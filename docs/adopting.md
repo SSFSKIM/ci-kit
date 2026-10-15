@@ -90,8 +90,12 @@ machine.
    - Changed files: for a PR, against the PR's base; for a `ci/**` ref, against the merge-base of the tested commit
      and the default branch. Added, modified and deleted files count, and both paths of a rename. A dispatch ignores
      changes.
-   - `paths` are globs anchored at the repo root: `*`, `?` and `[...]` stay within one directory, `**` crosses
-     directories (`src/**`, `**/*.md`). Dotfiles are not special.
+   - `paths` are globs anchored at the repo root, in a small dialect: `*` and `?` stay within one directory, `**`
+     as a whole segment crosses directories (`src/**`, `**/*.md`), and every other character is literal. Dotfiles
+     are not special.
+   - Bracket expressions (`[...]`), backslash escapes, braces (`{a,b}`), a leading `!` or `/`, and an empty pattern
+     are config errors, naming the gate and `paths[<i>]`, rather than patterns that might silently select nothing.
+     List alternatives as separate patterns instead.
 3. **An empty selection is a success.** `ci / verdict` is green with "no gates selected".
 
 ### Gate jobs
