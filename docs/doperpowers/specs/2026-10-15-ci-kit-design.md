@@ -71,6 +71,8 @@ How to see it working: §Acceptance. The shortest proofs are:
 - [x] (2026-10-15 23:20Z) M2/M3 prerequisite: the hosted probe report is committed to
   `ci-kit-sandbox` (`evidence/2026-10-15/hosted-probe.md`), and its results are folded into §5.
 - [ ] M2 — cua: adoption and timing-test stabilization
+  - [x] (2026-10-15 23:30Z) Kit additions (`setup.fetch_depth`, `CI_KIT_BASE`/`CI_KIT_HEAD`): PR #3
+    merged; `v1` moved to it.
 - [ ] M3 — doperpowers: adoption and timing-test stabilization
 - [x] (2026-10-15 22:10Z) M4 — Spike: the pool's boot path. Verdict ≤ 5 min; PR #1 merged
   (spike scripts and results under `spike/pool-boot/`).
@@ -1640,6 +1642,10 @@ euros, jobs, and the projected month at the current rate.
   about 280 MB, about 2 minutes per job on the mini. This is M7 proposal material.
 - **Observation (M6):** `gh run view --json jobs` returns an empty `runnerName`. The jobs API's
   `runner_name` (`gh api repos/<repo>/actions/runs/<id>/jobs`) carries it.
+- **Open owner step:** LibreOffice's first launch on the mini. The human opens it once and allows
+  the Gatekeeper prompt by hand. Done means the quarantine flag on `/Applications/LibreOffice.app`
+  gains the user-approved bit (it read `0181;…` on 10-15). Until then no soffice-launching group
+  runs on the mini. CI-opt checks it and tells maws-fe. It is not an M6 deliverable.
 - **Observation (M6):** LibreOffice on the mini (installed by Homebrew without a password) is
   still quarantined and has never been launched. The first document or presentation group may
   raise a Gatekeeper prompt that only the human can answer.
