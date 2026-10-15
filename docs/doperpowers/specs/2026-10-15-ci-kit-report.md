@@ -10,3 +10,4 @@ Decision Log carry the folded results; this file carries the execution mechanics
 - Dispatched concurrently, each in its own worktree: M1 (`m1-core`), M4 (`m4-spike`), M6
   (`m6-mac-lane`). M8 waits for M1's `npm test` layout; M2/M3 wait for the hosted-probe
   prerequisite (not yet in §5).
+- 2026-10-15: maws-fe (DL22) cleared the mini runner; M6 switched to e2e:composer with readiness steps (8371147); M6 executor told.

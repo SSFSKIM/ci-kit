@@ -1514,6 +1514,29 @@ euros, jobs, and the projected month at the current rate.
   drives its GUI. Evidence: maws-fe's ssh to the mini on 10-14 (`actions-runner-ida-solution`, 14
   of 16 GB used); the history catalogue's session index.
 
+- **Observation (M4, 2026-10-15 21:44–21:58Z):** a cold pool box takes 41–56 s from
+  `POST /servers` to the job's `started_at`, and snapshot size barely matters.
+  - cpx62 in hel1, six cold creates. Small snapshot (1.70 GB compressed): median 46.5 s, max
+    51.6 s. Large (12.16 GB, +10 GiB incompressible): median 51.3 s, max 56.3 s.
+  - Where it goes: ~20 s of Hetzner provisioning before the kernel runs, ~15–22 s to
+    `network-online` plus Docker, ~5 s from container start to job assignment.
+  - Hetzner's snapshot `image_size` is compressed: the base, Docker and the runner image come to
+    1.70 GB, not ~5 GB.
+  - A cpuset container (`--cpuset-cpus=0-3 --memory=8g` on 16 vCPU) reports `nproc` = 4 and
+    `os.availableParallelism()` = 4, while `getconf _NPROCESSORS_ONLN` = 16. That is P1's pitfall,
+    reproduced.
+  - `cx53` was never available during the spike (checked before every trial); cx33 and cx43 were
+    unavailable too, cx23 only in hel1.
+  - Evidence: kit branch `m4-spike`, `spike/pool-boot/results/`.
+- **Observation (M4):** a queued job's `started_at` equals its `created_at` until a runner takes
+  it; GitHub rewrites it at assignment. Queue age and FIFO order (the agent's admission, `ci-gate`'s
+  `WAIT`) must use `created_at` and `status`, never `started_at`, for queued jobs.
+- **Observation (M4):** the `actions-runner` image ships `externals/node24_alpine`, which does not
+  run on its glibc base; scripts must not pick `externals/node*` blindly.
+- **Observation (M4):** an ephemeral box should have `apt-daily*` timers and
+  `unattended-upgrades` disabled in its image; patching is a re-bake. Not measured: first-read
+  throughput of baked caches on a freshly restored disk (M5 looks once).
+
 ## Decision Log
 
 - **Decision:** the verification for this work.
@@ -1588,6 +1611,15 @@ euros, jobs, and the projected month at the current rate.
     hand-off to maws-fe for `GATE_E2E_RUNNER` come from maws-fe's reply (their gate-offload DL22),
     which raised no conflict with registering the runner.
   - **Date/Author:** 2026-10-15, plan-executor, from maws-fe through CI-opt.
+
+- **Decision:** M4's verdict is the "≤ 5 min" band. The on-demand design is promoted as written,
+  and A5's bound stays at 5 minutes.
+  - p90 of `POST /servers`→`started_at` is 56.3 s, so 1.9 min with the 1-minute plan-and-ensure
+    allowance (Surprises & Discoveries, M4). The spike cost about €1.50, and all its resources
+    were deleted (label listings in the M4 report).
+  - The spike measured on cpx62, the pool type, rather than the cheapest: the nproc question needs
+    more host cores than N, and boot time depends on the type.
+  - **Date/Author:** 2026-10-15, plan-executor.
 
 ## Outcomes & Retrospective
 
