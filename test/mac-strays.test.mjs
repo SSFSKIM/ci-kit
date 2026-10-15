@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parsePs, parseLsofCwd, selectStrays } from '../hooks/strays.mjs';
+import { parsePs, parseLsofCwd, selectStrays } from '../mac/hooks/strays.mjs';
 
 const WORK = '/Users/new/actions-runner-maws/_work';
 const UID = 501;

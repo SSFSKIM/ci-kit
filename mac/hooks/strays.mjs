@@ -1,5 +1,5 @@
 // Which processes the mac runner's job hooks kill: the pure half of sweep.mjs, tested against recorded `ps` and `lsof`
-// shapes (mac/test/strays.test.mjs).
+// shapes (test/mac-strays.test.mjs).
 //
 // A process is a stray when it belongs to the runner's user and either runs from the runner's work directory (a path
 // under it in its command line: the job's Electron, its node from the tool cache, its vitest) or sits in it (its working
