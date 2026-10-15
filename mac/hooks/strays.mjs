@@ -11,7 +11,7 @@
 export function parsePs(text) {
   const rows = [];
   for (const line of text.split('\n')) {
-    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4})\s+(.*)$/.exec(line);
+    const match = /^\s*(\d+)\s+(\d+)\s+(-?\d+)\s+(\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4})\s+(.*)$/.exec(line);
     if (match) {
       const [, pid, ppid, uid, started, command] = match;
       rows.push({ pid: Number(pid), ppid: Number(ppid), uid: Number(uid), started, command: command.trim() });

@@ -78,14 +78,16 @@ test('a descendant of another user is not selected through its parent', () => {
   assert.deepEqual(pids(strays), [900]);
 });
 
-test('parsePs reads `ps -axo pid=,ppid=,uid=,lstart=,command=` (C locale): start time apart, commands with spaces whole', () => {
+test('parsePs reads `ps -axo pid=,ppid=,uid=,lstart=,command=` (C locale): start time apart, a negative uid (nobody, -2), commands with spaces whole', () => {
   const text = [
     '    1     0     0 Fri Oct  9 18:53:38 2026     /sbin/launchd',
+    '  338     1    -2 Fri Oct  9 18:53:52 2026     /usr/sbin/distnoted agent',
     '  201   200   501 Thu Oct 15 22:02:31 2026     /a/Electron Helper (Renderer).app/Contents/MacOS/Electron Helper (Renderer) --type=renderer',
     '',
   ].join('\n');
   assert.deepEqual(parsePs(text), [
     { pid: 1, ppid: 0, uid: 0, started: 'Fri Oct  9 18:53:38 2026', command: '/sbin/launchd' },
+    { pid: 338, ppid: 1, uid: -2, started: 'Fri Oct  9 18:53:52 2026', command: '/usr/sbin/distnoted agent' },
     { pid: 201, ppid: 200, uid: 501, started: 'Thu Oct 15 22:02:31 2026', command: '/a/Electron Helper (Renderer).app/Contents/MacOS/Electron Helper (Renderer) --type=renderer' },
   ]);
 });
