@@ -68,7 +68,8 @@ How to see it working: §Acceptance. The shortest proofs are:
 - [ ] M1 — Kit core: config, planner, reusable workflow, `ci-gate`, the kit's own CI
 - [ ] M2 — cua: adoption and timing-test stabilization
 - [ ] M3 — doperpowers: adoption and timing-test stabilization
-- [ ] M4 — Spike: the pool's boot path
+- [x] (2026-10-15 22:10Z) M4 — Spike: the pool's boot path. Verdict ≤ 5 min; PR #1 merged
+  (spike scripts and results under `spike/pool-boot/`).
 - [ ] M5 — The pool
 - [ ] M6 — The mac lane on the mini
 - [ ] M7 — MAWS: evidence and proposals for maws-fe
