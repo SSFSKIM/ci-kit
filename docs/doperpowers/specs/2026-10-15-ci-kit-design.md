@@ -1,6 +1,6 @@
 # ci-kit — gates off the MacBook, for every repo — living spec
 
-**Date.** 2026-10-15. **Status.** Spec written from the approved design; under independent review.
+**Date.** 2026-10-15. **Status.** Reviewed; executing (plan-executor, from 2026-10-15).
 **Home.** `SSFSKIM/ci-kit` (public); this file is `docs/doperpowers/specs/2026-10-15-ci-kit-design.md`.
 **Design history.** Brainstormed on 2026-10-15 in the doperpowers session named "CI-opt", from
 three peer sessions' bottleneck reports, a mining of 4,021 session transcripts (09-22..10-15),
@@ -1552,6 +1552,18 @@ euros, jobs, and the projected month at the current rate.
     rule. A 10-minute schedule on a private repo bills at least 1 minute per run, about 4,300
     minutes a month, which is a quarter of the CI budget spent on a backstop.
   - **Date/Author:** 2026-10-15, CI-opt.
+
+- **Decision:** execution order and concurrency (pre-flight, plan-executor).
+  - **Order.** M1 and M4 run first and concurrently: M4 is a hand-made box with no kit code. M6
+    and M8 follow, M8 after M1 (it joins M1's `npm test`). M5 consumes M1 and M4's verdict. M2 and
+    M3 consume M1 and wait for the probe prerequisite. M7 consumes M5 and M6. M9 consumes all.
+  - **Concurrency.** Executors run in parallel only in separate worktrees on their own milestone
+    branches (`~/Developer/GitHub/ci-kit-wt-m<N>`), never two in one checkout. The spec itself is
+    edited only on `main`, by the plan-executor; milestone branches do not touch it.
+  - **M2's "20 dispatched runs".** Read as A10's 20 consecutive `ci-gate` runs of the adoption
+    branch's head, per the publication decision above, which replaced dispatched runs.
+  - **Ledger.** The execution ledger under `.doperpowers/sde/` is gitignored (`.gitignore` added).
+  - **Date/Author:** 2026-10-15, plan-executor.
 
 ## Outcomes & Retrospective
 
