@@ -38,8 +38,10 @@ case ${1:-} in
   *) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
 
-# 1. Prerequisites: MAWS's gate needs Node >= 22.12 (its engines), pnpm through corepack, and a compiler for native
-# modules such as node-pty; the hooks need node. Each is looked up on the PATH jobs get.
+# 1. Prerequisites (MAWS's gate-offload plan §3.6): Node >= 22.12 on the PATH jobs get (MAWS's engines; its plan job and
+# the hooks run node from PATH), pnpm through corepack, a compiler for native modules such as node-pty, and LibreOffice
+# for the document groups. LibreOffice is found, not run: a first launch can raise a Gatekeeper prompt, which is the
+# human's to answer.
 gaps=()
 probe() { # <name> <command…>: prints the command's first line, or records a gap
   local name=$1 out
@@ -53,6 +55,8 @@ probe corepack corepack --version
 probe 'Xcode command line tools (clang)' xcrun clang --version
 probe python3 python3 --version
 probe git git --version
+probe 'LibreOffice (soffice)' bash -c 'command -v soffice && test -x /Applications/LibreOffice.app/Contents/MacOS/soffice ||
+  { echo "soffice or /Applications/LibreOffice.app missing"; exit 1; }'
 if ((${#gaps[@]} > 0)); then
   for gap in "${gaps[@]}"; do echo "ci-kit mac: missing: $gap" >&2; done
   die 'prerequisites missing; nothing installed'
