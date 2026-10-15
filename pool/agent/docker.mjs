@@ -40,7 +40,6 @@ export function runArgs({ name, repo, runnerId, labels, cores, memoryGbPerCpu, i
     '--shm-size', '2g',
     '-v', `${CACHE}:${CACHE}`,
     '-e', 'CI_KIT_JIT',
-    '-e', `CI_KIT_WORK=${workDir(name)}`,
     ...Object.entries(CACHE_ENV).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
     image,
   ];

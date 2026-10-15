@@ -254,7 +254,7 @@ class Agent {
     this.counter += 1;
     let jit;
     try {
-      jit = await this.gh.jitConfig(job.repo, { name, labels: job.labels });
+      jit = await this.gh.jitConfig(job.repo, { name, labels: job.labels, work_folder: workDir(name) });
     } catch (err) {
       log(`jit for job ${job.id} (${name}): ${err.message}`);
       return false;
