@@ -1,0 +1,14 @@
+[Unit]
+Description=ci-kit pool agent: JIT runner containers for queued pool jobs; deletes the box when idle
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/node /opt/ci-kit/pool/agent/agent.mjs
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

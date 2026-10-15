@@ -1,0 +1,115 @@
+// Ensure's branches (spec §3 Ensure, I7) against a fake Hetzner API.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { ensure, ensureDecision, candidates, newestImage } from '../../pool/lib/ensure.mjs';
+import { fakeHcloud, deletes } from './fake-hcloud.mjs';
+
+const CFG = { types: ['cx53', 'cpx62'], locations: ['hel1', 'fsn1', 'nbg1'] };
+// server_types as the API lists them (2026-10-15: cx53 available nowhere; cpx62 in fsn1, nbg1, hel1, sin).
+const loc = (name, available = true) => ({ name, available });
+const TYPES = [
+  { name: 'cx53', locations: [loc('hel1', false), loc('fsn1', false), loc('nbg1', false)] },
+  { name: 'cpx62', locations: [loc('fsn1'), loc('nbg1'), loc('hel1'), loc('sin')] },
+  { name: 'cx23', locations: [loc('hel1')] },
+];
+const IMAGE = { id: 301, type: 'snapshot', status: 'available', labels: { 'ci-kit': 'pool-image', 'ci-kit-commit': 'abc' }, created: '2026-10-15T20:00:00Z' };
+const FIREWALL = { id: 401, name: 'ci-kit-pool', labels: { 'ci-kit': 'pool' } };
+const pool = (state, id = 1) => ({ id, name: 'ci-kit-pool', labels: { 'ci-kit': 'pool', 'ci-kit-state': state }, created: '2026-10-15T22:00:00Z' });
+const opts = () => {
+  let clock = Date.parse('2026-10-15T23:00:00Z');
+  return { sleep: async (ms) => { clock += ms; }, now: () => clock, log: () => {} };
+};
+
+test('ensure decides from the pool servers: booting or ready is done, draining waits, none creates', () => {
+  assert.equal(ensureDecision([]), 'create');
+  assert.equal(ensureDecision([pool('booting')]), 'existing');
+  assert.equal(ensureDecision([pool('ready')]), 'existing');
+  assert.equal(ensureDecision([pool('draining')]), 'wait');
+});
+
+test('candidates walk the type preference, then the location preference, skipping what server_types marks unavailable', () => {
+  assert.deepEqual(candidates(CFG, TYPES), [
+    { type: 'cpx62', location: 'hel1' }, { type: 'cpx62', location: 'fsn1' }, { type: 'cpx62', location: 'nbg1' },
+  ]);
+});
+
+test('the newest available snapshot labelled ci-kit=pool-image is the image', () => {
+  const images = [
+    { ...IMAGE, id: 1, created: '2026-10-01T00:00:00Z' },
+    { ...IMAGE, id: 2, created: '2026-10-10T00:00:00Z' },
+    { ...IMAGE, id: 3, created: '2026-10-12T00:00:00Z', status: 'creating' },
+    { ...IMAGE, id: 4, created: '2026-10-14T00:00:00Z', labels: { other: 'x' } },
+  ];
+  assert.equal(newestImage(images).id, 2);
+});
+
+test('an existing pool box is reported and nothing is created', async () => {
+  const hc = fakeHcloud({ servers: [pool('ready')], images: [IMAGE], firewalls: [FIREWALL], serverTypes: TYPES });
+  assert.equal(await ensure(hc, CFG, opts()), 'existing');
+  assert.ok(!hc.calls.some((c) => c.startsWith('create')));
+});
+
+test('no pool server: the box is created from the snapshot with the firewall and the booting labels', async () => {
+  const hc = fakeHcloud({ images: [IMAGE], firewalls: [FIREWALL], serverTypes: TYPES });
+  assert.equal(await ensure(hc, CFG, opts()), 'created:cpx62@hel1');
+  const made = hc.state.servers.at(-1);
+  assert.deepEqual(
+    { name: made.name, image: made.image, firewalls: made.firewalls, labels: made.labels },
+    { name: 'ci-kit-pool', image: 301, firewalls: [{ firewall: 401 }], labels: { 'ci-kit': 'pool', 'ci-kit-state': 'booting' } },
+  );
+});
+
+test('resource_unavailable (or placement_error) moves on to the next type and location pair', async () => {
+  const hc = fakeHcloud({ images: [IMAGE], firewalls: [FIREWALL], serverTypes: TYPES, createErrors: ['resource_unavailable', 'placement_error'] });
+  assert.equal(await ensure(hc, CFG, opts()), 'created:cpx62@nbg1');
+  assert.deepEqual(hc.calls.filter((c) => c.startsWith('create')), ['create cpx62@hel1', 'create cpx62@fsn1', 'create cpx62@nbg1']);
+});
+
+test('every pair unavailable fails, naming what was tried', async () => {
+  const hc = fakeHcloud({ images: [IMAGE], firewalls: [FIREWALL], serverTypes: TYPES, createErrors: ['resource_unavailable', 'resource_unavailable', 'resource_unavailable'] });
+  await assert.rejects(ensure(hc, CFG, opts()), /no pool server type is available: cpx62@hel1, cpx62@fsn1, cpx62@nbg1/);
+});
+
+test('a uniqueness_error means a concurrent ensure won: raced, and treated as done', async () => {
+  const hc = fakeHcloud({ images: [IMAGE], firewalls: [FIREWALL], serverTypes: TYPES, createErrors: ['uniqueness_error'] });
+  hc.createServer = async (spec) => {
+    hc.calls.push('create');
+    hc.state.servers.push(pool('booting', 99));
+    const { HcloudError } = await import('../../lib/hcloud.mjs');
+    throw new HcloudError(409, 'uniqueness_error', 'name is already used');
+  };
+  assert.equal(await ensure(hc, CFG, opts()), 'raced');
+});
+
+test('a draining box is waited out, then a new one is created', async () => {
+  const hc = fakeHcloud({ images: [IMAGE], firewalls: [FIREWALL], serverTypes: TYPES, serverSeq: [[pool('draining')], [pool('draining')], []] });
+  assert.equal(await ensure(hc, CFG, opts()), 'created:cpx62@hel1');
+});
+
+test('a missing firewall is created, labelled, with no inbound rules', async () => {
+  const hc = fakeHcloud({ images: [IMAGE], serverTypes: TYPES });
+  await ensure(hc, CFG, opts());
+  const fw = hc.state.firewalls.at(-1);
+  assert.deepEqual({ name: fw.name, labels: fw.labels, rules: fw.rules }, { name: 'ci-kit-pool', labels: { 'ci-kit': 'pool' }, rules: [] });
+  assert.deepEqual(hc.state.servers.at(-1).firewalls, [{ firewall: 6000 }]);
+});
+
+test('no pool snapshot is an error that says to bake', async () => {
+  const hc = fakeHcloud({ firewalls: [FIREWALL], serverTypes: TYPES });
+  await assert.rejects(ensure(hc, CFG, opts()), /no snapshot labelled ci-kit=pool-image.*bake/);
+});
+
+test('unlabelled resources are never used or touched, even when they match by name: an unlabelled server named ci-kit-pool is not "existing", and an unlabelled snapshot or firewall is not used', async () => {
+  const hc = fakeHcloud({ images: [IMAGE], firewalls: [FIREWALL], serverTypes: TYPES });
+  assert.equal(await ensure(hc, CFG, opts()), 'created:cpx62@hel1');
+  const made = hc.state.servers.at(-1);
+  assert.equal(made.image, 301);
+  assert.deepEqual(made.firewalls, [{ firewall: 401 }]);
+  assert.deepEqual(deletes(hc), []);
+});
+
+test('a name clash with a server that is not a pool box is an error, not a race', async () => {
+  const hc = fakeHcloud({ images: [IMAGE], firewalls: [FIREWALL], serverTypes: TYPES, createErrors: ['uniqueness_error'] });
+  await assert.rejects(ensure(hc, CFG, opts()), /named ci-kit-pool exists without the ci-kit=pool label/);
+  assert.deepEqual(deletes(hc), []);
+});
