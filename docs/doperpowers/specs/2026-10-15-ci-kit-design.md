@@ -123,7 +123,7 @@ Each item is a behavior someone can check. The commands are in Concrete Steps un
    - Start with no pool server in the Hetzner project, then push a commit to `ci-kit-sandbox` whose
      config has a `cpus: 4` pool gate.
    - A server named `ci-kit-pool` is created and runs the gate. The gate's log shows `nproc` = 4.
-     The gate reports `PASS` no more than 4 minutes after the push.
+     The gate reports `PASS` no more than 5 minutes after the push. M4's verdict may revise this bound; see M4.
    - With no further work, the server deletes itself at or after minute 50 of its billed hour.
    - The ledger gains one row for that server session.
 6. **A6 — Pool parallelism without overcommit.**
@@ -148,7 +148,8 @@ Each item is a behavior someone can check. The commands are in Concrete Steps un
 10. **A10 — Timing stability.**
     - Each test fixed in M2/M3 is checked under an induced CPU load of 2× the cores (with the
       command recorded): it fails before the fix and passes 20 of 20 runs after it.
-    - The cua and doperpowers CI gates pass 20 consecutive dispatched runs.
+    - The cua and doperpowers CI gates pass 20 consecutive `ci-gate` runs of the adoption branch's
+      head. That needs no merge: a `ci/**` push uses the workflow file in the pushed commit.
 11. **A11 — The janitor.**
     - On the MacBook, a test process orphaned for more than 2 hours (made for the test) is killed
       within one janitor interval and logged in `~/Library/Logs/ci-kit/janitor.log`.
@@ -431,9 +432,13 @@ about 1,000 an hour, including job listings.
 
 **Heartbeat.** Every 60 s the agent writes the label `ci-kit-heartbeat=<unix seconds>`.
 
-**Config source.** At start, the agent reads its config (I8) from the kit's `main` branch
-(`raw.githubusercontent.com`; the kit is public). If that fetch fails, it falls back to the copy
-baked into the snapshot. Adding a served repo therefore takes a commit, not a re-bake.
+**Config source.** The agent reads its config (I8) from the kit's `main` branch
+(`raw.githubusercontent.com`; the kit is public).
+
+- It reads it at start, and again every 5 minutes.
+- If a fetch fails, it keeps the last good copy. At start, that is the copy baked into the
+  snapshot.
+- Adding a served repo therefore takes a commit, not a re-bake or a restart.
 
 **Public repos.** The agent refuses to serve any repo whose API record says it is public, and logs
 that at start.
@@ -594,7 +599,10 @@ keep GUI contention low. The measured rate decides:
 **doperpowers** (M3):
 
 - **Gates.** One gate per suite family that runs without model calls:
-  - shell-lint (`scripts/lint-shell.sh`);
+  - shell-lint, over the committed shell files changed relative to the base, passed to
+    `scripts/lint-shell.sh` as file arguments. Run bare, the script lints only uncommitted changes,
+    so on a clean checkout it lints nothing. `--all` is used instead if the tracked baseline is
+    clean;
   - sminos (`tests/sminos/run-sminos-tests.sh`);
   - issue-tracker suites;
   - mods (`tests/mods/run-mods-tests.sh`), if `claude plugin test` runs on a hosted runner without
@@ -618,10 +626,16 @@ keep GUI contention low. The measured rate decides:
   measurements on the pool.
 - **P3 — Scope unit on ci refs.** Use `vitest --changed <merge-base>` on ci refs, with the full
   suite on landing. This only goes forward if the recall evidence holds (M7).
-- **P4 — e2e on the mini.**
-  - Route it there through MAWS's existing macOS lane (`GATE_E2E_RUNNER=macos`, or per run
+- **P4 — Mac-bound gates on the mini.**
+  - Route e2e there through MAWS's existing macOS lane (`GATE_E2E_RUNNER=macos`, or per run
     `--runner macos`).
   - Build once per gate rather than once per group (maws-fe's `MAWS_E2E_PREBUILT=1` seam).
+  - Run the macOS-only unit subset there too, as a job of its own. That is the "§6 list", the 13
+    files `gate.yml` has no job for, which today run locally under the load wrappers (MAWS
+    gate-offload plan §3.5).
+  - M7 inventories every other gate that still needs the MacBook. That includes the measured
+    performance bounds, class 2. Each one is either routed to the mini or named as staying local,
+    with its reason.
 - **P5 — Drop the duplicate type check.** Drop vitest's duplicate type-check pass if
   `pnpm typecheck` covers the `*.test-d.ts` files. That removes the out-of-memory class seen three
   times.
@@ -630,8 +644,8 @@ keep GUI contention low. The measured rate decides:
   - `src/main/sessions/recovery.test.ts`;
   - the `pause-take-over` pty test;
   - `resource.test.tsx` 5 s.
-- **P7 — Retire the load rule for gates.** Once no gate runs on the MacBook, retire
-  `waitload20.sh` and `with-slot.sh` for gates.
+- **P7 — Retire the load rule for gates.** Retire `waitload20.sh` and `with-slot.sh` for every gate
+  P4's inventory moved off the MacBook. They stay for anything the inventory names as staying local.
 
 ### 6. Test stabilization: the rule
 
@@ -707,8 +721,15 @@ in six `libghostty` threads, fixed upstream in ≥ 0.64.23; the latest is 0.65.1
 
 **Where work happens.**
 
-- Kit code lives in `SSFSKIM/ci-kit`, developed on branch `build` in a worktree and merged to
-  `main` by PR at the end.
+- **Kit code** lives in `SSFSKIM/ci-kit`.
+  - Each milestone's kit changes are developed on a branch `m<N>-<topic>` in a worktree.
+  - A milestone's branch merges to `main` by PR once its milestone review is clean.
+  - **Why per milestone, not at the end.** Later live proofs need published kit code:
+    - GitHub runs scheduled workflows (the guard, the bake) only from the default branch.
+    - Callers resolve `@v1` to a tag.
+  - **Moving `v1`.** The tag `v1` is moved to `main` after M1 merges (cua and doperpowers consume
+    it), after M5 merges (the pool branch of `gates.yml`), and at M9.
+  - The whole-range review in the Decision Log covers `main` from the spec commit to the final head.
 - cua and doperpowers changes are PRs in those repos, following each repo's CLAUDE.md, with one
   branch per milestone.
 - MAWS is not committed to. M7's output is a message and evidence.
@@ -842,9 +863,16 @@ These go up through the author session.
 
 **Interfaces.** Consumes I1, I2 and I5.
 
+**Prerequisite.** M2 and M3 start only after the author session has done two things:
+
+- committed the hosted-runner probe's report to `ci-kit-sandbox` at
+  `evidence/2026-10-15/hosted-probe.md`;
+- recorded its results in §5: per repo, the gate commands, lanes, Node version, tool
+  prerequisites, and justified exclusions.
+
 **Decisions.**
 
-- The probe report (`/tmp/ci-analysis/hosted-probe.md`, copied to the sandbox evidence) decides:
+- The probe report decides:
   - the lane per gate;
   - the Node version;
   - which tests must be skipped on a lane, by a platform guard in the test with the reason;
@@ -888,14 +916,21 @@ These go up through the author session.
 **What it does not touch.** `skills/`, `agents/`, `hooks/`, `output-styles/`, plugin manifests and
 versions.
 
-**What it proves.** A1 and A10 on doperpowers.
+**What it proves.**
+
+- A1 and A10 on doperpowers.
+- A negative proof: a committed shell file with a ShellCheck error turns the shell-lint gate red.
 
 #### M4 — Spike: the pool's boot path
 
 **Question.**
 
-- How long from `POST /servers` (from a snapshot, `cpx62`, `hel1`) to a queued job starting in a JIT
-  runner container on the new box?
+- How long from a push, with no pool server in existence, to `PASS` of a trivial pool gate? That is
+  the interval A5 bounds. Its parts are recorded separately:
+  - push to the ensure call;
+  - `POST /servers` to the agent's `ready`;
+  - `ready` to the job's `started_at`;
+  - the job itself.
 - Does snapshot size (about 5 GB vs about 15 GB with caches) change it?
 - Does a cpuset container report `nproc` = N?
 
@@ -912,10 +947,14 @@ versions.
 
 **Promote or discard.**
 
-| p90 create→start | Verdict |
+The spike runs on a hand-made box and has no planner, so it measures the box part: `POST /servers`
+to `started_at`. It adds 1 minute for the hosted plan and ensure steps. The measured cold
+push→`PASS` of M5 must then fit A5.
+
+| p90 `POST /servers`→`started_at`, + 1 min | Verdict |
 |---|---|
-| ≤ 4 min | Promote the on-demand design as written. |
-| 4–8 min | Promote, and record that the first gate of a burst waits; ensure is already called at the earliest point. |
+| ≤ 5 min | Promote the on-demand design as written. A5's bound stays at 5 min. |
+| 5–8 min | Promote. Raise A5's bound to the measured p90 + 1 min, with a Decision Log entry. Only the first gate of a burst pays it; the MAWS target (scoped gate p50 ≤ 10 min) still holds when later gates find a warm box. |
 | > 8 min | Stop. Take "always-on smaller box vs on-demand" to the human. |
 
 **After.** Delete every server and snapshot it made. Record the verdict, the numbers, and whether
@@ -1027,14 +1066,34 @@ token:
      file.
   3. Report the recall and the mean size of the selected set against the full suite.
 
-maws-fe's responses are recorded in the Decision Log. If maws-fe lands P1 before finish, the first
-MAWS gate run on the pool is observed for A9.
+The evidence also includes the inventory of Mac-bound gates (P4), and a mini run of the
+macOS-only unit subset through a sandbox job that checks out MAWS on the `mac` lane.
+
+maws-fe's responses are recorded in the Decision Log.
+
+**Activating MAWS on the pool.** When maws-fe confirms that P1 has landed or is about to land, M7
+does three things:
+
+1. It sets `HCLOUD_TOKEN` in MAWS, if maws-fe asks for that.
+2. It commits MAWS's entry to `pool/config/pool.json` on `main`. The agent picks it up within 5
+   minutes.
+3. It observes the first MAWS gate run on the pool, for A9.
+
+If maws-fe adopts after finish, the activation is the CI-opt session's. `docs/pool.md` states it as
+"adding a served repo", so anyone can do it.
 
 **What it touches.**
 
 - In the sandbox: `.github/workflows/maws-probe.yml` and `evidence/maws/`.
-- In the kit: nothing beyond fixes the probe exposes in the pool image, such as missing system
-  libraries.
+- In the kit:
+  - MAWS's served-repo entry, upon activation;
+  - fixes the probe exposes in the pool image, such as missing system libraries.
+- The mac runner serves MAWS only, so the sandbox's mac-lane job needs one more step: the mini gets
+  a second runner registration, for the sandbox, under the same LaunchAgent pattern, with
+  concurrency kept at one machine-wide by a lock in the job hooks.
+  - Alternatively, ask maws-fe to run the subset with `--runner macos`, if `gate.yml` gains that
+    job (P4).
+  - Choose whichever arrives first, and record which.
 
 **Interfaces.** Consumes I6–I8, and MAWS's `package.json` scripts (read-only).
 
@@ -1092,8 +1151,8 @@ pattern, parentage and age together.
 - Every acceptance item has been run, with its output recorded in Surprises & Discoveries or in the
   PR bodies.
 - The kit's `npm test` is green.
-- `build` is merged to `main` after the branch review (Decision Log).
-- `v1` points at the merge.
+- The whole-range review of `main` (Decision Log) has run and its findings are addressed.
+- `v1` points at the final `main`.
 - Outcomes & Retrospective is written, including:
   - the cost projection (A12);
   - A9's state;
@@ -1107,12 +1166,12 @@ pattern, parentage and age together.
 
 **Working directories.**
 
-- Kit: `~/Developer/GitHub/ci-kit-wt-build`, a worktree of `~/Developer/GitHub/ci-kit` on `build`.
+- Kit: `~/Developer/GitHub/ci-kit-wt-m<N>`, a worktree of `~/Developer/GitHub/ci-kit` on the milestone's branch.
 - Other repos: their own worktrees.
 
 ```
 # M1 — kit tests and a live ci-gate against the kit itself
-cd ~/Developer/GitHub/ci-kit-wt-build && npm test
+cd ~/Developer/GitHub/ci-kit-wt-m1 && npm test
 #   expect: "# pass <n>" and "# fail 0"
 ci-gate .
 #   expect lines like:
@@ -1124,8 +1183,8 @@ git ls-remote origin 'refs/heads/ci/*'      # expect: no output
 # M2/M3 — PR checks
 gh pr checks <n> -R SSFSKIM/cua            # expect: every "ci / …" pass, "ci / verdict" pass
 gh run view <id> -R SSFSKIM/cua --json jobs --jq '.jobs[]|[.name,.startedAt,.completedAt]|@tsv'
-for i in $(seq 20); do gh workflow run ci.yml -R SSFSKIM/cua --ref <branch>; done
-#   then: gh run list ... --json conclusion → 20× success
+for i in $(seq 20); do ci-gate ~/Developer/GitHub/<cua-worktree> --label stab$i | tail -1; done
+#   expect: 20 lines starting GREEN
 
 # M5 — pool round trip (sandbox)
 TOKEN="$(cat ~/.config/claude-secrets/HETZNER_API_TOKEN)"
@@ -1345,11 +1404,32 @@ euros, jobs, and the projected month at the current rate.
     `doperpowers:adversarial-reviewer`, since there are nine milestones.
   - **Execution.** Execution follows `doperpowers:subagent-driven-execution` under a
     `doperpowers:plan-executor`, with reviews at its dependency frontiers.
-  - **The kit branch.** The whole-branch review of `build` before it merges is
-    `doperpowers:review-code` at **high**. The pool holds credentials, spends money on its own,
+  - **The kit.** The whole-range review of `main`, from the spec commit to the final head, is
+    `doperpowers:review-code` at **high**, run in M9. The pool holds credentials, spends money on its own,
     and deletes servers.
   - **The PRs.** The cua and doperpowers PRs are each reviewed at **medium**.
   - **Rationale:** the review weight follows the stakes, not the size.
+  - **Date/Author:** 2026-10-15, CI-opt.
+
+- **Decision:** the review round folded six buildability findings.
+  - **Publication.** Kit milestones merge to `main` one at a time, and `v1` moves after M1 and M5.
+    The single `build` branch merged at the end is gone, because scheduled workflows and `@v1`
+    callers need published code.
+  - **Stability proof.** A10 uses `ci-gate` runs, which need no merge in the adopter repos, instead
+    of dispatched runs.
+  - **Mac-bound gates.** P4 now covers MAWS's macOS-only unit subset and an inventory of the
+    remaining Mac-bound gates. P7 is limited to the gates that inventory moves.
+  - **MAWS activation.** M7 owns MAWS's served-repo activation, and the agent re-reads its config
+    every 5 min.
+  - **Spike and A5 aligned.** The spike's verdict is set against A5's bound, which is now 5 min and
+    revisable only through the spike's middle band.
+  - **Probe prerequisite.** M2 and M3 wait for the hosted probe report, committed and folded into
+    §5.
+  - **Shell lint.** The doperpowers shell-lint gate passes the changed files explicitly.
+  - **Rationale:** each finding was a real gap between a live proof and what the plan published or
+    owned.
+  - **Alternative rejected:** keeping one end-merged branch and moving the live proofs to after
+    M9. That would defer every integration failure to the end.
   - **Date/Author:** 2026-10-15, CI-opt.
 
 ## Outcomes & Retrospective
