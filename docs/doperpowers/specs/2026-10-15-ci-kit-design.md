@@ -111,6 +111,9 @@ Each item is a behavior someone can check. The commands are in Concrete Steps un
      - it prints `FAIL <gate> <duration> log=<path>`;
      - the file at `<path>` contains the failing assertion;
      - the last line is `RED 1/<n> <run-url>` and the exit code is 1.
+   - Two `ci-gate` calls on the same commit and label, started 5 s apart:
+     - they get separate refs and separate runs, and each reports its own verdict;
+     - each deletes only its own ref, and neither run is cancelled.
 3. **A3 — Config errors fail early and say why.**
    - A `.github/ci-kit.yml` that puts a gate on lane `pool` in a public repo fails the `plan` job
      before any gate runs. Its message is `ci-kit: lane "pool" is for private repos only (gate "<name>")`.
@@ -134,16 +137,28 @@ Each item is a behavior someone can check. The commands are in Concrete Steps un
      agent). The guard deletes it within two guard cycles and opens an alert issue.
    - Take a pool job that stays queued with no pool server, as when a job was queued after the box
      deleted itself. The guard creates a box for it within two guard cycles.
+   - A box whose agent cannot reach GitHub (a revoked App key, made for the test) is deleted
+     within 40 minutes:
+     - its watchdog deletes it on its own (box-local);
+     - if the watchdog is stopped too, the guard deletes it.
+   - A job container that outlives its job, because its process ignores exit (made for the test),
+     is killed within 10 minutes of its runner leaving GitHub.
+   - Cancelling a bake after its builder exists, and failing one before its snapshot, both leave no
+     builder server after the next guard cycle.
+   - A guard workflow that GitHub has disabled is enabled again by the next pool boot.
 8. **A8 — The mac lane.**
    - In MAWS, `scripts/ci-gate.sh <sha> --runner macos --gates e2e:default` runs that e2e group on
      the mini's runner (the job's runner name is the mini's) and is green.
    - No process of the job runs on the MacBook.
    - After the job, no process started under the runner's work directory is left on the mini.
+   - MAWS's macOS-only unit subset (the 13 guarded files) runs on the mini, and its report shows
+     those files' tests executed, not skipped.
 9. **A9 — MAWS on the pool.**
    - maws-fe has the evidence package and the proposals (M7).
    - Once maws-fe lands the pool lane, a MAWS gate run's static, unit and probes jobs run on
      runners named `ci-kit-pool-*`. The unit job's wall time is no more than 8 minutes, against
      16–21 today.
+   - The unit job's log shows vitest started as many workers as the job's `cpus-<N>`, not 16.
    - If maws-fe has not landed it by finish, Outcomes records that A9 is pending and why.
 10. **A10 — Timing stability.**
     - Each test fixed in M2/M3 is checked under an induced CPU load of 2× the cores (with the
@@ -153,6 +168,8 @@ Each item is a behavior someone can check. The commands are in Concrete Steps un
 11. **A11 — The janitor.**
     - On the MacBook, a test process orphaned for more than 2 hours (made for the test) is killed
       within one janitor interval and logged in `~/Library/Logs/ci-kit/janitor.log`.
+    - A detached watcher (`vitest --watch`, made for the test) that is equally old and orphaned is
+      reported and left running.
     - `~/Library/Logs/ci-kit/report.md` lists worktrees that are clean and merged, and VMs that
       have run more than 12 h, and deletes nothing.
 12. **A12 — Cost is visible.**
@@ -179,7 +196,7 @@ Each item is a behavior someone can check. The commands are in Concrete Steps un
   - the pool's code;
   - the mac-lane setup;
   - the host janitor.
-- **ci ref.** A branch named `ci/<label>-<sha8>` that `ci-gate` pushes to trigger a run. It is
+- **ci ref.** A branch named `ci/<label>-<sha8>-<nonce6>` that `ci-gate` pushes to trigger a run. It is
   deleted after the run.
 - **Nonce commit.** The empty commit `ci-gate` puts on top of the tested commit. Its unique message
   makes every push start a run of its own. It carries the `CI-Gates:` trailer.
@@ -301,7 +318,7 @@ caller's repo, not the kit's).
 
 1. It resolves the target: a worktree path (its `HEAD`) or a sha. Uncommitted changes are not
    tested, and it says so on stderr when the worktree is dirty.
-2. It pushes the tested commit, plus the nonce commit, to `refs/heads/ci/<label>-<sha8>` with
+2. It pushes the tested commit, plus the nonce commit, to `refs/heads/ci/<label>-<sha8>-<nonce6>` with
    force. The label defaults to the branch name, else `gate`.
 3. It finds the run by the nonce commit's sha, which is unique, rather than by time.
 4. It prints a line when each gate job finishes, as it finishes, not at the end. maws-fe's
@@ -310,6 +327,10 @@ caller's repo, not the kit's).
    lane this is visible boot time.
 6. It downloads the failed jobs' logs and artifacts under `/tmp/ci-gate/<owner>-<repo>/<run-id>/`.
 7. It deletes the ref unless `--keep`, and exits 0 (green), 1 (red) or 2 (infra or config error).
+   - The ref carries the first 6 hex characters of the nonce, so concurrent calls on the same
+     commit and label never share a ref.
+   - Deletion is compare-and-delete: `git push --force-with-lease=<ref>:<nonce commit>`, as MAWS's
+     script already does. A call can then never remove a ref it did not push.
 
 **Why Node.** One language across the kit:
 
@@ -430,7 +451,42 @@ deletes itself and the job is stranded. The guard's wake rule catches that case.
 **API budget.** An installation token allows 5,000 requests an hour. A 10 s poll over 2 repos uses
 about 1,000 an hour, including job listings.
 
-**Heartbeat.** Every 60 s the agent writes the label `ci-kit-heartbeat=<unix seconds>`.
+**Heartbeat.** The heartbeat records the last successful reconciliation, not that the process is
+alive.
+
+- The agent writes the label `ci-kit-heartbeat=<unix seconds>` at most every 60 s, and only after
+  a tick in which both of these succeeded:
+  - the GitHub listing for every served repo;
+  - the Docker listing.
+- An agent that runs but cannot reach GitHub, for example because of a revoked App key, therefore
+  goes stale like a dead one.
+
+**Watchdog.** A dead-man switch on the box that depends on neither the agent nor GitHub. It is a
+systemd timer, separate from the agent, that runs every 5 minutes. It deletes the server through
+the Hetzner API (writing the ledger row first, I9) in two cases:
+
+- the last successful reconciliation is older than 30 min (read from a local file the agent
+  touches with each heartbeat);
+- the server has been up for more than 24 h. No gate legitimately needs that: the I1 timeout
+  ceiling is 6 h.
+
+The guard is then the backstop for a box whose kernel or network is gone, not the only one.
+
+**Container deadline.** A container stops counting against idleness when its job is over:
+
+- it is killed 5 minutes after its runner has left GitHub (a JIT runner unregisters when its job
+  ends);
+- it is killed in any case at 6 h 15 min of age.
+
+A container can therefore never keep the box alive past its job.
+
+**Re-enabling schedules.** GitHub disables a public repository's scheduled workflows after 60 days
+without repository activity, and kit activity stops once it is stable.
+
+- At each boot, the agent re-enables `pool-guard.yml` and `pool-bake.yml` through the Actions API.
+  The App is also installed on the kit, with Actions read and write.
+- The guard matters only while the pool is in use, and every use starts with a boot. The watchdog
+  covers the box in between.
 
 **Config source.** The agent reads its config (I8) from the kit's `main` branch
 (`raw.githubusercontent.com`; the kit is public).
@@ -447,14 +503,18 @@ that at start.
 GitHub's cron can run late; this is a backstop, not the main path.
 
 - **Wake.** A pool job queued for more than 5 min with no pool server → run ensure.
-- **Dead agent.** A server whose heartbeat is older than 10 min:
+- **Dead agent.** A server whose heartbeat is older than 10 min (successful reconciliation, see
+  Heartbeat):
   1. delete it;
-  2. write a ledger row with end reason `stale-heartbeat`;
+  2. write or finalize its ledger row with end reason `stale-heartbeat`;
   3. open an alert issue.
 - **Uptime.**
   - A server that has been up for more than 12 h straight → alert issue.
+  - A server that has been up for more than 24 h → delete it, as the watchdog would.
   - Pool hours for today (UTC) above `max_hours_per_day` (default 8) → alert issue. It never
     deletes the box, because a hung gate costs more than an hour of box.
+- **Builders.** A server labelled `ci-kit=builder` that is more than 2 h old → delete it and open
+  an alert.
 - **Weekly cost.** It posts a summary to the ledger issue: hours, euros, jobs, and the projected
   month.
 
@@ -473,17 +533,26 @@ network or ssh is needed.
      contents read) and writes `/etc/ci-kit/`.
 
    Then it powers off.
-2. Wait for the builder to show `off`.
+2. Wait for the builder to show `off`, for at most 30 min.
 3. Snapshot it with labels `ci-kit=pool-image` and `ci-kit-commit=<sha>`.
 4. Delete the builder.
 5. Keep the two newest snapshots.
 
+**When a bake does not complete.**
+
+- The builder is created with labels `ci-kit=builder` and `ci-kit-run=<run id>`.
+- The workflow's last step runs on every exit (`if: always()`, including cancellation). It deletes
+  any builder carrying its own run id, and any snapshot it started that never reached `available`.
+- The guard's builder rule catches what that step cannot reach, such as a runner lost mid-job.
+- A failed bake leaves the previous snapshots in place, so the pool keeps booting.
+
 **Credentials.**
 
-- **The GitHub App `ci-kit-runners`.** Owned by SSFSKIM and installed on MAWS and
-  `ci-kit-sandbox`. Permissions:
+- **The GitHub App `ci-kit-runners`.** Owned by SSFSKIM and installed on MAWS, `ci-kit-sandbox`
+  and `ci-kit`. Permissions:
   - Administration: read and write, to register runners;
-  - Actions: read;
+  - Actions: read and write. Write re-enables the kit's schedules; the agent writes nothing else
+    there;
   - Contents: read;
   - Issues: read and write.
 - **Baked into the snapshot.** The App's id and private key, a Hetzner token, and the served-repo
@@ -622,6 +691,11 @@ keep GUI contention low. The measured rate decides:
   - `gate.yml` resolves `GATE_RUNNER=pool` to `["self-hosted","ci-kit-pool","cpus-<N>"]`.
   - The plan job runs `SSFSKIM/ci-kit/pool-ensure@v1`.
   - The secret `HCLOUD_TOKEN` is set.
+  - The unit job's worker count comes from `nproc`, which respects the container's cpuset.
+    - Today it comes from `getconf _NPROCESSORS_ONLN`. glibc reads that from the host's
+      `/sys/devices/system/cpu/online`, so in a `cpus-4` container it says 16 and vitest starts 16
+      workers in 4 cores and 8 GB.
+    - M7 measures with the workflow's actual command, both ways.
 - **P2 — Shard unit.** Shard the unit job with `vitest --shard=i/N`, with the N chosen from M7's
   measurements on the pool.
 - **P3 — Scope unit on ci refs.** Use `vitest --changed <merge-base>` on ci refs, with the full
@@ -688,16 +762,23 @@ MacBook and on the mini.
 
 **It acts on one class only.** A process qualifies when all three hold:
 
-- its command matches the configured test-runner patterns (I9);
+- its command matches the configured one-shot test patterns, and none of the exclusion patterns
+  (I11);
 - its parent is `launchd` (pid 1);
 - it has run for more than 2 hours.
+
+**Exclusions.** These modes are long-lived on purpose, so they are report-only:
+
+- watch, UI and server modes: `--watch`, `-w`, `--ui`, `serve`, `dev`, `preview`;
+- vitest started without `run`, unless it carries `--run` or `CI`-style one-shot arguments.
 
 It sends such a process SIGTERM, then SIGKILL after 10 s, and logs a line in
 `~/Library/Logs/ci-kit/janitor.log`. A macOS notification goes out when it killed anything.
 
-**Why that rule.** A test process re-parented to `launchd` for two hours has outlived the session
-that ran it, whatever that session's state. Watchers and servers are reported, never killed: some
-are kept on purpose.
+**Why that rule.** A one-shot test process re-parented to `launchd` for two hours has outlived the
+session that ran it, whatever that session's state. Parentage and age alone cannot tell a stray
+from a watcher someone detached on purpose. So killing needs a positively one-shot command line,
+and everything else is reported, never killed.
 
 **It reports and never deletes.** It rewrites `~/Library/Logs/ci-kit/report.md` with:
 
@@ -995,9 +1076,17 @@ push→`PASS` of M5 must then fit A5.
   - from GitHub (runners named `ci-kit-pool-*`).
 - Runner names are `ci-kit-pool-<server id>-<counter>`, so A9 can read them.
 - Every API call the agent makes has a 20 s timeout. A failed poll skips that tick; it does not
-  crash the agent.
-- The ledger row is written before the delete call. A crash between the two shows as a row whose
-  server still exists, which the guard deletes as `stale-heartbeat`.
+  crash the agent. A run of failed ticks stops the heartbeat, and the watchdog and guard act on
+  that (§3).
+- **Ledger rows.** The deleter writes the row before its delete call (I9), marked `deleting`.
+  - Whoever next sees the server gone finalizes that same comment, keyed by server id:
+    - the guard;
+    - a later agent at boot.
+  - A server that outlived its row, because of a crash between the row and the delete, is deleted
+    by the guard or the watchdog. The same comment is updated with the true deletion time, billed
+    hours and end reason.
+- The watchdog is in the snapshot as its own systemd unit. It reads the Hetzner token and the
+  agent's last-success file, and nothing else.
 
 **What it does not touch.** MAWS's workflow and MAWS's secrets. Setting `HCLOUD_TOKEN` in MAWS is
 part of P1, done when maws-fe takes it.
@@ -1006,6 +1095,10 @@ part of P1, done when maws-fe takes it.
 
 - A5, A6 and A7.
 - Pure-function tests pin these rules:
+  - the heartbeat advances only after a fully successful tick;
+  - the watchdog's two deletion conditions;
+  - the container deadline;
+  - the ledger comment is finalized in place across a crash window that spans an hour boundary;
   - the idle predicate counts in-progress runs;
   - demand subtracts idle runners;
   - admission never exceeds free cores;
@@ -1055,8 +1148,12 @@ Any GUI setting on the mini.
 The evidence is measured on the pool through a sandbox workflow that checks out MAWS with an App
 token:
 
-- **Unit timings.** `pnpm test` full at `cpus-16`, and sharded at N = 2, 4 and 8 over `cpus-4`
-  containers. Wall time per shard.
+- **Unit timings.** The unit job's actual command from `gate.yml`, run two ways:
+  - as it is (with `getconf`);
+  - with `--maxWorkers=$(nproc)`.
+
+  Each runs full at `cpus-16` and sharded at N = 2, 4 and 8 over `cpus-4` containers. Record wall
+  time per shard and the worker count vitest reports.
 - **Linux-portable e2e groups.** MAWS's `LINUX_E2E` groups under `xvfb` on the pool, with timings.
 - **Scoping recall.**
   1. From MAWS's gate history (`gh run list -R SSFSKIM/MAWS --workflow gate.yml`), find the
@@ -1133,7 +1230,8 @@ plist, `host/install.sh`, and `docs/host.md`.
   - sminos test stand-in supervisors;
   - `codex-plugin-test-`.
 
-  Each pattern is a regex over the full command line.
+  Each pattern is a regex over the full command line. The exclusion patterns of §7 are checked
+  after the kill patterns, and an exclusion always wins.
 - The process listing uses `ps -axo pid,ppid,etime,command` for the current user only. The janitor
   never touches other users' or root's processes.
 - The worktree report reads `git worktree list --porcelain` per repo under `~/Developer/GitHub`, plus
@@ -1349,7 +1447,9 @@ Secrets go beside it as `/etc/ci-kit/app.pem`, `/etc/ci-kit/app_id` and `/etc/ci
 | server id | created (UTC) | deleted (UTC) | type@location | billed h | € | jobs | end |
 ```
 
-- `end` is one of `idle`, `stale-heartbeat` or `manual`.
+- `end` is one of `idle`, `stale-heartbeat`, `watchdog`, `max-uptime` or `manual`.
+- A row is written as `deleting` before the delete call, and finalized in place once the server is
+  confirmed gone (M5 Decisions).
 - At most one row is written per server id. The guard checks for an existing row before it writes
   one. The weekly summary comment states hours,
 euros, jobs, and the projected month at the current rate.
@@ -1365,7 +1465,7 @@ euros, jobs, and the projected month at the current rate.
 **I11 — The janitor.**
 
 - `node host/janitor.mjs [--dry-run]`.
-- Config `host/janitor.json`: `{"patterns":[…regex…],"min_age_hours":2,"vm_report_hours":12,"repos_root":"~/Developer/GitHub"}`.
+- Config `host/janitor.json`: `{"patterns":[…regex…],"exclude":[…regex…],"min_age_hours":2,"vm_report_hours":12,"repos_root":"~/Developer/GitHub"}`.
 - LaunchAgent `com.ssfskim.ci-kit.janitor`, every 1800 s.
 - Outputs `~/Library/Logs/ci-kit/janitor.log` and `report.md`.
 
@@ -1430,6 +1530,23 @@ euros, jobs, and the projected month at the current rate.
     owned.
   - **Alternative rejected:** keeping one end-merged branch and moving the live proofs to after
     M9. That would defer every integration failure to the end.
+  - **Date/Author:** 2026-10-15, CI-opt.
+
+- **Decision:** the design review round folded eight findings.
+  - **Cost leaks closed.** The heartbeat now means a successful reconciliation. A box-local
+    watchdog deletes a box after 30 min without one, or after 24 h of uptime. Containers have
+    deadlines. Bake builders are labelled, cleaned on every exit, and reaped by the guard. The
+    agent re-enables the guard and bake schedules at each boot.
+  - **Refs.** ci refs carry a nonce, and cleanup is compare-and-delete.
+  - **MAWS.** P1 carries the worker-count fix (`getconf` sees the host's cores). A8 checks the
+    macOS-only unit subset executes on the mini.
+  - **Ledger.** Rows are provisional and finalized in place.
+  - **Janitor.** Only one-shot test commands are killed; watchers are excluded.
+  - **Rationale:** each finding was a state in which the box kept billing, or the evidence went
+    green while the problem remained.
+  - **Alternative rejected:** moving the guard to the private sandbox to escape the 60-day schedule
+    rule. A 10-minute schedule on a private repo bills at least 1 minute per run, about 4,300
+    minutes a month, which is a quarter of the CI budget spent on a backstop.
   - **Date/Author:** 2026-10-15, CI-opt.
 
 ## Outcomes & Retrospective
