@@ -1,5 +1,5 @@
 // Gate selection (spec §1) and the planner's output (spec I3).
-import { ConfigError } from './config.mjs';
+import { ConfigError, DEFAULT_FETCH_DEPTH } from './config.mjs';
 import { matchesAny } from './glob.mjs';
 
 const RUNS_ON = {
@@ -8,7 +8,7 @@ const RUNS_ON = {
   pool: (gate) => ['self-hosted', 'ci-kit-pool', `cpus-${gate.cpus}`],
   mac: () => ['self-hosted', 'macOS', 'ARM64', 'ci-kit-mac'],
 };
-const NO_SETUP = { node: '', pnpm: false, install: '' };
+const NO_SETUP = { node: '', pnpm: false, install: '', fetch_depth: DEFAULT_FETCH_DEPTH };
 
 export function splitList(text) {
   return text.split(',').map((s) => s.trim()).filter(Boolean);

@@ -54,6 +54,7 @@ setup:                      # optional; applied to every gate unless the gate se
   node: "24"                # optional; an actions/setup-node version spec, quoted
   pnpm: false               # optional; true → corepack enable (pnpm's version from package.json packageManager)
   install: npm ci           # optional; shell command run after checkout
+  fetch_depth: 1            # optional; actions/checkout depth for gate jobs; 0 = full history; default 1
 gates:                      # required; non-empty
   - name: unit              # required; [a-z0-9][a-z0-9-]*; unique; not "plan" or "verdict"
     run: npm test           # required; run with bash -eo pipefail at the repo root
@@ -64,7 +65,7 @@ gates:                      # required; non-empty
     on: [pr, ci-ref, dispatch]       # optional; default all three
     artifacts: ["test-results/**"]   # optional; uploaded when the gate fails
     setup: true             # optional; false skips the shared setup
-    env: {FOO: bar}         # optional; string values (quote numbers)
+    env: {FOO: bar}         # optional; string values (quote numbers); CI_KIT_* names are the kit's
 ```
 
 ### Lanes
@@ -103,6 +104,37 @@ machine.
 Each selected gate is one job, named after the gate. It checks out the tested commit (a PR's merge commit), applies
 `setup` (Node through `actions/setup-node`, `corepack enable` when `pnpm`, then `install`), exports the gate's `env`,
 and runs `run`. When the gate fails, its `artifacts` are uploaded as an artifact named after the gate.
+
+The checkout holds `setup.fetch_depth` commits of history: the tested commit alone by default, everything with `0`.
+Set `0` when tests read git history (`git log`, blame, tags). Like the rest of `setup`, it does not apply to a gate
+with `setup: false`, which checks out at depth 1.
+
+#### The change, in the gate's environment
+
+`install` and `run` see two variables:
+
+| Variable | Holds |
+|---|---|
+| `CI_KIT_HEAD` | the commit the gate checked out (`HEAD`): a PR's merge commit, or `ci-gate`'s nonce commit, whose tree is the tested commit's |
+| `CI_KIT_BASE` | where that commit left the base: for a PR, the base it merges into; for a `ci/**` push, its merge-base with the default branch. **Empty on a dispatch**, which has no change basis |
+
+So `git diff $CI_KIT_BASE $CI_KIT_HEAD` (two dots) is the change the gate is testing. The base commit is fetched into
+the checkout whatever `fetch_depth` is, so this works at the default depth. Lint only what changed, for example (on
+`hosted`; `--no-run-if-empty` is GNU xargs):
+
+```yaml
+  - name: shell-lint
+    setup: false
+    run: |
+      if [ -z "$CI_KIT_BASE" ]; then echo "a dispatch has no change basis: nothing to lint"; exit 0; fi
+      git diff --name-only --diff-filter=d -z "$CI_KIT_BASE" "$CI_KIT_HEAD" -- '*.sh' |
+        xargs -0 --no-run-if-empty shellcheck
+```
+
+`--diff-filter=d` leaves out deleted files. With depth 1 the history between the two commits is absent, so use the
+two-dot form above: `git log`, `git merge-base` and three-dot ranges need `fetch_depth: 0`.
+
+A gate's `env` cannot set a `CI_KIT_*` name; the plan refuses it.
 
 `ci / verdict` always runs and is green only when every selected gate is. It is the one stable check a repo can
 choose to require; the kit never makes anything required.

@@ -25,6 +25,7 @@ jobs:
       count: ${{ steps.plan.outputs.count }}
       pool: ${{ steps.plan.outputs.pool }}
       note: ${{ steps.plan.outputs.note }}
+      base: ${{ steps.plan.outputs.base }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@v7
@@ -76,6 +77,12 @@ jobs:
             workflow_dispatch) export CI_KIT_EVENT=dispatch CI_KIT_BASE= CI_KIT_HEAD= ;;
             *) fail "ci-kit: event $EVENT_NAME is not planned (pull_request, push to ci/**, workflow_dispatch)" ;;
           esac
+          # The gates' CI_KIT_BASE: where the commit they check out ($GITHUB_SHA) left the base, so that a two-dot
+          # `git diff $CI_KIT_BASE $CI_KIT_HEAD` is the change. Empty on a dispatch, which has no change basis.
+          gate_base=
+          if [[ -n $CI_KIT_BASE ]]; then
+            gate_base=$(git merge-base "$CI_KIT_BASE" "$GITHUB_SHA") || fail "ci-kit: no merge-base of $CI_KIT_BASE and $GITHUB_SHA"
+          fi
           status=0
           node .ci-kit/plan/plan.mjs > "$RUNNER_TEMP/plan.json" 2> "$RUNNER_TEMP/plan.err" || status=$?
           cat "$RUNNER_TEMP/plan.err" >&2
@@ -92,6 +99,7 @@ jobs:
             echo "count=$(jq '.gates | length' "$RUNNER_TEMP/plan.json")"
             echo "pool=$(jq .pool "$RUNNER_TEMP/plan.json")"
             echo "note=$(jq -r .note "$RUNNER_TEMP/plan.json")"
+            echo "base=$gate_base"
           } >> "$GITHUB_OUTPUT"
 
       # M5 replaces this step with the pool's ensure (SSFSKIM/ci-kit/pool-ensure).
@@ -119,7 +127,23 @@ jobs:
       - name: Check out
         uses: actions/checkout@v7
         with:
+          fetch-depth: ${{ matrix.gate.setup.fetch_depth }}
           persist-credentials: false
+
+      # A shallow checkout lacks the change basis; fetch that one commit so `git diff $CI_KIT_BASE $CI_KIT_HEAD` works at
+      # any depth. The token is handed to this one git call through its environment and never persisted. A failed
+      # fetch only warns: a gate that never reads the base must not go red for it.
+      - name: Fetch the change basis
+        if: needs.plan.outputs.base != ''
+        env:
+          CI_KIT_BASE: ${{ needs.plan.outputs.base }}
+          CI_KIT_TOKEN: ${{ github.token }}
+        run: |
+          git cat-file -e "$CI_KIT_BASE^{commit}" 2>/dev/null && exit 0
+          auth=$(printf 'x-access-token:%s' "$CI_KIT_TOKEN" | base64 | tr -d '\n')
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth" \
+            git fetch --no-tags --no-recurse-submodules --depth=1 origin "$CI_KIT_BASE" \
+            || echo "::warning::ci-kit: could not fetch the change basis $CI_KIT_BASE"
 
       - name: Set up Node
         if: matrix.gate.setup.node != ''
@@ -135,11 +159,15 @@ jobs:
       - name: Install
         if: matrix.gate.setup.install != ''
         env:
+          CI_KIT_BASE: ${{ needs.plan.outputs.base }}
+          CI_KIT_HEAD: ${{ github.sha }}
           CI_KIT_INSTALL: ${{ matrix.gate.setup.install }}
         run: bash -eo pipefail -c "$CI_KIT_INSTALL"
 
       - name: Run ${{ matrix.gate.name }}
         env:
+          CI_KIT_BASE: ${{ needs.plan.outputs.base }}
+          CI_KIT_HEAD: ${{ github.sha }}
           CI_KIT_RUN: ${{ matrix.gate.run }}
         run: bash -eo pipefail -c "$CI_KIT_RUN"
 

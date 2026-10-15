@@ -17,10 +17,14 @@ export const POOL_SIZES = [2, 4, 8, 16];
 // The reusable workflow's own jobs: a gate with one of these names would be indistinguishable from them in checks.
 const RESERVED = ['plan', 'verdict'];
 const TOP_KEYS = ['version', 'setup', 'gates'];
-const SETUP_KEYS = ['node', 'pnpm', 'install'];
+const SETUP_KEYS = ['node', 'pnpm', 'install', 'fetch_depth'];
+// actions/checkout's depth when setup does not say: the tested commit alone.
+export const DEFAULT_FETCH_DEPTH = 1;
 const GATE_KEYS = ['name', 'run', 'lane', 'cpus', 'timeout', 'paths', 'on', 'artifacts', 'setup', 'env'];
 const NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// The kit sets CI_KIT_BASE, CI_KIT_HEAD, CI_KIT_RUN... in gate steps; a gate's env must not shadow or be shadowed by them.
+const KIT_ENV_RE = /^CI_KIT_/;
 
 const isMapping = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const isStringList = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string' && s !== '');
@@ -32,7 +36,7 @@ function unknownKeys(obj, allowed, where, errors) {
 }
 
 function readSetup(raw, errors) {
-  const setup = { node: '', pnpm: false, install: '' };
+  const setup = { node: '', pnpm: false, install: '', fetch_depth: DEFAULT_FETCH_DEPTH };
   if (raw === undefined || raw === null) return setup;
   if (!isMapping(raw)) {
     errors.push('setup: must be a mapping');
@@ -50,6 +54,10 @@ function readSetup(raw, errors) {
   if (raw.install !== undefined) {
     if (typeof raw.install === 'string') setup.install = raw.install;
     else errors.push('setup.install: must be a string');
+  }
+  if (raw.fetch_depth !== undefined) {
+    if (Number.isInteger(raw.fetch_depth) && raw.fetch_depth >= 0) setup.fetch_depth = raw.fetch_depth;
+    else errors.push('setup.fetch_depth: must be a whole number of commits, 0 for full history');
   }
   return setup;
 }
@@ -135,6 +143,7 @@ function readGate(raw, index, seen, isPrivate, errors) {
     else {
       for (const [key, value] of Object.entries(raw.env)) {
         if (!ENV_NAME_RE.test(key)) err(`env: "${key}" is not a valid variable name`);
+        else if (KIT_ENV_RE.test(key)) err(`env: "${key}" is reserved: the kit sets CI_KIT_* variables`);
         else if (typeof value !== 'string') err(`env.${key}: must be a string (quote it)`);
         else env[key] = value;
       }
