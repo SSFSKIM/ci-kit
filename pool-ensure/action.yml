@@ -1,0 +1,22 @@
+# Ensure (spec §3 Ensure, I7): create the pool box if none exists, before a workflow queues pool jobs.
+# It does not wait for the box to boot; the jobs wait in GitHub's queue.
+#   - uses: SSFSKIM/ci-kit/pool-ensure@v1
+#     with: {hcloud-token: "${{ secrets.HCLOUD_TOKEN }}"}
+name: ci-kit pool ensure
+description: Make sure the ci-kit pool box exists (created from the newest pool snapshot if not).
+inputs:
+  hcloud-token:
+    description: Hetzner Cloud API token of the pool's project
+    required: true
+outputs:
+  result:
+    description: existing | created:<type>@<location> | raced
+    value: ${{ steps.ensure.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - id: ensure
+      shell: bash
+      env:
+        HCLOUD_TOKEN: ${{ inputs.hcloud-token }}
+      run: node "$GITHUB_ACTION_PATH/ensure.mjs"

@@ -1,0 +1,35 @@
+# The pool's bake (spec §3 Bake): builds the pool snapshot weekly and on dispatch. The builder is labelled with this
+# run's id, and the last step deletes this run's builders and unfinished snapshots on every exit, cancellation
+# included; the guard reaps what that step cannot reach.
+name: pool-bake
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pool-bake
+  cancel-in-progress: false
+jobs:
+  bake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Bake
+        env:
+          CI_KIT_APP_ID: ${{ secrets.CI_KIT_APP_ID }}
+          CI_KIT_APP_KEY: ${{ secrets.CI_KIT_APP_KEY }}
+        run: node pool/bake/bake.mjs bake
+      - name: Clean up
+        if: always()
+        run: node pool/bake/bake.mjs cleanup

@@ -102,12 +102,13 @@ jobs:
             echo "base=$gate_base"
           } >> "$GITHUB_OUTPUT"
 
-      # M5 replaces this step with the pool's ensure (SSFSKIM/ci-kit/pool-ensure).
+      # A pool gate needs the pool box: ensure creates it if none exists, without waiting for it to boot (spec §3).
+      # It runs from the kit checkout, so it is at this workflow's version, like the planner.
       - name: Pool
         if: steps.plan.outputs.pool == 'true'
-        run: |
-          echo "::error::ci-kit: pool lane not available yet"
-          exit 2
+        uses: ./.ci-kit/pool-ensure
+        with:
+          hcloud-token: ${{ secrets.HCLOUD_TOKEN }}
 
   gate:
     name: ${{ matrix.gate.name }}
