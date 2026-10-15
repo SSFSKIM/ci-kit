@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { globMatch, matchesAny } from '../plan/glob.mjs';
+import { globMatch, globProblem, matchesAny } from '../plan/glob.mjs';
 
 const cases = [
   // [pattern, path, expected]
@@ -19,9 +19,6 @@ const cases = [
   ['src/*.js', 'src/a/b.js', false],
   ['?.txt', 'a.txt', true],
   ['?.txt', 'ab.txt', false],
-  ['[ab].txt', 'b.txt', true],
-  ['[!ab].txt', 'b.txt', false],
-  ['[!ab].txt', 'c.txt', true],
   ['.github/**', '.github/workflows/ci.yml', true],
   ['**/*.yml', '.github/ci-kit.yml', true],
   ['*', '.gitignore', true],
@@ -40,4 +37,25 @@ for (const [pattern, path, expected] of cases) {
 test('matchesAny is true when one pattern matches', () => {
   assert.equal(matchesAny('src/a.js', ['docs/**', 'src/**']), true);
   assert.equal(matchesAny('lib/a.js', ['docs/**', 'src/**']), false);
+});
+
+// Constructs the matcher does not implement are refused at validation, so none can silently fail to select.
+const refused = [
+  ['src/[[:digit:]].js', /bracket expressions/],
+  ['[ab].txt', /bracket expressions/],
+  ['src/[z-a].js', /bracket expressions/],
+  ['a\\*b', /backslash escapes/],
+  ['src/{a,b}/**', /braces/],
+  ['!src/**', /negation/],
+  ['', /empty/],
+  ['/src/**', /leading "\/"/],
+];
+for (const [pattern, why] of refused) {
+  test(`globProblem refuses ${JSON.stringify(pattern)}`, () => {
+    assert.match(globProblem(pattern) ?? '', why);
+  });
+}
+
+test('globProblem accepts what globMatch implements', () => {
+  for (const p of ['src/**', '**/*.md', '?.txt', 'a+b(c)', '.github/**', 'docs/**/*.md']) assert.equal(globProblem(p), null, p);
 });

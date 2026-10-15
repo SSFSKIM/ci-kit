@@ -14,7 +14,8 @@ function job(id, name, { status = 'completed', conclusion = 'success', created =
     status,
     conclusion: status === 'completed' ? conclusion : null,
     created_at: at(created),
-    started_at: status === 'queued' ? null : at(started),
+    // GitHub sets started_at to created_at on a job still queued (M4; spec Surprises & Discoveries).
+    started_at: status === 'queued' ? at(created) : at(started),
     completed_at: status === 'completed' ? at(completed) : null,
     html_url: `${URL}/job/${id}`,
   };
@@ -121,6 +122,25 @@ test('a timed-out gate is a FAIL, a cancelled one a CANCEL, a skipped one a SKIP
   assert.deepEqual(r, { line: `RED 2/4 ${URL}`, code: 1 });
 });
 
+test('a plan that timed out is an ERROR with its diagnostics, not RED 0/0', async () => {
+  const h = harness(
+    [{ run: run('completed', 'failure'), jobs: [plan({ conclusion: 'timed_out' }), job(4, 'ci / verdict', { conclusion: 'failure' })] }],
+    { planError: async (j) => `the plan job ended ${j.conclusion}: ${j.html_url}` },
+  );
+  const r = await watchRun(h.opts);
+  assert.deepEqual(r, { line: `ERROR the plan job ended timed_out: ${URL}/job/1`, code: 2 });
+});
+
+test('a run that failed while every gate passed is an ERROR, not RED 0/n', async () => {
+  const h = harness([
+    { run: run('completed', 'failure'), jobs: [plan(), job(2, 'ci / unit'), job(4, 'ci / verdict', { conclusion: 'failure' })] },
+  ]);
+  const r = await watchRun(h.opts);
+  assert.deepEqual(h.lines, ['PASS unit 0m41s']);
+  assert.equal(r.code, 2);
+  assert.match(r.line, /^ERROR the run failed though no gate did/);
+});
+
 test('a failed plan is an ERROR with the planner\'s message, without waiting for the run to end', async () => {
   const h = harness([
     { run: run('in_progress'), jobs: [plan({ conclusion: 'failure' }), job(4, 'ci / verdict', { status: 'queued' })] },
@@ -175,6 +195,27 @@ test('a transient read failure is retried; a run that stays unreadable is an ERR
   const r = await watchRun(bad.opts);
   assert.equal(r.code, 2);
   assert.match(r.line, /^ERROR run 7 cannot be read: HTTP 404/);
+});
+
+test('a queued job (started_at == created_at, as GitHub reports it) gets WAIT from its created_at', () => {
+  const queued = job(2, 'ci / unit', { status: 'queued', created: 0 });
+  assert.equal(queued.started_at, queued.created_at);
+  assert.deepEqual(jobEvents([queued], new Map(), T0 + 119_000), []);
+  const [wait] = jobEvents([queued], new Map(), T0 + 125_000);
+  assert.equal(wait.kind, 'WAIT');
+  assert.equal(wait.seconds, 125);
+});
+
+test('a job that waits on an approval or a concurrency slot also counts as queued', () => {
+  for (const status of ['waiting', 'pending']) {
+    const j = { ...job(2, 'ci / unit', { status: 'queued' }), status };
+    assert.equal(jobEvents([j], new Map(), T0 + 130_000)[0]?.kind, 'WAIT', status);
+  }
+});
+
+test('an in-progress job never gets a WAIT', () => {
+  const j = job(2, 'ci / unit', { status: 'in_progress', created: 0, started: 200 });
+  assert.deepEqual(jobEvents([j], new Map(), T0 + 300_000), []);
 });
 
 test('jobEvents reports each job once', () => {

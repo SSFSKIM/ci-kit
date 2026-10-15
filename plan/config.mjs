@@ -1,6 +1,7 @@
 // `.github/ci-kit.yml`, version 1 (spec I1): parse, validate fully, and fill defaults.
 // Every problem is collected, so one failed plan names them all; each message names the gate and the field.
 import { parse } from 'yaml';
+import { globProblem } from './glob.mjs';
 
 export class ConfigError extends Error {
   constructor(messages) {
@@ -95,8 +96,14 @@ function readGate(raw, index, seen, isPrivate, errors) {
 
   let paths = [];
   if (raw.paths !== undefined) {
-    if (isStringList(raw.paths)) paths = raw.paths;
-    else err('paths: must be a list of strings');
+    if (!isStringList(raw.paths)) err('paths: must be a list of strings');
+    else {
+      paths = raw.paths;
+      raw.paths.forEach((p, i) => {
+        const problem = globProblem(p);
+        if (problem) err(`paths[${i}]: "${p}" ${problem}`);
+      });
+    }
   }
 
   let on = [...EVENTS];

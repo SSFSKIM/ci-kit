@@ -100,6 +100,8 @@ const rejected = [
   ['a zero timeout', 'version: 1\ngates:\n  - {name: a, run: x, timeout: 0}\n', /^gate "a": timeout: must be a whole number of minutes from 1 to 360/],
   ['a timeout over 360', 'version: 1\ngates:\n  - {name: a, run: x, timeout: 361}\n', /^gate "a": timeout: must be/],
   ['paths not a list', 'version: 1\ngates:\n  - {name: a, run: x, paths: "src/**"}\n', /^gate "a": paths: must be a list of strings/],
+  ['a bracket expression in paths', 'version: 1\ngates:\n  - {name: a, run: x, paths: ["src/**", "src/[[:digit:]].js"]}\n', /^gate "a": paths\[1\]: "src\/\[\[:digit:\]\]\.js" uses bracket expressions/],
+  ['a malformed range in paths', 'version: 1\ngates:\n  - {name: a, run: x, paths: ["src/[z-a].js"]}\n', /^gate "a": paths\[0\]: .*bracket expressions/],
   ['an unknown event', 'version: 1\ngates:\n  - {name: a, run: x, on: [push]}\n', /^gate "a": on: "push" is not one of pr, ci-ref, dispatch/],
   ['an empty on list', 'version: 1\ngates:\n  - {name: a, run: x, on: []}\n', /^gate "a": on: must list at least one/],
   ['artifacts not a list', 'version: 1\ngates:\n  - {name: a, run: x, artifacts: 1}\n', /^gate "a": artifacts: must be a list of strings/],

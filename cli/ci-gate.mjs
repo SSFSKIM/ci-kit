@@ -71,7 +71,7 @@ function planErrorReader(gh, repo) {
     } catch {
       // fall through to the job's URL
     }
-    return `the plan job failed: ${job.html_url}`;
+    return `the plan job ended ${job.conclusion}: ${job.html_url}`;
   };
 }
 
@@ -138,11 +138,18 @@ async function main(argv) {
   let result;
   try {
     result = await follow(gh, repo, commit, ref, (id) => { runId = id; });
+  } catch (e) {
+    result = failure(e);
   } finally {
     cleanup(); // also when following the run throws: the ref is this call's to remove
   }
   out(result.line);
   return result.code;
+}
+
+// An unexpected local failure (a log that cannot be written, say) still ends in I5's ERROR line and exit 2.
+function failure(e) {
+  return { line: `ERROR ci-gate failed: ${e?.message ?? e}`, code: 2 };
 }
 
 async function follow(gh, repo, commit, ref, onRun) {
@@ -164,4 +171,8 @@ async function follow(gh, repo, commit, ref, onRun) {
   });
 }
 
-process.exitCode = await main(process.argv.slice(2));
+process.exitCode = await main(process.argv.slice(2)).catch((e) => {
+  const { line, code } = failure(e);
+  out(line);
+  return code;
+});

@@ -3,6 +3,8 @@
 import { formatDuration } from './naming.mjs';
 
 const WAIT_AFTER_MS = 2 * 60 * 1000;
+// A job not yet on a runner. Its started_at is no signal: GitHub sets it to created_at while the job is queued.
+const QUEUED = ['queued', 'waiting', 'pending', 'requested'];
 const GATE_RE = /^[a-z0-9][a-z0-9-]*$/;
 const OWN_JOBS = ['plan', 'verdict'];
 
@@ -41,9 +43,10 @@ export function jobEvents(jobs, seen, nowMs) {
       if (marks.has('done')) continue;
       marks.add('done');
       const kind = outcome(job.conclusion);
+      // A completed job's started_at is when a runner took it (a job cancelled while queued prints no duration).
       const took = job.started_at && job.completed_at ? seconds(job.started_at, job.completed_at) : 0;
       events.push({ kind, gate, job, seconds: took });
-    } else if (!job.started_at && !marks.has('wait')) {
+    } else if (QUEUED.includes(job.status) && !marks.has('wait')) {
       const queued = nowMs - Date.parse(job.created_at);
       if (queued >= WAIT_AFTER_MS) {
         marks.add('wait');
@@ -74,10 +77,12 @@ function verdict(run, jobs, runUrl) {
   const failed = gates.filter((j) => ['FAIL', 'CANCEL'].includes(outcome(j.conclusion))).length;
   if (run.conclusion === 'success') return { line: `GREEN ${runUrl}`, code: 0 };
   if (run.conclusion === 'cancelled') return { line: `ERROR the run was cancelled ${runUrl}`, code: 2 };
+  // RED is a verdict on the gates; a run that failed with no gate failing failed in the workflow itself.
+  if (failed === 0) return { line: `ERROR the run failed though no gate did (${run.conclusion}) ${runUrl}`, code: 2 };
   return { line: `RED ${failed}/${gates.length} ${runUrl}`, code: 1 };
 }
 
-// Polls until the run completes or its plan fails. Returns the final line and the exit code.
+// Polls until the run completes or its plan ends unsuccessfully. Returns the final line and the exit code.
 //   gh: { getRun(repo, id), listJobs(repo, id) }; emit(line): one stdout line;
 //   onFail(job, gate) → the path of the failed gate's downloaded log; planError(job) → the plan's error message.
 export async function watchRun({ gh, repo, runId, runUrl, emit, onFail, planError, now, sleep, interval = 10_000, maxUnreadable = 20 }) {
@@ -99,7 +104,7 @@ export async function watchRun({ gh, repo, runId, runUrl, emit, onFail, planErro
     for (const event of jobEvents(jobs, seen, now())) emit(await eventLine(event, onFail));
 
     const planJob = jobs.find(isPlan);
-    if (planJob?.status === 'completed' && planJob.conclusion === 'failure') {
+    if (planJob?.status === 'completed' && planJob.conclusion !== 'success') {
       return { line: `ERROR ${await planError(planJob)}`, code: 2 };
     }
     if (run.status === 'completed') return verdict(run, jobs, runUrl);
