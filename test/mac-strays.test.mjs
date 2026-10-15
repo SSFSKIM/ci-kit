@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parsePs, parseLsofCwd, selectStrays } from '../mac/hooks/strays.mjs';
+import { identityOf, parsePs, parseLsofCwd, selectStrays } from '../mac/hooks/strays.mjs';
 
 const WORK = '/Users/new/actions-runner-maws/_work';
 const UID = 501;
@@ -78,16 +78,23 @@ test('a descendant of another user is not selected through its parent', () => {
   assert.deepEqual(pids(strays), [900]);
 });
 
-test('parsePs reads `ps -axo pid=,ppid=,uid=,command=` output, commands with spaces kept whole', () => {
+test('parsePs reads `ps -axo pid=,ppid=,uid=,lstart=,command=` (C locale): start time apart, commands with spaces whole', () => {
   const text = [
-    '    1     0     0 /sbin/launchd',
-    '  201   200   501 /a/Electron Helper (Renderer).app/Contents/MacOS/Electron Helper (Renderer) --type=renderer',
+    '    1     0     0 Fri Oct  9 18:53:38 2026     /sbin/launchd',
+    '  201   200   501 Thu Oct 15 22:02:31 2026     /a/Electron Helper (Renderer).app/Contents/MacOS/Electron Helper (Renderer) --type=renderer',
     '',
   ].join('\n');
   assert.deepEqual(parsePs(text), [
-    { pid: 1, ppid: 0, uid: 0, command: '/sbin/launchd' },
-    { pid: 201, ppid: 200, uid: 501, command: '/a/Electron Helper (Renderer).app/Contents/MacOS/Electron Helper (Renderer) --type=renderer' },
+    { pid: 1, ppid: 0, uid: 0, started: 'Fri Oct  9 18:53:38 2026', command: '/sbin/launchd' },
+    { pid: 201, ppid: 200, uid: 501, started: 'Thu Oct 15 22:02:31 2026', command: '/a/Electron Helper (Renderer).app/Contents/MacOS/Electron Helper (Renderer) --type=renderer' },
   ]);
+});
+
+test('each stray carries its birth identity, uid and start time, for revalidation before a signal', () => {
+  const processes = [{ pid: 900, ppid: 1, uid: UID, started: 'Thu Oct 15 22:02:31 2026', command: `${WORK}/x/run` }];
+  const [stray] = selectStrays({ processes, cwds: new Map(), workDir: WORK, uid: UID, self: 9999 });
+  assert.equal(stray.identity, identityOf(processes[0]));
+  assert.equal(identityOf(processes[0]), '501 Thu Oct 15 22:02:31 2026');
 });
 
 test('parseLsofCwd reads `lsof -a -d cwd -Fpn` output into pid → cwd', () => {

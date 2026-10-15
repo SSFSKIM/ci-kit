@@ -92,8 +92,15 @@ Before each job and after it, the hooks kill every process of the runner's user 
 - every **descendant** of those, wherever it sits (an app's pty shell in `/tmp` is the app's).
 
 The hook's own process, its ancestors (the runner's worker and listener) and its own children are spared. Each stray
-gets SIGTERM, then SIGKILL after 10 s. Every run of a hook logs one `swept <n>` line, and one line per kill with the
-pid, why it matched and its command line, to `~/Library/Logs/ci-kit/mac-runner-hooks.log` and to the job's log.
+gets SIGTERM, then SIGKILL after 10 s. A pid is signalled only while it still holds the process that was selected (same
+uid and start time): a stray that exits during the grace can hand its pid to an unrelated process, which gets nothing.
+Every run of a hook logs one line per stray (pid, why it matched, command line), one per SIGKILL, and a last line, to
+`~/Library/Logs/ci-kit/mac-runner-hooks.log` and to the job's log.
+
+The last line is `swept <n>`, or `FAILED sweep …` with the survivors' pids and each refused signal (`pid:SIGNAL:code`).
+A failed sweep exits 1, which fails the job: before a job, because a desktop job beside a survivor is not the clean
+desktop it assumes and its result would not be trusted; after one, because the survivor is what that job left. Until
+someone removes the survivor, every job on the mini fails at "Set up runner" with that line, which is the point.
 
 **Do not work inside the runner's work directory.** A shell or session whose working directory is under `_work`, or a
 long-lived command that names a path there, is a stray to the next hook. To look at a job's files, copy them out.
@@ -126,13 +133,20 @@ gh api repos/SSFSKIM/MAWS/actions/runs/<run-id>/jobs --jq '.jobs[]|select(.concl
 
 (`gh run view --json jobs` has no runner name; the jobs API's `runner_name` does.)
 
-**The first run on a fresh runner** saves MAWS's pnpm store and Electron download to the Actions cache from the mini,
-which adds about four minutes to that job's post step; later jobs restore it.
-
 **Human-only prompts.** A first launch of a GUI app can raise a macOS prompt (Gatekeeper for a downloaded app, a
 Keychain or notification request). They are answered by the human, in the mini's GUI session, never by an agent and
-never through cua. LibreOffice (`/Applications/LibreOffice.app`, Homebrew cask, still quarantined) has not been launched
-on the mini; the document groups are the first to start it.
+never through cua.
+
+**Readiness hold: LibreOffice.** `/Applications/LibreOffice.app` (Homebrew cask) is installed but quarantined and has
+never been launched on the mini, so its first launch raises Gatekeeper's "downloaded from the Internet" prompt. Until
+the human has opened LibreOffice once on the mini and allowed it, no group that launches `soffice` runs there: in
+MAWS's `gate.yml` those are `LIBREOFFICE_E2E`, `document` and `presentations`. The flag shows the approval:
+
+```bash
+ssh mini 'xattr -p com.apple.quarantine /Applications/LibreOffice.app'
+#   0181;…  not yet approved (hold)
+#   01c1;…  approved (0x40, user approved, is set): the hold is lifted
+```
 
 ## Contention: measured
 

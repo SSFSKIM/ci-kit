@@ -7,15 +7,24 @@
 // itself, its ancestors (the hook's shell, the runner's worker and listener) and its own children are never strays,
 // though the hook runs inside the workspace.
 
-/** Rows of `ps -axo pid=,ppid=,uid=,command=`. */
+/** Rows of `ps -axo pid=,ppid=,uid=,lstart=,command=`, run in the C locale (`lstart` is then `Thu Oct 15 22:02:31 2026`). */
 export function parsePs(text) {
   const rows = [];
   for (const line of text.split('\n')) {
-    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s(.*)$/.exec(line);
-    if (match) rows.push({ pid: Number(match[1]), ppid: Number(match[2]), uid: Number(match[3]), command: match[4].trim() });
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4})\s+(.*)$/.exec(line);
+    if (match) {
+      const [, pid, ppid, uid, started, command] = match;
+      rows.push({ pid: Number(pid), ppid: Number(ppid), uid: Number(uid), started, command: command.trim() });
+    }
   }
   return rows;
 }
+
+/**
+ * A process's birth identity: its uid and start time. A pid alone can be reused once its process exits; the sweep
+ * signals a pid only while it still has the identity it had when it was selected.
+ */
+export const identityOf = (p) => `${p.uid} ${p.started}`;
 
 /** pid → working directory, from `lsof -a -d cwd -Fpn` (fields `p<pid>` then `n<path>`). */
 export function parseLsofCwd(text) {
@@ -29,9 +38,10 @@ export function parseLsofCwd(text) {
 }
 
 /**
- * @param {{processes: {pid:number, ppid:number, uid:number, command:string}[], cwds: Map<number,string>,
+ * @param {{processes: {pid:number, ppid:number, uid:number, started:string, command:string}[], cwds: Map<number,string>,
  *          workDir: string, uid: number, self: number}} input
- * @returns {{pid:number, command:string, reason:string}[]} the strays, each with why: `command`, `cwd` or `child of <pid>`
+ * @returns {{pid:number, identity:string, command:string, reason:string}[]} the strays, each with its identity and why:
+ *   `command`, `cwd` or `child of <pid>`
  */
 export function selectStrays({ processes, cwds, workDir, uid, self }) {
   const root = workDir.replace(/\/+$/, '');
@@ -58,15 +68,15 @@ export function selectStrays({ processes, cwds, workDir, uid, self }) {
   const strays = new Map();
   for (const p of processes) {
     if (!eligible(p)) continue;
-    if (names(p.command)) strays.set(p.pid, { pid: p.pid, command: p.command, reason: 'command' });
-    else if (under(cwds.get(p.pid))) strays.set(p.pid, { pid: p.pid, command: p.command, reason: 'cwd' });
+    if (names(p.command)) strays.set(p.pid, { pid: p.pid, identity: identityOf(p), command: p.command, reason: 'command' });
+    else if (under(cwds.get(p.pid))) strays.set(p.pid, { pid: p.pid, identity: identityOf(p), command: p.command, reason: 'cwd' });
   }
   const queue = [...strays.keys()];
   while (queue.length > 0) {
     const parent = queue.shift();
     for (const child of children.get(parent) ?? []) {
       if (!eligible(child) || strays.has(child.pid)) continue;
-      strays.set(child.pid, { pid: child.pid, command: child.command, reason: `child of ${parent}` });
+      strays.set(child.pid, { pid: child.pid, identity: identityOf(child), command: child.command, reason: `child of ${parent}` });
       queue.push(child.pid);
     }
   }

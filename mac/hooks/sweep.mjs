@@ -5,15 +5,22 @@
 //   node sweep.mjs <job-started|job-completed|manual> [--dry-run]
 //
 // Installed by mac/install.sh to <runner>/ci-kit/hooks/, so the work directory is <runner>/_work, two levels up. What
-// counts as a stray is strays.mjs's. A stray gets SIGTERM, then SIGKILL after 10 s. --dry-run lists and kills nothing;
-// `manual` without it refuses while a job runs.
+// counts as a stray is strays.mjs's; how one is ended (SIGTERM, then SIGKILL after 10 s, each only while the pid still
+// holds the process selected) is terminate.mjs's. --dry-run lists and kills nothing; `manual` without it refuses while a
+// job runs.
+//
+// Exit 1 when a stray could not be ended (a signal refused, or a process outliving SIGKILL), with the pids, signals and
+// errors on the last log line. As a hook that fails the job: before a job, because a desktop job beside a survivor is
+// not the clean desktop it assumes and its result would not be trusted; after one, because the survivor is what that
+// job left.
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { parseLsofCwd, parsePs, selectStrays } from './strays.mjs';
+import { identityOf, parseLsofCwd, parsePs, selectStrays } from './strays.mjs';
+import { terminate } from './terminate.mjs';
 
 const phase = process.argv[2] ?? 'manual';
 const dryRun = process.argv.includes('--dry-run');
@@ -23,14 +30,20 @@ const uid = process.getuid();
 
 const run = (file, args) => {
   try {
-    return execFileSync(file, args, { encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'ignore'] });
+    return execFileSync(file, args, {
+      encoding: 'utf8',
+      maxBuffer: 64 << 20,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      env: { ...process.env, LC_ALL: 'C' }, // lstart in one fixed format
+    });
   } catch (error) {
     // lsof exits 1 when some process could not be read; what it could read is still on stdout.
     if (typeof error.stdout === 'string' && error.stdout.length > 0) return error.stdout;
     throw error;
   }
 };
-const processes = parsePs(run('/bin/ps', ['-axo', 'pid=,ppid=,uid=,command=']));
+const listProcesses = () => parsePs(run('/bin/ps', ['-axo', 'pid=,ppid=,uid=,lstart=,command=']));
+const processes = listProcesses();
 const cwds = parseLsofCwd(run('/usr/sbin/lsof', ['-a', '-u', String(uid), '-d', 'cwd', '-Fpn']));
 const strays = selectStrays({ processes, cwds, workDir, uid, self: process.pid });
 // By hand, a sweep during a job would kill the job; the hooks run inside one, as its worker's descendants.
@@ -47,31 +60,28 @@ const log = (line) => {
   console.log(stamped);
   if (!dryRun) appendFileSync(join(logDir, 'mac-runner-hooks.log'), `${stamped}\n`);
 };
-const alive = (pid) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === 'EPERM';
-  }
-};
-const signal = (pid, name) => {
-  try {
-    process.kill(pid, name);
-  } catch {
-    // gone already
-  }
-};
-
 for (const stray of strays) {
   log(`${dryRun ? 'would kill' : 'kill'} pid=${stray.pid} (${stray.reason}) ${stray.command.slice(0, 300)}`);
-  if (!dryRun) signal(stray.pid, 'SIGTERM');
 }
-if (!dryRun && strays.length > 0) {
-  for (let waited = 0; waited < 10_000 && strays.some((s) => alive(s.pid)); waited += 250) await sleep(250);
-  for (const stray of strays.filter((s) => alive(s.pid))) {
-    log(`SIGKILL pid=${stray.pid} (still alive 10 s after SIGTERM)`);
-    signal(stray.pid, 'SIGKILL');
-  }
+if (dryRun || strays.length === 0) {
+  log(`swept ${strays.length} under ${workDir}${dryRun ? ' (dry run)' : ''}`);
+  process.exit(0);
 }
-log(`swept ${strays.length} under ${workDir}${dryRun ? ' (dry run)' : ''}`);
+
+const result = await terminate(strays, {
+  snapshot: () => new Map(listProcesses().map((p) => [p.pid, identityOf(p)])),
+  signal: (pid, name) => process.kill(pid, name),
+  sleep,
+});
+for (const event of result.events) {
+  if (event.signal === 'SIGKILL' && event.outcome === 'sent') log(`SIGKILL pid=${event.pid} (still alive 10 s after SIGTERM)`);
+  else if (event.outcome === 'replaced') log(`skip ${event.signal} pid=${event.pid} (the pid now belongs to another process)`);
+  else if (event.outcome === 'error') log(`${event.signal} pid=${event.pid} failed: ${event.code}`);
+}
+if (result.ok) {
+  log(`swept ${strays.length} under ${workDir}`);
+} else {
+  const errors = result.failures.map((f) => `${f.pid}:${f.signal}:${f.code}`).join(',') || '-';
+  log(`FAILED sweep of ${strays.length} under ${workDir}: survivors=${result.survivors.join(',') || '-'} errors=${errors}`);
+  process.exit(1);
+}
