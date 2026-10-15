@@ -65,7 +65,9 @@ How to see it working: §Acceptance. The shortest proofs are:
   14 findings folded (Decision Log). A second round was not run. The changes are additive
   hardening, and the pool code they shape gets its own milestone reviews and the high-rung
   whole-range review.
-- [ ] M1 — Kit core: config, planner, reusable workflow, `ci-gate`, the kit's own CI
+- [x] (2026-10-15 23:20Z) M1 — Kit core: config, planner, reusable workflow, `ci-gate`, the kit's
+  own CI. PR #2 merged (0a930ee); `v1` at 0a930ee; `ci-gate` installed on both Macs from the main
+  clones.
 - [ ] M2 — cua: adoption and timing-test stabilization
 - [ ] M3 — doperpowers: adoption and timing-test stabilization
 - [x] (2026-10-15 22:10Z) M4 — Spike: the pool's boot path. Verdict ≤ 5 min; PR #1 merged

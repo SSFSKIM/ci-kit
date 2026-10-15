@@ -12,3 +12,4 @@ Decision Log carry the folded results; this file carries the execution mechanics
   prerequisite (not yet in §5).
 - 2026-10-15: maws-fe (DL22) cleared the mini runner; M6 switched to e2e:composer with readiness steps (8371147); M6 executor told.
 - 2026-10-15: M4 DONE — verdict ≤5 min band (p90 56.3 s), ~€1.50, all deleted (verified by controller). No task review: a spike with no product code; numbers verified against results/summary.tsv and the cleanup listing re-run. PR #1 merged.
+- 2026-10-15: M1 merged (PR #2, 0a930ee) after two fix waves (WAIT on queued started_at, glob subset, plan-ending errors, error boundary). v1 → 0a930ee. ci-gate re-installed from the main clones on MacBook and mini.
