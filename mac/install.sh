@@ -105,7 +105,9 @@ cp "$RUNNER_DIR/bin/runsvc.sh" "$RUNNER_DIR/runsvc.sh"
 # 5. The LaunchAgent, reloaded so a re-run takes effect.
 sed -e "s|__RUNNER_DIR__|$RUNNER_DIR|g" -e "s|__LOG_DIR__|$LOG_DIR|g" "$here/$AGENT.plist" >"$PLIST"
 plutil -lint -s "$PLIST"
+# bootout returns while the runner is still shutting down, and bootstrap fails (5: Input/output error) until it is gone.
 launchctl bootout "$domain/$AGENT" 2>/dev/null || true
+for _ in $(seq 1 60); do launchctl print "$domain/$AGENT" >/dev/null 2>&1 || break; sleep 1; done
 if [[ $mode == disabled ]]; then
   launchctl disable "$domain/$AGENT"
   say "installed, disabled: $AGENT is not loaded (enable: launchctl enable $domain/$AGENT && launchctl bootstrap $domain $PLIST)"
