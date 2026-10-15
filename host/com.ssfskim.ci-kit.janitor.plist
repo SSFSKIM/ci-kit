@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The host janitor (I11). host/install.sh fills the __PLACEHOLDERS__ and loads it; do not load this file as is. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ssfskim.ci-kit.janitor</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__JANITOR__</string>__DRY_RUN__
+  </array>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- Its own cost matters on a machine at load 90–330: background CPU and I/O priority. -->
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__PATH__</string>
+  </dict>
+  <!-- What it did goes to janitor.log and report.md; stdout repeats it, stderr is for crashes. -->
+  <key>StandardOutPath</key>
+  <string>/dev/null</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/janitor.err</string>
+</dict>
+</plist>

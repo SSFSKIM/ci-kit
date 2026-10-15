@@ -1,0 +1,23 @@
+{
+  "patterns": [
+    "^\\S*\\bnode\\s(?:.*\\s)?--test\\b",
+    "^\\S*\\bnode\\s(?:.*\\s)?\\S+\\.test\\.[cm]?[jt]sx?(?:\\s|$)",
+    "^\\S*\\bnode\\s.*\\bvitest\\b",
+    "^\\S*\\bnode\\s.*\\bplaywright\\S*\\s+test(?:\\s|$)",
+    "^(?=\\S*/[Ee]lectron(?:\\s|$)).*(?:/\\.claude/worktrees/|/\\.worktrees/|/[^/\\s]+-wt-[^/\\s]+(?:/|\\s|$))",
+    "^\\S*\\bnode\\s.*\\bfake-upstream-process\\.mjs\\b",
+    "^\\S*\\b[Pp]ython[\\d.]*\\s.*(?:/tests/sminos/[^/\\s]+\\.py|/tmp/sm[a-z]\\.[A-Za-z0-9]{6}/[^/\\s]+\\.py)(?:\\s|$)",
+    "^\\S*\\bnode\\s.*codex-plugin-test-"
+  ],
+  "exclude": [
+    "\\s--watch(?:[=\\s]|$)",
+    "\\s-w(?:\\s|$)",
+    "\\s--ui(?:[=\\s]|$)",
+    "\\s(?:serve|dev|preview)(?:\\s|$)",
+    "^(?!.*\\s(?:run|--run)(?:\\s|$)).*\\bvitest\\b"
+  ],
+  "min_age_hours": 2,
+  "vm_report_hours": 12,
+  "repos_root": "~/Developer/GitHub",
+  "notify": true
+}
