@@ -135,30 +135,33 @@ async function main(argv) {
     process.exit(130);
   });
 
-  const run = await findRun(gh, repo, commit);
-  if (!run) {
-    cleanup();
-    out(`ERROR no run of ${CALLER} appeared within 2 min of the push to ${ref}`);
-    return 2;
+  let result;
+  try {
+    result = await follow(gh, repo, commit, ref, (id) => { runId = id; });
+  } finally {
+    cleanup(); // also when following the run throws: the ref is this call's to remove
   }
-  runId = run.id;
-  note(`run ${run.html_url}`);
+  out(result.line);
+  return result.code;
+}
 
+async function follow(gh, repo, commit, ref, onRun) {
+  const run = await findRun(gh, repo, commit);
+  if (!run) return { line: `ERROR no run of ${CALLER} appeared within 2 min of the push to ${ref}`, code: 2 };
+  onRun(run.id);
+  note(`run ${run.html_url}`);
   const [owner, name] = repo.split('/');
-  const result = await watchRun({
+  return watchRun({
     gh,
     repo,
-    runId,
+    runId: run.id,
     runUrl: run.html_url,
     emit: out,
-    onFail: failureSaver(gh, repo, runId, join('/tmp/ci-gate', `${owner}-${name}`, String(runId))),
+    onFail: failureSaver(gh, repo, run.id, join('/tmp/ci-gate', `${owner}-${name}`, String(run.id))),
     planError: planErrorReader(gh, repo),
     now: Date.now,
     sleep,
   });
-  cleanup();
-  out(result.line);
-  return result.code;
 }
 
 process.exitCode = await main(process.argv.slice(2));

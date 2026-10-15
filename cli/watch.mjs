@@ -7,6 +7,8 @@ const GATE_RE = /^[a-z0-9][a-z0-9-]*$/;
 const OWN_JOBS = ['plan', 'verdict'];
 
 const lastSegment = (name) => name.split(' / ').at(-1);
+// Finished jobs in the order they finished; unfinished ones after them, by id.
+const doneAt = (job) => (job.completed_at ? Date.parse(job.completed_at) : Number.MAX_SAFE_INTEGER);
 const seconds = (from, to) => (Date.parse(to) - Date.parse(from)) / 1000;
 
 // The gate a job runs, or null for the workflow's own jobs and the matrix job that never expanded on an empty selection
@@ -31,7 +33,7 @@ export function jobEvents(jobs, seen, nowMs) {
   const gateJobs = jobs
     .map((job) => ({ job, gate: gateOf(job.name) }))
     .filter((g) => g.gate !== null)
-    .sort((a, b) => Date.parse(a.job.completed_at ?? 0) - Date.parse(b.job.completed_at ?? 0) || a.job.id - b.job.id);
+    .sort((a, b) => doneAt(a.job) - doneAt(b.job) || a.job.id - b.job.id);
   for (const { job, gate } of gateJobs) {
     const marks = seen.get(gate) ?? new Set();
     seen.set(gate, marks);
