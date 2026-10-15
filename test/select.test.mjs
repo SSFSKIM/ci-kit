@@ -78,11 +78,11 @@ test('planOutput shapes I3: runs_on per lane, setup resolved, pool flag', () => 
     gates: [
       {
         name: 'unit', run: 'npm test', runs_on: ['ubuntu-latest'], timeout: 30,
-        setup: { node: '24', pnpm: false, install: 'npm ci' }, artifacts: [], env: {},
+        setup: { node: '24', pnpm: false, install: 'npm ci', fetch_depth: 1 }, artifacts: [], env: {},
       },
       {
         name: 'big', run: 'npm run big', runs_on: ['self-hosted', 'ci-kit-pool', 'cpus-8'], timeout: 30,
-        setup: { node: '24', pnpm: false, install: 'npm ci' }, artifacts: [], env: {},
+        setup: { node: '24', pnpm: false, install: 'npm ci', fetch_depth: 1 }, artifacts: [], env: {},
       },
     ],
     pool: true,
@@ -93,14 +93,16 @@ test('planOutput shapes I3: runs_on per lane, setup resolved, pool flag', () => 
 test('planOutput maps hosted-macos and mac lanes, and setup: false', () => {
   const c = parseConfig(`
 version: 1
-setup: {node: "22"}
+setup: {node: "22", fetch_depth: 0}
 gates:
   - {name: m, run: x, lane: hosted-macos}
   - {name: e, run: y, lane: mac, setup: false}
 `, { isPrivate: true });
   const out = planOutput(c, c.gates);
   assert.deepEqual(out.gates.map((g) => g.runs_on), [['macos-latest'], ['self-hosted', 'macOS', 'ARM64', 'ci-kit-mac']]);
-  assert.deepEqual(out.gates[1].setup, { node: '', pnpm: false, install: '' });
+  assert.deepEqual(out.gates[0].setup, { node: '22', pnpm: false, install: '', fetch_depth: 0 });
+  // setup: false skips the whole shared setup, fetch_depth with it (I1): the gate checks out at the default depth.
+  assert.deepEqual(out.gates[1].setup, { node: '', pnpm: false, install: '', fetch_depth: 1 });
   assert.equal(out.pool, false);
 });
 

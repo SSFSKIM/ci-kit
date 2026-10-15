@@ -17,7 +17,7 @@ function errorsOf(text, opts = priv) {
 
 test('a minimal config gets every default', () => {
   const c = parseConfig('version: 1\ngates:\n  - name: unit\n    run: npm test\n', pub);
-  assert.deepEqual(c.setup, { node: '', pnpm: false, install: '' });
+  assert.deepEqual(c.setup, { node: '', pnpm: false, install: '', fetch_depth: 1 });
   assert.deepEqual(c.gates, [
     {
       name: 'unit', run: 'npm test', lane: 'hosted', cpus: null, timeout: 30, paths: [],
@@ -33,6 +33,7 @@ setup:
   node: "24"
   pnpm: true
   install: pnpm install --frozen-lockfile
+  fetch_depth: 0
 gates:
   - name: unit
     run: npm test
@@ -45,7 +46,7 @@ gates:
     setup: false
     env: {FOO: bar}
 `, priv);
-  assert.deepEqual(c.setup, { node: '24', pnpm: true, install: 'pnpm install --frozen-lockfile' });
+  assert.deepEqual(c.setup, { node: '24', pnpm: true, install: 'pnpm install --frozen-lockfile', fetch_depth: 0 });
   assert.deepEqual(c.gates[0], {
     name: 'unit', run: 'npm test', lane: 'pool', cpus: 8, timeout: 15, paths: ['src/**'],
     on: ['pr', 'ci-ref'], artifacts: ['test-results/**'], setup: false, env: { FOO: 'bar' },
@@ -87,6 +88,9 @@ const rejected = [
   ['an unknown setup key', 'version: 1\nsetup: {npm: true}\ngates:\n  - {name: a, run: x}\n', /^setup: unknown key "npm"/],
   ['an unquoted node version', 'version: 1\nsetup: {node: 24}\ngates:\n  - {name: a, run: x}\n', /^setup\.node: must be a string/],
   ['a non-boolean pnpm', 'version: 1\nsetup: {pnpm: "yes"}\ngates:\n  - {name: a, run: x}\n', /^setup\.pnpm: must be true or false/],
+  ['a negative fetch_depth', 'version: 1\nsetup: {fetch_depth: -1}\ngates:\n  - {name: a, run: x}\n', /^setup\.fetch_depth: must be a whole number of commits, 0 for full history/],
+  ['a fractional fetch_depth', 'version: 1\nsetup: {fetch_depth: 1.5}\ngates:\n  - {name: a, run: x}\n', /^setup\.fetch_depth: must be a whole number/],
+  ['a quoted fetch_depth', 'version: 1\nsetup: {fetch_depth: "0"}\ngates:\n  - {name: a, run: x}\n', /^setup\.fetch_depth: must be a whole number/],
   ['a gate that is not a mapping', 'version: 1\ngates:\n  - unit\n', /^gates\[0\]: must be a mapping/],
   ['a gate without a name', 'version: 1\ngates:\n  - {run: x}\n', /^gates\[0\]: name: required/],
   ['a bad gate name', 'version: 1\ngates:\n  - {name: Unit, run: x}\n', /^gate "Unit": name: must match/],
@@ -108,6 +112,7 @@ const rejected = [
   ['a non-boolean gate setup', 'version: 1\ngates:\n  - {name: a, run: x, setup: no-thanks}\n', /^gate "a": setup: must be true or false/],
   ['a non-string env value', 'version: 1\ngates:\n  - {name: a, run: x, env: {N: 1}}\n', /^gate "a": env\.N: must be a string/],
   ['a bad env name', 'version: 1\ngates:\n  - {name: a, run: x, env: {"1X": "y"}}\n', /^gate "a": env: "1X" is not a valid variable name/],
+  ['an env name the kit sets', 'version: 1\ngates:\n  - {name: a, run: x, env: {CI_KIT_BASE: "y"}}\n', /^gate "a": env: "CI_KIT_BASE" is reserved: the kit sets CI_KIT_\* variables/],
 ];
 
 for (const [what, text, pattern] of rejected) {
