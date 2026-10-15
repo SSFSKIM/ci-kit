@@ -76,8 +76,8 @@ jobs:
             workflow_dispatch) export CI_KIT_EVENT=dispatch CI_KIT_BASE= CI_KIT_HEAD= ;;
             *) fail "ci-kit: event $EVENT_NAME is not planned (pull_request, push to ci/**, workflow_dispatch)" ;;
           esac
-          node .ci-kit/plan/plan.mjs > "$RUNNER_TEMP/plan.json" 2> "$RUNNER_TEMP/plan.err"
-          status=$?
+          status=0
+          node .ci-kit/plan/plan.mjs > "$RUNNER_TEMP/plan.json" 2> "$RUNNER_TEMP/plan.err" || status=$?
           cat "$RUNNER_TEMP/plan.err" >&2
           if (( status != 0 )); then
             # Each planner message becomes an error annotation, which ci-gate reads back and prints.
