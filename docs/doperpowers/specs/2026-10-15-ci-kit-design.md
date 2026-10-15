@@ -1541,6 +1541,18 @@ euros, jobs, and the projected month at the current rate.
   `unattended-upgrades` disabled in its image; patching is a re-bake. Not measured: first-read
   throughput of baked caches on a freshly restored disk (M5 looks once).
 
+- **Observation (M1):** GitHub's default `shell: bash` is `bash -e -o pipefail`, and a later
+  `set -uo pipefail` does not turn `-e` off. A step that inspects a failing command's status
+  captures it with `|| status=$?`. This hid the planner's message on the first A3 run.
+- **Observation (M1):** hosted runners announce that `ubuntu-latest` moves to Ubuntu 26 from
+  2026-10-19 (actions/runner-images#14748). Probe results and timings taken before then may shift.
+- **Observation (M1):** `actions/checkout`, `setup-node` and `upload-artifact` are at v7.
+  `setup-node@v7` caches automatically when `packageManager` names npm; the kit passes
+  `package-manager-cache: false`.
+- **Observation (M1):** on an empty selection, the API lists the skipped matrix job as
+  `ci / matrix.gate.name`; `ci-gate` filters it out. A hosted kit run takes about 40 s from push to
+  GREEN.
+
 ## Decision Log
 
 - **Decision:** the verification for this work.
@@ -1624,6 +1636,29 @@ euros, jobs, and the projected month at the current rate.
   - The spike measured on cpx62, the pool type, rather than the cheapest: the nproc question needs
     more host cores than N, and boot time depends on the type.
   - **Date/Author:** 2026-10-15, plan-executor.
+
+- **Decision:** M1's resolutions of gaps the spec left open.
+  - **The kit's own caller** uses `./.github/workflows/gates.yml`, permanently, so every kit
+    commit is gated by its own workflow and planner. I2's `@v1` is for adopters, and A4 does not
+    cover the kit.
+  - **The planner at the workflow's version.** The plan job checks out the kit at
+    `job.workflow_repository@job.workflow_sha`, the job-context properties GitHub documents for
+    this.
+  - **Change basis.** The planner runs `git diff --no-renames base...head`, which counts from the
+    merge-base and gives a rename's two paths. The default branch comes from the event payload's
+    `repository.default_branch`, the same field the repo API returns.
+  - **Config strictness.** `plan` and `verdict` are reserved gate names. `setup.node` and `env`
+    values must be YAML strings. All errors are reported at once, one `ci-kit:` line each.
+    Globs treat dotfiles as ordinary.
+  - **Explicit lists** ignore `on:` as well as `paths`. An empty dispatch input means all gates.
+    The trailer is read only on `ci-ref`, from the message's last paragraph.
+  - **`ci-gate`.** It talks to the REST API with `gh auth token` through `fetch`, with a 20 s
+    timeout per call, and `gh run download` for artifacts. It reads planner errors from the plan
+    job's check-run annotations.
+    - SIGINT cancels the run, removes the ref and exits 130.
+    - `startup_failure`, an outside cancel, or 20 unreadable polls are `ERROR`, exit 2.
+    - Progress notes go to stderr, so stdout carries only I5's lines.
+  - **Date/Author:** 2026-10-15, M1 executor, folded by plan-executor.
 
 ## Outcomes & Retrospective
 
