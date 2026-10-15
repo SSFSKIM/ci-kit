@@ -151,7 +151,7 @@ Each item is a behavior someone can check. The commands are in Concrete Steps un
      builder server after the next guard cycle.
    - A guard workflow that GitHub has disabled is enabled again by the next pool boot.
 8. **A8 — The mac lane.**
-   - In MAWS, `scripts/ci-gate.sh <sha> --runner macos --gates e2e:default` runs that e2e group on
+   - In MAWS, `scripts/ci-gate.sh <sha> --runner macos --gates e2e:composer` runs that e2e group on
      the mini's runner (the job's runner name is the mini's) and is green.
    - No process of the job runs on the MacBook.
    - After the job, no process started under the runner's work directory is left on the mini.
@@ -647,7 +647,8 @@ The guard alerts. The choice between those levers is the human's.
 **Measured, not assumed.** The mini has 16 GB, ~14 GB already in use, and ~11 sessions. Also, the
 cua session drives the mini's GUI, and MAWS e2e opens windows on the same desktop.
 
-M6 runs the `e2e:default` group 10 times during normal use and records failures and memory
+M6 runs the `e2e:composer` group (about 2 minutes; keyboard and focus cases, the ones owner
+input broke before; `e2e:c7` if it is absent) 10 times during normal use and records failures and memory
 pressure. MAWS's quiet e2e mode (windows shown inactive, the default since 10-10) is expected to
 keep GUI contention low. The measured rate decides:
 
@@ -1137,7 +1138,20 @@ semantics (read-only).
   reported rather than worked around with system changes:
   - Node ≥ 22.12;
   - pnpm through corepack;
-  - Xcode Command Line Tools, for native modules such as `node-pty`.
+  - Xcode Command Line Tools, for native modules such as `node-pty`;
+  - Node on the runner's PATH, since MAWS's `plan` job runs `node` from PATH;
+  - LibreOffice (`soffice`), for the document and presentation conversion groups.
+
+  These follow MAWS's gate-offload plan §3.6, steps 3 and 6. A Homebrew install that asks no
+  password is routine tool setup and may be done; anything that needs a password is reported.
+- The first-run Keychain and notification prompts are allowed by hand in the mini's GUI session,
+  by the human: never clicked by an agent, never through cua. The executor sends the exact prompts
+  and the group that triggers them to the author session.
+- When the runner is ready, the author session is told; it notifies maws-fe, who decides when to
+  set `GATE_E2E_RUNNER`. Until then only an explicit `--runner macos` or `Runner: macos` trailer
+  reaches the mini (MAWS has no repository variables set on 10-15).
+- Before the 10-run measurement, `gh run list -R SSFSKIM/MAWS` is checked for macOS-lane runs
+  already queued; any that land on the mini during it count as part of the measurement.
 - If the 10-run measurement shows more than 1 failure in 10, the runner ships disabled
   (LaunchAgent unloaded) and the lease question goes to the human.
 
@@ -1298,7 +1312,7 @@ ci-gate ~/Developer/GitHub/ci-kit-sandbox --gates nproc
 #   and the ledger issue has a new row
 
 # M6 — mac lane (run from a MAWS worktree; MAWS's own script)
-scripts/ci-gate.sh <sha> --runner macos --gates e2e:default
+scripts/ci-gate.sh <sha> --runner macos --gates e2e:composer
 #   expect green, and the job's runner_name = the mini's runner:
 gh run view <id> -R SSFSKIM/MAWS --json jobs --jq '.jobs[]|[.name,.runnerName]|@tsv'
 ssh mini 'pgrep -fl actions-runner-maws/_work' # expect: no output after the job
@@ -1564,6 +1578,16 @@ euros, jobs, and the projected month at the current rate.
     branch's head, per the publication decision above, which replaced dispatched runs.
   - **Ledger.** The execution ledger under `.doperpowers/sde/` is gitignored (`.gitignore` added).
   - **Date/Author:** 2026-10-15, plan-executor.
+
+- **Decision:** M6 measures with `e2e:composer`, not `e2e:default`, and gains readiness steps.
+  - `e2e:default` is the bare `pnpm e2e` (`playwright test` over every spec); ten runs would hold
+    the mini for most of a day. A named group of about 2 minutes, chosen for the keyboard and focus
+    cases that owner input broke before, measures the same contention. A8 and Concrete Steps
+    follow.
+  - Readiness (Node on PATH, LibreOffice, Xcode CLT), the human-only first-run prompts, and the
+    hand-off to maws-fe for `GATE_E2E_RUNNER` come from maws-fe's reply (their gate-offload DL22),
+    which raised no conflict with registering the runner.
+  - **Date/Author:** 2026-10-15, plan-executor, from maws-fe through CI-opt.
 
 ## Outcomes & Retrospective
 
