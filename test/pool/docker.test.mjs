@@ -18,9 +18,11 @@ test('a job container gets exactly its cores as a cpuset and 2N GB, the caches, 
   assert.match(joined, /--label ci-kit-labels=self-hosted,ci-kit-pool,cpus-4 /);
   assert.match(joined, /-e CI_KIT_JIT /); // the value comes from the environment, not the command line
   assert.ok(!args.some((a) => a.startsWith('CI_KIT_JIT=')));
-  for (const env of ['RUNNER_TOOL_CACHE', 'npm_config_cache', 'npm_config_store_dir', 'PLAYWRIGHT_BROWSERS_PATH', 'ELECTRON_CACHE']) {
-    assert.ok(args.includes(`${env}=${CACHE}/${{ RUNNER_TOOL_CACHE: 'toolcache', npm_config_cache: 'npm', npm_config_store_dir: 'pnpm-store', PLAYWRIGHT_BROWSERS_PATH: 'ms-playwright', ELECTRON_CACHE: 'electron' }[env]}`), env);
-  }
+  const dirs = {
+    RUNNER_TOOL_CACHE: 'toolcache', npm_config_cache: 'npm', npm_config_store_dir: 'pnpm-store', pnpm_config_store_dir: 'pnpm-store',
+    PLAYWRIGHT_BROWSERS_PATH: 'ms-playwright', electron_config_cache: 'electron', ELECTRON_CACHE: 'electron',
+  };
+  for (const [env, dir] of Object.entries(dirs)) assert.ok(args.includes(`${env}=${CACHE}/${dir}`), env);
   assert.equal(args.at(-1), 'ci-kit-runner:latest');
 });
 

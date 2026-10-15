@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Warms the pool image's caches on the bake's builder (spec §3 Caches, Bake step 1): for MAWS, `pnpm fetch`
 // against its lockfile (read with an App token, contents read), and the Playwright browsers and Electron binary
-// at the versions its lockfile pins. Each step is best effort; what happened goes to /var/lib/ci-kit/warm.json,
+// at the versions its lockfile pins. Each step is best effort; what happened goes to /var/lib/ci-kit/cache/warm.json,
 // and the exit status is non-zero when any step failed.
+// The record is written to the cache directory, so a job on the pool can read it too.
 import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -11,7 +12,7 @@ import { join } from 'node:path';
 import { parse } from 'yaml';
 import { createGitHub } from '../../lib/github.mjs';
 import { createAppTokens } from '../../lib/github-app.mjs';
-import { CACHE_ENV } from '../agent/docker.mjs';
+import { CACHE, CACHE_ENV } from '../agent/docker.mjs';
 
 const sh = promisify(execFile);
 const ETC = process.env.CI_KIT_ETC ?? '/etc/ci-kit';
@@ -75,7 +76,7 @@ async function main() {
     }
   }
   await rm(dir, { recursive: true, force: true });
-  await writeFile('/var/lib/ci-kit/warm.json', `${JSON.stringify(results, null, 2)}\n`).catch(() => {});
+  await writeFile(`${CACHE}/warm.json`, `${JSON.stringify(results, null, 2)}\n`).catch(() => {});
   if (Object.values(results).some((r) => !r.ok)) process.exit(1);
 }
 

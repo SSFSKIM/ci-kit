@@ -60,7 +60,7 @@ async function bake(hc) {
     if (Date.now() - start > OFF_TIMEOUT) throw new Error(`ci-kit: builder ${builder.id} did not power off within 30 min`);
   }
   const mark = s.labels['ci-kit-bake'];
-  log(`builder off after ${Math.round((Date.now() - start) / 1000)} s, marked ${mark ?? '(nothing)'}`);
+  log(`builder off after ${Math.round((Date.now() - start) / 1000)} s, marked ${mark ?? '(nothing)'}; caches warmed: ${s.labels['ci-kit-warm'] ?? 'unknown'}`);
   if (mark !== 'ok') throw new Error(`ci-kit: the builder did not finish (${mark ?? 'no mark: it failed before its credentials were written'})`);
 
   const { image, action } = await hc.createImage(builder.id, {

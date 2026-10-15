@@ -2,9 +2,8 @@
 // A pool box by hand, for the backstop tests (spec A7) and debugging (docs/pool.md): a server labelled like a pool
 // box (ci-kit=pool, ci-kit-state=booting), from the newest pool snapshot or a stock image, with optional user-data.
 //   node pool/tools/test-box.mjs <name> [--type cx23] [--location hel1] [--stock] [--user-data <file>]
-// Prints the server id. The Hetzner token is read from ~/.config/claude-secrets/HETZNER_API_TOKEN or HCLOUD_TOKEN.
+// Prints the server id. The Hetzner token comes from the HCLOUD_TOKEN environment variable.
 import { readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { parseArgs } from 'node:util';
 import { createHcloud } from '../../lib/hcloud.mjs';
 import { newestImage, poolFirewall } from '../lib/ensure.mjs';
@@ -18,8 +17,7 @@ if (!name?.startsWith('ci-kit-')) {
   console.error('usage: test-box.mjs <name starting ci-kit-> [--type cx23] [--location hel1] [--stock] [--user-data <file>]');
   process.exit(2);
 }
-const token = process.env.HCLOUD_TOKEN ?? (await readFile(`${homedir()}/.config/claude-secrets/HETZNER_API_TOKEN`, 'utf8'));
-const hc = createHcloud(token.trim());
+const hc = createHcloud(process.env.HCLOUD_TOKEN?.trim());
 const image = values.stock ? 'ubuntu-24.04' : newestImage(await hc.images('ci-kit=pool-image'))?.id;
 if (!image) throw new Error('no pool snapshot');
 const { server } = await hc.createServer({

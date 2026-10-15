@@ -13,9 +13,13 @@ export const CACHE_ENV = {
   RUNNER_TOOL_CACHE: `${CACHE}/toolcache`,
   AGENT_TOOLSDIRECTORY: `${CACHE}/toolcache`,
   npm_config_cache: `${CACHE}/npm`,
+  // pnpm ≤ 10 reads npm_config_*; pnpm 11 reads only pnpm_config_* (its migration guide).
   npm_config_store_dir: `${CACHE}/pnpm-store`,
+  pnpm_config_store_dir: `${CACHE}/pnpm-store`,
   COREPACK_HOME: `${CACHE}/corepack`,
   PLAYWRIGHT_BROWSERS_PATH: `${CACHE}/ms-playwright`,
+  // @electron/get reads electron_config_cache; ELECTRON_CACHE is the older electron-download's name.
+  electron_config_cache: `${CACHE}/electron`,
   ELECTRON_CACHE: `${CACHE}/electron`,
 };
 

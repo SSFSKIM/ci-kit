@@ -1,6 +1,6 @@
 #!/bin/bash
 # The bake's builder (spec §3 Bake): runs once on a fresh ubuntu-24.04 server through cloud-init, turns its disk
-# into the pool image, marks the result on its own server labels (ci-kit-bake=ok, or failed-<step>), and powers
+# into the pool image, marks the result on its own server labels (ci-kit-bake=ok, or failed-<step>; ci-kit-warm), and powers
 # off. pool/bake/bake.mjs fills the placeholders, waits for `off`, and snapshots only a builder marked ok.
 # Secrets arrive in this user-data; nothing here echoes them, and cloud-init's copies and logs are removed
 # before the snapshot.
@@ -9,13 +9,13 @@ KIT_SHA=__KIT_SHA__
 CACHE=/var/lib/ci-kit/cache
 export DEBIAN_FRONTEND=noninteractive
 step=start
-mark() {
+label() {
   # Merge one label into this server's labels through the Hetzner API (the token is in /etc/ci-kit by then).
   local token id labels
   token=$(cat /etc/ci-kit/hcloud_token 2>/dev/null || true)
   id=$(curl -sf --max-time 10 http://169.254.169.254/hetzner/v1/metadata/instance-id || true)
   [ -n "$token" ] && [ -n "$id" ] || return 0
-  labels=$(curl -sf --max-time 20 -H "Authorization: Bearer $token" "https://api.hetzner.cloud/v1/servers/$id" | jq -c --arg v "$1" '.server.labels + {"ci-kit-bake": $v}')
+  labels=$(curl -sf --max-time 20 -H "Authorization: Bearer $token" "https://api.hetzner.cloud/v1/servers/$id" | jq -c --arg k "$1" --arg v "$2" '.server.labels + {($k): $v}')
   curl -sf --max-time 20 -X PUT -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
     -d "{\"labels\": $labels}" "https://api.hetzner.cloud/v1/servers/$id" > /dev/null || true
 }
@@ -23,7 +23,7 @@ finish() {
   local status=$?
   if [ "$status" -ne 0 ]; then
     echo "ci-kit bake: failed at step $step (exit $status)"
-    mark "failed-$step"
+    label ci-kit-bake "failed-$step"
   fi
   sync
   poweroff
@@ -81,6 +81,8 @@ step=warm
 mkdir -p "$CACHE"/{npm,pnpm-store,corepack,ms-playwright,electron,work}
 # Best effort: a cache that cannot be warmed is fetched by the first job instead. warm.mjs records what it did.
 node /opt/ci-kit/pool/bake/warm.mjs || echo "ci-kit bake: warming was partial"
+# The bake's log shows which caches were warmed (label values: [a-z0-9._-], ≤ 63 characters).
+label ci-kit-warm "$(jq -r '[to_entries[] | select(.value.ok | not) | .key] | if length == 0 then "ok" else "failed-" + join(".") end' "$CACHE/warm.json" 2>/dev/null | cut -c1-63 || echo unknown)"
 chown -R 1001:1001 "$CACHE"
 
 step=smoke
@@ -103,7 +105,7 @@ echo "$KIT_SHA" > /var/lib/ci-kit/kit-commit
 step=clean
 apt-get clean
 docker image prune --force > /dev/null
-mark ok
+label ci-kit-bake ok
 # cloud-init keeps this user-data (and its output) on disk; the snapshot must not.
 cloud-init clean --logs
 journalctl --rotate > /dev/null 2>&1 || true
