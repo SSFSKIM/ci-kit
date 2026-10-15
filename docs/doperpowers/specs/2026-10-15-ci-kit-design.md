@@ -1111,6 +1111,9 @@ part of P1, done when maws-fe takes it.
   - ensure treats `uniqueness_error` as success and walks the type/location list on
     `resource_unavailable`;
   - the guard's wake and dead-agent rules.
+  - the guard, the watchdog, the bake cleanup and ensure leave a resource without a `ci-kit=` label
+    untouched, even when it matches by name or type. The Hetzner project holds other work's
+    resources: a firewall `ks2-db-fw` with no labels, seen 2026-10-15.
 
 #### M6 — The mac lane on the mini
 
