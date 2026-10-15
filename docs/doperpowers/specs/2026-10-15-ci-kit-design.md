@@ -1394,7 +1394,7 @@ ci-gate ~/Developer/GitHub/ci-kit-sandbox --gates nproc
 # M6 — mac lane (run from a MAWS worktree; MAWS's own script)
 scripts/ci-gate.sh <sha> --runner macos --gates e2e:composer
 #   expect green, and the job's runner_name = the mini's runner:
-gh run view <id> -R SSFSKIM/MAWS --json jobs --jq '.jobs[]|[.name,.runnerName]|@tsv'
+gh api repos/SSFSKIM/MAWS/actions/runs/<id>/jobs --jq '.jobs[]|[.name,.runner_name]|@tsv'
 ssh mini 'pgrep -fl actions-runner-maws/_work' # expect: no output after the job
 
 # M8 — janitor
@@ -1630,6 +1630,20 @@ euros, jobs, and the projected month at the current rate.
   `ci / matrix.gate.name`; `ci-gate` filters it out. A hosted kit run takes about 40 s from push to
   GREEN.
 
+- **Observation (M6, 2026-10-15):** the mini carries MAWS e2e without contention trouble.
+  `e2e:composer` ran 10 of 10 green (18 passed each) against MAWS master 767fcbb7, all on
+  `ci-kit-mac-mini`. Memory pressure stayed normal, free memory was 52–70%, swap did not grow, and
+  load peaked at 6.5. No maws-fe macOS-lane runs landed during the window.
+- **Observation (M6):** the job-completed hook killed 12 leftover processes (Electron and its
+  helpers, playwright, pnpm) in each of two cancelled jobs.
+- **Observation (M6):** MAWS's Actions cache never hits on `ci/` refs, so every gate run uploads
+  about 280 MB, about 2 minutes per job on the mini. This is M7 proposal material.
+- **Observation (M6):** `gh run view --json jobs` returns an empty `runnerName`. The jobs API's
+  `runner_name` (`gh api repos/<repo>/actions/runs/<id>/jobs`) carries it.
+- **Observation (M6):** LibreOffice on the mini (installed by Homebrew without a password) is
+  still quarantined and has never been launched. The first document or presentation group may
+  raise a Gatekeeper prompt that only the human can answer.
+
 ## Decision Log
 
 - **Decision:** the verification for this work.
@@ -1785,6 +1799,26 @@ euros, jobs, and the projected month at the current rate.
   moves after it. The cua and doperpowers adoption work starts at the same time on the test fixes
   and takes `v1` for its live proofs once `v1` has moved.
   - **Date/Author:** 2026-10-15, plan-executor.
+
+- **Decision:** M6's verdict is "0–1 failures in 10": ship. The runner is enabled, so no lease
+  question goes to the human. M6's resolutions:
+  - A leftover process is one whose command line names a path under `_work`, or whose working
+    directory is under it, together with its descendants.
+  - The hooks are Node files copied into the runner's directory, so they need no kit checkout.
+  - The registration token travels over stdin and reaches the runner through an environment
+    variable, never an argument or a file.
+  - Jobs get `LANG=en_US.UTF-8`, because the mini's locale is Korean.
+  - **Date/Author:** 2026-10-15, M6 executor, folded by plan-executor.
+- **Decision:** the m2-kit additions' semantics.
+  - `CI_KIT_BASE` is the merge-base of the plan's base with the commit the gate checked out. It is
+    empty on a dispatch.
+  - `CI_KIT_HEAD` is the commit the gate checked out: a PR's merge commit, or the nonce commit on
+    a ci ref.
+  - When the checkout lacks the base, a gate step fetches it at depth 1, so a two-dot
+    `git diff $CI_KIT_BASE $CI_KIT_HEAD` works at the default depth. The pool image needs git ≥ 2.31
+    for that step.
+  - `setup: false` leaves a gate at depth 1. Gate `env` may not use `CI_KIT_*` names.
+  - **Date/Author:** 2026-10-15, m2-kit executor, folded by plan-executor.
 
 ## Outcomes & Retrospective
 
