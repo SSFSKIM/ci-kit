@@ -1755,6 +1755,33 @@ euros, jobs, and the projected month at the current rate.
     That would hide the product bug at `linux-chrome-features.mjs:59` behind a guard.
   - **Date/Author:** 2026-10-15, CI-opt.
 
+- **Decision:** cua test coordination for M2 (from CI-opt, both cua_repl sessions having ended).
+  - PR #50 (the fake-upstream watchdog) was merged 2026-10-06. Nothing to do.
+  - cua's own-REPL-host M4 branch (`feat/own-repl-host-m4`) changes 54 test files. M2 edits none
+    of them. The list is kept beside the execution ledger as `cua-m4-test-files.txt`.
+    - The §6 `serve`/`repl-host` teardown flakes in `test/repl-host/*` stay with that branch. The
+      cua PR body records them as deferred.
+    - The other §6 targets are fixed: cdp, extension-host, group enumeration, mcp-upstream,
+      chrome-host-run, browser-service, `actions` element-without-box, eof-drain, serve-cli and
+      serve-lazy. Each is rechecked against the list before it is edited.
+  - The Linux findings are filed as SSFSKIM/cua#142, so M2 has no Linux work.
+  - **Date/Author:** 2026-10-15, CI-opt, recorded by plan-executor.
+- **Decision:** M3 is sequenced around the doperpowers desk's DC7 branch.
+  - DC7 is in its final fix wave. It touches `tests/sminos/test-bridge-requests.sh` and
+    `tests/sminos/run-sminos-tests.sh`. M3 edits neither until DC7 merges to doperpowers `main`.
+    `test-bridge-requests.sh` is then made event-driven on top of DC7's version, including DC7's
+    new flaky check ("the terminal won, as a field").
+  - Everything else in M3 proceeds now: the CI files and the other T3 fixes.
+  - The sminos gate is sized against the post-DC7 suite, about 3.8k more lines of tests. Over
+    about 8 minutes on ubuntu, it splits into two gates, shell suites and Python suites, without
+    editing `run-sminos-tests.sh`.
+  - **Date/Author:** 2026-10-15, CI-opt, recorded by plan-executor.
+- **Decision:** M2's kit additions (`setup.fetch_depth`, `CI_KIT_BASE`/`CI_KIT_HEAD` in gate
+  environments) run as their own kit branch, `m2-kit`. It is reviewed and merged first, and `v1`
+  moves after it. The cua and doperpowers adoption work starts at the same time on the test fixes
+  and takes `v1` for its live proofs once `v1` has moved.
+  - **Date/Author:** 2026-10-15, plan-executor.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
