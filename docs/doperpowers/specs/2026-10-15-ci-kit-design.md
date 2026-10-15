@@ -801,6 +801,10 @@ The hosted-runner probe's report, folded on 2026-10-15, is at `ci-kit-sandbox`
 - **Proof.** Each fixed test is shown failing under induced load before the fix and passing 20 of
   20 runs after it (A10). The load is `stress-ng --cpu <2×nproc>`, or `yes` loops where `stress-ng`
   is absent.
+- **Where the proof runs.** Only on a GitHub-hosted runner, through a `ci-gate` run whose stress
+  step runs beside the test loop. Never on the MacBook, which already sits at load 100–300, and
+  never on the mini, which hosts the human's sessions. Full-suite runs go through `ci-gate` too.
+  Locally, only single focused test files run while iterating (clarified 2026-10-15, CI-opt).
 - **Known lists** at authoring (M2/M3 refine them from the probe):
   - **cua:**
     - `cdp.test.mjs` budget;
