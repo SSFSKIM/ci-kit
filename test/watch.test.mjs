@@ -61,6 +61,7 @@ test('gateOf reads the gate from a caller-prefixed job name, and skips the workf
   assert.equal(gateOf('unit'), 'unit');
   assert.equal(gateOf('ci / plan'), null);
   assert.equal(gateOf('ci / verdict'), null);
+  assert.equal(gateOf('ci / matrix.gate.name'), null); // the skipped, unexpanded matrix job, as the API names it
   assert.equal(gateOf('ci / ${{ matrix.gate.name }}'), null);
 });
 
@@ -130,8 +131,9 @@ test('a failed plan is an ERROR with the planner\'s message, without waiting for
 });
 
 test('an empty selection is GREEN (the matrix job is skipped unexpanded)', async () => {
+  // Recorded from run 38814096312: the skipped matrix job is listed as "ci / matrix.gate.name".
   const h = harness([
-    { run: run('completed', 'success'), jobs: [plan(), job(3, 'ci / ${{ matrix.gate.name }}', { conclusion: 'skipped' }), job(4, 'ci / verdict')] },
+    { run: run('completed', 'success'), jobs: [plan(), job(3, 'ci / matrix.gate.name', { conclusion: 'skipped' }), job(4, 'ci / verdict')] },
   ]);
   const r = await watchRun(h.opts);
   assert.deepEqual(h.lines, []);

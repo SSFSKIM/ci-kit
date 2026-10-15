@@ -9,7 +9,8 @@ const OWN_JOBS = ['plan', 'verdict'];
 const lastSegment = (name) => name.split(' / ').at(-1);
 const seconds = (from, to) => (Date.parse(to) - Date.parse(from)) / 1000;
 
-// The gate a job runs, or null for the workflow's own jobs and a matrix job that never expanded (empty selection).
+// The gate a job runs, or null for the workflow's own jobs and the matrix job that never expanded on an empty selection
+// (the API lists it as "ci / matrix.gate.name").
 export function gateOf(jobName) {
   const name = lastSegment(jobName);
   return GATE_RE.test(name) && !OWN_JOBS.includes(name) ? name : null;
