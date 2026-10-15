@@ -68,6 +68,8 @@ How to see it working: §Acceptance. The shortest proofs are:
 - [x] (2026-10-15 23:20Z) M1 — Kit core: config, planner, reusable workflow, `ci-gate`, the kit's
   own CI. PR #2 merged (0a930ee); `v1` at 0a930ee; `ci-gate` installed on both Macs from the main
   clones.
+- [x] (2026-10-15 23:20Z) M2/M3 prerequisite: the hosted probe report is committed to
+  `ci-kit-sandbox` (`evidence/2026-10-15/hosted-probe.md`), and its results are folded into §5.
 - [ ] M2 — cua: adoption and timing-test stabilization
 - [ ] M3 — doperpowers: adoption and timing-test stabilization
 - [x] (2026-10-15 22:10Z) M4 — Spike: the pool's boot path. Verdict ≤ 5 min; PR #1 merged
@@ -664,10 +666,38 @@ keep GUI contention low. The measured rate decides:
 
 **cua** (M2):
 
-- **Lanes.** Gates on `hosted` and `hosted-macos`, per what the hosted-runner probe found. The
-  probe was still running at authoring; its result is folded into M2 before M2 starts.
-- **Node.** One Node version in CI, the one that runs the most tests (≥ 24, which the own-host
-  tests need). The double local run (Node 22 + 26) is cua's to retire.
+The hosted-runner probe's report, folded on 2026-10-15, is at `ci-kit-sandbox`
+`evidence/2026-10-15/hosted-probe.md`. The final cua matrix was run 38805346841 in SSFSKIM/cua.
+
+- **Gates.** Both run on `hosted-macos`.
+
+  | Gate | Command | Probe result |
+  |---|---|---|
+  | `test` | `npm test` | 2,316 pass, 0 fail, 86 skip in about 168 s |
+  | `plugin` | `claude plugin validate .` then `npm run test:mods` | passes, 32/32 |
+
+  - Both gates use Node 24 and `npm ci`.
+  - The `claude` CLI is installed in the gate with `npm i -g @anthropic-ai/claude-code`, retried
+    up to 3 times. One install hung for 6 minutes.
+  - Neither gate needs credentials.
+- **Full history.** Both gates check out the full history (`setup.fetch_depth: 0`). The
+  browser-parity and repl-parity tests read git history: shallow, 48 of them failed on every leg.
+- **Why not ubuntu.** It gates nothing for now. It fails 5 tests for platform reasons:
+  1. a socket test expects EPIPE, and Linux gives ECONNRESET;
+  2. `serve-lazy` uses the macOS-only peer-identity addon with no skip guard;
+  3. `remote-agent` Chrome readability, even after `apt install bubblewrap` and the unprivileged
+     user-namespace sysctl;
+  4. `linux-chrome-features.mjs:59` assumes `birthtimeMs >= Date.now()` for a new file, which is
+     false on ext4 (1,527 of 2,000 files);
+  5. `chrome-cua-registration` route, which flakes.
+
+  Item 4 is product code, which this initiative does not touch. Items 1, 2 and 3 are guards or
+  expectations. All five go to cua_repl as findings, through this session. A Linux leg is cua's to
+  add once they are fixed.
+- **Node.** Node 22 skips about 74 more tests than Node 24, on both platforms, so CI runs Node 24
+  only. The double local run (Node 22 + 26) is cua's to retire.
+- **The macOS runner is noisy.** The hosted macOS VM had load 14–55 at job start, so cua's timing
+  tests can still flake there. The §6 fixes are what make A10 hold, not a quiet runner.
 - **Live checks stay local.** Live-evidence checks (`verify.mjs`, `accept-native`, `accept-chrome`)
   need the real `$CUA_HOME`, a native helper and the GUI. They are not CI gates.
 - **Coordination.** cua_repl is mid-work on the same test files (its M4, own REPL host). The
@@ -675,17 +705,45 @@ keep GUI contention low. The measured rate decides:
 
 **doperpowers** (M3):
 
-- **Gates.** One gate per suite family that runs without model calls:
-  - shell-lint, over the committed shell files changed relative to the base, passed to
-    `scripts/lint-shell.sh` as file arguments. Run bare, the script lints only uncommitted changes,
-    so on a clean checkout it lints nothing. `--all` is used instead if the tracked baseline is
-    clean;
-  - sminos (`tests/sminos/run-sminos-tests.sh`);
-  - issue-tracker suites;
-  - mods (`tests/mods/run-mods-tests.sh`), if `claude plugin test` runs on a hosted runner without
-    credentials.
+- **Gates.** One gate per suite family that runs without model calls. Probe results come from
+  `evidence/2026-10-15/hosted-probe.md`, final run 38814103021. Serial, the ubuntu job took
+  25.5 min, so each family is its own gate and they run in parallel. Each gate's `paths` is set to
+  its area.
 
-  Each gate has `paths` set to its area. The probe settles each family's portability.
+  | Gate | Lane | Command | Probe |
+  |---|---|---|---|
+  | `shell-lint` | `hosted` | the committed shell files changed against `CI_KIT_BASE`, passed to `scripts/lint-shell.sh` as file arguments | bare, it lints only uncommitted changes, so it lints nothing on a clean checkout; `--all` exits 1 on 9 old warnings, so `--all` is not used until that debt is paid |
+  | `sminos` | `hosted` | `tests/sminos/run-sminos-tests.sh` | 1,728 assertions in 428 s |
+  | `issue-tracker` | `hosted` | the hermetic issue-tracker suites | pass |
+  | `board-api` | `hosted` | the hermetic suites, without `integration` | 1,451 assertions |
+  | `claude-code` | `hosted` | `tests/claude-code/run-skill-tests.sh`, non-live tier | pass |
+  | `mods` | `hosted` | `tests/mods/run-mods-tests.sh` | `claude plugin test` with no credentials, 295 green |
+  | `triaging-feedback` | `hosted` | `npm test` in `application-agents/triaging-feedback` | 117 pass |
+  | `codex-companion` | `hosted-macos` | its suite | see below |
+
+  - **Shared setup on ubuntu:**
+    - `bun`;
+    - the `claude` CLI from npm, retried;
+    - a system git identity (`sudo git config --system user.name/user.email`). Not `GIT_*`
+      environment variables: those override the `-c user.name=` that `test-archive` relies on, and
+      3 archive assertions failed in the probe because of it.
+- **ubuntu-only test fixes** (test code only):
+  - `test-review-standin.sh` expects macOS `sort` collation. Locale settings do not change glibc's
+    order, so the expectation is made order-independent.
+  - `test-execute-dispatch.sh` line 667 commits with an overridden `HOME`. The system identity above
+    covers it.
+- **Why codex-companion runs on macOS.** On ubuntu, `state.test.mjs` fails because ext4 reuses an
+  inode right after `rm` and `mkdir`, and `lib/state.mjs:350` compares inodes. That is plugin code,
+  which this initiative does not touch. Its `test-resume.sh` phase 9 also flakes there (2 of 3).
+  - On `hosted-macos` it needs, via brew: `jq`, `tmux`, `shellcheck`, `coreutils` (with `gnubin`
+    on PATH, for `timeout`) and `flock`.
+  - If it ever starts Python HTTP servers there, it also needs a `sitecustomize.py` shim. On 2 of 3
+    hosted macOS VMs, `socket.getfqdn()` stalls 35 s per process. The shim
+    `socket.getfqdn = lambda name='': name or socket.gethostname()` took `test-bind` from 39.8 s to
+    3.0 s; `/etc/hosts` and DNS changes did not help.
+  - The ubuntu inode finding goes to the doperpowers owner as a finding.
+- **Timing-flake targets.** `test-bridge-requests.sh` failed 1 full run and 2 of 5 reruns on macOS.
+  It joins the T3 list in §6. Its gate (sminos) runs on ubuntu, where it passed.
 - **Excluded:** tests that spend model calls, need Docker plus `ARKHO_DIR`, or exercise the
   installed plugin cache.
 - **Not plugin behavior.** These are test and CI files, not skills, agents or hooks, so the "no
@@ -757,7 +815,8 @@ keep GUI contention low. The measured rate decides:
     - sminos git-mirror "lands within two seconds";
     - the `send --wait` ack window;
     - "at most once more";
-    - watcher finalize-vs-retire.
+    - watcher finalize-vs-retire;
+    - `test-bridge-requests.sh` (macOS flake).
 
 **Why this rule** rather than load-calibrated budgets (cua's candidate 2). Calibration still fails
 when the load changes mid-test, and it keeps a speed claim inside a correctness test. Event waits
@@ -952,7 +1011,16 @@ These go up through the author session.
   §6 plus whatever the probe adds.
 - A test helper for waiting on conditions, if cua has none.
 
-**Interfaces.** Consumes I1, I2 and I5.
+**Interfaces.**
+
+- Consumes I1, I2 and I5.
+- Produces two kit additions, merged to the kit's `main` before the cua PR uses them, with `v1`
+  moved after the merge:
+  - `setup.fetch_depth` (I1);
+  - gate jobs receive `CI_KIT_BASE` and `CI_KIT_HEAD` in their environment: the change basis of §1,
+    empty on dispatch.
+
+  M3 consumes both.
 
 **Prerequisite.** M2 and M3 start only after the author session has done two things:
 
@@ -1340,6 +1408,7 @@ setup:                      # optional; applied to every gate unless the gate se
   node: "24"                # optional; actions/setup-node version spec
   pnpm: false               # optional; true → corepack enable (version from package.json packageManager)
   install: npm ci           # optional; shell command run after checkout
+  fetch_depth: 1            # optional; actions/checkout depth for gate jobs; 0 = full history
 gates:                      # required; non-empty
   - name: unit              # required; [a-z0-9][a-z0-9-]*; unique
     run: npm test           # required; bash, run with -eo pipefail at the repo root
@@ -1674,6 +1743,17 @@ euros, jobs, and the projected month at the current rate.
   - **Alternative rejected:** implementing POSIX bracket and escape semantics. It is more code to
     get exactly right, for a feature no config uses.
   - **Date/Author:** 2026-10-15, plan-executor.
+
+- **Decision:** the hosted probe's results are folded into §5.
+  - **cua** gates on `hosted-macos` only, with Node 24 and full history. Ubuntu waits for 5
+    platform fixes, which are cua_repl's.
+  - **doperpowers** gates on `hosted` per suite family. codex-companion goes on `hosted-macos`,
+    because an ubuntu fix would touch plugin code.
+  - **The kit** gains `setup.fetch_depth` and the base and head shas in gate environments, in M2.
+  - **Rationale:** these are measured portability facts (runs listed in §5).
+  - **Alternative rejected:** gating cua on both OSes with Linux skips added by this initiative.
+    That would hide the product bug at `linux-chrome-features.mjs:59` behind a guard.
+  - **Date/Author:** 2026-10-15, CI-opt.
 
 ## Outcomes & Retrospective
 
