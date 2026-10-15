@@ -72,7 +72,10 @@ Limits of the worktree list:
 One `ps` call for the whole machine. For each repo under `repos_root` that has linked worktrees (checked on disk,
 no git call otherwise): three git calls, plus a `git status` for each worktree whose branch is merged. All git
 calls use `--no-optional-locks`, so the janitor never rewrites an index an agent is using. One `tart list` where
-tart is installed. About 2 s of wall time and half a second of CPU on the MacBook at load 180.
+tart is installed. Run by hand on the MacBook at load 180, that is about 2 s of wall time and 0.7 s of CPU.
+The agent runs at background priority (`ProcessType` `Background`), which macOS throttles hard on a loaded
+machine: its first run on the MacBook took about 3 minutes, almost all of it waiting. Kills come first in a run,
+so the throttling delays the report, not the kills.
 
 ## Install, modes and removal
 

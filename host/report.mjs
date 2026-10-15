@@ -160,9 +160,9 @@ export function renderReport({ host, at, dryRun, minAgeHours, vmReportHours, kil
 
   out.push(`## Orphaned test processes (parent launchd, older than ${minAgeHours} h)`, '');
   out.push(dryRun ? '### Would kill (dry run)' : '### Killed', '');
-  out.push(table(['pid', 'age', 'pattern', 'result', 'command'], killed.map((k) => [k.pid, formatAge(k.age), cell(k.pattern, 80), k.result, cell(k.command)])));
+  out.push(table(['pid', 'age', 'pattern', 'result', 'command'], killed.map((k) => [k.pid, formatAge(k.age), cell(k.pattern), k.result, cell(k.command)])));
   out.push('### Left running (long-lived modes, matched by an exclusion)', '');
-  out.push(table(['pid', 'age', 'excluded by', 'command'], spared.map((s) => [s.pid, formatAge(s.age), cell(s.excludedBy, 80), cell(s.command)])));
+  out.push(table(['pid', 'age', 'excluded by', 'command'], spared.map((s) => [s.pid, formatAge(s.age), cell(s.excludedBy), cell(s.command)])));
 
   out.push('## Worktrees clean and merged into their default branch', '');
   out.push('A worktree made moments ago is listed too, until its first commit: the tip date tells them apart.', '');
