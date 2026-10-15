@@ -61,7 +61,10 @@ How to see it working: §Acceptance. The shortest proofs are:
 ## Progress
 
 - [x] (2026-10-15 21:30Z) Design approved; spec written.
-- [ ] Independent spec review and execution-section buildability review; findings folded.
+- [x] (2026-10-15 22:10Z) Independent spec review and execution-section buildability review;
+  14 findings folded (Decision Log). A second round was not run. The changes are additive
+  hardening, and the pool code they shape gets its own milestone reviews and the high-rung
+  whole-range review.
 - [ ] M1 — Kit core: config, planner, reusable workflow, `ci-gate`, the kit's own CI
 - [ ] M2 — cua: adoption and timing-test stabilization
 - [ ] M3 — doperpowers: adoption and timing-test stabilization
@@ -137,8 +140,9 @@ Each item is a behavior someone can check. The commands are in Concrete Steps un
      agent). The guard deletes it within two guard cycles and opens an alert issue.
    - Take a pool job that stays queued with no pool server, as when a job was queued after the box
      deleted itself. The guard creates a box for it within two guard cycles.
-   - A box whose agent cannot reach GitHub (a revoked App key, made for the test) is deleted
-     within 40 minutes:
+   - A box whose agent cannot reach GitHub is deleted within 40 minutes. For the test, the box is
+     booted with a deliberately invalid App key through a user-data override; the real key is not
+     revoked.
      - its watchdog deletes it on its own (box-local);
      - if the watchdog is stopped too, the guard deletes it.
    - A job container that outlives its job, because its process ignores exit (made for the test),
@@ -466,7 +470,7 @@ systemd timer, separate from the agent, that runs every 5 minutes. It deletes th
 the Hetzner API (writing the ledger row first, I9) in two cases:
 
 - the last successful reconciliation is older than 30 min (read from a local file the agent
-  touches with each heartbeat);
+  touches with each heartbeat). Until the first success, the clock runs from boot;
 - the server has been up for more than 24 h. No gate legitimately needs that: the I1 timeout
   ceiling is 6 h.
 
