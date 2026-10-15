@@ -913,8 +913,10 @@ These go up through the author session.
 
 **Decisions.**
 
-- Changed-file matching uses POSIX globs with `**`. The match set is the union of added, modified,
-  renamed (both paths) and deleted files.
+- Changed-file matching uses globs of `*`, `?` and `**` (crossing directories); every other
+  character is literal. Bracket expressions, backslash escapes, braces, a leading `!` or `/`, and
+  an empty pattern are config errors naming the gate and field. The match set is the union of
+  added, modified, renamed (both paths) and deleted files.
 - On a ci ref, the default branch is read from the repo API.
 - The nonce commit's message is `ci-gate <random 12 hex>`. The trailers follow a blank line. Only
   `CI-Gates:` is defined.
@@ -1659,6 +1661,17 @@ euros, jobs, and the projected month at the current rate.
     - `startup_failure`, an outside cancel, or 20 unreadable polls are `ERROR`, exit 2.
     - Progress notes go to stderr, so stdout carries only I5's lines.
   - **Date/Author:** 2026-10-15, M1 executor, folded by plan-executor.
+
+- **Decision:** `paths` globs are a fail-closed subset: `*`, `?`, `**`, literals (revised
+  2026-10-15 from "POSIX globs with `**`").
+  - The M1 review found the first glob translator silently mis-matching bracket expressions and
+    escapes, so a gate could drop out of a selection and leave a green verdict. A pattern the
+    planner cannot match exactly is now refused at validation.
+  - No adopter's paths need more. A future need for brackets is a compatible addition: a pattern
+    that is refused today cannot be in use anywhere.
+  - **Alternative rejected:** implementing POSIX bracket and escape semantics. It is more code to
+    get exactly right, for a feature no config uses.
+  - **Date/Author:** 2026-10-15, plan-executor.
 
 ## Outcomes & Retrospective
 
