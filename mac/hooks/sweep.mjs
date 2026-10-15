@@ -5,7 +5,8 @@
 //   node sweep.mjs <job-started|job-completed|manual> [--dry-run]
 //
 // Installed by mac/install.sh to <runner>/ci-kit/hooks/, so the work directory is <runner>/_work, two levels up. What
-// counts as a stray is strays.mjs's. A stray gets SIGTERM, then SIGKILL after 10 s. --dry-run lists and kills nothing.
+// counts as a stray is strays.mjs's. A stray gets SIGTERM, then SIGKILL after 10 s. --dry-run lists and kills nothing;
+// `manual` without it refuses while a job runs.
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -32,6 +33,12 @@ const run = (file, args) => {
 const processes = parsePs(run('/bin/ps', ['-axo', 'pid=,ppid=,uid=,command=']));
 const cwds = parseLsofCwd(run('/usr/sbin/lsof', ['-a', '-u', String(uid), '-d', 'cwd', '-Fpn']));
 const strays = selectStrays({ processes, cwds, workDir, uid, self: process.pid });
+// By hand, a sweep during a job would kill the job; the hooks run inside one, as its worker's descendants.
+const worker = `${dirname(workDir)}/bin/Runner.Worker`;
+if (phase === 'manual' && !dryRun && processes.some((p) => p.command.startsWith(worker))) {
+  console.error('sweep: a job is running on this runner; sweep by hand only between jobs (or with --dry-run)');
+  process.exit(1);
+}
 
 const job = `run=${process.env.GITHUB_RUN_ID ?? '-'} job=${process.env.GITHUB_JOB ?? '-'}`;
 mkdirSync(logDir, { recursive: true });
