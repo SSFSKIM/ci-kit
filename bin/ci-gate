@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// ci-gate: run this repo's ci-kit gates off the machine. See cli/args.mjs for usage, docs/adopting.md for the rest.
+import '../cli/ci-gate.mjs';

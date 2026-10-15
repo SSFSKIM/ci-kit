@@ -1,0 +1,8 @@
+version: 1
+setup:
+  node: "22"
+  install: npm ci --no-audit --no-fund
+gates:
+  - name: test
+    run: npm test
+    timeout: 10

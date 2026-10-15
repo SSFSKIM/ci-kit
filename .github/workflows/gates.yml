@@ -1,0 +1,171 @@
+# The ci-kit reusable workflow (spec §1). Callers use it through the two-file onboarding in docs/adopting.md:
+#   jobs: {ci: {uses: SSFSKIM/ci-kit/.github/workflows/gates.yml@v1, secrets: inherit}}
+# plan reads the caller's .github/ci-kit.yml and selects gates; gate runs one matrix job per selected gate;
+# verdict is the one stable check, green only when every selected gate is.
+name: gates
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# A newer push to a PR cancels the older run; every other run (each ci-gate call has its own ref) has a group of its own.
+concurrency:
+  group: ci-kit-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      gates: ${{ steps.plan.outputs.gates }}
+      count: ${{ steps.plan.outputs.count }}
+      pool: ${{ steps.plan.outputs.pool }}
+      note: ${{ steps.plan.outputs.note }}
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the change basis needs the base's history
+          filter: blob:none
+          persist-credentials: false
+
+      # Inside a reusable workflow `./` is the caller's repo, so the planner is checked out from the kit at the
+      # very commit this workflow file came from: planner and workflow always run at the same version.
+      - name: Check out the kit
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .ci-kit
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: Install the planner
+        working-directory: .ci-kit
+        run: npm ci --omit=dev --no-audit --no-fund --loglevel=error
+
+      - name: Plan
+        id: plan
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          CI_KIT_CONFIG: .github/ci-kit.yml
+          CI_KIT_PRIVATE: ${{ github.event.repository.private }}
+          CI_KIT_GATES: ${{ github.event.inputs.gates }}
+          CI_KIT_HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          set -uo pipefail
+          fail() { echo "::error::${1//%/%25}"; exit 2; }
+          case $EVENT_NAME in
+            pull_request) export CI_KIT_EVENT=pr CI_KIT_BASE=$PR_BASE CI_KIT_HEAD=$PR_HEAD ;;
+            push)
+              [[ $GITHUB_REF == refs/heads/ci/* ]] || fail "ci-kit: a push is planned only on ci/** refs, not $GITHUB_REF"
+              base=$(git rev-parse --verify "origin/$DEFAULT_BRANCH") || fail "ci-kit: no default branch origin/$DEFAULT_BRANCH to diff against"
+              export CI_KIT_EVENT=ci-ref CI_KIT_BASE=$base CI_KIT_HEAD=$GITHUB_SHA ;;
+            workflow_dispatch) export CI_KIT_EVENT=dispatch CI_KIT_BASE= CI_KIT_HEAD= ;;
+            *) fail "ci-kit: event $EVENT_NAME is not planned (pull_request, push to ci/**, workflow_dispatch)" ;;
+          esac
+          status=0
+          node .ci-kit/plan/plan.mjs > "$RUNNER_TEMP/plan.json" 2> "$RUNNER_TEMP/plan.err" || status=$?
+          cat "$RUNNER_TEMP/plan.err" >&2
+          if (( status != 0 )); then
+            # Each planner message becomes an error annotation, which ci-gate reads back and prints.
+            while IFS= read -r line; do
+              [[ $line == ci-kit:* ]] && echo "::error::${line//%/%25}"
+            done < "$RUNNER_TEMP/plan.err"
+            exit "$status"
+          fi
+          jq . "$RUNNER_TEMP/plan.json"
+          {
+            echo "gates=$(jq -c .gates "$RUNNER_TEMP/plan.json")"
+            echo "count=$(jq '.gates | length' "$RUNNER_TEMP/plan.json")"
+            echo "pool=$(jq .pool "$RUNNER_TEMP/plan.json")"
+            echo "note=$(jq -r .note "$RUNNER_TEMP/plan.json")"
+          } >> "$GITHUB_OUTPUT"
+
+      # M5 replaces this step with the pool's ensure (SSFSKIM/ci-kit/pool-ensure).
+      - name: Pool
+        if: steps.plan.outputs.pool == 'true'
+        run: |
+          echo "::error::ci-kit: pool lane not available yet"
+          exit 2
+
+  gate:
+    name: ${{ matrix.gate.name }}
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    strategy:
+      fail-fast: false
+      matrix:
+        gate: ${{ fromJSON(needs.plan.outputs.gates) }}
+    runs-on: ${{ matrix.gate.runs_on }}
+    timeout-minutes: ${{ matrix.gate.timeout }}
+    env: ${{ matrix.gate.env }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        if: matrix.gate.setup.node != ''
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.gate.setup.node }}
+          package-manager-cache: false
+
+      - name: Enable pnpm
+        if: matrix.gate.setup.pnpm
+        run: corepack enable
+
+      - name: Install
+        if: matrix.gate.setup.install != ''
+        env:
+          CI_KIT_INSTALL: ${{ matrix.gate.setup.install }}
+        run: bash -eo pipefail -c "$CI_KIT_INSTALL"
+
+      - name: Run ${{ matrix.gate.name }}
+        env:
+          CI_KIT_RUN: ${{ matrix.gate.run }}
+        run: bash -eo pipefail -c "$CI_KIT_RUN"
+
+      - name: Upload artifacts
+        if: failure() && join(matrix.gate.artifacts, '') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.gate.name }}
+          path: ${{ join(matrix.gate.artifacts, fromJSON('"\n"')) }}
+          if-no-files-found: ignore
+
+  verdict:
+    name: verdict
+    needs: [plan, gate]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verdict
+        env:
+          PLAN: ${{ needs.plan.result }}
+          GATES: ${{ needs.gate.result }}
+          COUNT: ${{ needs.plan.outputs.count }}
+          NOTE: ${{ needs.plan.outputs.note }}
+        run: |
+          if [ "$PLAN" != success ]; then echo "::error::the plan did not succeed ($PLAN)"; exit 1; fi
+          if [ "$COUNT" = 0 ]; then echo "$NOTE"; exit 0; fi
+          if [ "$GATES" != success ]; then echo "::error::not every gate passed ($GATES)"; exit 1; fi
+          echo "all $COUNT selected gates passed"

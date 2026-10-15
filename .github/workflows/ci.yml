@@ -1,0 +1,14 @@
+# The kit's own caller. It is I2 (docs/adopting.md) with one difference: it calls the reusable workflow by local path,
+# so every commit of the kit is gated by the gates.yml and planner in that same commit, not by the published @v1.
+name: ci
+on:
+  pull_request:
+  push:
+    branches: ['ci/**']
+  workflow_dispatch:
+    inputs:
+      gates: {description: 'comma list of gate names; empty = all', required: false, default: ''}
+jobs:
+  ci:
+    uses: ./.github/workflows/gates.yml
+    secrets: inherit
