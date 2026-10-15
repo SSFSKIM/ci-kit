@@ -1,0 +1,109 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { parseConfig } from '../plan/config.mjs';
+import { selectGates, trailerGates, planOutput } from '../plan/select.mjs';
+import { ConfigError } from '../plan/config.mjs';
+
+const config = parseConfig(`
+version: 1
+setup: {node: "24", install: npm ci}
+gates:
+  - name: unit
+    run: npm test
+    paths: ["src/**", "test/**"]
+  - name: docs
+    run: npm run docs
+    paths: ["docs/**"]
+  - name: lint
+    run: npm run lint
+  - name: nightly
+    run: npm run slow
+    on: [dispatch]
+  - name: big
+    run: npm run big
+    lane: pool
+    cpus: 8
+    on: [pr, ci-ref]
+`, { isPrivate: true });
+
+const names = (gates) => gates.map((g) => g.name);
+
+test('an explicit list wins over paths and on', () => {
+  const sel = selectGates(config, { event: 'pr', explicit: ['docs', 'nightly'], changedFiles: ['src/a.js'] });
+  assert.deepEqual(names(sel), ['docs', 'nightly']);
+});
+
+test('an explicit list keeps config order and drops duplicates', () => {
+  const sel = selectGates(config, { event: 'ci-ref', explicit: ['lint', 'unit', 'lint'], changedFiles: [] });
+  assert.deepEqual(names(sel), ['unit', 'lint']);
+});
+
+test('an unknown name in an explicit list is a config error', () => {
+  assert.throws(
+    () => selectGates(config, { event: 'ci-ref', explicit: ['unit', 'nope'], explicitSource: 'CI-Gates', changedFiles: [] }),
+    (e) => e instanceof ConfigError && e.messages[0] === 'unknown gate "nope" in CI-Gates (known: unit, docs, lint, nightly, big)',
+  );
+});
+
+test('on a PR, a gate with paths runs only when a changed file matches', () => {
+  assert.deepEqual(names(selectGates(config, { event: 'pr', changedFiles: ['src/x.js'] })), ['unit', 'lint', 'big']);
+  assert.deepEqual(names(selectGates(config, { event: 'pr', changedFiles: ['docs/a.md'] })), ['docs', 'lint', 'big']);
+  assert.deepEqual(names(selectGates(config, { event: 'pr', changedFiles: [] })), ['lint', 'big']);
+});
+
+test('on: filtering drops gates not listening for the event', () => {
+  assert.deepEqual(names(selectGates(config, { event: 'dispatch', changedFiles: [] })), ['unit', 'docs', 'lint', 'nightly']);
+});
+
+test('a dispatch ignores changes', () => {
+  assert.deepEqual(names(selectGates(config, { event: 'dispatch', changedFiles: ['README.md'] })), ['unit', 'docs', 'lint', 'nightly']);
+});
+
+test('an empty selection is possible', () => {
+  const only = parseConfig('version: 1\ngates:\n  - {name: a, run: x, paths: ["a/**"]}\n', { isPrivate: false });
+  assert.deepEqual(selectGates(only, { event: 'ci-ref', changedFiles: ['b/c'] }), []);
+});
+
+test('trailerGates reads the CI-Gates trailer from the last paragraph', () => {
+  assert.deepEqual(trailerGates('ci-gate 0123456789ab\n\nCI-Gates: unit, lint\n'), ['unit', 'lint']);
+  assert.deepEqual(trailerGates('ci-gate 0123456789ab\n\nci-gates: unit\n'), ['unit']);
+  assert.equal(trailerGates('ci-gate 0123456789ab\n'), null);
+  assert.equal(trailerGates('subject\n\nCI-Gates: unit\n\nlater paragraph\n'), null);
+  assert.equal(trailerGates(''), null);
+});
+
+test('planOutput shapes I3: runs_on per lane, setup resolved, pool flag', () => {
+  const out = planOutput(config, selectGates(config, { event: 'ci-ref', explicit: ['unit', 'big'] }));
+  assert.deepEqual(out, {
+    gates: [
+      {
+        name: 'unit', run: 'npm test', runs_on: ['ubuntu-latest'], timeout: 30,
+        setup: { node: '24', pnpm: false, install: 'npm ci' }, artifacts: [], env: {},
+      },
+      {
+        name: 'big', run: 'npm run big', runs_on: ['self-hosted', 'ci-kit-pool', 'cpus-8'], timeout: 30,
+        setup: { node: '24', pnpm: false, install: 'npm ci' }, artifacts: [], env: {},
+      },
+    ],
+    pool: true,
+    note: '',
+  });
+});
+
+test('planOutput maps hosted-macos and mac lanes, and setup: false', () => {
+  const c = parseConfig(`
+version: 1
+setup: {node: "22"}
+gates:
+  - {name: m, run: x, lane: hosted-macos}
+  - {name: e, run: y, lane: mac, setup: false}
+`, { isPrivate: true });
+  const out = planOutput(c, c.gates);
+  assert.deepEqual(out.gates.map((g) => g.runs_on), [['macos-latest'], ['self-hosted', 'macOS', 'ARM64', 'ci-kit-mac']]);
+  assert.deepEqual(out.gates[1].setup, { node: '', pnpm: false, install: '' });
+  assert.equal(out.pool, false);
+});
+
+test('planOutput of an empty selection says so', () => {
+  assert.deepEqual(planOutput(config, []), { gates: [], pool: false, note: 'no gates selected' });
+});

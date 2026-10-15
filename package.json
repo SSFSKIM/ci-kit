@@ -1,0 +1,19 @@
+{
+  "name": "ci-kit",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CI for SSFSKIM's repos without the MacBook: per-repo gate config, a reusable workflow, and the ci-gate CLI.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "ci-gate": "bin/ci-gate"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\""
+  },
+  "dependencies": {
+    "yaml": "^2.9.1"
+  }
+}
