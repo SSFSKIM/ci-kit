@@ -1,4 +1,4 @@
-{"repos":[],
+{"repos":[{"repo":"SSFSKIM/ci-kit-sandbox"}],
  "project":"ssfskim-ci-kit","region":"us-central1","network":"ci-kit","subnetwork":"ci-kit-us-central1",
  "zones":["us-central1-a","us-central1-b","us-central1-c","us-central1-f"],
  "machines":{"2":"e2-highcpu-2","4":"c3d-highcpu-4","8":"c3d-highcpu-8","16":"c3d-highcpu-16"},
