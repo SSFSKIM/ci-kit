@@ -35,6 +35,12 @@ base() {
   # needs no actAs on any other.
   g projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$SA" \
     --role=roles/compute.instanceAdmin.v1 --condition=None > /dev/null
+  # Cloud Run source deploys build as the project's default compute account (new projects since 2024), which needs
+  # the builder role to read the uploaded source and push the image. No kit VM runs as that account: VMs have none.
+  local number
+  number=$(g projects describe "$PROJECT" --format='value(projectNumber)')
+  g projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$number-compute@developer.gserviceaccount.com" \
+    --role=roles/run.builder --condition=None > /dev/null
   echo "deploy: base ok ($SA)"
 }
 
@@ -61,7 +67,7 @@ network() {
 bake() {
   # The job runs the bake orchestrator only; the builder clones the kit at the commit it bakes (main's head).
   g run jobs deploy ci-kit-bake --source="$KIT" --region="$REGION" --service-account="$SA" \
-    --command=node --args=gce/bake/bake.mjs --labels=ci-kit=bake \
+    --command=launcher --args=node,gce/bake/bake.mjs --labels=ci-kit=bake \
     --tasks=1 --max-retries=0 --task-timeout=60m --cpu=1 --memory=512Mi
   g run jobs add-iam-policy-binding ci-kit-bake --region="$REGION" \
     --member="serviceAccount:$SA" --role=roles/run.invoker > /dev/null
@@ -82,9 +88,11 @@ COMMIT=$(git -C "$KIT" rev-parse HEAD)
 LAUNCHER=ci-kit-launcher
 
 launcher() {
+  # Buildpack images keep node in their layers, off the bare PATH: the CNB `launcher` sets up the layers' environment
+  # and then runs the command (the same holds for the bake job above).
   # Request-based billing: a tick a minute of well under a second's work stays in the free tier.
   g run deploy "$LAUNCHER" --source="$KIT" --region="$REGION" --service-account="$SA" \
-    --command=node --args=gce/launcher/server.mjs --set-env-vars="CI_KIT_COMMIT=$COMMIT" --labels=ci-kit=launcher \
+    --command=launcher --args=node,gce/launcher/server.mjs --set-env-vars="CI_KIT_COMMIT=$COMMIT" --labels=ci-kit=launcher \
     --no-allow-unauthenticated --ingress=internal --min-instances=0 --max-instances=1 --concurrency=1 \
     --timeout=300 --cpu=1 --memory=512Mi
   # Cloud Scheduler calls it as the service account, which may invoke it and nothing else may.

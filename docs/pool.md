@@ -384,7 +384,13 @@ gce/deploy.sh launcher launcher-schedule   # the Cloud Run service ci-kit-launch
 gce/deploy.sh alert                 # the failed-tick metric and its alert policy, mailed to the owner
 ```
 
-Every part is idempotent. `launcher` builds from the checkout (Cloud Build, buildpacks) and records its commit as
+Every part is idempotent. `base` also gives the project's default compute account `roles/run.builder`: Cloud Run
+source builds run as it in a project created after 2024, and no kit VM uses it. Both Cloud Run images are
+buildpack builds, so their command is the CNB `launcher` (`launcher node <script>`), which puts the image's node on
+the PATH. If every gcloud call stalls for minutes on the MacBook, its IPv6 route to Google is down (2026-10-16:
+`curl -6 https://run.googleapis.com/` timed out, `-4` answered at once) and gcloud's Python waits out each IPv6
+connect; a `sitecustomize.py` that filters `socket.getaddrinfo` to `AF_INET`, on `PYTHONPATH` with
+`CLOUDSDK_PYTHON_SITEPACKAGES=1`, gets it through. `launcher` builds from the checkout (Cloud Build, buildpacks) and records its commit as
 `CI_KIT_COMMIT`; the service reads its configs from main whatever commit it runs, so a config change needs no
 deploy. To pause the launcher: `gcloud scheduler jobs pause ci-kit-launcher-tick --location=us-central1
 --project=ssfskim-ci-kit` (and `resume`). Its logs: `gcloud run services logs read ci-kit-launcher
