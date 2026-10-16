@@ -10,9 +10,9 @@ import { createGitHub } from '../../lib/github.mjs';
 import { createAppTokens } from '../../lib/github-app.mjs';
 import { parsePoolConfig } from '../lib/config.mjs';
 import { createAlerts } from '../lib/alerts.mjs';
-import { bakeLeftovers, snapshotsToPrune, builderUserData, createBuilder, CoreLimitError } from './plan.mjs';
+import { bakeLeftovers, snapshotsToPrune, builderUserData, createBuilder, BakeBlockedError, BUILDER_TYPES } from './plan.mjs';
 
-const BUILDER = { types: ['cx23', 'cpx22', 'cx33', 'cpx32'], locations: ['hel1', 'fsn1', 'nbg1'] };
+const BUILDER = { types: BUILDER_TYPES, locations: ['hel1', 'fsn1', 'nbg1'] };
 const OFF_TIMEOUT = 30 * 60_000;
 const KEEP = 2;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -24,14 +24,14 @@ const env = (name) => {
   return v;
 };
 
-// A bake the core limit kept from starting fails loudly: an alert issue, besides the red run.
-async function alertCoreLimit(message, runId) {
+// A bake kept from starting (a pool box up, or the core limit) fails loudly: an alert issue, besides the red run.
+async function alertBlocked(message, runId) {
   try {
     const cfg = parsePoolConfig(await readFile(new URL('../config/pool.json', import.meta.url), 'utf8'));
     const gh = createGitHub(createAppTokens({ appId: env('CI_KIT_APP_ID').trim(), pem: env('CI_KIT_APP_KEY'), owner: 'SSFSKIM' }));
     await createAlerts(gh, cfg.ledger.repo, { log })({
-      title: 'ci-kit alert: the bake was refused by the Hetzner core limit',
-      body: `${message}. Bake run ${runId} (https://github.com/SSFSKIM/ci-kit/actions/runs/${runId}) created no builder; the previous pool snapshots stay in use. Raising the project's limit is the owner's call (docs/pool.md).`,
+      title: 'ci-kit alert: the bake could not create its builder',
+      body: `${message}. Bake run ${runId} (https://github.com/SSFSKIM/ci-kit/actions/runs/${runId}) created no builder; the previous pool snapshots stay in use. The project's core limit leaves no room for a builder while a pool box is up (docs/pool.md); dispatch the bake again when the pool is idle.`,
     });
   } catch (err) {
     log(`alert not opened: ${err.message}`);
@@ -47,7 +47,7 @@ async function bake(hc) {
   try {
     builder = await createBuilder(hc, { userData, runId, builder: BUILDER, sleep, log });
   } catch (err) {
-    if (err instanceof CoreLimitError) await alertCoreLimit(err.message, runId);
+    if (err instanceof BakeBlockedError) await alertBlocked(err.message, runId);
     throw err;
   }
 
@@ -60,7 +60,7 @@ async function bake(hc) {
     if (Date.now() - start > OFF_TIMEOUT) throw new Error(`ci-kit: builder ${builder.id} did not power off within 30 min`);
   }
   const mark = s.labels['ci-kit-bake'];
-  log(`builder off after ${Math.round((Date.now() - start) / 1000)} s, marked ${mark ?? '(nothing)'}; caches warmed: ${s.labels['ci-kit-warm'] ?? 'unknown'}`);
+  log(`builder off after ${Math.round((Date.now() - start) / 1000)} s, marked ${mark ?? '(nothing)'}; caches warmed: ${s.labels['ci-kit-warm'] ?? 'unknown'}; peak memory + swap ${s.labels['ci-kit-mem-peak'] ?? '?'} MB`);
   if (mark !== 'ok') throw new Error(`ci-kit: the builder did not finish (${mark ?? 'no mark: it failed before it could label itself'})`);
 
   const { image, action } = await hc.createImage(builder.id, {

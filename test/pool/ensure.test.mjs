@@ -143,3 +143,25 @@ test('fallback types are not tried for stock: a preferred type out of stock ever
   await assert.rejects(ensure(hc, CFG, opts()), /no pool server type is available/);
   assert.ok(!hc.calls.some((c) => c.includes('cpx52')));
 });
+
+test('two first ensures racing on the firewall: the loser re-lists and uses the winner\'s labelled firewall', async () => {
+  const hc = fakeHcloud({ images: [IMAGE], serverTypes: TYPES });
+  hc.createFirewall = async () => {
+    hc.state.firewalls.push({ ...FIREWALL, id: 402 }); // the other ensure's create landed first
+    const { HcloudError } = await import('../../lib/hcloud.mjs');
+    throw new HcloudError(409, 'uniqueness_error', 'name is already used');
+  };
+  assert.equal(await ensure(hc, CFG, opts()), 'created:cpx62@hel1');
+  assert.deepEqual(hc.state.servers.at(-1).firewalls, [{ firewall: 402 }]);
+});
+
+test('a firewall name taken by a foreign, unlabelled firewall is refused, not used', async () => {
+  const hc = fakeHcloud({ images: [IMAGE], serverTypes: TYPES });
+  hc.createFirewall = async () => {
+    hc.state.firewalls.push({ id: 403, name: 'ci-kit-pool', labels: {} });
+    const { HcloudError } = await import('../../lib/hcloud.mjs');
+    throw new HcloudError(409, 'uniqueness_error', 'name is already used');
+  };
+  await assert.rejects(ensure(hc, CFG, opts()), /firewall named ci-kit-pool exists without the ci-kit=pool label/);
+  assert.ok(!hc.calls.some((c) => c.startsWith('create ')));
+});

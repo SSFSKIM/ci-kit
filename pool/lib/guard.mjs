@@ -1,7 +1,7 @@
 // The guard's rules (spec §3 Guard): the pool's backstop, run every 10 minutes from pool-guard.yml.
 // guardPlan is pure; pool/guard.mjs gathers its inputs and carries out the actions.
 import { hasKitLabel } from '../../lib/hcloud.mjs';
-import { hoursOnDay } from './ledger.mjs';
+import { hoursOnDay, makeRow } from './ledger.mjs';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -22,7 +22,8 @@ const minutes = (ms) => Math.floor(ms / MIN);
 
 // input: {now, servers (any listing; only ci-kit-labelled ones are considered), queued (queued pool jobs),
 //         rows (ledger rows), summaryAt (ms or null), cfg}
-// Actions: delete {server, end, alert} | delete-builder {server, alert} | finalize {row} | alert {title, body}
+// Actions: delete {server, end, alert} | delete-builder {server, alert} | finalize {row: the final row}
+//          | record {server: refresh its running row, creating it if missing} | alert {title, body}
 //          | ensure {reason} | summary.
 export function guardPlan({ now, servers, queued, rows, summaryAt, cfg }) {
   const actions = [];
@@ -54,10 +55,20 @@ export function guardPlan({ now, servers, queued, rows, summaryAt, cfg }) {
 
   const live = new Set(pool.map((s) => s.id));
   for (const row of rows) {
-    if (row.state === 'deleting' && !live.has(row.server)) actions.push({ kind: 'finalize', row });
+    if (live.has(row.server)) continue;
+    if (row.state === 'deleting') actions.push({ kind: 'finalize', row: { ...row, state: 'final' } });
+    // Gone without a deleter's row: most likely its watchdog, while GitHub was unreachable. Its last sighting
+    // (when the row was last refreshed) stands in for the deletion time.
+    if (row.state === 'running') {
+      const session = { id: row.server, created: row.created, type: row.type, location: row.location, price: row.price, jobs: row.jobs };
+      actions.push({ kind: 'finalize', row: makeRow(session, { deleted: Date.parse(row.seen), end: 'vanished', state: 'final' }) });
+    }
   }
 
   const remaining = pool.filter((s) => !deleted.has(s.id));
+  // Every live box has a row before any deleter needs one (spec Decision Log, ledger coverage); refreshing it each
+  // cycle keeps its last sighting within one cycle of the truth.
+  for (const s of remaining) actions.push({ kind: 'record', server: s });
   const oldest = queued.map((j) => Date.parse(j.created_at)).sort((a, b) => a - b)[0];
   if (remaining.length === 0 && oldest !== undefined && now - oldest > WAKE_AFTER) {
     actions.push({ kind: 'ensure', reason: `a pool job queued ${minutes(now - oldest)} min with no pool server` });

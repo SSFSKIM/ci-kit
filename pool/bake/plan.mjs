@@ -3,20 +3,28 @@
 import { hasKitLabel } from '../../lib/hcloud.mjs';
 import { candidates, poolFirewall, CORE_LIMIT } from '../lib/ensure.mjs';
 
-const LIMIT_RETRY_EVERY = 5 * 60_000;
-const LIMIT_RETRY_FOR = 2 * 3600_000;
+const BLOCKED_RETRY_EVERY = 15 * 60_000;
+const BLOCKED_RETRY_FOR = 2 * 3600_000;
 
-export class CoreLimitError extends Error {}
+// The smallest types that hold the image build, smallest first: cpx12 (1 vCPU, 2 GB; the builder adds 2 GB of
+// swap), then the 2-vCPU types. Each has a 40 GB disk except cpx22 (80), and a snapshot boots only on a type with
+// at least its disk, so the 40 GB ones come first (spec Decision Log: the kit lives within the core limit).
+export const BUILDER_TYPES = ['cpx12', 'cx23', 'cpx22'];
 
-// Create the bake's builder. The project's core limit (a pool box up, with other work's servers) refuses it
-// project-wide, so one attempt is made per round and the round is retried every 5 min for at most 2 h; then
-// CoreLimitError, which the bake turns into an alert (spec Decision Log: the pool degrades gracefully).
+export class BakeBlockedError extends Error {}
+
+// Create the bake's builder. The project's core limit leaves no room for one while a pool box is up, so the bake
+// waits while a pool box exists, and a create refused for the limit (project-wide: one attempt per round) waits
+// too; it tries again every 15 min for at most 2 h, then throws BakeBlockedError, which the bake turns into an
+// alert. The previous snapshots stay in use.
 export async function createBuilder(hc, { userData, runId, builder, sleep, now = Date.now, log = () => {} }) {
   const start = now();
   for (;;) {
+    let blocked = null;
+    const pool = (await hc.servers('ci-kit=pool')).filter((s) => hasKitLabel(s, 'pool'));
+    if (pool.length) blocked = `a pool box is up (${pool.map((s) => s.id).join(', ')})`;
     const tried = [];
-    let limited = false;
-    for (const { type, location } of candidates(builder, await hc.serverTypes())) {
+    for (const { type, location } of blocked ? [] : candidates(builder, await hc.serverTypes())) {
       tried.push(`${type}@${location}`);
       try {
         const { server } = await hc.createServer({
@@ -32,18 +40,18 @@ export async function createBuilder(hc, { userData, runId, builder, sleep, now =
         return server;
       } catch (err) {
         if (err.code === CORE_LIMIT) {
-          limited = true;
+          blocked = "the project's core limit refused the builder";
           break;
         }
         if (err.code !== 'resource_unavailable' && err.code !== 'placement_error') throw err;
       }
     }
-    if (!limited) throw new Error(`ci-kit: no builder type available: ${tried.join(', ')}`);
-    if (now() - start >= LIMIT_RETRY_FOR) {
-      throw new CoreLimitError(`ci-kit: the Hetzner project's core limit refused the bake's builder for 2 h (a pool box up, or other servers in the project)`);
+    if (!blocked) throw new Error(`ci-kit: no builder type available: ${tried.join(', ')}`);
+    if (now() - start >= BLOCKED_RETRY_FOR) {
+      throw new BakeBlockedError(`ci-kit: the bake could not create its builder for 2 h: ${blocked}`);
     }
-    log(`the project's core limit refused the builder; retrying in 5 min (waiting ${Math.round((now() - start) / 60_000)} of at most 120 min)`);
-    await sleep(LIMIT_RETRY_EVERY);
+    log(`${blocked}; retrying in 15 min (waited ${Math.round((now() - start) / 60_000)} of at most 120 min)`);
+    await sleep(BLOCKED_RETRY_EVERY);
   }
 }
 

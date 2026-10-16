@@ -59,7 +59,9 @@ export function queuedPoolJobs(jobs) {
 // queued: queued pool jobs, each with its `repo`. idleRunners: [{repo, labels}] for runners this agent started
 // that have not taken a job yet; each covers one queued job of the same repo and label set.
 // First in, first out by creation time: a job that does not fit now holds the line, so a big job is not starved.
-// A job this box can never serve (no valid size, or more cores than it has) is passed over and reported.
+// A job asking for more cores than the box has (a cpus-16 job on a smaller fallback box) runs on every core once
+// the box is otherwise empty; its start says `clamped: N` (spec Decision Log). A job with no valid size is passed
+// over and reported.
 export function planStarts({ queued, idleRunners, totalCores, usedCores }) {
   const cover = new Map();
   for (const r of idleRunners) cover.set(keyOf(r.repo, r.labels), (cover.get(keyOf(r.repo, r.labels)) ?? 0) + 1);
@@ -79,17 +81,14 @@ export function planStarts({ queued, idleRunners, totalCores, usedCores }) {
       unservable.push({ job, reason: 'no cpus-N label (N in 2, 4, 8, 16)' });
       continue;
     }
-    if (n > totalCores) {
-      unservable.push({ job, reason: `needs ${n} cores; this box has ${totalCores}` });
-      continue;
-    }
-    const cores = waiting.length ? null : allocateCores(totalCores, used, n);
+    const clamped = n > totalCores;
+    const cores = waiting.length ? null : allocateCores(totalCores, used, Math.min(n, totalCores));
     if (!cores) {
       waiting.push(job);
       continue;
     }
     cores.forEach((c) => used.add(c));
-    starts.push({ job, cores });
+    starts.push(clamped ? { job, cores, clamped: n } : { job, cores });
   }
   return { starts, waiting, unservable };
 }
@@ -139,15 +138,6 @@ const fileOf = (path) => (path ?? '').split('@')[0].split('/').at(-1);
 
 export function watchedRuns(runs, workflows) {
   return runs.filter((r) => (r.status === 'queued' || r.status === 'in_progress') && workflows.includes(fileOf(r.path)));
-}
-
-// The queued jobs this box could ever serve: a valid size no larger than the box. The others (a cpus-16 job on a
-// smaller fallback box) wait in GitHub's queue and do not keep this box up.
-export function servable(queued, totalCores) {
-  return queued.filter((j) => {
-    const n = cpusOf(j.labels);
-    return n !== null && n <= totalCores;
-  });
 }
 
 // Idle (spec §3): no running job container, no queued pool job, no queued or in-progress watched run.

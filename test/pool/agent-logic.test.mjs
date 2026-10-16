@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   cpusOf, parseCpuset, formatCpuset, allocateCores, planStarts, reviewContainers, isIdle, watchedRuns, queuedPoolJobs,
-  lifecycleAction, billedMinute, heartbeatDue, watchdogVerdict, runnerName, nextCounter, servable,
+  lifecycleAction, billedMinute, heartbeatDue, watchdogVerdict, runnerName, nextCounter,
 } from '../../pool/agent/logic.mjs';
 
 const T0 = Date.parse('2026-10-15T12:00:00Z');
@@ -75,11 +75,26 @@ test('jobs are admitted first in, first out by creation time; a job that does no
   assert.deepEqual(waiting.map((j) => j.id), [2, 3, 1]);
 });
 
-test('a job that can never fit this box, or names no valid size, is passed over rather than blocking the queue', () => {
-  const queued = [job(1, { created: 1, labels: ['self-hosted', 'ci-kit-pool', 'cpus-16'] }), job(2, { created: 2, labels: ['self-hosted', 'ci-kit-pool'] }), job(3, { created: 3 })];
+test('a job larger than the box runs on all its cores once the box is otherwise empty, and says it was clamped', () => {
+  // A cpus-16 job on a 12-core fallback box (spec Decision Log: a box smaller than a job runs it on all its cores).
+  const big = job(1, { created: 1, labels: ['self-hosted', 'ci-kit-pool', 'cpus-16'] });
+  const empty = planStarts({ queued: [big, job(3, { created: 3 })], idleRunners: [], totalCores: 12, usedCores: new Set() });
+  assert.deepEqual(empty.starts.map((s) => [s.job.id, formatCpuset(s.cores), s.clamped]), [[1, '0-11', 16]]);
+  assert.deepEqual(empty.waiting.map((j) => j.id), [3]);
+  // Not empty: the big job holds the line until the box empties.
+  const busy = planStarts({ queued: [big, job(3, { created: 3 })], idleRunners: [], totalCores: 12, usedCores: new Set([0, 1, 2, 3]) });
+  assert.deepEqual(busy.starts, []);
+  assert.deepEqual(busy.waiting.map((j) => j.id), [1, 3]);
+  // A job that fits is never marked clamped.
+  const fits = planStarts({ queued: [job(3)], idleRunners: [], totalCores: 12, usedCores: new Set() });
+  assert.equal(fits.starts[0].clamped, undefined);
+});
+
+test('a job with no valid size is passed over rather than blocking the queue', () => {
+  const queued = [job(2, { created: 2, labels: ['self-hosted', 'ci-kit-pool'] }), job(3, { created: 3 })];
   const { starts, unservable } = planStarts({ queued, idleRunners: [], totalCores: 8, usedCores: new Set() });
   assert.deepEqual(starts.map((s) => s.job.id), [3]);
-  assert.deepEqual(unservable.map((u) => [u.job.id, u.reason]), [[1, 'needs 16 cores; this box has 8'], [2, 'no cpus-N label (N in 2, 4, 8, 16)']]);
+  assert.deepEqual(unservable.map((u) => [u.job.id, u.reason]), [[2, 'no cpus-N label (N in 2, 4, 8, 16)']]);
 });
 
 const CFG = { idle_runner_minutes: 10 };
@@ -207,14 +222,4 @@ test('runner names are ci-kit-pool-<server id>-<counter>, and the counter resume
   assert.equal(nextCounter(55, { label: '3', names: ['ci-kit-pool-55-9', 'ci-kit-pool-54-20', 'ci-kit-pool-55-x', 'other'] }), 10);
   assert.equal(nextCounter(55, { label: undefined, names: [] }), 1);
   assert.equal(nextCounter(55, { label: '12', names: ['ci-kit-pool-55-4'] }), 13);
-});
-
-test('a job this box can never serve does not keep it up: idleness counts only servable queued jobs', () => {
-  // A cpus-16 job on a 12-core fallback box waits in GitHub's queue; the box drains at minute 50, and the guard's
-  // wake rule asks for a box again, full size if the core limit has eased.
-  const queued = [job(1, { labels: ['self-hosted', 'ci-kit-pool', 'cpus-16'] }), job(2, { labels: ['self-hosted', 'ci-kit-pool'] })];
-  assert.deepEqual(servable(queued, 12), []);
-  assert.equal(isIdle({ containers: [], queued: servable(queued, 12), watched: [] }), true);
-  assert.deepEqual(servable([...queued, job(3)], 12).map((j) => j.id), [3]);
-  assert.deepEqual(servable(queued, 16).map((j) => j.id), [1]);
 });

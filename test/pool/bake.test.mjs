@@ -1,7 +1,7 @@
 // The bake's cleanup and pruning (spec §3 Bake, "When a bake does not complete").
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { bakeLeftovers, snapshotsToPrune, builderUserData, createBuilder, CoreLimitError } from '../../pool/bake/plan.mjs';
+import { bakeLeftovers, snapshotsToPrune, builderUserData, createBuilder, BakeBlockedError } from '../../pool/bake/plan.mjs';
 import { fakeHcloud } from './fake-hcloud.mjs';
 import { FOREIGN } from './fake-hcloud.mjs';
 
@@ -58,7 +58,7 @@ const clock = () => {
   return { now: () => t, sleep: async (ms) => { t += ms; } };
 };
 
-test('a builder refused for the core limit is retried every 5 min, and created once the pool box is gone', async () => {
+test('a builder refused for the core limit is retried every 15 min, and created once the pool box is gone', async () => {
   const hc = fakeHcloud({ serverTypes: BTYPES, firewalls: [{ id: 401, name: 'ci-kit-pool', labels: { 'ci-kit': 'pool' } }], createErrors: ['resource_limit_exceeded', 'resource_limit_exceeded'] });
   const c = clock();
   const waits = [];
@@ -66,18 +66,34 @@ test('a builder refused for the core limit is retried every 5 min, and created o
   assert.equal(server.name, 'ci-kit-builder-9');
   // The limit is project-wide: one attempt per round, not one per location.
   assert.deepEqual(hc.calls.filter((x) => x.startsWith('create ')), ['create cx23@hel1', 'create cx23@hel1', 'create cx23@hel1']);
-  assert.equal(c.now() - Date.parse('2026-10-16T03:17:00Z'), 10 * 60_000);
+  assert.equal(c.now() - Date.parse('2026-10-16T03:17:00Z'), 30 * 60_000);
   assert.match(waits.join('\n'), /core limit/);
 });
 
-test('a builder still refused for the core limit after 2 h fails with CoreLimitError', async () => {
+test('a bake that finds a pool box up waits for it to go before creating its builder', async () => {
+  const pool = { id: 77, name: 'ci-kit-pool', labels: { 'ci-kit': 'pool', 'ci-kit-state': 'ready' }, created: '2026-10-16T03:00:00Z' };
+  const hc = fakeHcloud({ serverTypes: BTYPES, firewalls: [{ id: 401, name: 'ci-kit-pool', labels: { 'ci-kit': 'pool' } }], serverSeq: [[pool], [pool], []] });
+  const c = clock();
+  const waits = [];
+  await createBuilder(hc, { userData: 'x', runId: 9, builder: BUILDER, ...c, log: (m) => waits.push(m) });
+  assert.equal(c.now() - Date.parse('2026-10-16T03:17:00Z'), 30 * 60_000);
+  assert.deepEqual(hc.calls.filter((x) => x.startsWith('create ')), ['create cx23@hel1']);
+  assert.match(waits.join('\n'), /pool box is up/);
+});
+
+test('a builder still blocked after 2 h (pool box up, or the core limit) fails with BakeBlockedError', async () => {
   const hc = fakeHcloud({ serverTypes: BTYPES, firewalls: [{ id: 401, name: 'ci-kit-pool', labels: { 'ci-kit': 'pool' } }], createErrors: Array(100).fill('resource_limit_exceeded') });
   const c = clock();
   await assert.rejects(createBuilder(hc, { userData: 'x', runId: 9, builder: BUILDER, ...c, log: () => {} }), (err) => {
-    assert.ok(err instanceof CoreLimitError);
-    assert.match(err.message, /core limit.*2 h/);
+    assert.ok(err instanceof BakeBlockedError);
+    assert.match(err.message, /2 h/);
     return true;
   });
   const waited = c.now() - Date.parse('2026-10-16T03:17:00Z');
-  assert.ok(waited >= 2 * 3600_000 && waited < 2 * 3600_000 + 5 * 60_000, `waited ${waited / 60_000} min`);
+  assert.ok(waited >= 2 * 3600_000 && waited < 2 * 3600_000 + 15 * 60_000, `waited ${waited / 60_000} min`);
+});
+
+test('the bake\'s builder is the smallest type that holds the build: cpx12 first, a 40 GB disk every pool type can boot', async () => {
+  const { BUILDER_TYPES } = await import('../../pool/bake/plan.mjs');
+  assert.deepEqual(BUILDER_TYPES, ['cpx12', 'cx23', 'cpx22']);
 });

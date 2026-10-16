@@ -27,7 +27,9 @@ export const workDir = (name) => `${CACHE}/work/${name}`;
 
 // `docker run` arguments for one job container. The JIT config is passed by name (-e CI_KIT_JIT) and its value
 // comes from the docker CLI's environment, so it is not on any command line.
-export function runArgs({ name, repo, runnerId, labels, cores, memoryGbPerCpu, image = IMAGE }) {
+// Every container announces its cores in its job's log through the runner's job-started hook (pool/image), and a
+// job clamped to a smaller box (it asked for `clamped` cores) says so there.
+export function runArgs({ name, repo, runnerId, labels, cores, memoryGbPerCpu, clamped, image = IMAGE }) {
   const gb = cores.length * memoryGbPerCpu;
   const labelArgs = {
     'ci-kit-job': name,
@@ -44,6 +46,9 @@ export function runArgs({ name, repo, runnerId, labels, cores, memoryGbPerCpu, i
     '--shm-size', '2g',
     '-v', `${CACHE}:${CACHE}`,
     '-e', 'CI_KIT_JIT',
+    '-e', 'ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/ci-kit-job-started',
+    '-e', `CI_KIT_CORES=${formatCpuset(cores)}`,
+    ...(clamped ? ['-e', `CI_KIT_CLAMPED=${clamped}`] : []),
     ...Object.entries(CACHE_ENV).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
     image,
   ];

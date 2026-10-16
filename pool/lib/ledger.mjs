@@ -1,6 +1,8 @@
 // The pool ledger (spec I9): one comment per server session on the ledger issue, plus a weekly summary comment.
-// A row is written as `deleting` just before the delete call and finalized in place once the server is gone,
-// so a crash between the two leaves a row that the next deleter rewrites rather than a missing or double row.
+// Every session gets a provisional `running` row before any deleter can need one (the agent at boot, the guard
+// for a server it sees without a row). A deleter rewrites it as `deleting` just before its delete call, and it is
+// finalized in place once the server is gone. A row never moves back down that order. Concurrent writers can
+// still make two comments for one server; readers count the most final one, and writers delete the rest.
 const ROW_MARK = 'ci-kit-ledger';
 const SUMMARY_MARK = 'ci-kit-ledger-summary';
 const HOUR = 3600_000;
@@ -14,13 +16,20 @@ export function billedHours(createdMs, deletedMs) {
   return Math.max(1, Math.ceil((deletedMs - createdMs) / HOUR));
 }
 
+export const STATES = ['running', 'deleting', 'final'];
+const rank = (row) => STATES.indexOf(row.state);
+export const moreFinal = (a, b) => rank(a) > rank(b);
+
 // server: {id, created (ISO), type, location, price (€/h gross, or null), jobs (or null)}.
-export function makeRow(server, { deleted, end, state }) {
-  const billed = billedHours(Date.parse(server.created), deleted);
+// A `running` row takes `at` (when it was written; billed hours so far); the others take `deleted` and `end`.
+export function makeRow(server, { deleted = null, end = null, state, at = null }) {
+  const until = state === 'running' ? at : deleted;
+  const billed = billedHours(Date.parse(server.created), until);
   return {
     server: server.id,
     created: new Date(Date.parse(server.created)).toISOString(),
-    deleted: new Date(deleted).toISOString(),
+    deleted: deleted === null ? null : new Date(deleted).toISOString(),
+    ...(state === 'running' ? { seen: new Date(at).toISOString() } : {}),
     type: server.type,
     location: server.location,
     price: server.price ?? null,
@@ -35,12 +44,16 @@ export function makeRow(server, { deleted, end, state }) {
 const dash = (v) => (v == null ? '-' : String(v));
 
 export function renderRow(row) {
-  const deleted = row.state === 'deleting' ? `deleting ${utc(Date.parse(row.deleted))}` : utc(Date.parse(row.deleted));
+  const deleted = {
+    running: () => `running, seen ${utc(Date.parse(row.seen))}`,
+    deleting: () => `deleting ${utc(Date.parse(row.deleted))}`,
+    final: () => utc(Date.parse(row.deleted)),
+  }[row.state]();
   return [
     `<!-- ${ROW_MARK} ${JSON.stringify(row)} -->`,
     '| server id | created (UTC) | deleted (UTC) | type@location | billed h | € | jobs | end |',
     '|---|---|---|---|---|---|---|---|',
-    `| ${row.server} | ${utc(Date.parse(row.created))} | ${deleted} | ${row.type}@${row.location} | ${row.billed} | ${dash(row.euros)} | ${dash(row.jobs)} | ${row.end} |`,
+    `| ${row.server} | ${utc(Date.parse(row.created))} | ${deleted} | ${row.type}@${row.location} | ${row.billed} | ${dash(row.euros)} | ${dash(row.jobs)} | ${dash(row.end)} |`,
   ].join('\n');
 }
 
@@ -56,28 +69,62 @@ function marked(body, mark) {
 
 export const parseRow = (body) => marked(body, ROW_MARK);
 
-export function rowComment(comments, serverId) {
-  return comments.find((c) => parseRow(c.body)?.server === serverId) ?? null;
+// One server's row comments, the one that counts first: the most final, then the oldest comment. Every reader
+// and writer orders them the same way, so concurrent writers reconcile to the same comment.
+function rowComments(comments, serverId) {
+  return comments
+    .map((c) => ({ c, row: parseRow(c.body) }))
+    .filter((x) => x.row && (serverId === undefined || x.row.server === serverId))
+    .sort((a, b) => rank(b.row) - rank(a.row) || a.c.id - b.c.id);
 }
 
-export const rowsOf = (comments) => comments.map((c) => parseRow(c.body)).filter(Boolean);
+export function rowComment(comments, serverId) {
+  return rowComments(comments, serverId)[0]?.c ?? null;
+}
+
+// The comments for one server beyond the one that counts: a writer that finds them deletes them.
+export const extraRowComments = (comments, serverId) => rowComments(comments, serverId).slice(1).map((x) => x.c);
+
+// One row per server id.
+export function rowsOf(comments) {
+  const seen = new Set();
+  const rows = [];
+  for (const { row } of rowComments(comments)) {
+    if (seen.has(row.server)) continue;
+    seen.add(row.server);
+    rows.push(row);
+  }
+  return rows;
+}
 
 const dayStart = (ms) => ms - (ms % DAY);
 
-// Billed pool hours of sessions created on `now`'s UTC day: ledger rows, plus live servers that have none yet.
-export function hoursOnDay(rows, liveServers, now) {
-  const today = dayStart(now);
+// Billed pool hours on `day`'s UTC day (default: today): each billed hour counts on the day it begins. A session
+// runs from its created time to its deleted time; a live one to now; a running row whose server is gone, to when
+// the row was last written. Live servers without a row count too.
+export function hoursOnDay(rows, liveServers, now, day = now) {
+  const from = dayStart(day);
+  const to = from + DAY;
+  const live = new Map(liveServers.map((s) => [s.id, s]));
+  const sessions = rows.map((r) => {
+    const end = r.deleted ? Date.parse(r.deleted) : live.has(r.server) ? now : Date.parse(r.seen);
+    return [Date.parse(r.created), end];
+  });
   const withRow = new Set(rows.map((r) => r.server));
-  const fromRows = rows.filter((r) => dayStart(Date.parse(r.created)) === today).reduce((sum, r) => sum + r.billed, 0);
-  const fromLive = liveServers
-    .filter((s) => !withRow.has(s.id) && dayStart(Date.parse(s.created)) === today)
-    .reduce((sum, s) => sum + billedHours(Date.parse(s.created), now), 0);
-  return fromRows + fromLive;
+  for (const s of liveServers) if (!withRow.has(s.id)) sessions.push([Date.parse(s.created), now]);
+  let hours = 0;
+  for (const [start, end] of sessions) {
+    for (let k = 0; k < billedHours(start, end); k += 1) {
+      const begins = start + k * HOUR;
+      if (begins >= from && begins < to) hours += 1;
+    }
+  }
+  return hours;
 }
 
 export function weeklySummary(rows, now) {
   const from = now - 7 * DAY;
-  const week = rows.filter((r) => Date.parse(r.deleted) > from && Date.parse(r.deleted) <= now);
+  const week = rows.filter((r) => r.deleted && Date.parse(r.deleted) > from && Date.parse(r.deleted) <= now);
   const euros = round2(week.reduce((sum, r) => sum + (r.euros ?? 0), 0));
   return {
     from: new Date(from).toISOString(),

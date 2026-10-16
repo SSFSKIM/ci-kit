@@ -2,7 +2,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  billedHours, makeRow, renderRow, parseRow, rowComment, hoursOnDay, weeklySummary, lastSummaryAt, renderSummary,
+  billedHours, makeRow, renderRow, parseRow, rowComment, hoursOnDay, weeklySummary, lastSummaryAt, renderSummary, rowsOf,
+  extraRowComments,
 } from '../../pool/lib/ledger.mjs';
 
 const t = (iso) => Date.parse(iso);
@@ -56,15 +57,49 @@ test('a crash window across an hour boundary: the same row is rewritten with the
   assert.equal(rewritten.server, provisional.server);
 });
 
-test('pool hours today count rows created today and live servers without a row', () => {
+test('pool hours on a day count the billed hours that begin in that UTC day, across midnight both ways', () => {
   const now = t('2026-10-15T15:30:00Z');
   const rows = [
+    // 08:00–09:50: two billed hours, both on the 15th.
     makeRow({ ...server, id: 1, created: '2026-10-15T08:00:00Z' }, { deleted: t('2026-10-15T09:50:00Z'), end: 'idle', state: 'final' }),
+    // 23:30 on the 14th to 00:50: two billed hours, 23:30 (the 14th) and 00:30 (the 15th).
     makeRow({ ...server, id: 2, created: '2026-10-14T23:30:00Z' }, { deleted: t('2026-10-15T00:50:00Z'), end: 'idle', state: 'final' }),
+    // A deleting row of a server still listed: its row's deleted time ends it.
     makeRow({ ...server, id: 3, created: '2026-10-15T14:00:00Z' }, { deleted: t('2026-10-15T14:50:00Z'), end: 'idle', state: 'deleting' }),
   ];
+  // A live server without a row, up since 13:10: 13:10, 14:10, 15:10 so far.
   const live = [{ id: 3, created: '2026-10-15T14:00:00Z' }, { id: 4, created: '2026-10-15T13:10:00Z' }];
-  assert.equal(hoursOnDay(rows, live, now), 2 + 1 + 3);
+  assert.equal(hoursOnDay(rows, live, now), 2 + 1 + 1 + 3);
+  assert.equal(hoursOnDay(rows, live, now, t('2026-10-14T12:00:00Z')), 1);
+});
+
+test('a live session that started yesterday counts only its hours since midnight today', () => {
+  const now = t('2026-10-16T02:15:00Z');
+  const running = makeRow({ ...server, id: 9, created: '2026-10-15T22:40:00Z' }, { at: t('2026-10-15T22:41:00Z'), state: 'running' });
+  // Billed hours begin 22:40, 23:40 (the 15th), 00:40, 01:40 (the 16th); live, so it runs to now.
+  assert.equal(hoursOnDay([running], [{ id: 9, created: '2026-10-15T22:40:00Z' }], now), 2);
+  assert.equal(hoursOnDay([running], [{ id: 9, created: '2026-10-15T22:40:00Z' }], now, t('2026-10-15T10:00:00Z')), 2);
+  // Gone without a deleter's row: it ends when its row was last written.
+  assert.equal(hoursOnDay([running], [], now), 0);
+});
+
+test('a running row is provisional: written at boot, never downgrading a later state', () => {
+  const running = makeRow(server, { at: t('2026-10-15T22:01:00Z'), state: 'running' });
+  assert.equal(running.deleted, null);
+  assert.equal(running.end, null);
+  assert.match(renderRow(running), /\| 123 \| 2026-10-15 22:00:12 \| running, seen 2026-10-15 22:01:00 \| cpx62@hel1 \| 1 \| 0\.25 \| 3 \| - \|/);
+  assert.deepEqual(parseRow(renderRow(running)), running);
+});
+
+test('duplicate rows for one server reconcile deterministically: the most final wins, then the oldest comment', () => {
+  const running = makeRow(server, { at: t('2026-10-15T22:01:00Z'), state: 'running' });
+  const deleting = makeRow(server, { deleted: t('2026-10-15T22:51:00Z'), end: 'idle', state: 'deleting' });
+  const final = { ...deleting, state: 'final' };
+  const c = (id, row) => ({ id, body: renderRow(row) });
+  assert.deepEqual(rowsOf([c(5, running), c(3, deleting), c(9, final)]).map((r) => r.state), ['final']);
+  assert.equal(rowComment([c(5, running), c(3, deleting)], 123).id, 3);
+  assert.equal(rowComment([c(7, deleting), c(3, deleting)], 123).id, 3);
+  assert.deepEqual(extraRowComments([c(7, deleting), c(3, deleting), c(4, running), { id: 1, body: 'x' }], 123).map((x) => x.id), [7, 4]);
 });
 
 test('the weekly summary covers sessions deleted in the last 7 days and projects a 30-day month', () => {

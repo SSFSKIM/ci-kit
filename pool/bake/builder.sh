@@ -51,6 +51,19 @@ umask 022
 # An ephemeral box is patched by re-baking, not by apt timers racing its boot (M4).
 step=apt
 systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service || true
+
+# A cpx12 builder has 2 GB of memory: the build gets 2 GB of swap on top, and the peak of memory plus swap in use
+# is sampled so the bake's log shows how much the build needed (label ci-kit-mem-peak, MB).
+step=swap
+if [ ! -e /swapfile ]; then
+  fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap -q /swapfile && swapon /swapfile
+fi
+( peak=0; while :; do
+    used=$(free -m | awk '/^Mem:/ {m=$3} /^Swap:/ {s=$3} END {print m+s}')
+    [ "$used" -gt "$peak" ] && peak=$used && echo "$peak" > /run/ci-kit-mem-peak
+    sleep 2
+  done ) &
+sampler=$!
 apt-get update
 apt-get install -y --no-install-recommends docker.io git jq curl xz-utils ca-certificates iptables
 systemctl enable docker
@@ -107,6 +120,9 @@ mkdir -p /var/lib/ci-kit
 echo "$KIT_SHA" > /var/lib/ci-kit/kit-commit
 
 step=clean
+kill "$sampler" 2>/dev/null || true
+label ci-kit-mem-peak "$(cat /run/ci-kit-mem-peak 2>/dev/null || echo unknown)"
+swapoff /swapfile && rm -f /swapfile
 apt-get clean
 docker image prune --force > /dev/null
 label ci-kit-bake ok

@@ -37,11 +37,21 @@ export function newestImage(images) {
     .sort((a, b) => Date.parse(b.created) - Date.parse(a.created))[0] ?? null;
 }
 
+const ownFirewall = async (hc) => (await hc.firewalls('ci-kit=pool')).find((f) => hasKitLabel(f, 'pool') && f.name === POOL_NAME);
+
 export async function poolFirewall(hc) {
-  const mine = (await hc.firewalls('ci-kit=pool')).find((f) => hasKitLabel(f, 'pool') && f.name === POOL_NAME);
+  const mine = await ownFirewall(hc);
   if (mine) return mine;
-  // No inbound rules: Hetzner firewalls drop all inbound traffic not allowed by a rule (spec §3 Isolation).
-  return hc.createFirewall({ name: POOL_NAME, labels: { 'ci-kit': 'pool' }, rules: [] });
+  try {
+    // No inbound rules: Hetzner firewalls drop all inbound traffic not allowed by a rule (spec §3 Isolation).
+    return await hc.createFirewall({ name: POOL_NAME, labels: { 'ci-kit': 'pool' }, rules: [] });
+  } catch (err) {
+    if (err.code !== 'uniqueness_error') throw err;
+    // Another first ensure created it between our list and our create: use theirs, if it is the kit's.
+    const theirs = await ownFirewall(hc);
+    if (theirs) return theirs;
+    throw new Error(`ci-kit: a firewall named ${POOL_NAME} exists without the ci-kit=pool label; it is not the kit's to touch`);
+  }
 }
 
 // Returns 'existing' | 'created:<type>@<location>' | 'raced' (I7). Throws when every pair is unavailable,
@@ -49,7 +59,7 @@ export async function poolFirewall(hc) {
 // The core limit is the project's, not a location's: a type refused for it is not tried elsewhere, and the walk
 // moves on to `fallback_types` (smaller boxes). A box made that way carries `ci-kit-fallback=core-limit`, which
 // its agent turns into an alert; `warn` reports it in the calling workflow. Jobs asking for more cores than a
-// smaller box has wait in GitHub's queue.
+// smaller box run on all its cores once it is otherwise empty (clamped; logic.mjs planStarts).
 export async function ensure(hc, cfg, { sleep, now = Date.now, log = () => {}, warn = log, userData } = {}) {
   let decision = ensureDecision(poolServers(await hc.servers('ci-kit=pool')));
   if (decision === 'wait') {
@@ -107,7 +117,7 @@ export async function ensure(hc, cfg, { sleep, now = Date.now, log = () => {}, w
   if (limited.length && cfg.fallback_types?.length) {
     const fallback = await walk(cfg.fallback_types, { 'ci-kit': 'pool', 'ci-kit-state': 'booting', 'ci-kit-fallback': 'core-limit' });
     if (fallback) {
-      warn(`ci-kit pool: the project's core limit refused ${limited.join(', ')}; created a smaller box (${fallback.slice('created:'.length)}). Gates asking for more cores than it has wait.`);
+      warn(`ci-kit pool: the project's core limit refused ${limited.join(', ')}; created a smaller box (${fallback.slice('created:'.length)}). Gates asking for more cores than it has run clamped to it.`);
       return fallback;
     }
   }

@@ -18,6 +18,11 @@ import { createAlerts } from './lib/alerts.mjs';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log(...a);
 
+const sessionOf = (server) => ({
+  id: server.id, created: server.created, type: server.server_type?.name ?? '?', location: serverLocation(server) ?? '?',
+  price: serverPriceHourly(server), jobs: server.labels['ci-kit-jobs'] === undefined ? null : Number(server.labels['ci-kit-jobs']),
+});
+
 async function queuedJobs(gh, cfg) {
   const queued = [];
   for (const { repo } of cfg.repos) {
@@ -44,10 +49,7 @@ async function main() {
 
   // Row first (deleting), then the delete, then the row finalized once the delete action has finished (I9).
   async function deletePoolServer(server, end) {
-    const session = {
-      id: server.id, created: server.created, type: server.server_type?.name ?? '?', location: serverLocation(server) ?? '?',
-      price: serverPriceHourly(server), jobs: server.labels['ci-kit-jobs'] === undefined ? null : Number(server.labels['ci-kit-jobs']),
-    };
+    const session = sessionOf(server);
     const deleted = Date.now();
     await ledger.upsertRow(makeRow(session, { deleted, end, state: 'deleting' }));
     const action = await hc.deleteServer(server.id);
@@ -67,8 +69,10 @@ async function main() {
         log(`deleted builder ${a.server.id}`);
         await alert(a.alert);
       } else if (a.kind === 'finalize') {
-        await ledger.upsertRow({ ...a.row, state: 'final' });
-        log(`finalized the ledger row of server ${a.row.server}`);
+        await ledger.upsertRow(a.row);
+        log(`finalized the ledger row of server ${a.row.server} (${a.row.end})`);
+      } else if (a.kind === 'record') {
+        await ledger.upsertRow(makeRow(sessionOf(a.server), { state: 'running', at: Date.now() }));
       } else if (a.kind === 'alert') {
         await alert(a);
       } else if (a.kind === 'ensure') {

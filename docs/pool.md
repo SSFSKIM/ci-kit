@@ -60,17 +60,20 @@ the snapshot. For the App key: github.com/settings/apps/ci-kit-runners → Priva
 
 ## Re-bake
 
-The bake runs every Monday at 03:17 UTC and on dispatch:
+The bake runs every Sunday at 18:00 UTC (03:00 KST Monday, an hour the pool is usually down) and on dispatch:
 
 ```
 gh workflow run pool-bake.yml -R SSFSKIM/ci-kit
 gh run watch -R SSFSKIM/ci-kit $(gh run list -R SSFSKIM/ci-kit -w pool-bake.yml -L 1 --json databaseId -q '.[0].databaseId')
 ```
 
-It creates a builder (`ci-kit-builder-<run id>`, label `ci-kit=builder`, from `ubuntu-24.04`) whose user-data
+It waits while a pool box is up (see "The project's core limit" below), then creates a builder
+(`ci-kit-builder-<run id>`, label `ci-kit=builder`, from `ubuntu-24.04`, the smallest type that holds the build:
+`cpx12` with 2 GB of swap added, else `cx23`, else `cpx22`; the bake's log shows the build's peak memory plus swap)
+whose user-data
 (`pool/bake/builder.sh`) installs Docker and Node, clones the kit at the run's commit, builds the runner image
 (`pool/image/Dockerfile`), warms the caches (`pool/bake/warm.mjs`, which records what it did in
-`/var/lib/ci-kit/warm.json` on the image), writes `/etc/ci-kit/`, smoke-tests a cpuset container, marks itself
+`/var/lib/ci-kit/cache/warm.json` on the image, readable by jobs), writes `/etc/ci-kit/`, smoke-tests a cpuset container, marks itself
 `ci-kit-bake=ok` and powers off. The workflow then snapshots it (`ci-kit=pool-image`, `ci-kit-commit=<sha>`),
 deletes it, and keeps the two newest snapshots. A builder that fails marks itself `ci-kit-bake=failed-<step>`,
 and the run fails naming the step. A failed or cancelled bake leaves the previous snapshots in place, and its
@@ -87,20 +90,29 @@ The ledger is the issue "pool ledger" in `SSFSKIM/ci-kit-sandbox`. Each pool ser
 | server id | created (UTC) | deleted (UTC) | type@location | billed h | € | jobs | end |
 ```
 
+- A row is provisional before the server is gone. Its deleted column reads `running, seen <time>` from the box's
+  boot (the agent writes it then, and the guard writes or refreshes it every cycle for any live pool box). It reads
+  `deleting <time>` once a deleter has written it just before its delete call. The guard, or the next box's agent
+  at boot, finalizes it once the server is gone. A row never moves back.
 - `end`: `idle` (the agent deleted its idle box), `stale-heartbeat` (the guard deleted a box whose agent had not
   reconciled for 10 min), `watchdog` (the box deleted itself after 30 min without reconciling), `max-uptime`
-  (24 h up).
-- A row whose deleted column reads `deleting <time>` was written just before the delete call. The guard, or the
-  next box's agent at boot, finalizes it once the server is gone. A row stays `deleting` only while that server
-  still exists.
+  (24 h up), `manual`, or `vanished`. `vanished` means the server disappeared while its row still read `running`,
+  most likely its watchdog while GitHub was unreachable. Its deleted time is its last sighting, which is within one
+  guard cycle of the truth.
+- Accepted residue: a box that never reached GitHub and was deleted by its watchdog before the guard first saw it
+  has no row. The watchdog deletes whether or not GitHub answers, because deletion must not depend on GitHub.
 - `€` is billed hours times the type's gross hourly price in that location; the IPv4 address adds €0.001/h.
-- A box the watchdog deleted while GitHub was unreachable has no row: the watchdog writes the row first when it
-  can, and deletes regardless.
+- Two writers can each create a comment for the same server, for example the guard and a watchdog at once. Readers
+  count one row per server, the most final, then the oldest comment, and every writer deletes the others it finds.
+- A box ensure made smaller for the core limit shows its type in the row, for example
+  `| 170700001 | 2026-10-20 09:12:04 | 2026-10-20 10:02:11 | cpx52@hel1 | 1 | 0.19 | 6 | idle |`, and has a
+  matching `ci-kit-alert` issue.
 - Each comment starts with a hidden `<!-- ci-kit-ledger {…} -->` marker holding the same row as JSON; the kit
   reads that, not the table.
 
 The guard posts a weekly summary comment (hours, euros, jobs, the month projected at that week's rate), and opens
-a `ci-kit-alert` issue when a day's pool hours exceed `max_hours_per_day` (default 8). It never deletes a box
+a `ci-kit-alert` issue when a day's pool hours exceed `max_hours_per_day` (default 8). A day's hours are the
+billed hours that begin in that UTC day, so a session across midnight counts on both days. It never deletes a box
 for cost; the levers are a smaller type in `types` (cpx52 or cpx42), CX53 stock, or fewer pool gates.
 
 ## Changing type or location preferences
@@ -108,19 +120,26 @@ for cost; the levers are a smaller type in `types` (cpx52 or cpx42), CX53 stock,
 Edit `types`, `fallback_types` and `locations` in `pool/config/pool.json` and commit to `main`. Ensure reads them from the kit
 checkout at the calling workflow's version (`@v1` callers after `v1` moves); the guard reads `main`. The first
 available type in order wins, in the first location in order that offers it (availability from
-`GET /v1/server_types`). A type with fewer than 16 cores serves fewer jobs at once; a job asking for more cores
-than the box has is logged by the agent and never runs there.
+`GET /v1/server_types`). A type with fewer than 16 cores serves fewer jobs at once. A job asking for more cores
+than the box has runs on all of the box's cores once the box is otherwise empty, and its job log says so: `ci-kit
+pool: this job asked for cpus-16; this box has 12 cores, so it runs on all of them (clamped)`. The box's disk must
+be at least the snapshot's `disk_size` (40 GB from a `cpx12` or `cx23` builder), which every type in the lists
+meets. Changing types for cost is the owner's call.
 
-**The project's core limit.** The Hetzner project caps its shared vCPUs below 20, and other work's servers count
-against it. When a create is refused for it (`403 resource_limit_exceeded`, "shared core limit exceeded"), ensure
-does not try the same type elsewhere, since the limit is project-wide. It moves on to `fallback_types` (cpx52 at 12
-vCPU, then cpx42 at 8) and labels that box `ci-kit-fallback=core-limit`. Its agent opens an alert, and the ledger
-row shows the smaller type. Gates asking for more cores than that box has wait in GitHub's queue, and they do not
-keep it up. It drains at minute 50, and the guard's wake rule asks for a full-size box again. While a pool box is
-up, the bake's builder is refused too. The bake retries every 5 min for at most 2 h, then fails with an alert. A
-limit increase is a Hetzner support request, and that is the owner's call. The box's disk must be at least the snapshot's
-`disk_size` (40 GB from a `cx23` builder), which every type in the list meets. Changing types for cost is the
-owner's call.
+**The project's core limit.** The kit lives within the Hetzner project's current shared-core limit, which is
+below 20 vCPU. 18 (the 16-core pool box plus the foreign 2-core `session-mirror`) is accepted, and 20 is refused.
+Raising the limit is not available for now, and `session-mirror` is not the kit's. Two measures follow:
+
+- **Smaller boxes.** When a create is refused for the limit (`403 resource_limit_exceeded`, "shared core limit
+  exceeded"), ensure does not try the same type elsewhere, since the limit is project-wide. It moves on to
+  `fallback_types` (cpx52 at 12 vCPU, then cpx42 at 8) and labels that box `ci-kit-fallback=core-limit`. Its agent
+  opens an alert, the ledger row shows the smaller type, and larger gates run clamped (above).
+- **The bake avoids the pool.** It is scheduled when the pool is usually down. If a pool box is up when it starts,
+  or the builder is refused for the limit, it tries again every 15 min for at most 2 h, then fails with an alert.
+  The previous snapshots stay in use.
+
+Raising the project's limit (a Hetzner support request) removes the need for both measures. With room for a pool
+box and a builder side by side, the fallback types would never be reached and the bake would never wait.
 
 ## Debug access
 

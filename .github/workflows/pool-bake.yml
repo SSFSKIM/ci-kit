@@ -4,7 +4,7 @@
 name: pool-bake
 on:
   schedule:
-    - cron: '17 3 * * 1'
+    - cron: '0 18 * * 0' # Sunday 18:00Z (03:00 KST Monday): an hour the pool is usually down (spec Decision Log)
   workflow_dispatch:
 permissions:
   contents: read
@@ -14,7 +14,7 @@ concurrency:
 jobs:
   bake:
     runs-on: ubuntu-latest
-    timeout-minutes: 180 # 2 h of waiting out the core limit, then the bake itself
+    timeout-minutes: 180 # up to 2 h waiting for room under the core limit, then the bake itself
     env:
       HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
     steps:
