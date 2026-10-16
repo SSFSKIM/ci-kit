@@ -1,7 +1,7 @@
 #!/bin/bash
 # The bake's builder (spec §3 Bake): runs once on a fresh ubuntu-24.04 server through cloud-init, turns its disk
-# into the pool image, marks the result on its own server labels (ci-kit-bake=ok, or failed-<step>; ci-kit-warm), and powers
-# off. pool/bake/bake.mjs fills the placeholders, waits for `off`, and snapshots only a builder marked ok.
+# into the pool image, marks the result on its own server labels (ci-kit-bake=ok or failed-<step>, and
+# ci-kit-warm), and powers off. pool/bake/bake.mjs fills the placeholders, waits for `off`, and snapshots only a builder marked ok.
 # Secrets arrive in this user-data; nothing here echoes them, and cloud-init's copies and logs are removed
 # before the snapshot.
 set -euo pipefail
