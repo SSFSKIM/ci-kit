@@ -2093,6 +2093,16 @@ euros, jobs, and the projected month at the current rate.
     "timeout", in `src/browser-service`.
   - **Date/Author:** 2026-10-16, M2 executor, folded by plan-executor.
 
+- **Decision:** the guard's schedule is checked over a window of at least 6 hours in M9, and its
+  observed cadence is recorded in Surprises & Discoveries. If it still never fires:
+  - the watchdog remains the primary cost safety (30 minutes without a successful
+    reconciliation, or 24 hours of uptime);
+  - the guard's wake rule is recorded as effectively dispatch-only;
+  - `docs/pool.md` gains one line on dispatching the guard by hand.
+
+  No second scheduling mechanism is added.
+  - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
