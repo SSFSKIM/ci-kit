@@ -2351,12 +2351,21 @@ euros, jobs, and the projected month at the current rate.
 - **Observation (guard schedule, window 03:49:48–09:50Z on 2026-10-16):** `pool-guard.yml`'s
   `*/10` schedule fired once, at 07:29:36Z, where 36 runs were expected. The workflow is active,
   the repo is public with Actions on, and dispatch works. The GitHub schedule is not a backstop to
-  rely on, so the guard also runs from the mini (Decision Log).
+  rely on, see the Decision Log for what replaces it.
 - **Observation (M10, 2026-10-16):** the human uploaded the App key for GCE to Secret Manager,
   because agents' secret-store writes are blocked here. Only `ci-kit-launcher@` can read it. A
   double generate created a third App key (fingerprint 9NaIZCKu…); its downloaded file was
   deleted, and the M10 worker revokes the key on GitHub. The remaining two are yj//oTVK… (Hetzner)
   and qQgu9F… (GCE).
+
+- **Observation (drain proof, 2026-10-16, PR #16 on snapshot 444209129):** box 170721447
+  (cx23@hel1, created 09:05:21Z) received an ensure stamp at 09:42:23Z from sandbox run 38882260237.
+  It stayed `ready` past minute 50 while the stamp was under 15 min old, and deleted itself at
+  09:57:33Z, 15 min 10 s after the stamp.
+  - MAWS gate.yml runs were active throughout and never pinned it: 38882155146 and 38884000341
+    were in progress at the deletion, and four more completed in the window.
+  - Ledger row: `| 170721447 | … 09:05:21 | … 09:57:33 | cx23@hel1 | 1 | 0.01 | 1 | idle |`.
+  - The `draining` label lasts one 10 s tick, too short for 30 s sampling to see.
 
 ## Decision Log
 
@@ -2938,10 +2947,19 @@ euros, jobs, and the projected month at the current rate.
     (17/20) and test_session_plane "presence within a second" (8/20).
   - **Date/Author:** 2026-10-16, M3 executor, folded by plan-executor.
 
-- **Decision:** the guard runs from the mini as a LaunchAgent every 10 minutes, beside the
-  janitor, and the GitHub schedule stays in place. The schedule fired once in 6 hours, so the
-  fallback agreed earlier applies: a single run is no more of a backstop than none.
-  - **Date/Author:** 2026-10-16, plan-executor, applying CI-opt's fallback.
+- **Decision (supersedes the mini-guard entry withdrawn the same day):** the GitHub schedule
+  failed its window, firing 1 of about 36 expected runs between 03:49:48Z and 09:50Z.
+  - For the Hetzner interim, the on-box watchdog is primary, the GitHub schedule stays as best
+    effort, and `docs/pool.md` documents manual dispatch.
+  - GCE replaces the guard's role with its Cloud Scheduler reconciler.
+  - What the guard alone covers is small:
+    - a box whose kernel or network is dead while its watchdog cannot act;
+    - a pool job stranded by the ensure/drain race. At MAWS's rate, the next run's ensure creates
+      a box within about 12 minutes.
+  - **Rejected:** a guard LaunchAgent on the mini. It would put the Hetzner token and a GitHub
+    credential on a CI host, under the user that runs the CI jobs, for a backend that retires
+    within days.
+  - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
 
 ## Outcomes & Retrospective
 
