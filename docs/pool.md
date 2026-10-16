@@ -256,8 +256,11 @@ action, a `pd-balanced` boot disk of `disk_gb` that goes with it, labels `ci-kit
 `ci-kit-repo=<owner>--<repo>`, `ci-kit-cpus`, `ci-kit-provisioning=spot|standard` and `ci-kit-config=<gce.json
 commit, 8>`.
 
-Allocation ids are the launch second in base36 (7 characters) and 3 random ones, so a runner's age is read from
-its name: the runners API gives no creation time.
+Allocation ids are the launch minute in base36 (5 characters) and 5 random ones (about 60 million a minute), so a
+runner's age is read from its name, never more than the real one: the runners API gives no creation time.
+Admission reserves the largest machine a launch could land on (an `e2-highcpu-2` job reserves 4, its fallback
+`c3d-highcpu-4`'s), and no placement attempt starts once the tick's 45 s budget is spent; the job waits for the
+next tick.
 
 Cleanup, every tick:
 - a `TERMINATED` VM (its job ended and the guest powered off) is deleted;
@@ -274,7 +277,11 @@ Cleanup, every tick:
 
 Deletes are not waited for: the row goes `deleting` (with its end) just before the delete call, and the next tick
 finds the VM gone and finalizes it. A VM missing from the listing is confirmed with a direct read before its row is
-finalized, since another tick may have just created it.
+finalized, since another tick may have just created it. When the aggregated listing reports a zone unreachable,
+the tick launches nothing and does nothing that rests on something being absent (finalizing a vanished VM's row,
+unregistering a runner with no VM); when GCE's operation history cannot be read, a vanished VM's row waits rather
+than being called `orphan`. Runners are listed for every repo with a row in the ledger's window, so a repo that has
+left `gce.json` is still cleaned until its last runner is gone.
 
 **Overlap.** Two ticks can run at once (Cloud Run can briefly exceed one instance; a deploy overlaps two revisions).
 Nothing depends on it never happening: deletes and unregisters treat 404 as done, rows are keyed by allocation and
@@ -404,6 +411,13 @@ per allocation:
   2026-10-16), the address and the disk included.
 - The daily line, `**GCE pool, <day> (UTC):** …`, totals the day's VMs, seconds and dollars, projects the month at
   that rate, and names the gce.json commit the launcher ran.
+- A writer reads a row's comment again just before updating it, and drops the write if the comment is already as
+  far along; a final row is never rewritten. Issue comments have no compare-and-swap, so a write can still land
+  over a row another tick finalized in the same few milliseconds. The next tick sees the row not final, finds its
+  VM gone and finalizes it again; only that row's end reason can be lost.
+- A row left unfinished through a launcher outage of more than 26 hours falls out of the window the launcher reads
+  and stays unfinished (its VM is long gone: Compute Engine deleted it at its run limit). The failed-tick alert
+  fires long before that.
 - Hidden markers `<!-- ci-kit-gce-ledger {…} -->` and `<!-- ci-kit-gce-daily {…} -->` hold the JSON the kit reads;
   the Hetzner readers skip them.
 

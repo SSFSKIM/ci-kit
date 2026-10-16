@@ -76,18 +76,23 @@ export class Launcher {
     // listing that follows unless it is gone. (A row whose VM is missing is confirmed with a direct read anyway.)
     await this.ledger.read();
     const rows = await this.ledger.rows();
-    const [rawInstances, disks, builders] = await Promise.all([
-      this.gce.instances('labels.ci-kit=gce'),
-      this.gce.disks('labels.ci-kit=gce'),
+    const [listing, disks, builders] = await Promise.all([
+      this.gce.listInstances('labels.ci-kit=gce'),
+      this.gce.listDisks('labels.ci-kit=gce'),
       this.gce.instances('labels.ci-kit=gce-builder'),
     ]);
-    const instances = rawInstances.filter(isGce).map(viewInstance);
+    const instances = listing.items.filter(isGce).map(viewInstance);
+    // A zone the listing missed hides its VMs: nothing is admitted, and nothing is cleaned up for being absent.
+    const complete = listing.complete;
+    if (!complete) this.log('the instance listing missed a zone: no launches, and no cleanup by absence, this tick');
     const rowOf = new Map(rows.map((r) => [r.alloc, r]));
 
-    // Runners are listed for every repo something of ours belongs to: served repos, and repos being drained (a row
-    // not yet final, or an instance of a repo no longer served). A failed listing leaves the repo out of `runners`.
+    // Runners are listed for every repo something of ours belongs to: served repos, and every repo with a row in the
+    // ledger's window, final or not. A repo being drained stays listed after its last row is final, so a runner left
+    // behind (a preempted VM's, still busy until GitHub fails its job) is unregistered once it is free. A failed
+    // listing leaves the repo out of `runners`.
     const byLabel = new Map();
-    for (const repo of [...served, ...rows.filter((r) => r.state !== 'final').map((r) => r.repo)]) byLabel.set(repoLabel(repo), repo);
+    for (const repo of [...served, ...rows.map((r) => r.repo)]) byLabel.set(repoLabel(repo), repo);
     for (const i of instances) if (!byLabel.has(i.repoLabel) && rowOf.get(i.alloc)) byLabel.set(i.repoLabel, rowOf.get(i.alloc).repo);
     const runners = new Map();
     const demand = new Map();
@@ -114,7 +119,7 @@ export class Launcher {
         this.log(`jobs of ${repo}: ${err.message}`);
       }
     }
-    return { served, instances, disks, builders, rows, rowOf, byLabel, runners, demand, queued, jobs };
+    return { served, instances, complete, disks: disks.items, builders, rows, rowOf, byLabel, runners, demand, queued, jobs };
   }
 
   repoOf(seen, view) {
@@ -125,13 +130,15 @@ export class Launcher {
     return seen.runners.get(repo)?.get(name) ?? null;
   }
 
-  // The job a runner actually held: from this tick's listing, else from the repo's runs since the allocation began.
+  // The job a runner actually held: from this tick's listing, else from the repo's runs created since max_run_minutes
+  // before the allocation (a job can queue long after its run began, behind slow jobs it needs, but no job this
+  // runner took can belong to a run older than that: GitHub would have timed it out on the run's side first).
   async jobOf(seen, row) {
     const hit = seen.jobs.find((j) => j.runner_name === row.instance);
     if (hit) return hit;
     try {
-      const since = new Date(Date.parse(row.at) - 10 * 60_000).toISOString();
-      for (const run of (await this.gh.runsCreatedSince(row.repo, since)).slice(0, 30)) {
+      const since = new Date(Date.parse(row.at) - this.cfg.max_run_minutes * 60_000).toISOString();
+      for (const run of (await this.gh.runsCreatedSince(row.repo, since)).slice(0, 100)) {
         const found = (await this.gh.listJobs(row.repo, run.id)).find((j) => j.runner_name === row.instance);
         if (found) return found;
       }
@@ -225,15 +232,15 @@ export class Launcher {
     const pending = seen.rows.filter((r) => r.state !== 'final');
     const live = new Set(seen.instances.map((i) => i.alloc));
     let preempted = new Map();
-    if (pending.some((r) => r.state !== 'deleting' && !live.has(r.alloc))) preempted = await this.preemptions();
+    if (seen.complete && pending.some((r) => r.state !== 'deleting' && !live.has(r.alloc))) preempted = await this.preemptions();
     const current = pending.map((r) => seen.rowOf.get(r.alloc) ?? r);
     const actions = reviewRows({
       rows: current,
       instances: seen.instances,
       runnerKnown: (row) => seen.runners.has(row.repo),
       runnerOf: (row) => this.runnerOf(seen, row.repo, row.instance),
-      preempted: new Set(preempted.keys()),
-      now: this.now(), cfg: this.cfg,
+      preempted: preempted && new Set(preempted.keys()),
+      now: this.now(), cfg: this.cfg, complete: seen.complete,
     });
     for (const a of actions) {
       // A VM missing from the listing is confirmed gone before its row is finalized: another launcher may have
@@ -249,7 +256,7 @@ export class Launcher {
       const job = row.job ?? (row.created && row.state !== 'deleting' ? await this.jobOf(seen, row) : null);
       let deleted = this.now();
       if (row.state === 'deleting') deleted = Date.parse(row.deleted);
-      else if (a.end === 'preempted') deleted = preempted.get(row.instance) ?? deleted;
+      else if (a.end === 'preempted') deleted = preempted?.get(row.instance) ?? deleted;
       else if (a.end === 'max-run' && row.created) deleted = Math.min(deleted, Date.parse(row.created) + this.cfg.max_run_minutes * 60_000);
       const final = finalRow(row, { end: a.end, deleted, job, diskGb: this.cfg.disk_gb });
       if (await this.write(final)) {
@@ -268,21 +275,22 @@ export class Launcher {
     }
   }
 
-  // Instance name → when GCE preempted it, from its compute.instances.preempted operations.
+  // Instance name → when GCE preempted it, from its compute.instances.preempted operations; null when that history
+  // could not be read (unavailable is not the same as empty: the rows wait for a tick that can read it).
   async preemptions() {
     try {
       const ops = await this.gce.operations('operationType="compute.instances.preempted"');
       return new Map(ops.map((op) => [op.targetLink.split('/').pop(), Date.parse(op.insertTime ?? op.endTime)]));
     } catch (err) {
-      this.log(`preemptions: ${err.message}`);
-      return new Map();
+      this.log(`preemptions unreadable, vanished VMs wait for the next tick: ${err.message}`);
+      return null;
     }
   }
 
   async cleanRunners(seen, out) {
     const names = new Set(seen.instances.map((i) => i.name));
     for (const [repo, runners] of seen.runners) {
-      for (const r of orphanRunners({ runners: [...runners.values()], instanceNames: names, now: this.now() })) {
+      for (const r of orphanRunners({ runners: [...runners.values()], instanceNames: names, now: this.now(), complete: seen.complete })) {
         try {
           await this.gh.deleteRunner(repo, r.id);
           out.unregistered.push(r.name);
@@ -309,7 +317,7 @@ export class Launcher {
   // ── launches ───────────────────────────────────────────────────────────────────────────────────────────────────
 
   async launchAll(seen, out, deadline) {
-    const plan = planLaunches({ queued: seen.queued, instances: seen.instances, runners: seen.demand, now: this.now(), cfg: this.cfg });
+    const plan = planLaunches({ queued: seen.queued, instances: seen.instances, runners: seen.demand, now: this.now(), cfg: this.cfg, complete: seen.complete });
     for (const job of plan.unservable) this.log(`job ${job.id} in ${job.repo} cannot run on GCE: labels ${job.labels.join(',')}`);
     out.waiting = plan.waiting.length;
     if (plan.launches.length === 0) return;
@@ -322,7 +330,7 @@ export class Launcher {
     let stop = false;
     const worker = async () => {
       while (queue.length && !stop && this.now() < deadline) {
-        const result = await this.launch(queue.shift(), image).catch((err) => {
+        const result = await this.launch(queue.shift(), image, { seen, deadline }).catch((err) => {
           this.log(`launch: ${err.message}`);
           return {};
         });
@@ -336,9 +344,11 @@ export class Launcher {
   // One allocation (spec §3a VM lifecycle 1–2): the launching row, then the JIT config, then the walk over zones,
   // spot then on demand. A definite refusal everywhere unregisters the runner and abandons the row at once; an
   // outcome that stays unknown leaves both for the cleanup rules, so a VM that does appear later is still served.
-  async launch({ repo, cpus, job }, image) {
+  async launch({ repo, cpus, job }, image, { seen, deadline }) {
     const at = this.now();
-    const alloc = allocationId(at, this.random);
+    let alloc = allocationId(at, this.random);
+    while (seen.rowOf.has(alloc)) alloc = allocationId(at, this.random); // ids are random: never reuse one in the ledger
+    seen.rowOf.set(alloc, null);
     const name = instanceName(alloc);
     const row = launchRow({ alloc, repo, cpus, at, config: this.config });
     await this.ledger.upsert(row); // a launch with no row never happens: this throws, and nothing was created
@@ -350,11 +360,14 @@ export class Launcher {
       await this.write(finalRow(row, { end: 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb }));
       return {};
     }
+    // Each attempt waits for its operation at most until the tick's deadline (and never under 5 s); an insert whose
+    // operation outlives that is uncertain, reconciled now, and if still unsettled left for the next tick.
     const result = await walkPlacements(placements(cpus, this.cfg), {
       attempt: (p) => this.gce.insertInstance(p.zone, jobInstance({
         alloc, ...p, repo, cpus, image: image.selfLink, jit: jit.encoded_jit_config, cfg: this.cfg, config: this.config,
-      }), { deadlineMs: this.insertDeadlineMs }),
+      }), { deadlineMs: Math.max(5_000, Math.min(this.insertDeadlineMs, deadline - this.now())) }),
       reconcile: (p, err) => this.reconcileInsert(p.zone, name, err),
+      now: this.now, deadline,
     });
     const tried = result.tried.map((t) => `${t.machine}/${t.provisioning}@${t.zone}: ${t.outcome}`).join(', ');
     if (result.placement) {
@@ -402,7 +415,7 @@ export class Launcher {
     if (now % (24 * 3600_000) >= DAILY_WITHIN_MS) return;
     const yesterday = day(now - 24 * 3600_000);
     try {
-      if (await this.ledger.postDaily(dailyLine([...seen.rowOf.values()], yesterday, this.config))) this.log(`ledger: daily line for ${yesterday}`);
+      if (await this.ledger.postDaily(dailyLine([...seen.rowOf.values()].filter(Boolean), yesterday, this.config))) this.log(`ledger: daily line for ${yesterday}`);
     } catch (err) {
       this.log(`daily line: ${err.message}`);
     }

@@ -34,10 +34,11 @@ const runner = (name, { busy = false, status = 'online' } = {}) => ({ id: name.l
 const job = (id, labels, at = T0 - MIN) => ({ id, repo: SBX, status: 'queued', labels, created_at: new Date(at).toISOString(), runner_name: null });
 const A = (n) => `000000${n}abc`.slice(-10); // a fixed allocation id
 
-test('allocation ids are 10 lowercase base36 characters that carry their second, and name the instance', () => {
-  const id = allocationId(T0, () => 12345);
+test('allocation ids are 10 lowercase base36 characters: the launch minute and 5 random, read back no earlier than the launch', () => {
+  const id = allocationId(T0 + 30_000, () => 12345);
   assert.match(id, /^[0-9a-z]{10}$/);
-  assert.equal(allocationTime(id), Math.floor(T0 / 1000) * 1000);
+  // The id's time is the end of its minute: an age read from it is never more than the real age.
+  assert.equal(allocationTime(id), T0 + MIN);
   assert.notEqual(allocationId(T0, () => 1), allocationId(T0, () => 2));
   assert.equal(instanceName(id), `ci-kit-gce-${id}`);
   assert.equal(allocOf(`ci-kit-gce-${id}`), id);
@@ -367,4 +368,59 @@ test('the GCE config is validated: unknown keys and missing fields are refused, 
   assert.throws(() => parseGceConfig(JSON.stringify({ ...CFG, repos: [{ repo: 'nope' }] })), /repos\[0\]/);
   assert.throws(() => parseGceConfig(JSON.stringify({ ...CFG, machines: { 3: 'x' } })), /machines/);
   assert.throws(() => parseGceConfig('{'), /not JSON/);
+});
+
+// Fix wave 1 (high-rung review): regressions.
+test('review 8: within one minute, 500 allocations from a real random source do not collide', () => {
+  const ids = new Set(Array.from({ length: 500 }, () => allocationId(T0)));
+  assert.equal(ids.size, 500);
+  assert.equal(new Set([...ids].map((id) => id.slice(5))).size, 500, 'the random part alone is distinct');
+});
+
+test('review 1: admission reserves the largest machine the walk could land on (an e2-2 may become a c3d-4)', () => {
+  const cfg = { ...CFG, max_vcpus: 64 };
+  // 62 vCPUs in flight: a cpus-2 job fits on e2-highcpu-2 (64) but not on its fallback c3d-highcpu-4 (66).
+  const instances = Array.from({ length: 31 }, (_, k) => instance({ alloc: A(k + 10), cpus: 2, machine: 'e2-highcpu-2' }))
+    .map((i) => ({ ...i, name: `ci-kit-gce-${i.labels['ci-kit-alloc']}` }));
+  const p = plan({ queued: [job(1, L(2))], instances, cfg });
+  assert.deepEqual(p.launches, []);
+  assert.deepEqual(p.waiting.map((j) => j.id), [1]);
+  assert.equal(plan({ queued: [job(1, L(2))], instances: instances.slice(1), cfg }).launches.length, 1, '60 in flight + 4 fits');
+});
+
+test('review 5: the walk makes no new attempt once the tick\'s budget is spent', async () => {
+  let clock = 0;
+  const tried = [];
+  const result = await walkPlacements(placements(8, CFG), {
+    attempt: async (p) => {
+      tried.push(p.zone);
+      clock += 20_000;
+      throw opError(['ZONE_RESOURCE_POOL_EXHAUSTED']);
+    },
+    reconcile: async () => 'unknown',
+    now: () => clock,
+    deadline: 45_000,
+  });
+  assert.deepEqual(tried, ['us-central1-a', 'us-central1-b', 'us-central1-c']);
+  assert.equal(result.placement, null);
+  assert.equal(result.stop, 'deadline');
+});
+
+test('review 7: with the preemption history unavailable, a vanished row is left for a later tick, not called orphan', () => {
+  const a1 = allocAt(T0 - 5 * MIN, 1);
+  const a2 = allocAt(T0 - 20 * MIN, 2);
+  const out = reviewRows({
+    rows: [row(a1, 'running'), row(a2, 'deleting', { end: 'done' })],
+    instances: [], runnerKnown: () => true, runnerOf: () => null, preempted: null, now: T0, cfg: CFG,
+  });
+  assert.deepEqual(out.map((a) => [a.row.alloc, a.end]), [[a2, 'done']], 'a deleting row needs no history');
+});
+
+test('review 3: an incomplete instance listing launches nothing and finalizes nothing by absence', () => {
+  const p = planLaunches({ queued: [job(1, L(4))], instances: [], runners: new Map([[SBX, new Map()]]), now: T0, cfg: CFG, complete: false });
+  assert.deepEqual(p.launches, []);
+  const a = allocAt(T0 - 30 * MIN, 1);
+  assert.deepEqual(reviewRows({ rows: [row(a, 'running')], instances: [], complete: false, runnerKnown: () => true, runnerOf: () => null, preempted: new Set(), now: T0, cfg: CFG }), []);
+  const old = instanceName(allocAt(T0 - 6 * MIN, 1));
+  assert.deepEqual(orphanRunners({ runners: [runner(old)], instanceNames: new Set(), now: T0, complete: false }), []);
 });

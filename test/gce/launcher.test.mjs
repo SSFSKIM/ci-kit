@@ -380,3 +380,80 @@ test('the daily line is written once, early in the UTC day, from yesterday\'s fi
   await launcher.tick();
   assert.equal(w.gh.comments.filter((c) => c.body.includes('ci-kit-gce-daily')).length, 1);
 });
+
+// Fix wave 1 (high-rung review): orchestration regressions.
+test('review 3: while a zone is unreachable, nothing launches and nothing is finalized or unregistered for being absent', async () => {
+  const { w, launcher } = setup();
+  const job = w.sim.queue(SBX, L(4));
+  await launcher.tick();
+  const [name] = vms(w);
+  w.sim.boot(SBX, name);
+  w.sim.take(SBX, name, job);
+  w.sim.queue(SBX, L(4));
+  w.hooks.unreachable = w.sim.vm(name).zone.split('/').pop();
+  for (let m = 0; m < 6; m += 1) {
+    w.advance(MIN);
+    assert.deepEqual((await launcher.tick()).launched, []);
+  }
+  assert.equal(only(rows(w)).state, 'running');
+  assert.ok(!w.log.includes(`unregister ${name}`));
+  delete w.hooks.unreachable;
+  assert.equal((await launcher.tick()).launched.length, 1, 'once the listing is whole, the waiting job launches');
+});
+
+test('review 4: a draining repo whose busy VM is preempted keeps being listed until its runner is unregistered', async () => {
+  const { w, launcher, make } = setup();
+  const job = w.sim.queue(SBX, L(4));
+  await launcher.tick();
+  const [name] = vms(w);
+  w.sim.boot(SBX, name);
+  w.sim.take(SBX, name, job);
+  const removed = make({ cfg: { ...CFG, repos: [] } });
+  w.advance(MIN);
+  await removed.tick();
+  w.sim.preempt(name);
+  w.sim.runner(SBX, name).status = 'offline';
+  await removed.tick();
+  assert.equal(only(rows(w)).end, 'preempted');
+  w.advance(5 * MIN);
+  job.status = 'completed';
+  w.sim.runner(SBX, name).busy = false; // GitHub failed the job; its runner is free
+  for (let m = 0; m < 6; m += 1) {
+    await removed.tick();
+    w.advance(MIN);
+  }
+  assert.deepEqual(leftovers(w), { instances: 0, disks: 0, runners: 0 });
+});
+
+test('review 6: the job a runner held is found when its run began long before the allocation', async () => {
+  const { w, launcher } = setup();
+  const job = w.sim.queue(SBX, L(4), { name: 'ci / late' }); // its run was created now
+  w.advance(40 * MIN); // the job waited 40 min (a slow hosted job before it)
+  await launcher.tick();
+  const [name] = vms(w);
+  w.sim.boot(SBX, name);
+  w.sim.take(SBX, name, job);
+  w.sim.finish(SBX, name, job); // started and ended between two ticks: never seen running
+  w.advance(MIN);
+  await launcher.tick();
+  w.advance(MIN);
+  await launcher.tick();
+  assert.deepEqual(only(rows(w)).job, { id: job.id, name: 'ci / late' });
+});
+
+test('review 7: with GCE\'s operation history unreadable, a vanished VM\'s row waits; it is classified once history reads', async () => {
+  const { w, launcher } = setup();
+  const job = w.sim.queue(SBX, L(4));
+  await launcher.tick();
+  const [name] = vms(w);
+  w.sim.boot(SBX, name);
+  w.sim.take(SBX, name, job);
+  w.advance(MIN);
+  w.sim.preempt(name);
+  w.hooks.operationsFail = true;
+  await launcher.tick();
+  assert.equal(only(rows(w)).state, 'running');
+  delete w.hooks.operationsFail;
+  await launcher.tick();
+  assert.equal(only(rows(w)).end, 'preempted');
+});

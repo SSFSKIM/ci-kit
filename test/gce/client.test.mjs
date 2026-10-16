@@ -181,8 +181,19 @@ test('disks and operations are listed across zones; an operation is read by its 
     ['GET /zones/a/operations?filter=targetLink%20eq%20%22.*%2Finstances%2Fci-kit-gce-x%22', json(200, { items: [{ name: 'op-i', operationType: 'insert', status: 'DONE' }] })],
     ['GET /zones/a/operations/op-i', json(200, { name: 'op-i', status: 'DONE' })],
   ]);
-  assert.deepEqual((await gce.disks('labels.ci-kit=gce')).map((d) => d.name), ['d1']);
+  assert.deepEqual((await gce.listDisks('labels.ci-kit=gce')).items.map((d) => d.name), ['d1']);
   assert.deepEqual((await gce.operations('operationType="compute.instances.preempted"')).map((o) => o.name), ['op-p']);
   assert.deepEqual((await gce.zoneOperations('a', 'targetLink eq ".*/instances/ci-kit-gce-x"')).map((o) => o.name), ['op-i']);
   assert.equal((await gce.operation(`${BASE}/zones/a/operations/op-i`)).status, 'DONE');
+});
+
+test('review 3: an aggregated listing that could not reach a zone says it is not complete', async () => {
+  const { gce } = gceWith([
+    ['GET /aggregated/instances?filter=labels.ci-kit%3Dgce', json(200, { items: { 'zones/a': { instances: [{ name: 'x' }] }, 'zones/b': { warning: { code: 'UNREACHABLE', message: 'zone b' } } }, unreachables: ['zones/b'] })],
+    ['GET /aggregated/disks?filter=labels.ci-kit%3Dgce', json(200, { items: { 'zones/a': { disks: [{ name: 'd' }] } } })],
+    ['GET /aggregated/operations', json(200, { items: {}, unreachables: ['zones/c'] })],
+  ]);
+  assert.deepEqual(await gce.listInstances('labels.ci-kit=gce'), { items: [{ name: 'x' }], complete: false });
+  assert.deepEqual(await gce.listDisks('labels.ci-kit=gce'), { items: [{ name: 'd' }], complete: true });
+  await assert.rejects(gce.operations('x'), /unreachable/, 'a partial operation history is unavailable, not empty');
 });

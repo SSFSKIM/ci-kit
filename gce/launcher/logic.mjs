@@ -11,13 +11,15 @@ export const OVERAGE_GRACE_MS = 5 * MIN; // past max_run_minutes, which Compute 
 export const DISK_ORPHAN_MS = 10 * MIN; // a disk is attached as its instance is created; give that time
 const DONE_STATUSES = new Set(['TERMINATED']);
 
-// Allocation ids: 10 lowercase base36 characters, the launch second (7) then 3 random. The id names the VM and its
-// runner, and its age is readable from the id alone: the runners API gives no creation time.
+// Allocation ids: 10 lowercase base36 characters, the launch minute (5; good until 2084) then 5 random (36^5, about
+// 60 million a minute). The id names the VM and its runner, and its age is readable from the id alone: the runners
+// API gives no creation time, and a ledger lookup would race a concurrent launcher's fresh runner. The time read
+// back is the end of the minute, so an age taken from it is never more than the real one.
 const ALLOC = /^[0-9a-z]{10}$/;
 export function allocationId(nowMs, random = () => randomBytes(4).readUInt32BE(0)) {
-  return Math.floor(nowMs / 1000).toString(36).padStart(7, '0') + (random() % 36 ** 3).toString(36).padStart(3, '0');
+  return Math.floor(nowMs / MIN).toString(36).padStart(5, '0') + (random() % 36 ** 5).toString(36).padStart(5, '0');
 }
-export const allocationTime = (alloc) => (ALLOC.test(alloc ?? '') ? parseInt(alloc.slice(0, 7), 36) * 1000 : null);
+export const allocationTime = (alloc) => (ALLOC.test(alloc ?? '') ? (parseInt(alloc.slice(0, 5), 36) + 1) * MIN : null);
 export const instanceName = (alloc) => `ci-kit-gce-${alloc}`;
 export const allocOf = (name) => /^ci-kit-gce-([0-9a-z]{10})$/.exec(name ?? '')?.[1] ?? null;
 
@@ -66,7 +68,10 @@ export const isGce = (r) => r?.labels?.['ci-kit'] === 'gce';
 // the Hetzner box), and the rest wait in GitHub's queue.
 // queued: queued pool jobs of served repos, each with `repo`. instances: viewInstance()s of every ci-kit=gce instance.
 // runners: Map repo → Map runner name → runner, for each repo whose listing succeeded; a repo without one gets nothing.
-export function planLaunches({ queued, instances, runners, now, cfg }) {
+// complete: false when the instance listing missed a zone; nothing is admitted then, since the vCPUs in flight and
+// the coverage are unknown. A launch reserves the largest machine its walk could land on (machine_fallback).
+export function planLaunches({ queued, instances, runners, now, cfg, complete = true }) {
+  if (!complete) return { launches: [], waiting: [...queued], unservable: [] };
   const idleMs = cfg.idle_runner_minutes * MIN;
   const repoByLabel = new Map([...runners.keys()].map((r) => [repoLabel(r), r]));
   const key = (repo, cpus) => `${repo.toLowerCase()}|${cpus}`;
@@ -95,7 +100,7 @@ export function planLaunches({ queued, instances, runners, now, cfg }) {
       cover.set(k, cover.get(k) - 1);
       continue;
     }
-    const need = machineCpus(cfg.machines[cpus]);
+    const need = largestMachineCpus(cpus, cfg);
     if (waiting.length || inflight + need > cfg.max_vcpus) {
       waiting.push(job);
       continue;
@@ -105,6 +110,9 @@ export function planLaunches({ queued, instances, runners, now, cfg }) {
   }
   return { launches, waiting, unservable };
 }
+
+export const largestMachineCpus = (cpus, cfg) =>
+  Math.max(...[cfg.machines[cpus], cfg.machine_fallback?.[cpus]].filter(Boolean).map(machineCpus));
 
 // The attempts for a size, in order: its machine as spot in every configured zone, then on demand in every zone, then
 // its fallback machine (machine_fallback) the same way.
@@ -128,14 +136,17 @@ export function insertOutcome(err) {
 // Walks the placements until one creates the VM. Capacity moves to the next placement; quota skips the machine's
 // remaining placements. An unknown outcome is reconciled (through the zone's operation) before anything else is
 // tried, and if it stays unknown the walk stops: two zones must never both hold this allocation's VM.
-// attempt(p) resolves once created and throws the insert's error; reconcile(p, err) resolves to an outcome.
-// Returns {placement, tried, stop: 'exhausted'|'failed'|'unknown' when no placement, quota: true if any refused it}.
-export async function walkPlacements(list, { attempt, reconcile }) {
+// attempt(p) resolves once created and throws the insert's error; reconcile(p, err) resolves to an outcome. No new
+// attempt starts at or past `deadline` (the tick's budget): the walk stops with 'deadline', having created nothing.
+// Returns {placement, tried, stop: 'exhausted'|'failed'|'unknown'|'deadline' when no placement, quota: true if any
+// refused it}.
+export async function walkPlacements(list, { attempt, reconcile, now = Date.now, deadline = Infinity }) {
   const tried = [];
   let skip = null;
   let quota = false;
   for (const p of list) {
     if (p.machine === skip) continue;
+    if (now() >= deadline) return { placement: null, tried, stop: 'deadline', quota };
     let outcome;
     try {
       await attempt(p);
@@ -229,8 +240,10 @@ export function reviewInstances({ instances, runnersOf, served, now, cfg }) {
 // happened to it (a preemption GCE recorded, the run limit, else `orphan`: gone by a hand outside the launcher); a
 // launching row with no VM and no runner 10 min after its launch never got one (`abandoned`).
 // runnerKnown(row): whether the row's repo's runners were listed; runnerOf(row): its runner, or null.
-// preempted: Set of instance names with a compute.instances.preempted operation.
-export function reviewRows({ rows, instances, runnerKnown, runnerOf, preempted, now, cfg }) {
+// preempted: Set of instance names with a compute.instances.preempted operation, or null when that history could
+// not be read: a vanished VM is then not classified this tick. complete: false when the instance listing missed a
+// zone; then no row is finalized for its VM's absence.
+export function reviewRows({ rows, instances, runnerKnown, runnerOf, preempted, now, cfg, complete = true }) {
   const byAlloc = new Map(instances.map((i) => [i.alloc, i]));
   const actions = [];
   for (const row of rows) {
@@ -240,10 +253,14 @@ export function reviewRows({ rows, instances, runnerKnown, runnerOf, preempted, 
       if (row.state === 'launching') actions.push({ row, action: 'running', instance: inst });
       continue;
     }
+    if (!complete) continue;
     const launched = allocationTime(row.alloc) ?? Date.parse(row.at);
     if (row.state === 'deleting') {
       actions.push({ row, action: 'final', end: row.end });
-    } else if (preempted.has(row.instance)) {
+      continue;
+    }
+    if (preempted === null) continue; // without the history, a vanished VM cannot be told from a preempted one
+    if (preempted.has(row.instance)) {
       actions.push({ row, action: 'final', end: 'preempted' });
     } else if (row.state === 'running') {
       actions.push({ row, action: 'final', end: now - launched >= cfg.max_run_minutes * MIN ? 'max-run' : 'orphan' });
@@ -256,7 +273,8 @@ export function reviewRows({ rows, instances, runnerKnown, runnerOf, preempted, 
 
 // Runners named ci-kit-gce-<alloc> whose instance does not exist, older than 5 min and not busy: minted, then the
 // insert never happened (a crash, or an insert whose outcome stayed unknown).
-export function orphanRunners({ runners, instanceNames, now }) {
+export function orphanRunners({ runners, instanceNames, now, complete = true }) {
+  if (!complete) return [];
   return runners.filter((r) => {
     const launched = allocationTime(allocOf(r.name));
     return launched !== null && !instanceNames.has(r.name) && !r.busy && now - launched >= RUNNER_ORPHAN_MS;

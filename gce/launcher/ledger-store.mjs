@@ -1,10 +1,17 @@
 // The GCE ledger on GitHub (spec I12): the pool ledger issue, found by title, one comment per allocation. A tick
 // reads only the comments updated in the last 26 h (a VM lives at most max_run_minutes, and the daily line needs
 // yesterday), so the read stays small however long the issue grows. Writes keep that copy current. A row never
-// moves back; two writers that each created a row for one allocation converge on the one every reader counts.
+// moves back: before an update the comment is read again and the write is dropped if the comment is already as far
+// along (a final row is never rewritten). Issue comments have no compare-and-swap, so a writer that finalizes the
+// row in the milliseconds between that read and this update can still be overwritten; the next tick that sees the
+// row not final settles it again (its VM is gone, so it is finalized anew), at the cost of that row's end reason.
+// Two writers that each created a row for one allocation converge on the one every reader counts.
 import { renderRow, parseRow, rowComments, rowsOf, moreFinal, renderDaily, dailyDays } from './ledger.mjs';
 
 export const WINDOW_MS = 26 * 3600_000;
+
+// `row` may replace `current` unless current is final or further along.
+const mayWrite = (current, row) => current !== null && current.state !== 'final' && !moreFinal(current, row);
 
 export function createGceLedger(gh, { repo, issue_title: title }, { now = Date.now } = {}) {
   let number = null;
@@ -36,9 +43,13 @@ export function createGceLedger(gh, { repo, issue_title: title }, { now = Date.n
       if (!counted) {
         const made = await gh.createComment(repo, await issue(), body);
         comments.push(made ?? { id: Number.MAX_SAFE_INTEGER, body });
-      } else if (!moreFinal(parseRow(counted.body), row) && counted.body !== body) {
-        await gh.updateComment(repo, counted.id, body);
-        counted.body = body;
+      } else if (mayWrite(parseRow(counted.body), row) && counted.body !== body) {
+        const fresh = await gh.getComment(repo, counted.id);
+        counted.body = fresh.body;
+        if (mayWrite(parseRow(fresh.body), row) && fresh.body !== body) {
+          await gh.updateComment(repo, counted.id, body);
+          counted.body = body;
+        }
       }
       if (extras.length || (!counted && dedupe)) {
         if (!counted) await read();

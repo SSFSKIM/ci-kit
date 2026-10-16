@@ -86,6 +86,12 @@ function fakeIssue({ comments = [] } = {}) {
       return state.comments.filter((c) => !since || c.updated_at >= since).map((c) => ({ ...c }));
     },
     createComment: async (_r, _n, body) => { calls.push('create'); state.comments.push({ id: id++, body, updated_at: new Date(T0).toISOString() }); },
+    getComment: async (_r, cid) => {
+      calls.push(`get ${cid}`);
+      const c = state.comments.find((x) => x.id === cid);
+      if (!c) throw Object.assign(new Error('Not Found'), { status: 404 });
+      return { ...c };
+    },
     updateComment: async (_r, cid, body) => { calls.push(`update ${cid}`); state.comments.find((c) => c.id === cid).body = body; },
     deleteComment: async (_r, cid) => { calls.push(`delete ${cid}`); state.comments = state.comments.filter((c) => c.id !== cid); },
   };
@@ -105,7 +111,7 @@ test('the store reads only the recent window, creates a launch row, and finalize
   await store.upsert(running);
   await store.upsert(running); // unchanged: no write
   await store.upsert(launching); // older: never written over the running row
-  assert.deepEqual(f.calls.filter((c) => !c.startsWith('read')), ['create', 'update 100']);
+  assert.deepEqual(f.calls.filter((c) => !c.startsWith('read')), ['create', 'get 100', 'update 100']);
   assert.equal(parseRow(f.state.comments.find((c) => c.id === 100).body).state, 'running');
 });
 
@@ -129,4 +135,25 @@ test('the daily line is posted once per day', async () => {
   await store.read();
   assert.equal(await store.postDaily(line), false);
   assert.equal(f.state.comments.length, 1);
+});
+
+test('review 2: a stale writer never moves a row back: the comment is re-read before each update, and a final row is never rewritten', async () => {
+  const f = fakeIssue();
+  const a = createGceLedger(f.gh, LEDGER, { now: () => T0 });
+  const b = createGceLedger(f.gh, LEDGER, { now: () => T0 });
+  const launching = launchRow({ alloc: 'tb0abc0001', repo: SBX, cpus: 4, at: T0, config: 'x' });
+  await a.upsert(launching);
+  await a.read();
+  await b.read();
+  const running = runningRow(launching, INST);
+  await a.upsert(running);
+  await b.upsert(running); // b's copy is current: same rank, same body after the re-read → nothing written
+  const final = finalRow(running, { end: 'done', deleted: T0 + 60_000, diskGb: 50 });
+  await a.upsert(final);
+  // b still holds the launching copy and writes running over what is now final.
+  await b.upsert({ ...running, job: { id: 5, name: 'late' } });
+  assert.equal(parseRow(f.state.comments[0].body).state, 'final');
+  // Another final over a final is refused too: the first final stands.
+  await b.upsert(finalRow(running, { end: 'orphan', deleted: T0 + 90_000, diskGb: 50 }));
+  assert.equal(parseRow(f.state.comments[0].body).end, 'done');
 });

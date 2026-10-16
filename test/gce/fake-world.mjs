@@ -34,6 +34,12 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
   const gce = {
     instances: async () => [...g.instances, ...g.foreign].map((i) => structuredClone(i)),
     disks: async () => g.disks.map((d) => structuredClone(d)),
+    // hooks.unreachable: a zone the aggregated listings cannot reach this time (its resources are missing).
+    listInstances: async () => {
+      const hidden = hooks.unreachable;
+      return { items: [...g.instances, ...g.foreign].filter((i) => !hidden || !i.zone.endsWith(hidden)).map((i) => structuredClone(i)), complete: !hidden };
+    },
+    listDisks: async () => ({ items: g.disks.filter((d) => !hooks.unreachable || !d.zone.endsWith(hooks.unreachable)).map((d) => structuredClone(d)), complete: !hooks.unreachable }),
     images: async () => g.images.map((i) => structuredClone(i)),
     instance: async (zone, name) => structuredClone(g.instances.find((i) => i.name === name && i.zone.endsWith(zone)) ?? null),
     insertInstance: async (zone, body) => {
@@ -63,7 +69,10 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
       count(`disk ${name}`);
       g.disks = g.disks.filter((d) => d.name !== name);
     },
-    operations: async () => g.preempted.map((p) => structuredClone(p)),
+    operations: async () => {
+      if (hooks.operationsFail) throw new GceError(503, 'operations listing failed');
+      return g.preempted.map((p) => structuredClone(p));
+    },
     zoneOperations: async (zone, filter) => g.ops.filter((o) => filter.includes(o.targetLink.split('/').pop()) && o.zone === zone).map((o) => structuredClone(o)),
     operation: async (link) => structuredClone(g.ops.find((o) => o.selfLink === link) ?? null),
   };
@@ -91,7 +100,7 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
     },
     runsByStatus: async (repo, status) => gh.runs.filter((r) => r.repo === repo && r.status === status).map((r) => ({ ...r })),
     listJobs: async (repo, id) => gh.jobs.filter((j) => j.run_id === id).map((j) => ({ ...j, labels: [...j.labels] })),
-    runsCreatedSince: async (repo) => gh.runs.filter((r) => r.repo === repo).map((r) => ({ ...r })),
+    runsCreatedSince: async (repo, iso) => gh.runs.filter((r) => r.repo === repo && r.created_at >= iso).map((r) => ({ ...r })),
     jitConfig: async (repo, spec) => {
       hooks.beforeJit?.(repo, spec);
       const r = { id: nextId++, name: spec.name, status: 'offline', busy: false, labels: spec.labels.map((name) => ({ name })) };
@@ -117,6 +126,11 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
       gh.comments.push(c);
       return { ...c };
     },
+    getComment: async (_repo, id) => {
+      const c = gh.comments.find((x) => x.id === id);
+      if (!c) throw httpError(404);
+      return { ...c };
+    },
     updateComment: async (_repo, id, body) => {
       const c = gh.comments.find((x) => x.id === id);
       if (!c) throw httpError(404);
@@ -134,7 +148,7 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
   let runId = 1000;
   const sim = {
     queue(repo, labels, { name = 'ci / gate' } = {}) {
-      const run = { id: runId++, repo, status: 'queued' };
+      const run = { id: runId++, repo, status: 'queued', created_at: new Date(clock).toISOString() };
       const job = { id: run.id * 10, run_id: run.id, name, status: 'queued', labels, created_at: new Date(clock).toISOString(), runner_name: null };
       gh.runs.push(run);
       gh.jobs.push(job);
