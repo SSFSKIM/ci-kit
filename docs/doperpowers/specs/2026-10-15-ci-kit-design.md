@@ -1297,6 +1297,9 @@ the one these peers already address (`@doperpowers/CI-opt`).
 - Changing server types for cost.
 - The GCP billing budget alert (§3a, Cost): it needs the billing admin. Also any quota increase
   the Quotas API does not approve on its own.
+- Writing Secret Manager (creating a secret, adding a version, granting access): agents on the
+  MacBook are refused secret-store writes by their permission classifier, so a key rotation goes
+  to the human from the start (`docs/pool.md`, GCE).
 
 These go up through the author session.
 
@@ -2399,10 +2402,9 @@ euros, jobs, and the projected month at the current rate.
   the repo is public with Actions on, and dispatch works. The GitHub schedule is not a backstop to
   rely on, see the Decision Log for what replaces it.
 - **Observation (M10, 2026-10-16):** the human uploaded the App key for GCE to Secret Manager,
-  because agents' secret-store writes are blocked here. Only `ci-kit-launcher@` can read it. A
-  double generate created a third App key (fingerprint 9NaIZCKu…); its downloaded file was
-  deleted, and the M10 worker revokes the key on GitHub. The remaining two are yj//oTVK… (Hetzner)
-  and qQgu9F… (GCE).
+  because agents' secret-store writes are blocked here. Only `ci-kit-launcher@` can read it. The
+  App holds three keys: yj//oTVK… (Hetzner), qQgu9F… (GCE), and 9NaIZCKu…, which the human
+  generated themselves and keeps; no key was revoked.
 
 - **Observation (drain proof, 2026-10-16, PR #16 on snapshot 444209129):** box 170721447
   (cx23@hel1, created 09:05:21Z) received an ensure stamp at 09:42:23Z from sandbox run 38882260237.
@@ -3038,6 +3040,13 @@ euros, jobs, and the projected month at the current rate.
   - PR #18 merges for its GCE bake. Its change to the Hetzner builder's token line stays unrun
     live.
   - **Date/Author:** 2026-10-16, the human and CI-opt, recorded by plan-executor.
+
+- **Decision:** one App key per backend (CI-opt, 2026-10-16; M10 step 2). The GCE key,
+  `SHA256:qQgu9FOJPM9maxPvDhd8nV+AyYS+tXW6+mp2RGiXvAg=`, lives only in Secret Manager
+  (`ci-kit-app-key`). The Hetzner key, `SHA256:yj//oTVKm3OJamD12RO3JYnGFdQxzGoFYRmFkD90cYU=`, is
+  in the GitHub secrets and the snapshots. Retiring Hetzner revokes the first without touching GCE.
+  The fingerprints are GitHub's, from the App's Key pairs page; `docs/pool.md` (GCE) has them too.
+  - **Date/Author:** 2026-10-16, M10 step 2 executor, at CI-opt's request.
 
 ## Outcomes & Retrospective
 
