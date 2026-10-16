@@ -897,8 +897,23 @@ does not know the other backend still behaves correctly.
 - **A repo is never in both files.** The planner's config test and the launcher both refuse a repo
   listed in both, and the launcher then serves neither.
 
-**Moving a repo between backends.** MAWS's workflow never changes. The move works only with agents
-that support it. M10 changes the Hetzner agent and re-bakes before the first move. Today's agent,
+**Moving a repo between backends.** MAWS's workflow never changes.
+
+**The preferred move: a window with the pool lane off.** This works for a repo whose owner can toggle
+its pool lane (MAWS: the `GATE_RUNNER` variable).
+1. The owner unsets the toggle. The repo's pool jobs run on GitHub-hosted runners for the window
+   (about $0.10 a MAWS gate), and nothing in its workflow changes.
+2. Wait until no job of the repo is in progress on a `ci-kit-pool-*` runner, and no box serving it
+   remains. Hetzner's box idles out, or is deleted by hand once idle; its ledger row ends `manual`.
+3. Move the repo between `pool.json` and `gce.json` on `main` in one commit.
+4. The owner sets the toggle again. The new backend serves from then on.
+
+No agent behaviour is relied on, so the window works whatever snapshot the old backend runs. MAWS's
+move to GCE uses it.
+
+**The drain protocol** below is kept for a repo whose owner cannot toggle its lane. It works only
+with agents that support it: the agent must carry the PR #17 changes, and every snapshot must be
+re-baked from a commit that includes them. Today's agent,
 once a repo is removed, stops listing that repo's runners but still lists its containers. After
 5 minutes it kills them as runner-gone, without unregistering, which would kill an in-flight job.
 
@@ -939,6 +954,10 @@ launcher's equivalents:
 **Retirement.**
 - `hetzner` stays a working fallback: ensure, the agent, the guard, the bake and the snapshots keep
   their code.
+- **Fallback caveat (2026-10-16).** The kept snapshots, 444153251 and 444209129, run the pre-#17
+  agent and the pre-#18 bake.
+  - Before Hetzner serves anything beyond the current MAWS interim, re-bake it from `main` first.
+  - A move off these snapshots uses the lane-off window, never the drain protocol.
 - Once GCE has run a week clean, CI-opt proposes retiring the Hetzner pieces to the owner:
   - the guard's schedule;
   - the snapshots;
@@ -1720,7 +1739,8 @@ pattern, parentage and age together.
 - The image family `ci-kit-runner` holds a ready image.
 - The sandbox's pool gates and MAWS's pool jobs are served by GCE: both repos are in `gce.json` and
   neither is in `pool.json`, on `main`.
-- The Hetzner pool is left as a fallback, with no box up.
+- The Hetzner pool is left as a fallback, with no box up, on its pre-#17 snapshots (§3a, the
+  fallback caveat).
 - `docs/pool.md` has a GCE section covering:
   - deploy;
   - rotating the App key in Secret Manager;
@@ -1739,7 +1759,8 @@ pattern, parentage and age together.
   - the provider-neutral split of `pool/bake/` (`warm.mjs` takes an installation token);
   - ensure's `gce.json` check, and the rule that ensure creates a box only for repos in `pool.json`;
   - the Hetzner agent: draining for unserved repos, and the `ci-kit-config` label (§3a, Moving a
-    repo between backends). Re-baked before the first move;
+    repo between backends). Built in PR #17 but not baked: Hetzner is frozen as the fallback
+    (Decision Log, 2026-10-16);
   - `pool/config/gce.json`;
   - `docs/pool.md`.
 - GCP resources, in `ssfskim-ci-kit` only.
@@ -1784,8 +1805,11 @@ pattern, parentage and age together.
   2. The bake split and a ready image.
   3. The launcher, with only the sandbox in `gce.json`.
   4. A13 on the sandbox.
-  5. MAWS's move by the §3a procedure: out of `pool.json`, drained, into `gce.json`. CI-opt tells
-     maws-fe before and after.
+  5. MAWS's move in one window with `GATE_RUNNER` unset (§3a, the preferred move). After A13
+     passes, CI-opt books the window with maws-fe. In the window:
+     - no Hetzner job is in flight, and the box is idle or deleted;
+     - MAWS leaves `pool.json` and joins `gce.json`;
+     - maws-fe sets `GATE_RUNNER=pool` again.
 - **When MAWS moves.** MAWS moves after maws-fe has flipped `GATE_RUNNER=pool` onto the Hetzner
   pool, after PR #16's drain proof. The move is then invisible to MAWS.
 - **Every GCE resource:**
@@ -2992,6 +3016,18 @@ euros, jobs, and the projected month at the current rate.
   - So does any planned step a permission refusal blocks. Executors and the workers they dispatch
     never route around a refusal with another tool.
   - **Date/Author:** 2026-10-16, the human through CI-opt, recorded by plan-executor.
+
+- **Decision (Hetzner frozen; the move by window):** the human said "you can use GCE spot
+  instance". Hetzner investment stops.
+  - The re-bake after PR #17 (run 38887946326) was cancelled. It had been blocked anyway: MAWS's
+    live load kept a pool box up, so the builder never found room under the core limit.
+  - The two existing snapshots stay as the fallback image.
+  - MAWS moves to GCE in one window with `GATE_RUNNER` unset, opened by maws-fe once A13 passes on
+    the sandbox. A hosted window costs cents and removes any reliance on the old agent's behaviour.
+    The drain protocol stays for repos whose owners cannot toggle their lane.
+  - PR #18 merges for its GCE bake. Its change to the Hetzner builder's token line stays unrun
+    live.
+  - **Date/Author:** 2026-10-16, the human and CI-opt, recorded by plan-executor.
 
 ## Outcomes & Retrospective
 
