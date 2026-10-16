@@ -95,6 +95,10 @@ rm -f "$RUNNER_DIR/ci-kit/hooks/"*
 cp "$here/hooks/job-started.sh" "$here/hooks/job-completed.sh" "$here/hooks/desktop-check.sh" "$here/hooks/sweep.mjs" \
   "$here/hooks/strays.mjs" "$here/hooks/terminate.mjs" "$RUNNER_DIR/ci-kit/hooks/"
 chmod +x "$RUNNER_DIR/ci-kit/hooks/"*.sh
+# The cursor park is compiled here; without it the hook skips the step, so a failed compile is reported, not fatal.
+if ! xcrun swiftc -O -o "$RUNNER_DIR/ci-kit/hooks/cursor-park" "$here/hooks/cursor-park.swift" 2>"$LOG_DIR/cursor-park-build.log"; then
+  say "warning: cursor-park did not compile (see $LOG_DIR/cursor-park-build.log); jobs start without the cursor park"
+fi
 cat >"$RUNNER_DIR/.env" <<EOF
 LANG=en_US.UTF-8
 ACTIONS_RUNNER_HOOK_JOB_STARTED=$RUNNER_DIR/ci-kit/hooks/job-started.sh
