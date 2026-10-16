@@ -54,11 +54,13 @@ test('the smoke verdict is the check script\'s last verdict line, or the contain
   assert.equal(smokeVerdict('ci-kit smoke: ok\n', 1), 'failed:container-exit-1'); // an ok that did not exit 0 is not trusted
 });
 
-test('the unit powers the VM off however the job ends, and starts after Docker', () => {
+test('the unit powers the VM off at once however the job ends (no orderly shutdown: the disk is discarded), and starts after Docker', () => {
   const unit = readFileSync(new URL('../../gce/vm/ci-kit-gce-job.service', import.meta.url), 'utf8');
   const unitSection = unit.slice(unit.indexOf('[Unit]'), unit.indexOf('[Service]'));
-  assert.match(unitSection, /^SuccessAction=poweroff$/m);
-  assert.match(unitSection, /^FailureAction=poweroff$/m);
+  // An orderly poweroff took about 85 s on a job VM (A13 measurement, 2026-10-16), all of it billed and all of it
+  // between the job's end and the VM's deletion.
+  assert.match(unitSection, /^SuccessAction=poweroff-immediate$/m);
+  assert.match(unitSection, /^FailureAction=poweroff-immediate$/m);
   assert.match(unitSection, /^Requires=docker\.service$/m);
   assert.match(unit, /^ExecStart=\/usr\/local\/bin\/node \/opt\/ci-kit\/gce\/vm\/job\.mjs$/m);
   assert.match(unit, /^WantedBy=multi-user\.target$/m);

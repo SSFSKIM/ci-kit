@@ -186,7 +186,8 @@ export class Launcher {
       }
     })));
     const actions = reviewInstances({ instances: seen.instances, runnersOf, reports, served, now: this.now(), cfg: this.cfg });
-    for (const a of actions) await this.retire(seen, a, out);
+    // Each retirement touches only its own VM, runner and row, so they run together: a VM waits for no other.
+    await Promise.all(actions.map((a) => this.retire(seen, a, out)));
   }
 
   // Unregister first (for an idle runner: GitHub refuses a runner that just took a job, and the VM then stays), then

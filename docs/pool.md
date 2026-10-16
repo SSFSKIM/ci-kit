@@ -373,7 +373,8 @@ gcloud compute disks list --project=ssfskim-ci-kit --filter='labels.ci-kit:*'
 **The job VM.** At boot, `ci-kit-gce-job.service` runs `gce/vm/job.mjs`: it drops the job container's TCP and UDP
 to `169.254.169.254` except port 53 (GCE's resolver lives there), runs one job container from
 `ci-kit-runner:latest` on all of the VM's vCPUs with the Hetzner container's mounts and environment and the JIT
-config from metadata `ci-kit-jit`, reports `ci-kit/job=exit:<code>`, and the unit powers the VM off. A VM with no
+config from metadata `ci-kit-jit`, reports `ci-kit/job=exit:<code>`, and the unit powers the VM off at once
+(`poweroff-immediate`: no orderly shutdown, since the disk is discarded; an orderly one took about 85 s). A VM with no
 `ci-kit-jit` and no `ci-kit-smoke` reports `ci-kit/job=failed:no-jit` and powers off. Every VM needs metadata
 `enable-guest-attributes=TRUE` for the reports.
 
