@@ -1731,6 +1731,16 @@ euros, jobs, and the projected month at the current rate.
   is ko-KR, and maws-fe pins `--lang=en-US` in its launcher. The mac lane's job-started hook gains
   a desktop precondition (see the Decision Log).
 
+- **Observation (2026-10-16 ~05:28Z):** GitHub refused hosted jobs in `ci-kit-sandbox`. The
+  annotation read: "recent account payments have failed or your spending limit needs to be
+  increased". Two runs confirm it: 38855962530 and probe 38856777128. A MAWS hosted plan job ran
+  normally at 05:32Z, so the block was not shown to be account-wide.
+  - This is a single point of failure for the pool. A private repo's plan job, which calls ensure,
+    runs on a hosted runner, so without hosted billing nothing can wake the pool for that repo.
+  - The cost section already accepts the dependency (about 1 hosted minute per run). The design is
+    unchanged unless the human stops private hosted spending. The alternative then is a second,
+    light runner instance on the mini for plan jobs.
+
 ## Decision Log
 
 - **Decision:** the verification for this work.

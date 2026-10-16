@@ -19,3 +19,4 @@ Decision Log carry the folded results; this file carries the execution mechanics
 - 2026-10-16: M5 code merged (PR #7) after three review rounds; v1 → 86069cf. Post-merge guard proofs dispatched. Janitor report headers confirmed live on both Macs (02:12Z runs).
 - 2026-10-16: M2 merged (cua#143). M3 reworked after the owner discarded codex-companion; its 20-run series is running. M7 waits for the pool.
 - 2026-10-16: M5 complete (PR #8 post-merge fixes). v1 moved. Pool handed to M7.
+- 2026-10-16 ~05:25Z: GitHub billing block on private-repo hosted jobs (spending limit / payment); escalated to CI-opt for the human. M7 pool measurement set done (run 38850160827).
