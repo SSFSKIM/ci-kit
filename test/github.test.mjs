@@ -118,3 +118,15 @@ test('stats reports the reset of the lowest open window', async () => {
   await gh.getRun('o/r', 2);
   assert.deepEqual([gh.stats().remaining, gh.stats().reset], [10, 1792112074]);
 });
+
+test('issue comments can be read from a time on, and runs from a creation time on', async () => {
+  const f = fakeFetch([
+    { status: 200, body: [{ id: 1, body: 'x' }] },
+    { status: 200, body: { total_count: 0, workflow_runs: [] } },
+  ]);
+  const gh = createGitHub('t', { fetchImpl: f.impl });
+  assert.deepEqual(await gh.issueComments('o/r', 5, { since: '2026-10-16T00:00:00Z' }), [{ id: 1, body: 'x' }]);
+  assert.deepEqual(await gh.runsCreatedSince('o/r', '2026-10-16T00:00:00Z'), []);
+  assert.equal(f.requests[0].url, 'https://api.github.com/repos/o/r/issues/5/comments?since=2026-10-16T00%3A00%3A00Z&per_page=100&page=1');
+  assert.equal(f.requests[1].url, 'https://api.github.com/repos/o/r/actions/runs?created=%3E%3D2026-10-16T00%3A00%3A00Z&per_page=100&page=1');
+});

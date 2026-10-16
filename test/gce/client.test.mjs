@@ -129,3 +129,60 @@ test('a 4xx after an insert was accepted, from its wait call or its finished ope
   ]).gce;
   await assert.rejects(fromOp.insertImage({ name: 'i' }), (e) => e.status === 400 && e.accepted === true);
 });
+
+// The launcher's calls (spec §3a The launcher): deletes it does not wait for, disks, operations, and inserts held to a
+// deadline so a tick stays inside its budget.
+test('an insert past its deadline fails as accepted and pending, carrying its operation, without waiting longer', async () => {
+  const op = { name: 'op-4', status: 'RUNNING', selfLink: `${BASE}/zones/z/operations/op-4` };
+  let clock = 0;
+  const f = fake([
+    ['POST /zones/z/instances', json(200, op)],
+    ['POST /zones/z/operations/op-4/wait', () => { clock += 30_000; return json(200, op); }],
+  ]);
+  const gce = createGce({ project: 'ssfskim-ci-kit', token: async () => 'tok', fetchImpl: f.fetchImpl, sleep: async () => {}, now: () => clock });
+  await assert.rejects(gce.insertInstance('z', { name: 'b' }, { deadlineMs: 40_000 }), (e) => {
+    assert.equal(e.accepted, true);
+    assert.equal(e.finished, false);
+    assert.equal(e.operation, op.selfLink);
+    return true;
+  });
+  assert.equal(f.calls.filter((c) => c.key.includes('/wait')).length, 2);
+});
+
+test('an operation that finished with an error is marked finished; a wait call that failed is not', async () => {
+  const op = (extra) => ({ name: 'op-5', status: 'RUNNING', selfLink: `${BASE}/zones/z/operations/op-5`, ...extra });
+  const finished = gceWith([
+    ['POST /zones/z/instances', json(200, op())],
+    ['POST /zones/z/operations/op-5/wait', json(200, op({ status: 'DONE', error: { errors: [{ code: 'ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS' }] } }))],
+  ]).gce;
+  await assert.rejects(finished.insertInstance('z', { name: 'b' }), (e) => e.finished === true && e.accepted === true);
+  const lost = gceWith([
+    ['POST /zones/z/instances', json(200, op())],
+    ['POST /zones/z/operations/op-5/wait', json(503, { error: { code: 503, message: 'backend error' } })],
+  ]).gce;
+  await assert.rejects(lost.insertInstance('z', { name: 'b' }), (e) => e.finished === false && e.accepted === true && e.status === 503);
+});
+
+test('a delete asked not to wait returns once the request is accepted', async () => {
+  const { gce, f } = gceWith([
+    ['DELETE /zones/z/instances/a', json(200, { name: 'op-6', status: 'RUNNING', selfLink: `${BASE}/zones/z/operations/op-6` })],
+    ['DELETE /zones/z/disks/d', json(200, { name: 'op-7', status: 'RUNNING', selfLink: `${BASE}/zones/z/operations/op-7` })],
+  ]);
+  await gce.deleteInstance('z', 'a', { wait: false });
+  await gce.deleteDisk('z', 'd', { wait: false });
+  await gce.deleteDisk('z', 'gone', { wait: false }); // 404: already done
+  assert.deepEqual(f.calls.map((c) => c.key), ['DELETE /zones/z/instances/a', 'DELETE /zones/z/disks/d', 'DELETE /zones/z/disks/gone']);
+});
+
+test('disks and operations are listed across zones; an operation is read by its link', async () => {
+  const { gce } = gceWith([
+    ['GET /aggregated/disks?filter=labels.ci-kit%3Dgce', json(200, { items: { 'zones/a': { disks: [{ name: 'd1' }] } } })],
+    ['GET /aggregated/operations?filter=operationType%3D%22compute.instances.preempted%22', json(200, { items: { 'zones/a': { operations: [{ name: 'op-p', targetLink: `${BASE}/zones/a/instances/ci-kit-gce-x` }] } } })],
+    ['GET /zones/a/operations?filter=targetLink%20eq%20%22.*%2Finstances%2Fci-kit-gce-x%22', json(200, { items: [{ name: 'op-i', operationType: 'insert', status: 'DONE' }] })],
+    ['GET /zones/a/operations/op-i', json(200, { name: 'op-i', status: 'DONE' })],
+  ]);
+  assert.deepEqual((await gce.disks('labels.ci-kit=gce')).map((d) => d.name), ['d1']);
+  assert.deepEqual((await gce.operations('operationType="compute.instances.preempted"')).map((o) => o.name), ['op-p']);
+  assert.deepEqual((await gce.zoneOperations('a', 'targetLink eq ".*/instances/ci-kit-gce-x"')).map((o) => o.name), ['op-i']);
+  assert.equal((await gce.operation(`${BASE}/zones/a/operations/op-i`)).status, 'DONE');
+});
