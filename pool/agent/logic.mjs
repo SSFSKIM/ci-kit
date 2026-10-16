@@ -141,6 +141,15 @@ export function watchedRuns(runs, workflows) {
   return runs.filter((r) => (r.status === 'queued' || r.status === 'in_progress') && workflows.includes(fileOf(r.path)));
 }
 
+// The queued jobs this box could ever serve: a valid size no larger than the box. The others (a cpus-16 job on a
+// smaller fallback box) wait in GitHub's queue and do not keep this box up.
+export function servable(queued, totalCores) {
+  return queued.filter((j) => {
+    const n = cpusOf(j.labels);
+    return n !== null && n <= totalCores;
+  });
+}
+
 // Idle (spec §3): no running job container, no queued pool job, no queued or in-progress watched run.
 export function isIdle({ containers, queued, watched }) {
   return !containers.some((c) => c.running) && queued.length === 0 && watched.length === 0;

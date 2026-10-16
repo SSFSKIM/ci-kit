@@ -10,6 +10,7 @@ test('the shipped pool.json is valid and serves the sandbox', () => {
   const cfg = parsePoolConfig(shipped);
   assert.deepEqual(cfg.repos, [{ repo: 'SSFSKIM/ci-kit-sandbox', workflows: ['ci.yml', 'maws-probe.yml'] }]);
   assert.deepEqual(cfg.types, ['cx53', 'cpx62']);
+  assert.deepEqual(cfg.fallback_types, ['cpx52', 'cpx42']);
   assert.equal(cfg.ledger.issue_title, 'pool ledger');
 });
 

@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   cpusOf, parseCpuset, formatCpuset, allocateCores, planStarts, reviewContainers, isIdle, watchedRuns, queuedPoolJobs,
-  lifecycleAction, billedMinute, heartbeatDue, watchdogVerdict, runnerName, nextCounter,
+  lifecycleAction, billedMinute, heartbeatDue, watchdogVerdict, runnerName, nextCounter, servable,
 } from '../../pool/agent/logic.mjs';
 
 const T0 = Date.parse('2026-10-15T12:00:00Z');
@@ -207,4 +207,14 @@ test('runner names are ci-kit-pool-<server id>-<counter>, and the counter resume
   assert.equal(nextCounter(55, { label: '3', names: ['ci-kit-pool-55-9', 'ci-kit-pool-54-20', 'ci-kit-pool-55-x', 'other'] }), 10);
   assert.equal(nextCounter(55, { label: undefined, names: [] }), 1);
   assert.equal(nextCounter(55, { label: '12', names: ['ci-kit-pool-55-4'] }), 13);
+});
+
+test('a job this box can never serve does not keep it up: idleness counts only servable queued jobs', () => {
+  // A cpus-16 job on a 12-core fallback box waits in GitHub's queue; the box drains at minute 50, and the guard's
+  // wake rule asks for a box again, full size if the core limit has eased.
+  const queued = [job(1, { labels: ['self-hosted', 'ci-kit-pool', 'cpus-16'] }), job(2, { labels: ['self-hosted', 'ci-kit-pool'] })];
+  assert.deepEqual(servable(queued, 12), []);
+  assert.equal(isIdle({ containers: [], queued: servable(queued, 12), watched: [] }), true);
+  assert.deepEqual(servable([...queued, job(3)], 12).map((j) => j.id), [3]);
+  assert.deepEqual(servable(queued, 16).map((j) => j.id), [1]);
 });

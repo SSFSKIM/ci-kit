@@ -105,11 +105,20 @@ for cost; the levers are a smaller type in `types` (cpx52 or cpx42), CX53 stock,
 
 ## Changing type or location preferences
 
-Edit `types` and `locations` in `pool/config/pool.json` and commit to `main`. Ensure reads them from the kit
+Edit `types`, `fallback_types` and `locations` in `pool/config/pool.json` and commit to `main`. Ensure reads them from the kit
 checkout at the calling workflow's version (`@v1` callers after `v1` moves); the guard reads `main`. The first
 available type in order wins, in the first location in order that offers it (availability from
 `GET /v1/server_types`). A type with fewer than 16 cores serves fewer jobs at once; a job asking for more cores
-than the box has is logged by the agent and never runs there. The box's disk must be at least the snapshot's
+than the box has is logged by the agent and never runs there.
+
+**The project's core limit.** The Hetzner project caps its shared vCPUs below 20, and other work's servers count
+against it. When a create is refused for it (`403 resource_limit_exceeded`, "shared core limit exceeded"), ensure
+does not try the same type elsewhere, since the limit is project-wide. It moves on to `fallback_types` (cpx52 at 12
+vCPU, then cpx42 at 8) and labels that box `ci-kit-fallback=core-limit`. Its agent opens an alert, and the ledger
+row shows the smaller type. Gates asking for more cores than that box has wait in GitHub's queue, and they do not
+keep it up. It drains at minute 50, and the guard's wake rule asks for a full-size box again. While a pool box is
+up, the bake's builder is refused too. The bake retries every 5 min for at most 2 h, then fails with an alert. A
+limit increase is a Hetzner support request, and that is the owner's call. The box's disk must be at least the snapshot's
 `disk_size` (40 GB from a `cx23` builder), which every type in the list meets. Changing types for cost is the
 owner's call.
 
@@ -151,6 +160,7 @@ and `ci-kit-state=booting` labels so the guard watches it, and delete it afterwa
 | A pool gate waits (`ci-gate` prints `WAIT`) for more than ~3 min | the `plan` job's Pool step (ensure's result); then `GET /v1/servers?label_selector=ci-kit=pool`; then the agent's journal |
 | ensure fails "no pool server type is available" | stock: every pair in `types` × `locations` is out; add a type or location |
 | ensure fails "no snapshot labelled ci-kit=pool-image" | run the bake |
+| ensure warns "the project's core limit refused …", or an alert names a smaller box or a refused bake | the project's shared-core limit (above); list the project's servers, and ask Hetzner for a higher limit if this recurs |
 | An alert "heartbeat stale" | the agent could not reconcile (GitHub unreachable, App key revoked, crash); the box is already deleted; check the App and the last bake |
 | A box up more than 12 h | a gate that never ends, or a watched workflow stuck in progress; cancel it, the box then idles out |
 | The guard or bake stopped running | GitHub disables scheduled workflows in a repo with no activity for 60 days; each pool boot re-enables them, or `gh workflow enable pool-guard.yml -R SSFSKIM/ci-kit` |

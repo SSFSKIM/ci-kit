@@ -1,7 +1,8 @@
 // The bake's cleanup and pruning (spec §3 Bake, "When a bake does not complete").
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { bakeLeftovers, snapshotsToPrune, builderUserData } from '../../pool/bake/plan.mjs';
+import { bakeLeftovers, snapshotsToPrune, builderUserData, createBuilder, CoreLimitError } from '../../pool/bake/plan.mjs';
+import { fakeHcloud } from './fake-hcloud.mjs';
 import { FOREIGN } from './fake-hcloud.mjs';
 
 const snap = (id, created, { status = 'available', run = '1', labels } = {}) => ({
@@ -48,4 +49,35 @@ test('warm reads the lockfile\'s resolved root versions, without peer suffixes',
   assert.equal(lockedVersion(lock, '@playwright/test'), '1.63.2');
   assert.equal(lockedVersion(lock, 'electron'), '44.4.5');
   assert.equal(lockedVersion(lock, 'vitest'), null);
+});
+
+const BTYPES = [{ name: 'cx23', locations: [{ name: 'hel1', available: true }, { name: 'fsn1', available: true }] }];
+const BUILDER = { types: ['cx23'], locations: ['hel1', 'fsn1'] };
+const clock = () => {
+  let t = Date.parse('2026-10-16T03:17:00Z');
+  return { now: () => t, sleep: async (ms) => { t += ms; } };
+};
+
+test('a builder refused for the core limit is retried every 5 min, and created once the pool box is gone', async () => {
+  const hc = fakeHcloud({ serverTypes: BTYPES, firewalls: [{ id: 401, name: 'ci-kit-pool', labels: { 'ci-kit': 'pool' } }], createErrors: ['resource_limit_exceeded', 'resource_limit_exceeded'] });
+  const c = clock();
+  const waits = [];
+  const server = await createBuilder(hc, { userData: 'x', runId: 9, builder: BUILDER, ...c, log: (m) => waits.push(m) });
+  assert.equal(server.name, 'ci-kit-builder-9');
+  // The limit is project-wide: one attempt per round, not one per location.
+  assert.deepEqual(hc.calls.filter((x) => x.startsWith('create ')), ['create cx23@hel1', 'create cx23@hel1', 'create cx23@hel1']);
+  assert.equal(c.now() - Date.parse('2026-10-16T03:17:00Z'), 10 * 60_000);
+  assert.match(waits.join('\n'), /core limit/);
+});
+
+test('a builder still refused for the core limit after 2 h fails with CoreLimitError', async () => {
+  const hc = fakeHcloud({ serverTypes: BTYPES, firewalls: [{ id: 401, name: 'ci-kit-pool', labels: { 'ci-kit': 'pool' } }], createErrors: Array(100).fill('resource_limit_exceeded') });
+  const c = clock();
+  await assert.rejects(createBuilder(hc, { userData: 'x', runId: 9, builder: BUILDER, ...c, log: () => {} }), (err) => {
+    assert.ok(err instanceof CoreLimitError);
+    assert.match(err.message, /core limit.*2 h/);
+    return true;
+  });
+  const waited = c.now() - Date.parse('2026-10-16T03:17:00Z');
+  assert.ok(waited >= 2 * 3600_000 && waited < 2 * 3600_000 + 5 * 60_000, `waited ${waited / 60_000} min`);
 });

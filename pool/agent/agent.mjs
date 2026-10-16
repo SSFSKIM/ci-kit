@@ -15,9 +15,10 @@ import { createHcloud, serverLocation, serverPriceHourly } from '../../lib/hclou
 import { parsePoolConfig } from '../lib/config.mjs';
 import { createLedgerStore } from '../lib/ledger-store.mjs';
 import { makeRow } from '../lib/ledger.mjs';
+import { createAlerts } from '../lib/alerts.mjs';
 import {
   planStarts, reviewContainers, isIdle, watchedRuns, queuedPoolJobs, lifecycleAction, billedMinute, heartbeatDue,
-  runnerName, nextCounter,
+  runnerName, nextCounter, servable,
 } from './logic.mjs';
 import { listContainers, startContainer, removeContainer, workDir } from './docker.mjs';
 
@@ -101,6 +102,22 @@ class Agent {
     log(`state ${this.labels['ci-kit-state']}; next runner ${runnerName(this.serverId, this.counter)}`);
     await this.reenableSchedules();
     await this.finalizeGoneRows();
+    await this.alertFallback(server);
+  }
+
+  // A box ensure made smaller because of the project's core limit says so in an alert (spec Decision Log).
+  async alertFallback(server) {
+    if (this.labels['ci-kit-fallback'] !== 'core-limit') return;
+    try {
+      await createAlerts(this.gh, this.cfg.ledger.repo, { log })({
+        title: `ci-kit alert: pool server ${this.serverId} is a smaller ${server.server_type.name} (core limit)`,
+        body: `The Hetzner project's core limit refused the preferred pool types, so ensure created ${server.server_type.name} ` +
+          `(${this.totalCores} cores) in ${serverLocation(server)}. Gates asking for more cores wait in GitHub's queue. ` +
+          'Raising the project limit is the owner\'s call (docs/pool.md).',
+      });
+    } catch (err) {
+      log(`alert for the fallback box: ${err.message}`);
+    }
   }
 
   // Served repos from the config, minus any the API says is public (spec §3 Public repos).
@@ -229,7 +246,8 @@ class Agent {
       }
     }
 
-    const idle = started === 0 && isIdle({ containers: live, queued: seen.queued, watched: seen.watched });
+    // A job this box can never serve (more cores than it has) waits in GitHub's queue without keeping the box up.
+    const idle = started === 0 && isIdle({ containers: live, queued: servable(seen.queued, this.totalCores), watched: seen.watched });
     const action = lifecycleAction({ state: this.labels['ci-kit-state'], idle, minute: billedMinute(this.created, now), drainMinute: this.cfg.drain_minute });
     if (action === 'drain' || action === 'undrain' || action === 'ready') {
       this.labels['ci-kit-state'] = action === 'drain' ? 'draining' : 'ready';

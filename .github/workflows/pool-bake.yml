@@ -14,7 +14,7 @@ concurrency:
 jobs:
   bake:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 180 # 2 h of waiting out the core limit, then the bake itself
     env:
       HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
     steps:

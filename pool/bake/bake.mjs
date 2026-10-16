@@ -6,8 +6,11 @@
 // Env: HCLOUD_TOKEN, CI_KIT_APP_ID, CI_KIT_APP_KEY, GITHUB_SHA (the kit commit baked), GITHUB_RUN_ID.
 import { readFile } from 'node:fs/promises';
 import { createHcloud, waitAction } from '../../lib/hcloud.mjs';
-import { candidates, poolFirewall } from '../lib/ensure.mjs';
-import { bakeLeftovers, snapshotsToPrune, builderUserData } from './plan.mjs';
+import { createGitHub } from '../../lib/github.mjs';
+import { createAppTokens } from '../../lib/github-app.mjs';
+import { parsePoolConfig } from '../lib/config.mjs';
+import { createAlerts } from '../lib/alerts.mjs';
+import { bakeLeftovers, snapshotsToPrune, builderUserData, createBuilder, CoreLimitError } from './plan.mjs';
 
 const BUILDER = { types: ['cx23', 'cpx22', 'cx33', 'cpx32'], locations: ['hel1', 'fsn1', 'nbg1'] };
 const OFF_TIMEOUT = 30 * 60_000;
@@ -21,27 +24,18 @@ const env = (name) => {
   return v;
 };
 
-async function createBuilder(hc, userData, runId) {
-  const tried = [];
-  for (const { type, location } of candidates(BUILDER, await hc.serverTypes())) {
-    tried.push(`${type}@${location}`);
-    try {
-      const { server } = await hc.createServer({
-        name: `ci-kit-builder-${runId}`,
-        server_type: type,
-        location,
-        image: 'ubuntu-24.04',
-        firewalls: [{ firewall: (await poolFirewall(hc)).id }],
-        labels: { 'ci-kit': 'builder', 'ci-kit-run': String(runId) },
-        user_data: userData,
-      });
-      log(`builder ${server.id} (${type}@${location}) created`);
-      return server;
-    } catch (err) {
-      if (err.code !== 'resource_unavailable' && err.code !== 'placement_error') throw err;
-    }
+// A bake the core limit kept from starting fails loudly: an alert issue, besides the red run.
+async function alertCoreLimit(message, runId) {
+  try {
+    const cfg = parsePoolConfig(await readFile(new URL('../config/pool.json', import.meta.url), 'utf8'));
+    const gh = createGitHub(createAppTokens({ appId: env('CI_KIT_APP_ID').trim(), pem: env('CI_KIT_APP_KEY'), owner: 'SSFSKIM' }));
+    await createAlerts(gh, cfg.ledger.repo, { log })({
+      title: 'ci-kit alert: the bake was refused by the Hetzner core limit',
+      body: `${message}. Bake run ${runId} (https://github.com/SSFSKIM/ci-kit/actions/runs/${runId}) created no builder; the previous pool snapshots stay in use. Raising the project's limit is the owner's call (docs/pool.md).`,
+    });
+  } catch (err) {
+    log(`alert not opened: ${err.message}`);
   }
-  throw new Error(`ci-kit: no builder type available: ${tried.join(', ')}`);
 }
 
 async function bake(hc) {
@@ -49,7 +43,13 @@ async function bake(hc) {
   const runId = env('GITHUB_RUN_ID');
   const template = await readFile(new URL('./builder.sh', import.meta.url), 'utf8');
   const userData = builderUserData(template, { sha, appId: env('CI_KIT_APP_ID'), appKey: env('CI_KIT_APP_KEY'), hcloudToken: env('HCLOUD_TOKEN') });
-  const builder = await createBuilder(hc, userData, runId);
+  let builder;
+  try {
+    builder = await createBuilder(hc, { userData, runId, builder: BUILDER, sleep, log });
+  } catch (err) {
+    if (err instanceof CoreLimitError) await alertCoreLimit(err.message, runId);
+    throw err;
+  }
 
   const start = Date.now();
   let s;

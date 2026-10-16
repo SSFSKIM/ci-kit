@@ -4,13 +4,15 @@ import assert from 'node:assert/strict';
 import { ensure, ensureDecision, candidates, newestImage } from '../../pool/lib/ensure.mjs';
 import { fakeHcloud, deletes } from './fake-hcloud.mjs';
 
-const CFG = { types: ['cx53', 'cpx62'], locations: ['hel1', 'fsn1', 'nbg1'] };
+const CFG = { types: ['cx53', 'cpx62'], fallback_types: ['cpx52', 'cpx42'], locations: ['hel1', 'fsn1', 'nbg1'] };
 // server_types as the API lists them (2026-10-15: cx53 available nowhere; cpx62 in fsn1, nbg1, hel1, sin).
 const loc = (name, available = true) => ({ name, available });
 const TYPES = [
   { name: 'cx53', locations: [loc('hel1', false), loc('fsn1', false), loc('nbg1', false)] },
   { name: 'cpx62', locations: [loc('fsn1'), loc('nbg1'), loc('hel1'), loc('sin')] },
   { name: 'cx23', locations: [loc('hel1')] },
+  { name: 'cpx52', locations: [loc('hel1'), loc('fsn1'), loc('nbg1')] },
+  { name: 'cpx42', locations: [loc('hel1'), loc('fsn1'), loc('nbg1')] },
 ];
 const IMAGE = { id: 301, type: 'snapshot', status: 'available', labels: { 'ci-kit': 'pool-image', 'ci-kit-commit': 'abc' }, created: '2026-10-15T20:00:00Z' };
 const FIREWALL = { id: 401, name: 'ci-kit-pool', labels: { 'ci-kit': 'pool' } };
@@ -112,4 +114,32 @@ test('a name clash with a server that is not a pool box is an error, not a race'
   const hc = fakeHcloud({ images: [IMAGE], firewalls: [FIREWALL], serverTypes: TYPES, createErrors: ['uniqueness_error'] });
   await assert.rejects(ensure(hc, CFG, opts()), /named ci-kit-pool exists without the ci-kit=pool label/);
   assert.deepEqual(deletes(hc), []);
+});
+
+test('the core limit (Hetzner: 403 resource_limit_exceeded) moves on to the fallback types, labels the box, and warns', async () => {
+  // Seen live 2026-10-15: "hcloud POST /servers: 403 resource_limit_exceeded (shared core limit exceeded)".
+  const hc = fakeHcloud({ images: [IMAGE], firewalls: [FIREWALL], serverTypes: TYPES, createErrors: ['resource_limit_exceeded'] });
+  const warnings = [];
+  assert.equal(await ensure(hc, CFG, { ...opts(), warn: (m) => warnings.push(m) }), 'created:cpx52@hel1');
+  // The limit is the project's, so the other locations of a type that is too big are not tried.
+  assert.deepEqual(hc.calls.filter((c) => c.startsWith('create')), ['create cpx62@hel1', 'create cpx52@hel1']);
+  assert.deepEqual(hc.state.servers.at(-1).labels, { 'ci-kit': 'pool', 'ci-kit-state': 'booting', 'ci-kit-fallback': 'core-limit' });
+  assert.match(warnings.join('\n'), /core limit.*cpx62.*cpx52/);
+});
+
+test('the fallback walks down: cpx52 refused for the limit too gives cpx42', async () => {
+  const hc = fakeHcloud({ images: [IMAGE], firewalls: [FIREWALL], serverTypes: TYPES, createErrors: ['resource_limit_exceeded', 'resource_limit_exceeded'] });
+  assert.equal(await ensure(hc, CFG, opts()), 'created:cpx42@hel1');
+  assert.deepEqual(hc.calls.filter((c) => c.startsWith('create')), ['create cpx62@hel1', 'create cpx52@hel1', 'create cpx42@hel1']);
+});
+
+test('every type refused for the core limit fails naming the limit', async () => {
+  const hc = fakeHcloud({ images: [IMAGE], firewalls: [FIREWALL], serverTypes: TYPES, createErrors: ['resource_limit_exceeded', 'resource_limit_exceeded', 'resource_limit_exceeded'] });
+  await assert.rejects(ensure(hc, CFG, opts()), /core limit.*cpx62, cpx52, cpx42/);
+});
+
+test('fallback types are not tried for stock: a preferred type out of stock everywhere fails as before', async () => {
+  const hc = fakeHcloud({ images: [IMAGE], firewalls: [FIREWALL], serverTypes: TYPES, createErrors: ['resource_unavailable', 'resource_unavailable', 'resource_unavailable'] });
+  await assert.rejects(ensure(hc, CFG, opts()), /no pool server type is available/);
+  assert.ok(!hc.calls.some((c) => c.includes('cpx52')));
 });

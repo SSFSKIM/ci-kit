@@ -13,8 +13,8 @@ import { makeRow, weeklySummary, rowsOf, lastSummaryAt } from './lib/ledger.mjs'
 import { guardPlan } from './lib/guard.mjs';
 import { ensure } from './lib/ensure.mjs';
 import { queuedPoolJobs } from './agent/logic.mjs';
+import { createAlerts } from './lib/alerts.mjs';
 
-const ALERT_LABEL = 'ci-kit-alert';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log(...a);
 
@@ -40,15 +40,7 @@ async function main() {
   const actions = guardPlan({ now, servers, queued, rows, summaryAt: lastSummaryAt(comments), cfg });
   log(`guard: ${servers.length} labelled servers, ${queued.length} queued pool jobs, ${rows.length} ledger rows; ${actions.length} actions`);
 
-  let openAlerts = null;
-  async function alert({ title, body }) {
-    openAlerts ??= (await gh.openIssues(alertsRepo, ALERT_LABEL)).filter((i) => !i.pull_request).map((i) => i.title);
-    if (openAlerts.includes(title)) return log(`alert already open: ${title}`);
-    await gh.ensureLabel(alertsRepo, ALERT_LABEL, 'd73a4a');
-    await gh.createIssue(alertsRepo, { title, body, labels: [ALERT_LABEL] });
-    openAlerts.push(title);
-    log(`alert opened: ${title}`);
-  }
+  const alert = createAlerts(gh, alertsRepo, { log });
 
   // Row first (deleting), then the delete, then the row finalized once the delete action has finished (I9).
   async function deletePoolServer(server, end) {
