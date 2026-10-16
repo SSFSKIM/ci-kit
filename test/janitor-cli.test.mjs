@@ -23,9 +23,12 @@ const alive = (pid) => {
   }
 };
 
-// Starts `node -e <loop> <marker> [args]` orphaned: its shell exits at once, so launchd adopts it.
+// Starts `node <home>/<marker>.mjs [args]` (a script that only waits) orphaned: its shell exits at once, so launchd
+// adopts it.
 function orphan(...args) {
-  const out = execFileSync('sh', ['-c', `"$0" -e 'setInterval(() => {}, 1e6)' "$@" >/dev/null 2>&1 & echo $!`, process.execPath, marker, ...args], { encoding: 'utf8' });
+  const script = join(home, `${marker}.mjs`);
+  writeFileSync(script, 'setInterval(() => {}, 1e6);\n');
+  const out = execFileSync('sh', ['-c', `"$0" "$@" >/dev/null 2>&1 & echo $!`, process.execPath, script, ...args], { encoding: 'utf8' });
   return Number(out.trim());
 }
 
@@ -39,7 +42,7 @@ before(() => {
   writeFileSync(
     config,
     JSON.stringify({
-      patterns: [`^\\S*\\bnode\\s.*${marker}`],
+      patterns: [`^node \\S*/${marker}\\.mjs(?= |$)`],
       exclude: ['\\s--watch(?:[=\\s]|$)'],
       min_age_hours: 0,
       vm_report_hours: 12,

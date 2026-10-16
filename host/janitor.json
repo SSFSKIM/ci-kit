@@ -1,23 +1,23 @@
 {
   "patterns": [
-    "^\\S*\\bnode(?:\\s+(?:--experimental-[\\w-]+(?:=\\S+)?|--no-experimental-[\\w-]+|--no-warnings|--no-deprecation|--disable-warning=\\S+|--enable-source-maps|--max-old-space-size=\\d+|--stack-size=\\d+|--expose-gc|--inspect(?:-brk|-wait)?(?:=\\S+)?|--import=\\S+|--require=\\S+|--loader=\\S+|--conditions=\\S+|--env-file=\\S+|--unhandled-rejections=\\S+|--trace-[\\w-]+|--test-[\\w-]+(?:=\\S+)?|--watch(?:-path=\\S+|-preserve-output)?))*\\s+--test(?=\\s|$)",
-    "^\\S*\\bnode(?:\\s+(?:--experimental-[\\w-]+(?:=\\S+)?|--no-experimental-[\\w-]+|--no-warnings|--no-deprecation|--disable-warning=\\S+|--enable-source-maps|--max-old-space-size=\\d+|--stack-size=\\d+|--expose-gc|--inspect(?:-brk|-wait)?(?:=\\S+)?|--import=\\S+|--require=\\S+|--loader=\\S+|--conditions=\\S+|--env-file=\\S+|--unhandled-rejections=\\S+|--trace-[\\w-]+|--test-[\\w-]+(?:=\\S+)?|--watch(?:-path=\\S+|-preserve-output)?))*\\s+(?!-)\\S+\\.test\\.[cm]?[jt]sx?(?=\\s|$)",
-    "^\\S*\\bnode(?:\\s+(?:--experimental-[\\w-]+(?:=\\S+)?|--no-experimental-[\\w-]+|--no-warnings|--no-deprecation|--disable-warning=\\S+|--enable-source-maps|--max-old-space-size=\\d+|--stack-size=\\d+|--expose-gc|--inspect(?:-brk|-wait)?(?:=\\S+)?|--import=\\S+|--require=\\S+|--loader=\\S+|--conditions=\\S+|--env-file=\\S+|--unhandled-rejections=\\S+|--trace-[\\w-]+|--test-[\\w-]+(?:=\\S+)?|--watch(?:-path=\\S+|-preserve-output)?))*\\s+\\S*/(?:vitest/vitest\\.mjs|\\.bin/vitest)(?=\\s|$)",
-    "^\\S*\\bnode(?:\\s+(?:--experimental-[\\w-]+(?:=\\S+)?|--no-experimental-[\\w-]+|--no-warnings|--no-deprecation|--disable-warning=\\S+|--enable-source-maps|--max-old-space-size=\\d+|--stack-size=\\d+|--expose-gc|--inspect(?:-brk|-wait)?(?:=\\S+)?|--import=\\S+|--require=\\S+|--loader=\\S+|--conditions=\\S+|--env-file=\\S+|--unhandled-rejections=\\S+|--trace-[\\w-]+|--test-[\\w-]+(?:=\\S+)?|--watch(?:-path=\\S+|-preserve-output)?))*\\s+\\S*/(?:\\.bin/playwright|@playwright/test/cli\\.js|playwright/cli\\.js)\\s+test(?=\\s|$)",
-    "^\\S*/[Ee]lectron(?:\\s+-r\\s+\\S*/playwright-core/lib/server/electron/loader\\.js)?(?:\\s+--no-sandbox)?\\s+--inspect=0\\s+--remote-debugging-port=0(?=\\s|$)",
+    "^node --test(?= |$)",
+    "^node \\S+\\.test\\.[cm]?[jt]sx?(?= |$)",
+    "^node \\S*/(?:vitest/vitest\\.mjs|\\.bin/vitest)(?= |$)",
+    "^node \\S*/(?:\\.bin/playwright|@playwright/test/cli\\.js|playwright/cli\\.js) test(?= |$)",
+    "^\\S*/[Ee]lectron(?: -r \\S*/playwright-core/lib/server/electron/loader\\.js)?(?: --no-sandbox)? --inspect=0 --remote-debugging-port=0(?=\\s|$)",
     "^(?=\\S*/[Ee]lectron(?:\\s|$)).*(?:/\\.claude/worktrees/|/\\.worktrees/|/[^/\\s]+-wt-[^/\\s]+(?:/|\\s|$))",
-    "^\\S*\\bnode(?:\\s+(?:--experimental-[\\w-]+(?:=\\S+)?|--no-experimental-[\\w-]+|--no-warnings|--no-deprecation|--disable-warning=\\S+|--enable-source-maps|--max-old-space-size=\\d+|--stack-size=\\d+|--expose-gc|--inspect(?:-brk|-wait)?(?:=\\S+)?|--import=\\S+|--require=\\S+|--loader=\\S+|--conditions=\\S+|--env-file=\\S+|--unhandled-rejections=\\S+|--trace-[\\w-]+|--test-[\\w-]+(?:=\\S+)?|--watch(?:-path=\\S+|-preserve-output)?))*\\s+(?:\\S*/)?fake-upstream-process\\.mjs(?=\\s|$)",
-    "^\\S*\\b[Pp]ython[\\d.]*(?:\\s+-[IuBEsSObdqv]+)*\\s+(?:\\S*/tests/sminos/[^/\\s]+\\.py|(?:/private)?/tmp/sm[a-z]\\.[A-Za-z0-9]{6}/[^/\\s]+\\.py)(?=\\s|$)",
-    "^\\S*\\bnode(?:\\s+(?:--experimental-[\\w-]+(?:=\\S+)?|--no-experimental-[\\w-]+|--no-warnings|--no-deprecation|--disable-warning=\\S+|--enable-source-maps|--max-old-space-size=\\d+|--stack-size=\\d+|--expose-gc|--inspect(?:-brk|-wait)?(?:=\\S+)?|--import=\\S+|--require=\\S+|--loader=\\S+|--conditions=\\S+|--env-file=\\S+|--unhandled-rejections=\\S+|--trace-[\\w-]+|--test-[\\w-]+(?:=\\S+)?|--watch(?:-path=\\S+|-preserve-output)?))*\\s+\\S*/codex-plugin-test-[^/\\s]+/\\S+",
-    "^\\S*\\bnode(?:\\s+(?:--experimental-[\\w-]+(?:=\\S+)?|--no-experimental-[\\w-]+|--no-warnings|--no-deprecation|--disable-warning=\\S+|--enable-source-maps|--max-old-space-size=\\d+|--stack-size=\\d+|--expose-gc|--inspect(?:-brk|-wait)?(?:=\\S+)?|--import=\\S+|--require=\\S+|--loader=\\S+|--conditions=\\S+|--env-file=\\S+|--unhandled-rejections=\\S+|--trace-[\\w-]+|--test-[\\w-]+(?:=\\S+)?|--watch(?:-path=\\S+|-preserve-output)?))*\\s+\\S*/(?:app-server-broker\\.mjs\\s+serve|codex-companion\\.mjs\\s+task-worker)(?=\\s).*\\s--cwd\\s+\\S*/codex-plugin-test-[^/\\s]+(?=\\s|$)"
+    "^node (?:\\S*/)?fake-upstream-process\\.mjs(?= |$)",
+    "^python (?:\\S*/tests/sminos/[^/ ]+\\.py|(?:/private)?/tmp/sm[a-z]\\.[A-Za-z0-9]{6}/[^/ ]+\\.py)(?= |$)",
+    "^node \\S*/codex-plugin-test-[^/ ]+/\\S+",
+    "^node \\S*/(?:app-server-broker\\.mjs serve|codex-companion\\.mjs task-worker) (?:.* )?--cwd \\S*/codex-plugin-test-[^/ ]+(?= |$)"
   ],
   "exclude": [
     "\\s--watch(?:[=\\s]|$)",
     "\\s-w(?:\\s|$)",
     "\\s--ui(?:[=\\s]|$)",
     "\\s(?:serve|dev|preview)(?:\\s|$)",
-    "^\\S*\\bnode(?:\\s+(?:--experimental-[\\w-]+(?:=\\S+)?|--no-experimental-[\\w-]+|--no-warnings|--no-deprecation|--disable-warning=\\S+|--enable-source-maps|--max-old-space-size=\\d+|--stack-size=\\d+|--expose-gc|--inspect(?:-brk|-wait)?(?:=\\S+)?|--import=\\S+|--require=\\S+|--loader=\\S+|--conditions=\\S+|--env-file=\\S+|--unhandled-rejections=\\S+|--trace-[\\w-]+|--test-[\\w-]+(?:=\\S+)?|--watch(?:-path=\\S+|-preserve-output)?))*\\s+\\S*/(?:vitest/vitest\\.mjs|\\.bin/vitest)(?!\\s+run(?=\\s|$))(?!.*\\s--run(?=\\s|$))",
-    "^(?=\\S*/[Ee]lectron(?:\\s|$))(?!\\S*/[Ee]lectron(?:\\s+-r\\s+\\S*/playwright-core/lib/server/electron/loader\\.js)?(?:\\s+--no-sandbox)?\\s+--inspect=0\\s+--remote-debugging-port=0(?=\\s|$))"
+    "^node \\S*/(?:vitest/vitest\\.mjs|\\.bin/vitest)(?! run(?= |$))(?!.* --run(?= |$))",
+    "^(?=\\S*/[Ee]lectron(?:\\s|$))(?!\\S*/[Ee]lectron(?: -r \\S*/playwright-core/lib/server/electron/loader\\.js)?(?: --no-sandbox)? --inspect=0 --remote-debugging-port=0(?=\\s|$))"
   ],
   "min_age_hours": 2,
   "vm_report_hours": 12,

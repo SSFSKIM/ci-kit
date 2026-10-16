@@ -23,29 +23,29 @@ reported, never killed.
 
 ### The patterns
 
-Each pattern is a JavaScript regex over the whole command line, as `ps -o command` prints it, and must be a
-non-empty string. The patterns match what a process *runs*, not what its arguments mention. A pattern names the
-interpreter (`node`, Python), then the script, which must be a test entrypoint, or node's own `--test` flag.
+The patterns judge what a process *runs*, not what its arguments mention. `host/invocation.mjs` reads that from
+the command line before any pattern sees it:
 
-Between the interpreter and the script, only options known to keep the script in its place may appear:
+- For `node` and Python, it walks the interpreter's own options against a table in the code that knows each
+  option's arity: a flag, a value inline (`--import=x`), or a value in the next token (`--import x`). The first
+  token after the options is the entrypoint. The invocation is `node [--test] <entrypoint> <arguments…>` or
+  `python <entrypoint> <arguments…>`; node's `--test` is kept wherever it sat among the options.
+- Execution modes give no invocation, so the line never matches. For node these are `-e`/`--eval`, `-p`/`--print`,
+  `-c`/`--check`, `-i`, `--run` and `-` (stdin); for Python, `-c`, `-m` and `-`. So does any option missing from
+  the table, or an inline-only option given a separate value (`--max-old-space-size 4096`). To cover a new form,
+  add the option to the table.
+- A watch option among node's own (`--watch`, `--watch-path`, `--watch-preserve-output`, `--watch-kill-signal`)
+  makes a matching process report-only.
+- Any other executable (Electron) is judged by its command line as `ps` prints it.
 
-- node: `--experimental-*`, `--no-experimental-*`, `--no-warnings`, `--no-deprecation`, `--disable-warning=`,
-  `--enable-source-maps`, `--max-old-space-size=`, `--stack-size=`, `--expose-gc`, `--inspect*`, `--import=`,
-  `--require=`, `--loader=`, `--conditions=`, `--env-file=`, `--unhandled-rejections=`, `--trace-*`, `--test-*`
-  and `--watch*` (a watcher then matches and is spared by the exclusion below);
-- Python: the bundled one-letter flags `-I -u -B -E -s -S -O -b -d -q -v`.
-
-Anything else before the script stops the match, so execution modes never qualify. These include `-e`/`--eval`,
-`-p`/`--print`, `-c`/`--check`, `-i`, `--run`, `-` for stdin, and Python's `-c`, `-m` and `-`; in those modes the
-"script" is only an argument. As a result, `node …/claude-code/cli.js --resume "… vitest run …"`,
-`node daemon.mjs --test-mode`, `node daemon.mjs --config heartbeat.test.mjs` and
-`node --eval=… /srv/heartbeat.test.mjs` never qualify. An option outside the list, or one in its separate-value
-form (`node --import tsx --test`), also stops a match, and such a process is not killed. To cover a new form,
-add the option to the list in `janitor.json`.
+Each pattern in `janitor.json` is a JavaScript regex over that invocation, and must be a non-empty string. ps joins
+argv with spaces, so an argument that contains a space reads as several tokens, which can only make a pattern
+miss. So `node …/claude-code/cli.js --resume "… vitest run …"`, `node daemon.mjs --test-mode`,
+`node --eval=… /srv/heartbeat.test.mjs` and `node --experimental-loader x.test.mjs daemon.mjs` never qualify.
 
 | Pattern targets | Example command line |
 |---|---|
-| the `node --test` runner (exactly `--test`, among node's options) | `node --test test/` |
+| the `node --test` runner (exactly `--test`, among node's options) | `node --test-reporter spec --test test/` |
 | a test file as the script, as the runner's children are | `node /x/test/eof-drain.test.mjs` |
 | vitest's entrypoint (`vitest/vitest.mjs`, `.bin/vitest`) | `node /x/node_modules/vitest/vitest.mjs run` |
 | the Playwright test runner's entrypoint, then `test` (not `@playwright/cli` or MCP) | `node /x/node_modules/.bin/playwright test` |

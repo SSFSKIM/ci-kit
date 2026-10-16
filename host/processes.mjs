@@ -2,6 +2,7 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { identityOf } from '../mac/hooks/strays.mjs';
+import { invocationOf } from './invocation.mjs';
 import { terminate as sharedTerminate } from '../mac/hooks/terminate.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -61,18 +62,21 @@ export function compileRules(config) {
   return { patterns, exclude, minAgeSeconds: hours * 3600 };
 }
 
-// A process qualifies when it is this user's, its parent is launchd, it is older than the minimum age, and its
-// command line matches a pattern. An exclusion always wins: such a process is spared (reported, left running).
+// A process qualifies when it is this user's, its parent is launchd, it is older than the minimum age, and what it
+// runs (its invocation, invocation.mjs) matches a pattern. An exclusion always wins, and so does a watch option
+// among node's own: such a process is spared (reported, left running).
 export function classify(procs, rules, { uid, selfPid }) {
   const kill = [];
   const spare = [];
   for (const p of procs) {
     if (p.uid !== uid || p.ppid !== 1 || p.pid === selfPid || !(p.age > rules.minAgeSeconds)) continue;
-    const pattern = rules.patterns.find(({ re }) => re.test(p.command));
+    const invocation = invocationOf(p.command);
+    if (!invocation) continue;
+    const pattern = rules.patterns.find(({ re }) => re.test(invocation.text));
     if (!pattern) continue;
-    const excludedBy = rules.exclude.find(({ re }) => re.test(p.command));
+    const excludedBy = invocation.watch ? `node ${invocation.watch}` : rules.exclude.find(({ re }) => re.test(invocation.text))?.source;
     const identity = identityOf(p);
-    if (excludedBy) spare.push({ ...p, identity, pattern: pattern.source, excludedBy: excludedBy.source });
+    if (excludedBy) spare.push({ ...p, identity, pattern: pattern.source, excludedBy });
     else kill.push({ ...p, identity, pattern: pattern.source });
   }
   return { kill, spare };

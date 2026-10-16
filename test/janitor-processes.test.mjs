@@ -54,6 +54,9 @@ test('one-shot test commands are killed', () => {
     `${node} --enable-source-maps --max-old-space-size=4096 /x/test/a.test.mjs`,
     `${node} --max-old-space-size=8192 /x/node_modules/vitest/vitest.mjs run`,
     'python3 -u -I /tmp/smb.Q1w2E3/fakemod.py /tmp/x.sock',
+    'python3 -X importtime /tmp/smb.Q1w2E3/fakemod.py',
+    `${node} --inspect=0 --test-reporter spec --test`,
+    `${node} -- /x/test/a.test.mjs`,
     `${node} --test --test-concurrency=1 test/`,
     `${node} --experimental-vm-modules --test "test/**/*.test.mjs"`,
     // The node --test runner's child: what is left when the runner itself dies.
@@ -85,6 +88,9 @@ test('watch, UI and server modes are reported and left running', () => {
     'node /x/node_modules/vitest/vitest.mjs run --ui',
     'node /x/node_modules/vitest/vitest.mjs -w',
     'node --test --watch test/',
+    // Watch mode turned on by any of node's watch options, not only a bare --watch.
+    'node --watch-path=/srv /srv/heartbeat.test.mjs',
+    'node --watch-path /srv /srv/heartbeat.test.mjs',
     'node --watch /x/a.test.mjs',
     'node /x/node_modules/.bin/playwright test --ui',
     'node /x/node_modules/@playwright/test/cli.js test --ui=true',
@@ -148,6 +154,19 @@ test('everything else is ignored, however it reads', () => {
     'python3 -m http.server /Users/new/Developer/GitHub/doperpowers/tests/sminos/hub_standin.py',
     'python3 - /tmp/smc.Ab3dE9/ctl.py',
     'python3 -u -c pass /tmp/smc.Ab3dE9/ctl.py',
+    // Option values are values, never the entrypoint (fix wave 3).
+    'node --experimental-loader /srv/heartbeat.test.mjs /srv/daemon.mjs',
+    'node --test-name-pattern /srv/heartbeat.test.mjs /srv/daemon.mjs',
+    'node --test-name-pattern X.test.mjs --eval=setInterval(()=>{},1e6)',
+    'node --env-file=/tmp/codex-plugin-test-ABC/env /srv/daemon.mjs',
+    'node --env-file /tmp/codex-plugin-test-ABC/env /srv/daemon.mjs',
+    'node --import /x/node_modules/vitest/vitest.mjs /srv/daemon.mjs run',
+    'node -r /x/test/fixtures/fake-upstream-process.mjs /srv/daemon.mjs',
+    'node --require=/x/node_modules/.bin/playwright /srv/daemon.mjs test',
+    'python3 -W ignore /srv/daemon.py /tmp/smc.Ab3dE9/ctl.py',
+    // An option the walk does not know, or an inline-only option given a separate value, stops it.
+    'node --frobnicate /x/test/a.test.mjs',
+    'node --max-old-space-size 4096 /x/test/a.test.mjs',
     // A vitest worker: its parent's mode is unknowable, and it is not an entrypoint.
     'node /x/node_modules/vitest/dist/workers/forks.js',
     // Electron with only a debugger port is not Playwright's launch.
