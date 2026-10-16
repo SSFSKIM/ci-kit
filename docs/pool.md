@@ -418,12 +418,17 @@ per allocation:
 - The daily line, `**GCE pool, <day> (UTC):** …`, totals the day's VMs, seconds and dollars, projects the month at
   that rate, and names the gce.json commit the launcher ran.
 - A writer reads a row's comment again just before updating it, and drops the write if the comment is already as
-  far along; a final row is never rewritten. Issue comments have no compare-and-swap, so a write can still land
-  over a row another tick finalized in the same few milliseconds. The next tick sees the row not final, finds its
-  VM gone and finalizes it again; only that row's end reason can be lost.
-- A row left unfinished through a launcher outage of more than 26 hours falls out of the window the launcher reads
-  and stays unfinished (its VM is long gone: Compute Engine deleted it at its run limit). The failed-tick alert
-  fires long before that.
+  far along; a final row is never rewritten. Issue comments have no compare-and-swap, so during an overlap of two
+  ticks a row is eventually final rather than finalized once: a stale write that lands in the milliseconds after
+  another tick finalized the row rolls it back to running, and the next tick finalizes it again, possibly with a
+  later deletion time and charge.
+- A launcher outage of more than 26 hours leaves residue (a deferred review finding). A row not yet final falls out
+  of the window the launcher reads and stays unfinished in the ledger. Its VM is not necessarily gone:
+  `maxRunDuration` deletes only a VM that is still running, and a VM whose guest powered off after its job is
+  `TERMINATED` with its timer cleared, so it and its disk stay, costing about $0.007 a day at 50 GB, until the
+  launcher is back. Its first tick deletes the stopped VM, under a new row ended `orphan` (it finds no row for it),
+  so the old row stays unfinished beside it. The failed-tick alert fires within minutes of an outage, long before
+  26 hours.
 - Hidden markers `<!-- ci-kit-gce-ledger {…} -->` and `<!-- ci-kit-gce-daily {…} -->` hold the JSON the kit reads;
   the Hetzner readers skip them.
 

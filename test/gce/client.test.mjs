@@ -197,3 +197,18 @@ test('review 3: an aggregated listing that could not reach a zone says it is not
   assert.deepEqual(await gce.listDisks('labels.ci-kit=gce'), { items: [{ name: 'd' }], complete: true });
   await assert.rejects(gce.operations('x'), /unreachable/, 'a partial operation history is unavailable, not empty');
 });
+
+test('fix wave 2: a partial-success or list-overhead warning, top-level or per scope, makes a listing incomplete; no results does not', async () => {
+  const listing = (body) => gceWith([['GET /aggregated/instances', json(200, body)], ['GET /aggregated/operations', json(200, body)]]).gce;
+  const cases = [
+    [{ items: { 'zones/a': { instances: [{ name: 'x' }] } }, warning: { code: 'PARTIAL_SUCCESS' } }, false],
+    [{ items: { 'zones/a': { instances: [{ name: 'x' }], warning: { code: 'LIST_OVERHEAD_QUOTA_EXCEED' } } } }, false],
+    [{ items: { 'zones/a': { instances: [{ name: 'x' }] }, 'zones/b': { warning: { code: 'PARTIAL_SUCCESS' } } } }, false],
+    [{ items: { 'zones/a': { instances: [{ name: 'x' }] }, 'zones/b': { warning: { code: 'NO_RESULTS_ON_PAGE' } } } }, true],
+  ];
+  for (const [body, complete] of cases) {
+    assert.equal((await listing(body).listInstances('f')).complete, complete, JSON.stringify(body));
+    if (complete) await listing(body).operations('f');
+    else await assert.rejects(listing(body).operations('f'), /unreachable|incomplete/);
+  }
+});

@@ -263,7 +263,10 @@ export function reviewRows({ rows, instances, runnerKnown, runnerOf, preempted, 
     if (preempted.has(row.instance)) {
       actions.push({ row, action: 'final', end: 'preempted' });
     } else if (row.state === 'running') {
-      actions.push({ row, action: 'final', end: now - launched >= cfg.max_run_minutes * MIN ? 'max-run' : 'orphan' });
+      // The run limit counts from the VM's recorded creation; the id's time rounds up and would call a VM deleted
+      // at its limit an orphan.
+      const created = row.created ? Date.parse(row.created) : launched;
+      actions.push({ row, action: 'final', end: now - created >= cfg.max_run_minutes * MIN ? 'max-run' : 'orphan' });
     } else if (now - launched >= ABANDON_MS && runnerKnown(row) && !runnerOf(row)) {
       actions.push({ row, action: 'final', end: 'abandoned' });
     }

@@ -2,9 +2,11 @@
 // reads only the comments updated in the last 26 h (a VM lives at most max_run_minutes, and the daily line needs
 // yesterday), so the read stays small however long the issue grows. Writes keep that copy current. A row never
 // moves back: before an update the comment is read again and the write is dropped if the comment is already as far
-// along (a final row is never rewritten). Issue comments have no compare-and-swap, so a writer that finalizes the
-// row in the milliseconds between that read and this update can still be overwritten; the next tick that sees the
-// row not final settles it again (its VM is gone, so it is finalized anew), at the cost of that row's end reason.
+// along (a final row is never rewritten). Issue comments have no compare-and-swap, so during an overlap of two
+// ticks a row is eventually final rather than finalized once: a stale writer whose update lands in the milliseconds
+// after another finalized the row rolls it back to running, and the next tick finalizes it again, possibly with a
+// later deletion time and charge. As with every overlap (spec Decision Log, 2026-10-16), correctness does not rest
+// on a single writer, and the overlap heals itself.
 // Two writers that each created a row for one allocation converge on the one every reader counts.
 import { renderRow, parseRow, rowComments, rowsOf, moreFinal, renderDaily, dailyDays } from './ledger.mjs';
 

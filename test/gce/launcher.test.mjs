@@ -457,3 +457,24 @@ test('review 7: with GCE\'s operation history unreadable, a vanished VM\'s row w
   await launcher.tick();
   assert.equal(only(rows(w)).end, 'preempted');
 });
+
+test('fix wave 2: an allocation id drawn twice is drawn again: two launches in one minute from a repeating source stay distinct', async () => {
+  const draws = [5, 5, 5, 6];
+  const { w, launcher } = setup({ random: () => draws.shift() ?? 7 });
+  w.sim.queue(SBX, L(4));
+  w.sim.queue(SBX, L(4));
+  const out = await launcher.tick();
+  assert.equal(out.launched.length, 2);
+  assert.equal(new Set(out.launched).size, 2);
+  assert.equal(rows(w).size, 2);
+});
+
+test('fix wave 2: an id already in the ledger window is never reused', async () => {
+  const { w, launcher } = setup({ random: (() => { const d = [3, 4]; return () => d.shift() ?? 8; })() });
+  const taken = allocationId(T0, () => 3);
+  w.gh.comments.push({ id: 1, body: renderRow(finalRow(launchRow({ alloc: taken, repo: SBX, cpus: 4, at: T0 - 10_000, config: COMMIT }), { end: 'abandoned', deleted: T0 - 5_000, diskGb: 50 })), updated_at: new Date(T0).toISOString() });
+  w.sim.queue(SBX, L(4));
+  const out = await launcher.tick();
+  assert.deepEqual(out.launched, [instanceName(allocationId(T0, () => 4))]);
+  assert.equal([...rows(w).get(taken)].length, 1, 'the old row is untouched');
+});

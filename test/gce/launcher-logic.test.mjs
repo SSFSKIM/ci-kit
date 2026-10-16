@@ -371,10 +371,24 @@ test('the GCE config is validated: unknown keys and missing fields are refused, 
 });
 
 // Fix wave 1 (high-rung review): regressions.
-test('review 8: within one minute, 500 allocations from a real random source do not collide', () => {
-  const ids = new Set(Array.from({ length: 500 }, () => allocationId(T0)));
-  assert.equal(ids.size, 500);
-  assert.equal(new Set([...ids].map((id) => id.slice(5))).size, 500, 'the random part alone is distinct');
+test('review 8: the random part is 5 base36 characters taken from the source, all of its range used', () => {
+  assert.equal(allocationId(T0, () => 0).slice(5), '00000');
+  assert.equal(allocationId(T0, () => 36 ** 5 - 1).slice(5), 'zzzzz');
+  assert.equal(allocationId(T0, () => 36 ** 5).slice(5), '00000', 'the source is taken modulo 36^5');
+  assert.equal(allocationId(T0, () => 46_656).slice(5), '01000');
+  assert.equal(allocationId(T0, () => 1).slice(0, 5), allocationId(T0 + 59_999, () => 1).slice(0, 5), 'one minute, one prefix');
+});
+
+test('fix wave 2: a VM deleted at its run limit is max-run by its recorded creation time, though its id rounds up', () => {
+  // Created 12:00:05 in the minute 12:00 (its id reads 12:01), deleted at 14:00:05, seen gone at 14:00:10.
+  const created = Date.parse('2026-10-16T12:00:05Z');
+  const alloc = allocationId(created, () => 9);
+  const seen = created + 120 * MIN + 5_000;
+  const out = reviewRows({
+    rows: [row(alloc, 'running', { created: new Date(created).toISOString() })],
+    instances: [], runnerKnown: () => true, runnerOf: () => null, preempted: new Set(), now: seen, cfg: CFG,
+  });
+  assert.deepEqual(out.map((a) => a.end), ['max-run']);
 });
 
 test('review 1: admission reserves the largest machine the walk could land on (an e2-2 may become a c3d-4)', () => {
