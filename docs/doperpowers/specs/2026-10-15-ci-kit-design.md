@@ -89,7 +89,10 @@ How to see it working: §Acceptance. The shortest proofs are:
     schedule is checked in M9.
 - [x] (2026-10-16 00:05Z) M6 — The mac lane on the mini. PR #4 merged; runner `ci-kit-mac-mini`
   live on MAWS; `e2e:composer` 10/10, ship. A8's macOS-only unit subset is M7's.
-- [ ] M7 — MAWS: evidence and proposals for maws-fe
+- [x] (2026-10-16 06:40Z) M7 — MAWS: evidence and proposals for maws-fe. The package is in the
+  sandbox `evidence/maws/` (191afcc), reviewed and approved for relay, and sent to CI-opt for
+  maws-fe. The kit fix (Electron cache) is PR #10. A9 waits on maws-fe adopting P1; activation
+  stays with M7's activation steps or with CI-opt after finish.
 - [x] (2026-10-16 02:20Z) M8 — Host janitor. PR #6 merged after four review rounds; the first
   dry-run would-kill lists were empty on both Macs; the janitor runs live from the main clones on
   both.
