@@ -2984,6 +2984,15 @@ euros, jobs, and the projected month at the current rate.
   - The token is required only once the repo resolves to Hetzner; gce.json is checked first.
   - **Date/Author:** 2026-10-16, task-executor, confirmed by CI-opt, recorded by plan-executor.
 
+- **Decision (v1 moves):** the human approved `v1` moves on 2026-10-16. A move uses only
+  `gh api -X PATCH repos/SSFSKIM/ci-kit/git/refs/tags/v1 -f sha=<commit> -F force=true`, and only to
+  a merged, reviewed commit on main. A scoped permission rule covers exactly that form. A
+  force-push of tags stays out, and so does any other tag or repo.
+  - If the approved form is refused, the step stops and goes to CI-opt.
+  - So does any planned step a permission refusal blocks. Executors and the workers they dispatch
+    never route around a refusal with another tool.
+  - **Date/Author:** 2026-10-16, the human through CI-opt, recorded by plan-executor.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
