@@ -25,11 +25,23 @@ reported, never killed.
 
 Each pattern is a JavaScript regex over the whole command line, as `ps -o command` prints it, and must be a
 non-empty string. The patterns match what a process *runs*, not what its arguments mention. A pattern names the
-interpreter (`node`, Python), lets only that interpreter's own options (`-x`, `--x=y`) come before the script, and
-then requires a test entrypoint as the script, or the runner's own flag in the runner's position. So
-`node …/claude-code/cli.js --resume "… vitest run …"`, `node daemon.mjs --test-mode` and
-`node daemon.mjs --config heartbeat.test.mjs` never qualify. An interpreter option that takes a separate value
-(`node --import tsx --test`) also stops a match; such a process is not killed.
+interpreter (`node`, Python), then the script, which must be a test entrypoint, or node's own `--test` flag.
+
+Between the interpreter and the script, only options known to keep the script in its place may appear:
+
+- node: `--experimental-*`, `--no-experimental-*`, `--no-warnings`, `--no-deprecation`, `--disable-warning=`,
+  `--enable-source-maps`, `--max-old-space-size=`, `--stack-size=`, `--expose-gc`, `--inspect*`, `--import=`,
+  `--require=`, `--loader=`, `--conditions=`, `--env-file=`, `--unhandled-rejections=`, `--trace-*`, `--test-*`
+  and `--watch*` (a watcher then matches and is spared by the exclusion below);
+- Python: the bundled one-letter flags `-I -u -B -E -s -S -O -b -d -q -v`.
+
+Anything else before the script stops the match, so execution modes never qualify. These include `-e`/`--eval`,
+`-p`/`--print`, `-c`/`--check`, `-i`, `--run`, `-` for stdin, and Python's `-c`, `-m` and `-`; in those modes the
+"script" is only an argument. As a result, `node …/claude-code/cli.js --resume "… vitest run …"`,
+`node daemon.mjs --test-mode`, `node daemon.mjs --config heartbeat.test.mjs` and
+`node --eval=… /srv/heartbeat.test.mjs` never qualify. An option outside the list, or one in its separate-value
+form (`node --import tsx --test`), also stops a match, and such a process is not killed. To cover a new form,
+add the option to the list in `janitor.json`.
 
 | Pattern targets | Example command line |
 |---|---|

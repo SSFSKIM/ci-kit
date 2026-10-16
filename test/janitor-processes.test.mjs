@@ -48,6 +48,12 @@ const wt = '/Users/new/Developer/GitHub/MAWS/.claude/worktrees/agent-a1b2';
 test('one-shot test commands are killed', () => {
   for (const command of [
     'node --test',
+    // Options known to keep the script position may come first.
+    `${node} --experimental-vm-modules --no-warnings --test`,
+    `${node} --import=tsx --test-reporter=spec --test test/`,
+    `${node} --enable-source-maps --max-old-space-size=4096 /x/test/a.test.mjs`,
+    `${node} --max-old-space-size=8192 /x/node_modules/vitest/vitest.mjs run`,
+    'python3 -u -I /tmp/smb.Q1w2E3/fakemod.py /tmp/x.sock',
     `${node} --test --test-concurrency=1 test/`,
     `${node} --experimental-vm-modules --test "test/**/*.test.mjs"`,
     // The node --test runner's child: what is left when the runner itself dies.
@@ -120,6 +126,28 @@ test('everything else is ignored, however it reads', () => {
     'node /srv/watch.mjs --dir /var/folders/7x/abc/T/codex-plugin-test-Qx81/state',
     'python3 /srv/daemon.py /Users/new/Developer/GitHub/doperpowers/tests/sminos/hub_standin.py',
     'python3 /srv/daemon.py --log /tmp/smc.Ab3dE9/ctl.py',
+    // Execution modes make the "script" an argument: eval, print, check, interactive, stdin, node --run, python -c/-m/-.
+    'node --eval=setInterval(()=>{},1e6) /srv/heartbeat.test.mjs',
+    'node --eval setInterval(()=>{},1e6) /srv/heartbeat.test.mjs',
+    'node -e setInterval(()=>{},1e6) /srv/heartbeat.test.mjs',
+    'node --eval=setInterval(()=>{},1e6) /x/node_modules/vitest/vitest.mjs run',
+    'node --print=1 /x/node_modules/.bin/playwright test',
+    'node --print 1 /x/node_modules/.bin/playwright test',
+    'node -p 1 /x/node_modules/.bin/playwright test',
+    'node -pe 1 /x/test/fixtures/fake-upstream-process.mjs',
+    'node -e 1 --test',
+    'node --input-type=module -e 1 /x/a.test.mjs',
+    'node --check /x/a.test.mjs',
+    'node -c /x/a.test.mjs',
+    'node -i /x/a.test.mjs',
+    'node - /x/a.test.mjs',
+    'node --run test /x/a.test.mjs',
+    'node --run=test /x/node_modules/vitest/vitest.mjs run',
+    'node --eval=1 /var/folders/7x/abc/T/codex-plugin-test-Qx81/codex app-server',
+    'python3 -c import\ time;time.sleep(1e6) /tmp/smc.Ab3dE9/ctl.py',
+    'python3 -m http.server /Users/new/Developer/GitHub/doperpowers/tests/sminos/hub_standin.py',
+    'python3 - /tmp/smc.Ab3dE9/ctl.py',
+    'python3 -u -c pass /tmp/smc.Ab3dE9/ctl.py',
     // A vitest worker: its parent's mode is unknowable, and it is not an entrypoint.
     'node /x/node_modules/vitest/dist/workers/forks.js',
     // Electron with only a debugger port is not Playwright's launch.
