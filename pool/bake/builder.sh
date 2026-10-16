@@ -15,12 +15,16 @@ label() {
   token=$(cat /etc/ci-kit/hcloud_token 2>/dev/null || true)
   id=$(curl -sf --max-time 10 http://169.254.169.254/hetzner/v1/metadata/instance-id || true)
   [ -n "$token" ] && [ -n "$id" ] || return 0
-  labels=$(curl -sf --max-time 20 -H "Authorization: Bearer $token" "https://api.hetzner.cloud/v1/servers/$id" | jq -c --arg k "$1" --arg v "$2" '.server.labels + {($k): $v}')
+  command -v jq > /dev/null || return 0
+  labels=$(curl -sf --max-time 20 -H "Authorization: Bearer $token" "https://api.hetzner.cloud/v1/servers/$id" | jq -c --arg k "$1" --arg v "$2" '.server.labels + {($k): $v}') || return 0
   curl -sf --max-time 20 -X PUT -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
     -d "{\"labels\": $labels}" "https://api.hetzner.cloud/v1/servers/$id" > /dev/null || true
 }
 finish() {
   local status=$?
+  # Nothing in here may stop the power-off: errexit would end the trap at the first failing command (a builder
+  # that fails before jq is installed cannot label itself), and the bake would wait 30 min for nothing.
+  set +e
   if [ "$status" -ne 0 ]; then
     echo "ci-kit bake: failed at step $step (exit $status)"
     label ci-kit-bake "failed-$step"

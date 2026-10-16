@@ -61,7 +61,7 @@ async function bake(hc) {
   }
   const mark = s.labels['ci-kit-bake'];
   log(`builder off after ${Math.round((Date.now() - start) / 1000)} s, marked ${mark ?? '(nothing)'}; caches warmed: ${s.labels['ci-kit-warm'] ?? 'unknown'}`);
-  if (mark !== 'ok') throw new Error(`ci-kit: the builder did not finish (${mark ?? 'no mark: it failed before its credentials were written'})`);
+  if (mark !== 'ok') throw new Error(`ci-kit: the builder did not finish (${mark ?? 'no mark: it failed before it could label itself'})`);
 
   const { image, action } = await hc.createImage(builder.id, {
     type: 'snapshot',
