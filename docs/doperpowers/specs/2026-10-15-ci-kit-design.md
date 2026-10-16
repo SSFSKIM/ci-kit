@@ -2034,8 +2034,10 @@ euros, jobs, and the projected month at the current rate.
 
 - **One file per repo.** A repo appears in at most one of `pool.json` and `gce.json` (§3a, Which
   backend serves a repo).
-- **Ensure.** When the calling repo is in `gce.json`, ensure prints `result=gce` and exits 0
-  without calling Hetzner. I7's `result` gains the value `gce`.
+- **Ensure.** It creates a Hetzner box only for a calling repo in `pool.json`.
+  - For a repo in `gce.json`, it prints `result=gce`.
+  - For a repo in neither file, it prints `result=none`.
+  - In both cases it exits 0 without calling Hetzner. I7's `result` gains `gce` and `none`.
 - **Instances.**
   - Name `ci-kit-gce-<allocation id>`, where the allocation id is 10 lowercase base36 characters.
   - Labels:
