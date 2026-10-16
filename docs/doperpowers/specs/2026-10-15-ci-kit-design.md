@@ -2043,6 +2043,24 @@ euros, jobs, and the projected month at the current rate.
     once that lands. Its report must show the 13 files' tests executed, not skipped.
   - **Date/Author:** 2026-10-16, CI-opt from maws-fe, recorded by plan-executor.
 
+- **Decision:** two codex-companion tests come out of doperpowers' CI gate until their product
+  races are fixed (M3, overridable by CI-opt).
+  - `test-resume.sh` and `test-verb-e2e.sh` went red unloaded in 2 of 7 runs, on races in
+    codex-companion's runtime under `skills/`, which M3 must not touch:
+    - verb-e2e case 9, a resume lease race (run 38833218641);
+    - phase 9 "got 0": the worker is gone just after SIGKILL (run 38843076054).
+  - They keep running in the local `run-workflow-tests.sh` list. The exclusion is commented in
+    `.github/ci-kit.yml` and recorded in TECH-DEBT. The races go to the doperpowers owner.
+  - **Rationale:** a check that goes red on its own teaches agents to ignore red, which costs more
+    than these two files' coverage.
+  - **Alternative rejected:** keep the gate whole and count those two tests as a declared exception
+    to A10. That keeps coverage, but leaves a noisy check on every PR.
+  - **Date/Author:** 2026-10-16, plan-executor.
+- **Decision:** maws-fe took the ci/ cache item itself. There is no Actions cache on the macOS
+  runner, whose disk keeps the stores. A `warm` job on master fills the Linux caches that ci/ refs
+  restore. M7's pool-vs-hosted comparisons record the MAWS sha and the cache state of each side.
+  - **Date/Author:** 2026-10-16, CI-opt from maws-fe, recorded by plan-executor.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
