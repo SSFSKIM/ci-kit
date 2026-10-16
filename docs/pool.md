@@ -263,6 +263,9 @@ Admission reserves the largest machine a launch could land on (an `e2-highcpu-2`
 next tick.
 
 Cleanup, every tick:
+- a VM whose job unit reported `ci-kit/job=exit:<code>` (or `failed:<step>`) is deleted on that tick, without
+  waiting for the guest's power-off, which takes about 85 s more. Only a VM whose runner is not busy is read, so a
+  running job is never touched;
 - a `TERMINATED` VM (its job ended and the guest powered off) is deleted;
 - an idle runner (registered, not busy, its VM older than `idle_runner_minutes`) is unregistered first and its VM
   deleted only once GitHub has let go (or answers 404); `busy` or any error keeps the VM for the next tick, since

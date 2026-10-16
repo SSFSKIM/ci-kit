@@ -478,3 +478,24 @@ test('fix wave 2: an id already in the ledger window is never reused', async () 
   assert.deepEqual(out.launched, [instanceName(allocationId(T0, () => 4))]);
   assert.equal([...rows(w).get(taken)].length, 1, 'the old row is untouched');
 });
+
+test('step 4: a VM whose job reported its end is deleted on the next tick, while the guest is still shutting down', async () => {
+  const { w, launcher } = setup();
+  const job = w.sim.queue(SBX, L(4));
+  await launcher.tick();
+  const [name] = vms(w);
+  w.sim.boot(SBX, name);
+  w.sim.take(SBX, name, job);
+  w.advance(MIN);
+  await launcher.tick();
+  assert.ok(!w.log.includes(`read ci-kit/job ${name}`), 'a busy runner\'s VM is not read');
+  w.sim.finish(SBX, name, job, { poweredOff: false });
+  w.advance(20_000);
+  await launcher.tick();
+  assert.deepEqual(vms(w), [], 'deleted before it powered off');
+  w.advance(MIN);
+  await launcher.tick();
+  const row = only(rows(w));
+  assert.deepEqual([row.state, row.end, row.job?.id], ['final', 'done', job.id]);
+  assert.deepEqual(leftovers(w), { instances: 0, disks: 0, runners: 0 });
+});

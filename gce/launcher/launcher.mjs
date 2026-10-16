@@ -12,7 +12,7 @@ import { staleBakeInstances } from '../bake/plan.mjs';
 import { servedRepos } from './config.mjs';
 import {
   allocationId, instanceName, repoLabel, viewInstance, isGce, planLaunches, placements, insertOutcome, walkPlacements,
-  jobInstance, jitRequest, newestReadyImage, reviewInstances, reviewRows, orphanRunners, orphanDisks,
+  jobInstance, jitRequest, newestReadyImage, reviewInstances, reviewRows, orphanRunners, orphanDisks, reportable,
 } from './logic.mjs';
 import { launchRow, runningRow, withJob, finalRow, dailyLine } from './ledger.mjs';
 
@@ -175,11 +175,17 @@ export class Launcher {
 
   async cleanInstances(seen, out) {
     const served = new Set(seen.served.map(repoLabel));
-    const actions = reviewInstances({
-      instances: seen.instances,
-      runnersOf: (v) => seen.runners.get(this.repoOf(seen, v)),
-      served, now: this.now(), cfg: this.cfg,
-    });
+    const runnersOf = (v) => seen.runners.get(this.repoOf(seen, v));
+    // A VM whose job has ended says so in ci-kit/job before its guest powers off; reading it saves that wait.
+    const reports = new Map(await Promise.all(reportable(seen.instances, runnersOf).map(async (v) => {
+      try {
+        return [v.name, await this.gce.guestAttribute(v.zone, v.name, 'ci-kit/job')];
+      } catch (err) {
+        if (err.status !== 404) this.log(`ci-kit/job of ${v.name}: ${err.message}`);
+        return [v.name, null];
+      }
+    })));
+    const actions = reviewInstances({ instances: seen.instances, runnersOf, reports, served, now: this.now(), cfg: this.cfg });
     for (const a of actions) await this.retire(seen, a, out);
   }
 
