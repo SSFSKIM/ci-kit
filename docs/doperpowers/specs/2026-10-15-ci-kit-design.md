@@ -1703,6 +1703,18 @@ euros, jobs, and the projected month at the current rate.
 - **Observation (M5):** the App `ci-kit-runners` (id 5337915) was created through the human's
   Chrome with the manifest flow, without escalation.
 
+- **Observation (M7, 2026-10-16):** vitest's `--changed` reruns the whole suite whenever a changed
+  file matches a force-rerun trigger: a `package.json`, a vitest or vite config, or a setup file.
+  70 of MAWS's 71 unit-bearing gate runs touched one against their base, and so did all 22 unit
+  reds. P3 as written would select the full suite every time. M7 measures scoping by the import
+  graph alone.
+- **Observation (M7):** MAWS's `unit:darwin` (maws-fe, master 7180fe78) ran 13 files and 263 tests
+  on the mini, none skipped (run 38841090087). The job took 5 min, of which 4 min 24 s was setup
+  and 15 s was tests. That is the ci/ cache-miss cost.
+- **Observation (M7):** Electron 44 has no install script, so `npm install electron` never
+  downloads it, and the pool's Electron cache was empty. The bake now warms it through
+  `install-electron`.
+
 ## Decision Log
 
 - **Decision:** the verification for this work.
