@@ -6,9 +6,9 @@ import { parsePoolConfig } from '../../pool/lib/config.mjs';
 
 const shipped = readFileSync(new URL('../../pool/config/pool.json', import.meta.url), 'utf8');
 
-test('the shipped pool.json is valid and serves MAWS (the sandbox moved to gce.json in M10 step 3)', () => {
+test('the shipped pool.json is valid and serves no repo (MAWS moved to gce.json in M10 step 5; Hetzner is the frozen fallback)', () => {
   const cfg = parsePoolConfig(shipped);
-  assert.deepEqual(cfg.repos, [{ repo: 'SSFSKIM/MAWS', workflows: ['gate.yml'] }]);
+  assert.deepEqual(cfg.repos, []);
   assert.deepEqual(cfg.types, ['cx53', 'cpx62']);
   assert.deepEqual(cfg.fallback_types, ['cpx52', 'cpx42']);
   assert.equal(cfg.ledger.issue_title, 'pool ledger');
