@@ -1769,6 +1769,21 @@ euros, jobs, and the projected month at the current rate.
 - **Observation (M7):** M7's hosted use on 2026-10-16 was about 60 billed minutes: 53 for the MAWS
   baseline and 7 for the probe's plan jobs.
 
+- **Observation (2026-10-16 06:37Z):** a second system dialog held focus on the mini, and the
+  desktop precondition worked.
+  - A SecurityAgent keychain-access dialog appeared at 06:37:22Z. PR #9's job-started check
+    failed 12 MAWS jobs fast from 06:37:41Z (runs 38860039850 and 38860081438), instead of
+    letting them run into it.
+  - **Cause.** The mini's unified log shows the ClaudeUsage menubar app's `SecItemCopyMatching`
+    was denied. It then fell back to `/usr/bin/security find-generic-password`, and securityd
+    spawned SecurityAgent. Neither MAWS nor the kit was involved.
+  - **Tooling.** On the mini, `/usr/bin/log` needs its full path, because zsh's builtin `log`
+    shadows it. The predicate `process == "launchservicesd" AND eventMessage CONTAINS "SETFRONT"`,
+    then a `processID == <pid>` follow-up, attributes a dialog in seconds.
+  - Focus falling back to Finder when an e2e app quits is expected and harmless.
+  - **Host-readiness rule:** no app that can raise a keychain or permission prompt runs in the
+    runner's GUI session.
+
 ## Decision Log
 
 - **Decision:** the verification for this work.
@@ -2189,6 +2204,21 @@ euros, jobs, and the projected month at the current rate.
   - M9's Outcomes reports MAWS's hosted minutes per day once P1 lands, to check that the budget
     holds.
   - **Date/Author:** 2026-10-16, owner via CI-opt, recorded by plan-executor.
+
+- **Decision:** the guard-schedule window runs from the schedule's re-registration (042a8ee,
+  workflow `updated_at` 03:49:48Z) and closes at 09:50Z.
+  - Before then, zero schedule runs had come since the workflow's creation at 23:39:50Z, although
+    the workflow is `active`, the repo is public with Actions enabled, and the commit author
+    resolves to SSFSKIM.
+  - **If it never fires by 09:50Z:**
+    - the watchdog becomes primary;
+    - the guard also runs from the mini as its own LaunchAgent every 10 minutes, beside the
+      janitor, because the mini is always on and the MacBook is not a CI host;
+    - the Hetzner token sits in a 0600 file under `~/.config/ci-kit/` on the mini;
+    - the GitHub schedule stays in place.
+  - **Rejected alternative:** manual dispatch only. Nobody dispatches at 3 a.m., and a box whose
+    watchdog is dead bills without limit.
+  - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
 
 ## Outcomes & Retrospective
 

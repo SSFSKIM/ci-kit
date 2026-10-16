@@ -20,3 +20,4 @@ Decision Log carry the folded results; this file carries the execution mechanics
 - 2026-10-16: M2 merged (cua#143). M3 reworked after the owner discarded codex-companion; its 20-run series is running. M7 waits for the pool.
 - 2026-10-16: M5 complete (PR #8 post-merge fixes). v1 moved. Pool handed to M7.
 - 2026-10-16 ~05:25Z: GitHub billing block on private-repo hosted jobs (spending limit / payment); escalated to CI-opt for the human. M7 pool measurement set done (run 38850160827).
+- 2026-10-16 06:52Z: whole-range review (two high slices) → 2 P2s, fixer dispatched. Guard scheduled runs since merge: 0 (window started ~02:22Z).
