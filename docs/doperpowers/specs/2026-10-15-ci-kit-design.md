@@ -3095,6 +3095,23 @@ euros, jobs, and the projected month at the current rate.
     - This parallels M3's 8× entry.
   - **Date/Author:** 2026-10-16, plan-executor.
 
+- **Decision (M10 step 3 review: what the ledger promises during an overlap):** a GCE ledger row is
+  *eventually* final, not final-once, while two reconciliations overlap.
+  - Issue comments have no compare-and-swap. The launcher re-reads a row just before it updates it
+    and never regresses a rank it can see. Even so, a writer that read before another finalised
+    can still PATCH a stale `running` body over the final row. The next tick finds the VM gone and
+    finalises the row again, possibly with a later deletion time and charge.
+  - This follows the 2026-10-16 overlap decision. Overlaps are rare (`max-instances=1`,
+    `concurrency=1`), correctness does not rest on a single writer, and the outcome heals itself.
+  - **Rejected:** append-only finalisation as a second comment. It doubles the rows per allocation
+    and complicates the summary, to remove an accounting drift of minutes.
+  - **Also deferred, to the PR's Unresolved Review Findings:**
+    - Job attribution for a workflow older than `max_run_minutes` whose job finished between ticks.
+      Only the job id is lost; billing is unaffected.
+    - A row left unresolved after a launcher outage longer than 26 h, with its stopped VM waiting
+      for the launcher. The failed-tick alert fires long before that.
+  - **Date/Author:** 2026-10-16, plan-executor.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
