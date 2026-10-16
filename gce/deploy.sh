@@ -122,10 +122,13 @@ alert() {
     g logging metrics create "$ALERT_METRIC" \
       --description='ci-kit: failed executions of the Scheduler job ci-kit-launcher-tick (spec 3a)' \
       --log-filter='resource.type="cloud_scheduler_job" AND resource.labels.job_id="ci-kit-launcher-tick" AND severity>=ERROR'
-  channel=$(g beta monitoring channels list --filter="displayName=\"ci-kit owner\"" --format='value(name)' | head -1)
+  # Only resource names are kept from gcloud's output: its first alpha or beta call may install those components and
+  # print the installer's lines to stdout.
+  channel=$(g beta monitoring channels list --filter="displayName=\"ci-kit owner\"" --format='value(name)' | grep '^projects/' | head -1 || true)
   [ -n "$channel" ] || channel=$(g beta monitoring channels create --display-name='ci-kit owner' --type=email \
-    --channel-labels="email_address=$email" --user-labels=ci-kit=alert --format='value(name)')
-  policy=$(g alpha monitoring policies list --filter='displayName="ci-kit launcher ticks failing"' --format='value(name)' | head -1)
+    --channel-labels="email_address=$email" --user-labels=ci-kit=alert --format='value(name)' | grep '^projects/' | head -1)
+  [ -n "$channel" ] || die "no notification channel"
+  policy=$(g alpha monitoring policies list --filter='displayName="ci-kit launcher ticks failing"' --format='value(name)' | grep '^projects/' | head -1 || true)
   if [ -z "$policy" ]; then
     local file
     file=$(mktemp)
