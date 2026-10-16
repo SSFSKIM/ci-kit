@@ -36,9 +36,10 @@ export const ownsBakeInstance = (instance, runId) => labelled(instance, 'gce-bui
 // bake chose (a collision, or one an operator relabelled) is not.
 export const ownsBakeImage = (image, runId) => labelled(image, 'gce-image') && image.labels['ci-kit-run'] === String(runId);
 
-// An insert the API refused outright (4xx: alreadyExists, invalid, quota) created nothing of the caller's. Anything
-// else (a timeout, a lost response, an operation that failed after it was accepted) may have, and is checked by label.
-export const refusedOutright = (err) => err?.status >= 400 && err.status < 500;
+// An insert whose request the API refused outright (4xx before acceptance: alreadyExists, invalid, quota) created
+// nothing of the caller's. Anything else (a timeout, a lost response, any failure once the insert was accepted, 4xx
+// included) may have, and is checked by label.
+export const refusedOutright = (err) => err?.status >= 400 && err.status < 500 && !err.accepted;
 
 // Builders and smoke VMs of any bake older than 2 h: a bake killed mid-run (its job's timeout) cannot clean up.
 export const staleBakeInstances = (instances, now) => instances.filter((i) => labelled(i, 'gce-builder') && now - created(i) > STALE_MS);

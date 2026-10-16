@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   reportOutcome, ownsBakeInstance, staleBakeInstances, imagesToPrune, placements, refusal, bakeRunId, bakeNames,
-  builderInstance, smokeInstance, imageBody, fillBuilderScript, machineCpus, BAKE_TIMEOUT_MS,
+  builderInstance, smokeInstance, imageBody, fillBuilderScript, machineCpus, BAKE_TIMEOUT_MS, refusedOutright,
 } from '../../gce/bake/plan.mjs';
 import { runBake } from '../../gce/bake/bake.mjs';
 import { GceError } from '../../lib/gce.mjs';
@@ -257,4 +257,18 @@ test('the cleanup deletes an image by this run\'s name only while it carries thi
   };
   await assert.rejects(bake(gce), /failed:dns/);
   assert.equal(gce.state.images.filter((i) => i.name === `ci-kit-runner-${RUN}-aaaaaaaa`).length, 1);
+});
+
+test('an image insert accepted and then failed with a 4xx (from its wait or its operation) is still cleaned up by label', async () => {
+  const gce = fakeGce({ imageInsert: 'accepted-4xx', scripts: { builder: OK_BUILDER, smoke: OK_SMOKE } });
+  await assert.rejects(bake(gce), /403/);
+  assert.ok(gce.calls.includes(`delete image ci-kit-runner-${RUN}-aaaaaaaa`));
+  assert.ok(!gce.state.images.some((i) => i.name.startsWith(`ci-kit-runner-${RUN}`)));
+});
+
+test('only a request refused before acceptance counts as an outright refusal', () => {
+  assert.equal(refusedOutright(new GceError(409, 'x', ['alreadyExists'])), true);
+  assert.equal(refusedOutright(new GceError(403, 'x', ['forbidden'], { accepted: true })), false);
+  assert.equal(refusedOutright(new GceError(400, 'x', ['INVALID'], { accepted: true })), false);
+  assert.equal(refusedOutright(new Error('timeout')), false);
 });

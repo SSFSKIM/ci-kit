@@ -47,7 +47,8 @@ export const FOREIGN = {
 // insertErrors: codes the next inserts fail with, in order ('' for success). scripts: per role ('builder', 'smoke'),
 // the states an instance created for that role goes through.
 // imageInsert: 'accepted-timeout' makes the image insert succeed on the server but fail the call, as a lost response
-// or an operation wait that times out does.
+// or an operation wait that times out does; 'accepted-4xx' fails it after acceptance with a 4xx, as a refused wait
+// call or a completed operation's httpErrorStatusCode does (lib/gce.mjs marks such errors `accepted`).
 export function fakeGce({ instances = [], images = [], insertErrors = [], scripts = {}, imageInsert } = {}) {
   const state = { instances: [...FOREIGN.instances, ...instances], images: [...FOREIGN.images, ...images] };
   const progress = new Map(); // name → { steps, at }
@@ -111,6 +112,7 @@ export function fakeGce({ instances = [], images = [], insertErrors = [], script
       if (state.images.some((i) => i.name === body.name)) throw new GceError(409, `The resource '${body.name}' already exists`, ['alreadyExists']);
       state.images.push(imageShape({ name: body.name, family: body.family, labels: { ...body.labels }, created: '2026-10-16T10:00:00.000Z' }));
       if (imageInsert === 'accepted-timeout') throw new Error('The operation was aborted due to timeout');
+      if (imageInsert === 'accepted-4xx') throw new GceError(403, 'gce POST .../operations/op-9/wait: 403 Forbidden', ['forbidden'], { accepted: true });
     },
     setImageLabels: async (name, labels) => {
       calls.push(`label image ${name} ${JSON.stringify(labels)}`);

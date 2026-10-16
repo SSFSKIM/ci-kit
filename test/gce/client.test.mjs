@@ -55,6 +55,7 @@ test('an insert waits for its zone operation and fails with the operation\'s err
   await assert.rejects(gce.insertInstance('z', { name: 'b' }), (e) => {
     assert.ok(e instanceof GceError);
     assert.deepEqual(e.codes, ['ZONE_RESOURCE_POOL_EXHAUSTED']);
+    assert.equal(e.accepted, true); // the insert itself was accepted; its operation failed
     return true;
   });
   assert.equal(waits, 2);
@@ -64,7 +65,7 @@ test('an insert waits for its zone operation and fails with the operation\'s err
 
 test('a request refused outright carries its reasons, as a quota refusal does', async () => {
   const { gce } = gceWith([['POST /zones/z/instances', json(403, { error: { code: 403, message: "Quota 'E2_CPUS' exceeded.", errors: [{ reason: 'quotaExceeded', message: 'x' }] } })]]);
-  await assert.rejects(gce.insertInstance('z', { name: 'b' }), (e) => e.status === 403 && e.codes[0] === 'quotaExceeded' && /E2_CPUS/.test(e.message));
+  await assert.rejects(gce.insertInstance('z', { name: 'b' }), (e) => e.status === 403 && e.codes[0] === 'quotaExceeded' && /E2_CPUS/.test(e.message) && !e.accepted);
 });
 
 test('a delete of something already gone is done', async () => {
@@ -113,4 +114,18 @@ test('the token comes from the metadata server on Cloud Run and from gcloud else
   });
   assert.equal(await cloud(), 'from-metadata');
   assert.deepEqual(urls, ['http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token Google']);
+});
+
+test('a 4xx after an insert was accepted, from its wait call or its finished operation, is marked accepted', async () => {
+  const accepted = (op) => json(200, { name: 'op-3', status: 'RUNNING', selfLink: `${BASE}/global/operations/op-3`, ...op });
+  const fromWait = gceWith([
+    ['POST /global/images', accepted()],
+    ['POST /global/operations/op-3/wait', json(403, { error: { code: 403, message: 'Forbidden', errors: [{ reason: 'forbidden' }] } })],
+  ]).gce;
+  await assert.rejects(fromWait.insertImage({ name: 'i' }), (e) => e.status === 403 && e.accepted === true);
+  const fromOp = gceWith([
+    ['POST /global/images', accepted()],
+    ['POST /global/operations/op-3/wait', json(200, { name: 'op-3', status: 'DONE', httpErrorStatusCode: 400, error: { errors: [{ code: 'INVALID_USAGE', message: 'x' }] }, selfLink: `${BASE}/global/operations/op-3` })],
+  ]).gce;
+  await assert.rejects(fromOp.insertImage({ name: 'i' }), (e) => e.status === 400 && e.accepted === true);
 });
