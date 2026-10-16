@@ -1,7 +1,7 @@
 // ci-gate's watch loop against recorded API shapes (the Actions REST run and jobs objects), with a scripted clock.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { gateOf, jobEvents, watchRun } from '../cli/watch.mjs';
+import { gateOf, jobEvents, pollInterval, watchRun } from '../cli/watch.mjs';
 
 const T0 = Date.parse('2026-10-15T12:00:00Z');
 const at = (s) => new Date(T0 + s * 1000).toISOString().replace('.000Z', 'Z');
@@ -23,13 +23,17 @@ function job(id, name, { status = 'completed', conclusion = 'success', created =
 const run = (status, conclusion = null) => ({ id: 7, status, conclusion, html_url: URL });
 const plan = (opts) => job(1, 'ci / plan', { completed: 10, ...opts });
 
-// A fake GitHub client that replays one snapshot per poll; the clock advances 10 s per sleep.
+// A fake GitHub client that replays one snapshot per poll; the clock advances by each sleep, which is recorded.
+// A snapshot's `remaining` is the X-RateLimit-Remaining the client saw on that poll.
 function harness(snapshots, { onFail, planError } = {}) {
   let i = 0;
   let clock = T0;
   const lines = [];
-  const calls = { fail: [] };
+  const calls = { fail: [], sleeps: [] };
   const gh = {
+    stats() {
+      return { remaining: snapshots[Math.max(0, Math.min(i - 1, snapshots.length - 1))].remaining ?? null };
+    },
     async getRun() {
       const s = snapshots[Math.min(i, snapshots.length - 1)];
       if (s.error) throw new Error(s.error);
@@ -50,8 +54,7 @@ function harness(snapshots, { onFail, planError } = {}) {
     onFail: onFail ?? (async (j, gate) => { calls.fail.push(gate); return `/tmp/ci-gate/SSFSKIM-ci-kit/7/${gate}.log`; }),
     planError: planError ?? (async () => 'ci-kit: lane "pool" is for private repos only (gate "big")'),
     now: () => clock,
-    sleep: async (ms) => { clock += ms; },
-    interval: 10_000,
+    sleep: async (ms) => { calls.sleeps.push(ms); clock += ms; },
     maxUnreadable: 3,
   };
   return { opts, lines, calls };
@@ -223,4 +226,32 @@ test('jobEvents reports each job once', () => {
   const jobs = [plan(), job(2, 'ci / unit')];
   assert.equal(jobEvents(jobs, seen, T0).length, 1);
   assert.equal(jobEvents(jobs, seen, T0).length, 0);
+});
+
+test('pollInterval: 15 s for the first 2 minutes, then 30 s; 60 s when the token runs low', () => {
+  assert.equal(pollInterval(0, null), 15_000);
+  assert.equal(pollInterval(119_999, 4000), 15_000);
+  assert.equal(pollInterval(120_000, 4000), 30_000);
+  assert.equal(pollInterval(3_600_000, 4000), 30_000);
+  assert.equal(pollInterval(0, 499), 60_000);
+  assert.equal(pollInterval(600_000, 0), 60_000);
+  assert.equal(pollInterval(0, 500), 15_000);
+});
+
+test('the loop follows the schedule: 15 s polls for 2 minutes, then 30 s', async () => {
+  const busy = { run: run('in_progress'), jobs: [plan(), job(2, 'ci / unit', { status: 'in_progress' })] };
+  const h = harness([...Array.from({ length: 11 }, () => busy), { run: run('completed', 'success'), jobs: [plan(), job(2, 'ci / unit')] }]);
+  await watchRun(h.opts);
+  assert.deepEqual(h.calls.sleeps, [...Array(8).fill(15_000), 30_000, 30_000, 30_000]);
+});
+
+test('a token below 500 stretches the poll to 60 s and prints THROTTLE once', async () => {
+  const busy = (remaining) => ({ run: run('in_progress'), jobs: [plan(), job(2, 'ci / unit', { status: 'in_progress' })], remaining });
+  const h = harness([busy(4000), busy(499), busy(450), busy(900), {
+    run: run('completed', 'success'), jobs: [plan(), job(2, 'ci / unit')], remaining: 899,
+  }]);
+  const r = await watchRun(h.opts);
+  assert.deepEqual(h.lines, ['THROTTLE remaining=499', 'PASS unit 0m41s']);
+  assert.deepEqual(h.calls.sleeps, [15_000, 60_000, 60_000, 30_000]);
+  assert.equal(r.code, 0);
 });

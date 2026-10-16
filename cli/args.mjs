@@ -8,7 +8,9 @@ Runs the repo's ci-kit gates for one commit on GitHub Actions and reports each g
   --repo OWNER/NAME  the GitHub repo; default: the one origin points at
   --label NAME       the ci ref's label; default: the branch name, else "gate"
   --keep             leave the ci/ ref on the remote
-Exit: 0 GREEN, 1 RED, 2 ERROR (infra or config).`;
+Stdout: WAIT/PASS/FAIL/SKIP/CANCEL <gate> lines as gates progress; THROTTLE remaining=<n> once if the token's REST
+budget falls below 500 (polls then slow to 60 s); last, GREEN, RED or ERROR.
+Exit: 0 GREEN, 1 RED, 2 ERROR (infra or config). CI_GATE_DEBUG=1 logs each API request on stderr.`;
 
 export class UsageError extends Error {}
 

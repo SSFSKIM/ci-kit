@@ -3,6 +3,14 @@
 import { formatDuration } from './naming.mjs';
 
 const WAIT_AFTER_MS = 2 * 60 * 1000;
+// The poll schedule (spec Decision Log, "ci-gate is a good citizen of the shared token"): every session on the human's
+// account shares one REST budget of 5,000 requests an hour, so a poller backs off as a run ages and when the budget
+// runs low.
+const FAST_MS = 15_000;
+const FAST_FOR_MS = 2 * 60 * 1000;
+const SLOW_MS = 30_000;
+const THROTTLED_MS = 60_000;
+export const THROTTLE_BELOW = 500;
 // A job not yet on a runner. Its started_at is no signal: GitHub sets it to created_at while the job is queued.
 const QUEUED = ['queued', 'waiting', 'pending', 'requested'];
 const GATE_RE = /^[a-z0-9][a-z0-9-]*$/;
@@ -82,12 +90,29 @@ function verdict(run, jobs, runUrl) {
   return { line: `RED ${failed}/${gates.length} ${runUrl}`, code: 1 };
 }
 
+// How long to wait before the next poll: 15 s for the first 2 minutes of watching, 30 s after, and 60 s whenever the
+// token's remaining budget (null until a response reports it) is below THROTTLE_BELOW.
+export function pollInterval(elapsedMs, remaining) {
+  if (remaining !== null && remaining < THROTTLE_BELOW) return THROTTLED_MS;
+  return elapsedMs < FAST_FOR_MS ? FAST_MS : SLOW_MS;
+}
+
 // Polls until the run completes or its plan ends unsuccessfully. Returns the final line and the exit code.
-//   gh: { getRun(repo, id), listJobs(repo, id) }; emit(line): one stdout line;
+//   gh: { getRun(repo, id), listJobs(repo, id), stats() → { remaining } }; emit(line): one stdout line;
 //   onFail(job, gate) → the path of the failed gate's downloaded log; planError(job) → the plan's error message.
-export async function watchRun({ gh, repo, runId, runUrl, emit, onFail, planError, now, sleep, interval = 10_000, maxUnreadable = 20 }) {
+export async function watchRun({ gh, repo, runId, runUrl, emit, onFail, planError, now, sleep, maxUnreadable = 20 }) {
   const seen = new Map();
+  const started = now();
+  let throttled = false;
   let unreadable = 0;
+  const wait = () => {
+    const { remaining } = gh.stats();
+    if (!throttled && remaining !== null && remaining < THROTTLE_BELOW) {
+      throttled = true; // said once; the stretched poll itself lasts as long as the budget stays low
+      emit(`THROTTLE remaining=${remaining}`);
+    }
+    return sleep(pollInterval(now() - started, remaining));
+  };
   for (;;) {
     let run;
     let jobs;
@@ -98,7 +123,7 @@ export async function watchRun({ gh, repo, runId, runUrl, emit, onFail, planErro
     } catch (e) {
       unreadable += 1;
       if (unreadable >= maxUnreadable) return { line: `ERROR run ${runId} cannot be read: ${e.message}`, code: 2 };
-      await sleep(interval);
+      await wait();
       continue;
     }
     for (const event of jobEvents(jobs, seen, now())) emit(await eventLine(event, onFail));
@@ -108,6 +133,6 @@ export async function watchRun({ gh, repo, runId, runUrl, emit, onFail, planErro
       return { line: `ERROR ${await planError(planJob)}`, code: 2 };
     }
     if (run.status === 'completed') return verdict(run, jobs, runUrl);
-    await sleep(interval);
+    await wait();
   }
 }

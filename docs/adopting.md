@@ -157,12 +157,19 @@ PASS <gate> <m>m<ss>s
 FAIL <gate> <m>m<ss>s log=<path>
 SKIP <gate>
 CANCEL <gate>
+THROTTLE remaining=<n>       once, when the GitHub token's remaining REST budget falls below 500
 ```
 
 The last line is `GREEN <run-url>` (exit 0), `RED <failed>/<total> <run-url>` (exit 1) or `ERROR <message>` (exit 2:
 a config error, no run within 2 minutes of the push, gh not logged in, a run that failed to start). Failed gates' logs
 are saved to `/tmp/ci-gate/<owner>-<repo>/<run-id>/<gate>.log`, with their artifacts beside them. The ref is deleted
 afterwards unless `--keep`, and only while it still points at this call's commit. Progress notes go to stderr.
+
+**It is gentle with the shared token.** Every session on the account shares the gh login's 5,000 REST requests an
+hour, so `ci-gate` polls the run and its jobs with conditional requests (a `304 Not Modified` is not counted against
+the limit), every 15 s for the first 2 minutes and every 30 s after that, and fetches logs only for failed gates. When
+the remaining budget drops below 500 it prints `THROTTLE` and polls every 60 s until the budget recovers; lines can
+then arrive up to a minute late. With `CI_GATE_DEBUG=1` it prints each API request and a final count on stderr.
 
 `ci-gate` uses the `gh` CLI's login and needs no other credential. Install it with `install.sh` from a ci-kit checkout
 that stays put (it symlinks `~/.local/bin/ci-gate`).
