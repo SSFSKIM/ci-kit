@@ -1741,6 +1741,24 @@ euros, jobs, and the projected month at the current rate.
     unchanged unless the human stops private hosted spending. The alternative then is a second,
     light runner instance on the mini for plan jobs.
 
+- **Observation (M7, 2026-10-16):** on the pool, MAWS's unit job takes 4–5 minutes, against
+  19.1 minutes hosted.
+  - All of class 1a fits on one box in about 5 minutes: unit on 8 cores, static on 4, probes on 2.
+  - Measured on MAWS master dfb01258a with warm caches on both sides. The hosted baseline is run
+    38848353451; the pool runs are 38850160827 (55 jobs) and 38856271856.
+  - Sharding over 4-core jobs is never faster than one unit job using the same total cores.
+- **Observation (M7):** one MAWS unit test,
+  `browser/import/service.test.ts` › "hears a cancel between history batches", timed out in all 5
+  full pool runs that kept TMPDIR on disk. Its fixture does 1,200 separate SQLite inserts, each
+  with its own fsync.
+- **Observation (M7):** scoping by the import graph alone catches 5 of 6 change-caused reds. It
+  misses `tokens-guard`, which reads source files rather than importing them.
+- **Observation (M7):** Chromium inside a pool container runs only with `--no-sandbox`, because
+  Docker's default seccomp profile refuses user namespaces. This rules out Linux e2e on the pool
+  until the kit ships a seccomp profile that allows them, or the setuid helper. Open item.
+- **Observation (M7):** M7's hosted use on 2026-10-16 was about 60 billed minutes: 53 for the MAWS
+  baseline and 7 for the probe's plan jobs.
+
 ## Decision Log
 
 - **Decision:** the verification for this work.
@@ -2135,6 +2153,21 @@ euros, jobs, and the projected month at the current rate.
     does not return through main.
   - The 20-run A10 series runs on the merged head.
   - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
+
+- **Decision:** M7's verdicts on the proposals, measured on the pool.
+  - **P1 (pool lane for class 1a):** proposed. It is gated on the SQLite-fsync test above, and
+    needs workers from `nproc`, pnpm through corepack, and no Actions cache.
+  - **P2 (sharding):** not proposed.
+  - **P3 (`--changed` scoping):** not proposed; it goes as a finding. Recall is 6 of 6, but only
+    because the whole suite runs every time. Import-graph scoping reaches 5 of 6.
+  - **P4 (mini for Mac-bound gates):** proposed. The cache item is listed as taken.
+  - **P5 (duplicate type check):** proposed at low priority. Its value is avoiding the
+    out-of-memory failures, not time.
+  - **P6 (event-driven timing tests):** proposed, with three more tests the pool runs found.
+  - **P7 (retire the load rule):** proposed, framed around the owner's ruling.
+  - A red counts as caused by the change when it fails 3 of 3 at the tested commit and passes, or
+    does not exist, at the base.
+  - **Date/Author:** 2026-10-16, M7 executor, folded by plan-executor.
 
 ## Outcomes & Retrospective
 
