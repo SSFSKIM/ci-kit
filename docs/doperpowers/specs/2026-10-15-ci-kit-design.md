@@ -2973,6 +2973,17 @@ euros, jobs, and the projected month at the current rate.
     within days.
   - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
 
+- **Decision (PR #17 review):** ensure fails when main's pool.json was fetched but its repo list
+  cannot be read. It exits with an error and makes no change to Hetzner.
+  - It does not answer `result=none` with a warning, as CI-opt's note first proposed. A config that
+    parses but has no readable repos is a kit bug. An error turns the plan job red and puts the
+    cause in its log. `none` would leave the pool jobs queued with nothing saying why.
+  - Repo membership is read apart from the operational schema (`kitRepos`), so main's list counts
+    even when the bundled parser rejects main's copy.
+  - The bundled copy is used only when main cannot be reached. A 404 means the repo is in no list.
+  - The token is required only once the repo resolves to Hetzner; gce.json is checked first.
+  - **Date/Author:** 2026-10-16, task-executor, confirmed by CI-opt, recorded by plan-executor.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
