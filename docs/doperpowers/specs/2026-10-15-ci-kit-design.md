@@ -779,27 +779,33 @@ Scheduler) and on demand:
   gcloud's default account.
 - MAWS holds nothing new. Its `HCLOUD_TOKEN` is removed when the Hetzner pool retires.
 
-**Cost.** These are estimates. M10 replaces them with M7's measured GCE table
-(`ci-kit-sandbox` `evidence/maws/`).
-- Unit prices are the live Cloud Billing catalog on 2026-10-16, us-central1, spot:
-  - C3D: $0.00715 per vCPU-h plus $0.00096 per GiB-h;
-  - E2: $0.01309 per vCPU-h plus $0.001754 per GiB-h.
-- One MAWS class-1a gate is unit, static and probes, with the cpx62 job times plus about 70 s of
-  boot each:
-  - c3d-8 for 380 s;
-  - c3d-4 for 277 s;
-  - e2-2 for 104 s.
+**Cost.** Measured by M7 on MAWS class 1a (`ci-kit-sandbox` `evidence/maws/gce-spot.md`, sandbox
+4d2f044; MAWS dfb01258a; us-central1 spot catalog prices of 2026-10-16).
 
-  That is about $0.011 of compute. Disk ($0.10/GB-month for 50 GB, per second) and a spot
-  external IP add about $0.002, so the total is about $0.013 per gate.
-- At 116 gates a day, that is about $47 a month. Images add about $3, and the control plane stays
-  inside the free tiers: two Scheduler jobs and about 43k short Cloud Run requests a month.
-- That sits at the edge of the $50 target. The levers, in order:
-  - a 30 GB disk;
-  - fewer MAWS gate runs that touch the pool;
-  - c3d-4 for unit. That is slower, so the owner decides it.
-- A billing budget alert on the project, at $40 with 50/90/100% emails, is created by the billing
-  admin (Human-only steps).
+| Layout | $ per gate (warm image) | Month at 116 gates a day | Class 1a, dispatch → last job end |
+|---|---|---|---|
+| **One VM per job** (c3d-8 unit, c3d-4 static, e2-2 probes) | **$0.0117** | **$41** | about 6.0 min |
+| One c3d-highcpu-16 per gate | $0.0150 | $52 | about 6.0 min |
+| Hetzner cpx42 at its cap | — | €82 | 9–11 min (8 cores) |
+| Hetzner cpx62 at its cap | — | €153 | 5.2 min, box already up |
+
+- **Speed.** C3D at 8 vCPUs runs the unit job at cpx62-cpus-8 speed.
+- **Boot.** From the create call to the runner online: 33–55 s on a warm image. The runner is
+  usually online before the hosted plan job ends.
+- **Cold images** cost 1–2.5 min and $0.002–0.005 more per gate, so the bake matters.
+- **Every price above includes disk and IP.** Cores and memory bill until the VM enters
+  `STOPPING`, at the guest's power-off. The disk and IP bill until `TERMINATED`, which is 15–175 s
+  later.
+- **No preemptions** in 12 VM runs, which is too few to estimate a rate.
+- **Spot stock-outs happen.** `c3d-highcpu-16` was exhausted in us-central1-a and -b once
+  (08:10Z), and -c served 15 s later. The zone order and the on-demand fallback are required, not
+  optional.
+- **The control plane** stays inside the free tiers: two Scheduler jobs and about 43k short
+  Cloud Run requests a month.
+- **Against the $50 target.** About $41 here, plus MAWS's hosted plan jobs, about 1 billed minute a
+  run. That comes to about 3,500 minutes a month against the 3,000 included, so about $3.
+- **A billing budget alert** on the project, at $40 with 50/90/100% emails, is created by the
+  billing admin (Human-only steps).
 
 **Backends after cutover.**
 - `pool.json` selects the backend per repo, with a default.
