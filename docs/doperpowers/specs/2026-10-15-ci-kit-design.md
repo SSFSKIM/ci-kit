@@ -1330,7 +1330,8 @@ plist, `host/install.sh`, and `docs/host.md`.
   - `node --test`;
   - `vitest`;
   - `playwright`;
-  - `electron` with a worktree path in its arguments;
+  - `electron` with a worktree path in its arguments, and only with positive evidence of a test
+    or automation launch (revised 2026-10-16; see the Decision Log);
   - `fake-upstream-process.mjs`;
   - sminos test stand-in supervisors;
   - `codex-plugin-test-`.
@@ -1863,6 +1864,20 @@ euros, jobs, and the projected month at the current rate.
   `ERROR`. The budget is the lowest remaining across the rate-limit windows that are still open:
   the run and jobs endpoints reported different windows in one poll. The 2-poller cap on
   executors is lifted.
+  - **Date/Author:** 2026-10-16, plan-executor.
+
+- **Decision:** the janitor kills only command lines that positively establish a one-shot test
+  (revised 2026-10-16, from the M8 review).
+  - **Electron.** A worktree path alone does not prove a test: a developer's app opened from a
+    worktree can be orphaned past 2 hours on purpose. Electron is killed only with positive
+    evidence of a test or automation launch, such as the flags Playwright passes. Otherwise it is
+    reported. This follows §7's rule, which outranks the authoring list's looser entry.
+  - **Patterns match the entrypoint.** They match the running script or the runner's own option
+    position, not any later argument. A Node-hosted CLI (`node …/claude-code/cli.js --resume
+    "… vitest run …"`) or an argument that merely mentions a test never qualifies.
+  - **Config.** Every pattern and exclusion must be a string; anything else is a config error.
+  - **Signals.** Process identity (birth time) is revalidated before SIGTERM and before SIGKILL, as
+    in M6's hooks.
   - **Date/Author:** 2026-10-16, plan-executor.
 
 ## Outcomes & Retrospective
