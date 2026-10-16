@@ -21,6 +21,7 @@ and most of them never touch the pool.
 | bake | `.github/workflows/pool-bake.yml`, `pool/bake/` |
 | guard | `.github/workflows/pool-guard.yml`, `pool/guard.mjs`, rules in `pool/lib/guard.mjs` |
 | served repos and preferences | `pool/config/pool.json` |
+| GCE backend (§3a): image bake, VM unit, deploy | `gce/`, `lib/gce.mjs`, `pool/config/gce.json`; see "GCE" below |
 | ledger and alerts | issue "pool ledger" and issues labelled `ci-kit-alert` in `SSFSKIM/ci-kit-sandbox` |
 
 Every Hetzner resource the kit makes carries a `ci-kit=` label (`pool`, `pool-image`, `builder`), and every
@@ -94,9 +95,11 @@ It waits while a pool box is up (see "The project's core limit" below), then cre
 (`ci-kit-builder-<run id>`, label `ci-kit=builder`, from `ubuntu-24.04`, the smallest type that holds the build:
 `cpx12` with 2 GB of swap added, else `cx23`, else `cpx22`; the bake's log shows the build's peak memory plus swap)
 whose user-data
-(`pool/bake/builder.sh`) installs Docker and Node, clones the kit at the run's commit, builds the runner image
-(`pool/image/Dockerfile`), warms the caches (`pool/bake/warm.mjs`, which records what it did in
-`/var/lib/ci-kit/cache/warm.json` on the image, readable by jobs), writes `/etc/ci-kit/`, smoke-tests a cpuset container, marks itself
+(`pool/bake/builder.sh`) writes `/etc/ci-kit/`, installs Docker, clones the kit at the run's commit, and runs the
+provider-neutral half of the bake that the GCE bake shares (`pool/bake/prepare.sh`): Node, the runner image
+(`pool/image/Dockerfile`), and the warmed caches (`pool/bake/warm.mjs`, given an installation token that
+`pool/bake/app-token.mjs` mints from the baked App, narrowed to reading MAWS; it records what it did in
+`/var/lib/ci-kit/cache/warm.json` on the image, readable by jobs). It then smoke-tests a cpuset container, marks itself
 `ci-kit-bake=ok` and powers off. The workflow then snapshots it (`ci-kit=pool-image`, `ci-kit-commit=<sha>`),
 deletes it, and keeps the two newest snapshots. A builder that fails marks itself `ci-kit-bake=failed-<step>`,
 and the run fails naming the step. A failed or cancelled bake leaves the previous snapshots in place, and its
@@ -207,3 +210,98 @@ and `ci-kit-state=booting` labels so the guard watches it, and delete it afterwa
 | A box up more than 12 h | a pool job that never ends, or ensure called over and over (each call holds the box 15 min); cancel the job or find the caller, and the box then idles out |
 | The guard has no scheduled runs (`gh api 'repos/SSFSKIM/ci-kit/actions/runs?event=schedule'`) an hour after its file changed | GitHub has not registered the schedule; commit any change to `.github/workflows/pool-guard.yml` on `main`. Meanwhile `gh workflow run pool-guard.yml -R SSFSKIM/ci-kit` runs one cycle |
 | The guard or bake stopped running | GitHub disables scheduled workflows in a repo with no activity for 60 days; each pool boot re-enables them, or `gh workflow enable pool-guard.yml -R SSFSKIM/ci-kit` |
+
+## GCE
+
+The GCE backend (spec §3a) runs each pool job on its own spot VM in the project `ssfskim-ci-kit`, booted from the
+image family `ci-kit-runner`. Its launcher is not built yet (M10 step 3). This section covers what is: the image,
+its bake, the VM's job unit, and the credentials.
+
+| Piece | Where |
+|---|---|
+| bake (orchestrator, decisions) | `gce/bake/bake.mjs`, `gce/bake/plan.mjs` |
+| builder (startup script) | `gce/bake/builder.sh`, sharing `pool/bake/prepare.sh` with the Hetzner builder |
+| the VM's job unit and smoke check | `gce/vm/` (`ci-kit-gce-job.service`, `job.mjs`, `run.mjs`, `smoke.sh`) |
+| Compute Engine and Secret Manager client | `lib/gce.mjs` |
+| deploy | `gce/deploy.sh` |
+| config | `pool/config/gce.json` (I12; `repos` stays empty until the launcher serves one) |
+
+Every resource carries a `ci-kit` label: `gce-builder` (builders and smoke VMs, with `ci-kit-run=<run id>` and
+`ci-kit-role`), `gce-image` (images, with `ci-kit-commit` and `ci-kit-ready`). The bake selects by label and checks
+the label again before it acts.
+
+**Credentials.**
+- The App key used by GCE lives only in Secret Manager: `ci-kit-app-id` and `ci-kit-app-key`, labelled
+  `ci-kit=app`, readable only by `ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com`. gcloud's default account
+  reads them for a bake run from the Mac.
+- The App has one key per backend, told apart by fingerprint (GitHub's App settings → Credentials → Key pairs):
+  `SHA256:yj//oTVKm3OJamD12RO3JYnGFdQxzGoFYRmFkD90cYU=` is the Hetzner key (GitHub secrets `CI_KIT_APP_KEY`, baked
+  into the snapshots); `SHA256:qQgu9FOJPM9maxPvDhd8nV+AyYS+tXW6+mp2RGiXvAg=` is the GCE key (Secret Manager), added
+  2026-10-16. Retiring Hetzner revokes the Hetzner key without touching GCE.
+- **Writing Secret Manager is a human-only step on this machine.** The agent's permission classifier refuses
+  secret-store writes, so a rotation goes to the human from the start: generate a new key on the App's Key pairs
+  page, then, with the `.pem` in a 0600 file under `mktemp -d`,
+  `gcloud secrets versions add ci-kit-app-key --project=ssfskim-ci-kit --data-file=<file>`, remove the file, run a
+  bake, and delete the old GCE key on the App's page.
+- No VM gets a service account or a key. The builder gets a one-hour installation token, narrowed to reading
+  MAWS's contents (`WARM_SCOPE` in `pool/bake/warm.mjs`), in its metadata; the image is made from its disk, never
+  from its metadata.
+
+**The network.** Every builder, smoke VM and job VM sits on the subnetwork `ci-kit-us-central1` (10.64.0.0/20) of
+the VPC `ci-kit`, named in `gce.json` (`network`, `subnetwork`), with an ephemeral external address for outbound
+traffic. The VPC has no firewall rule: GCE's implied rules deny all ingress and allow all egress. The project's
+`default` network is never used, since its stock rules open ssh and RDP to the internet. `gce/deploy.sh network`
+creates both idempotently and fails if any rule allows ingress into `ci-kit`. Networks and firewall rules take no
+labels; the names carry the kit's. To check:
+
+```
+gcloud compute networks list --project=ssfskim-ci-kit
+gcloud compute networks subnets list --project=ssfskim-ci-kit --network=ci-kit
+gcloud compute firewall-rules list --project=ssfskim-ci-kit --filter='network~/ci-kit$'   # expect: none
+```
+
+**The bake.** From the Mac (gcloud's default account), at a commit pushed to GitHub:
+
+```
+CI_KIT_COMMIT=$(git rev-parse HEAD) node gce/bake/bake.mjs     # default commit: the kit's main
+```
+
+1. It deletes builders and smoke VMs any bake left more than 2 h ago.
+2. It creates `ci-kit-gce-builder-<run id>` (the run id is UTC seconds plus four random characters, so two bakes
+   never share one; on demand: `e2-standard-4`, else `n2d-standard-4` when E2 is refused,
+   zones in `gce.json` order) from `ubuntu-2404-lts-amd64`. Its startup script (`gce/bake/builder.sh`) installs
+   Docker, clones the kit at the commit, runs `pool/bake/prepare.sh` (Node, the runner image, the caches), requires
+   every cache warmed, installs and enables `ci-kit-gce-job.service`, cleans the disk, reports
+   `ci-kit/bake=ok` (or `failed:<step>`) as a guest attribute, and powers off. GCE deletes a builder still running
+   at 45 min.
+3. Only on `ok` and power-off within 30 min, it images the builder's disk into the family, labelled
+   `ci-kit-ready=false`, and deletes the builder.
+4. It boots `ci-kit-gce-builder-<run id>-smoke` from the image on the `cpus-2` machine (its fallback when E2 is
+   refused), with metadata `ci-kit-smoke=<vCPUs>` in place of a JIT config. The job unit runs `gce/vm/smoke.sh` in a
+   job container: vCPUs, user, isolation, the runner, Node 22 and 24, every warmed cache, the work directory, DNS,
+   egress, and the metadata server refused. It reports `ci-kit/smoke=ok|failed:<check>` and powers off.
+5. On a pass the image is labelled `ci-kit-ready=true`; the launcher uses only ready images (never
+   `getFromFamily`, which would return an unready one). On any failure the bake deletes its own image.
+6. On every exit it deletes its instances, and keeps the two newest ready images (unready images of other runs
+   are dropped once 2 h old). It deletes an image only while that image carries its `ci-kit-run` label: an image
+   insert refused because the name exists leaves the existing image alone.
+
+The Cloud Run job `ci-kit-bake` runs the same script as `ci-kit-launcher@`: `gce/deploy.sh base bake` deploys it,
+and `gce/deploy.sh bake-schedule` adds the weekly run (Sunday 18:00 UTC). Neither is deployed yet: the first ready
+image, `ci-kit-runner-20261016-100502-b4fc88e2`, was baked from the Mac (2026-10-16, 12.5 min: builder 8 min,
+image 1 min, smoke 2.5 min).
+
+**Checking for leftovers.**
+
+```
+gcloud compute images list --project=ssfskim-ci-kit --filter='family=ci-kit-runner' --format='table(name,status,labels)'
+gcloud compute instances list --project=ssfskim-ci-kit --filter='labels.ci-kit:*'
+gcloud compute disks list --project=ssfskim-ci-kit --filter='labels.ci-kit:*'
+```
+
+**The job VM.** At boot, `ci-kit-gce-job.service` runs `gce/vm/job.mjs`: it drops the job container's TCP and UDP
+to `169.254.169.254` except port 53 (GCE's resolver lives there), runs one job container from
+`ci-kit-runner:latest` on all of the VM's vCPUs with the Hetzner container's mounts and environment and the JIT
+config from metadata `ci-kit-jit`, reports `ci-kit/job=exit:<code>`, and the unit powers the VM off. A VM with no
+`ci-kit-jit` and no `ci-kit-smoke` reports `ci-kit/job=failed:no-jit` and powers off. Every VM needs metadata
+`enable-guest-attributes=TRUE` for the reports.

@@ -72,39 +72,17 @@ apt-get update
 apt-get install -y --no-install-recommends docker.io git jq curl xz-utils ca-certificates iptables
 systemctl enable docker
 
-step=node
-mkdir -p "$CACHE/toolcache/node"
-index=$(curl -sf --max-time 60 https://nodejs.org/dist/index.json)
-for major in 22 24; do
-  v=$(jq -r --arg m "v$major." '[.[] | select(.version | startswith($m))][0].version' <<< "$index")
-  curl -sfL --max-time 300 "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz" -o /tmp/node.tar.xz
-  dir="$CACHE/toolcache/node/${v#v}/x64"
-  mkdir -p "$dir"
-  tar -xJf /tmp/node.tar.xz -C "$dir" --strip-components=1
-  touch "$CACHE/toolcache/node/${v#v}/x64.complete"
-  if [ "$major" = 22 ]; then
-    rm -rf /opt/node && cp -a "$dir" /opt/node
-    for b in node npm npx corepack; do ln -sf "/opt/node/bin/$b" "/usr/local/bin/$b"; done
-  fi
-done
-rm -f /tmp/node.tar.xz
-
 step=kit
 git clone --quiet https://github.com/SSFSKIM/ci-kit.git /opt/ci-kit
 git -C /opt/ci-kit checkout --quiet "$KIT_SHA"
-(cd /opt/ci-kit && npm ci --omit=dev --no-audit --no-fund --loglevel=error)
 install -m 0600 /opt/ci-kit/pool/config/pool.json /etc/ci-kit/pool.json
 
-step=image
-docker build --quiet -t ci-kit-runner:latest /opt/ci-kit/pool/image
-
-step=warm
-mkdir -p "$CACHE"/{npm,pnpm-store,corepack,ms-playwright,electron,work}
-# Best effort: a cache that cannot be warmed is fetched by the first job instead. warm.mjs records what it did.
-node /opt/ci-kit/pool/bake/warm.mjs || echo "ci-kit bake: warming was partial"
+# Node, the kit's dependencies, the runner image and the caches: the half every provider's bake shares. Warming is
+# best effort: a cache that cannot be warmed is fetched by the first job instead. The token comes from the baked App.
+warm_token() { node /opt/ci-kit/pool/bake/app-token.mjs; }
+. /opt/ci-kit/pool/bake/prepare.sh
 # The bake's log shows which caches were warmed (label values: [a-z0-9._-], ≤ 63 characters).
 label ci-kit-warm "$(jq -r '[to_entries[] | select(.value.ok | not) | .key] | if length == 0 then "ok" else "failed-" + join(".") end' "$CACHE/warm.json" 2>/dev/null | cut -c1-63 || echo unknown)"
-chown -R 1001:1001 "$CACHE"
 
 step=smoke
 # The image runs, a cpuset bounds nproc, and the baked Node runs inside a job container.

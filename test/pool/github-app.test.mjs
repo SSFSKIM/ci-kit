@@ -49,3 +49,15 @@ test('an owner the App is not installed on is an error naming it', async () => {
   const tokens = createAppTokens({ appId: '1', pem, owner: 'nobody', fetchImpl: api.fetchImpl });
   await assert.rejects(tokens(), /not installed on nobody/);
 });
+
+test('a scoped token asks GitHub for only the repositories and permissions it names', async () => {
+  const bodies = [];
+  const api = fakeApi();
+  const fetchImpl = async (url, init) => {
+    if (init.method === 'POST') bodies.push(JSON.parse(init.body));
+    return api.fetchImpl(url, init);
+  };
+  const tokens = createAppTokens({ appId: '1', pem, owner: 'SSFSKIM', fetchImpl, scope: { repositories: ['MAWS'], permissions: { contents: 'read' } } });
+  assert.equal(await tokens(), 'tok-1');
+  assert.deepEqual(bodies, [{ repositories: ['MAWS'], permissions: { contents: 'read' } }]);
+});

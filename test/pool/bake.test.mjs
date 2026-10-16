@@ -98,3 +98,27 @@ test('the bake\'s builder is the smallest type that holds the build: cpx12 first
   const { BUILDER_TYPES } = await import('../../pool/bake/plan.mjs');
   assert.deepEqual(BUILDER_TYPES, ['cpx12', 'cx23', 'cpx22']);
 });
+
+test('warm takes its GitHub token from CI_KIT_GH_TOKEN and reads no App key: without one it stops before any work', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const script = fileURLToPath(new URL('../../pool/bake/warm.mjs', import.meta.url));
+  const env = { PATH: process.env.PATH, CI_KIT_ETC: '/nonexistent' };
+  const run = spawnSync(process.execPath, [script], { env, encoding: 'utf8', timeout: 20_000 });
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /CI_KIT_GH_TOKEN is not set/);
+  const { readFileSync } = await import('node:fs');
+  assert.doesNotMatch(readFileSync(script, 'utf8'), /app\.pem|createAppTokens/);
+});
+
+test('both builders share the provider-neutral prepare, each with its own source of the warming token', async () => {
+  const { readFileSync } = await import('node:fs');
+  const hetzner = readFileSync(new URL('../../pool/bake/builder.sh', import.meta.url), 'utf8');
+  const gce = readFileSync(new URL('../../gce/bake/builder.sh', import.meta.url), 'utf8');
+  for (const s of [hetzner, gce]) {
+    assert.match(s, /^\. \/opt\/ci-kit\/pool\/bake\/prepare\.sh$/m);
+    assert.match(s, /^warm_token\(\) \{/m);
+  }
+  assert.match(hetzner, /warm_token\(\) \{ node \/opt\/ci-kit\/pool\/bake\/app-token\.mjs; \}/);
+  assert.match(gce, /attributes\/ci-kit-gh-token/);
+});
