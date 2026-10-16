@@ -119,7 +119,11 @@ How to see it working: §Acceptance. The shortest proofs are:
     (Decision Log). `gce/deploy.sh` is live. The sandbox moved by a direct commit on main, f71afcb.
     Round trips 38921909804 and 38923752949 both ran on c3d-highcpu-4 spot, nproc 4, with queue to
     start in 1 m 25 s and 1 m 49 s.
-  - [ ] Step 4: A13 on the sandbox.
+  - [x] (2026-10-16 18:05Z) Step 4: A13 on the sandbox passes on every clause except the daily
+    line, which posts after 00:00Z.
+    - PR #20 merged 04c0bd9 after one review fix: a VM is deleted when its job reports exit,
+      unregister first, and kept when GitHub refuses. The VM powers off without an orderly shutdown.
+    - The launcher runs revision 00008 from main 04c0bd9.
   - [ ] Step 5: MAWS's move in one window with `GATE_RUNNER` unset.
 
 ## Context: what was measured (2026-10-15)
@@ -2469,6 +2473,33 @@ euros, jobs, and the projected month at the current rate.
   - **Ledger load.** At MAWS's rate the shared ledger issue gains about 350 GCE comments a day.
     Hetzner's ledger code reads the whole issue on every write. That matters only until Hetzner
     retires.
+
+- **Observation (A13 on the sandbox, 2026-10-16; details in the ledger task-10c report):**
+  - **Sizing.** 44 jobs ran, all on `ci-kit-gce-*` runners, and every job's `nproc` was N:
+    - cpus-2 on e2-highcpu-2;
+    - cpus-4, cpus-8 and cpus-16 on c3d-highcpu-4, -8 and -16.
+  - **Queue to start:** median 96 s, p90 122 s, over 33 jobs.
+  - **Teardown:** median 61 s from job end to VM gone, range 25–107 s, over 11 jobs, after PR #20.
+    It was 130–139 s before.
+  - **No demand from 17:02 to 18:02Z:** 61 ticks launched nothing. Afterwards there were 0
+    instances, 0 disks and 0 runners.
+  - **Cancelled before pickup:** the VM was gone within 11 min (run 38927851813).
+  - **VM settings:** all 48 VMs were SPOT, with termination action DELETE, 7200 s
+    `maxRunDuration`, and no service account.
+  - **Network:** `getent hosts github.com` worked inside the container, and 169.254.169.254:80
+    failed.
+  - **Simulated preemption** (run 38927837115): GitHub reported the job as "The operation was
+    canceled" with exit 130, not "runner lost" as A13 words it. The row is final `preempted` with
+    its job, and nothing was left behind.
+  - **Ledger:** 48 rows, all final. 45 `done`, 1 `cancelled-idle`, 1 `preempted`, and 1
+    `abandoned` (GCE refused a cpus-16 insert).
+  - **The move, both ways:**
+    - Two jobs were queued mid-move, runs 38932593676 and 38935215450. Each waited with no runner
+      of either kind, then started on the new backend: 2 m 8 s after the move to Hetzner (MAWS's
+      live box), 51 s after the move back to GCE.
+    - The old Hetzner agent took about 11 min to refresh its config after a removal.
+    - No job was served by both backends.
+  - **Tick time:** 10–20 s idle, 45–50 s in a burst.
 
 ## Decision Log
 
