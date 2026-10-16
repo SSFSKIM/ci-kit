@@ -42,7 +42,8 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
     listDisks: async () => ({ items: g.disks.filter((d) => !hooks.unreachable || !d.zone.endsWith(hooks.unreachable)).map((d) => structuredClone(d)), complete: !hooks.unreachable }),
     images: async () => g.images.map((i) => structuredClone(i)),
     instance: async (zone, name) => structuredClone(g.instances.find((i) => i.name === name && i.zone.endsWith(zone)) ?? null),
-    insertInstance: async (zone, body) => {
+    insertInstance: async (zone, body, opts = {}) => {
+      log.push(`insert-wait ${body.name} ${opts.deadlineMs}`);
       hooks.beforeInsert?.(zone, body);
       const i = g.insertErrors.findIndex((e) => e.match(zone, body));
       if (i >= 0) {

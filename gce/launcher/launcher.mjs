@@ -18,7 +18,7 @@ import { launchRow, runningRow, withJob, finalRow, dailyLine } from './ledger.mj
 
 export const TICK_BUDGET_MS = 45_000;
 const INSERT_DEADLINE_MS = 40_000;
-const PARALLEL_LAUNCHES = 6;
+const PARALLEL_LAUNCHES = 16; // a burst launches in one round: each insert waits ~10–20 s for its operation
 const DAILY_WITHIN_MS = 2 * 3600_000; // the 26 h ledger window holds all of yesterday only early in the day
 const zoneOf = (r) => r.zone.split('/').pop();
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -367,12 +367,13 @@ export class Launcher {
       await this.write(finalRow(row, { end: 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb }));
       return {};
     }
-    // Each attempt waits for its operation at most until the tick's deadline (and never under 5 s); an insert whose
-    // operation outlives that is uncertain, reconciled now, and if still unsettled left for the next tick.
+    // The tick's deadline stops new attempts; an attempt already started waits for its operation up to its own
+    // deadline, since giving up early saves nothing (the operation runs on) and only defers what it decides. An
+    // operation that outlives that wait is uncertain, reconciled now, and if still unsettled left for the next tick.
     const result = await walkPlacements(placements(cpus, this.cfg), {
       attempt: (p) => this.gce.insertInstance(p.zone, jobInstance({
         alloc, ...p, repo, cpus, image: image.selfLink, jit: jit.encoded_jit_config, cfg: this.cfg, config: this.config,
-      }), { deadlineMs: Math.max(5_000, Math.min(this.insertDeadlineMs, deadline - this.now())) }),
+      }), { deadlineMs: this.insertDeadlineMs }),
       reconcile: (p, err) => this.reconcileInsert(p.zone, name, err),
       now: this.now, deadline,
     });

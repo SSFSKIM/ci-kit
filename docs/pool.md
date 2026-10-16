@@ -260,7 +260,8 @@ Allocation ids are the launch minute in base36 (5 characters) and 5 random ones 
 runner's age is read from its name, never more than the real one: the runners API gives no creation time.
 Admission reserves the largest machine a launch could land on (an `e2-highcpu-2` job reserves 4, its fallback
 `c3d-highcpu-4`'s), and no placement attempt starts once the tick's 45 s budget is spent; the job waits for the
-next tick.
+next tick. An attempt already started waits for its operation up to 40 s whatever the budget, since giving up early
+only defers what the operation decides. Up to 16 launches run at once, so a burst launches in one round.
 
 Cleanup, every tick:
 - a VM whose job unit reported `ci-kit/job=exit:<code>` (or `failed:<step>`) is deleted on that tick, without

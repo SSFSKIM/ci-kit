@@ -204,7 +204,7 @@ test('an insert whose call timed out but which GCE accepted is found through its
   w.g.insertErrors.push({ match: () => true, accepted: true, error: () => new Error('The operation was aborted due to timeout') });
   await launcher.tick();
   assert.equal(vms(w).length, 1);
-  assert.equal(w.log.filter((l) => l.startsWith('insert')).length, 1);
+  assert.equal(w.log.filter((l) => l.startsWith('insert ')).length, 1);
   assert.equal(only(rows(w)).state, 'running');
 });
 
@@ -498,4 +498,13 @@ test('step 4: a VM whose job reported its end is deleted on the next tick, while
   const row = only(rows(w));
   assert.deepEqual([row.state, row.end, row.job?.id], ['final', 'done', job.id]);
   assert.deepEqual(leftovers(w), { instances: 0, disks: 0, runners: 0 });
+});
+
+test('step 4: an insert started late in the tick still waits its own deadline; the tick\'s budget only stops new attempts', async () => {
+  const { w, launcher } = setup();
+  w.sim.queue(SBX, L(4));
+  w.hooks.beforeJit = () => w.advance(44_000); // the mint returns 44 s into a 45 s budget
+  await launcher.tick();
+  assert.ok(w.log.some((l) => /^insert-wait ci-kit-gce-\S+ 40000$/.test(l)), w.log.filter((l) => l.startsWith('insert-wait')).join('; '));
+  assert.equal(vms(w).length, 1);
 });
