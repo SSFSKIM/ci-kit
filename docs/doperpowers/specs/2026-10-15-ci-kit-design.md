@@ -80,7 +80,11 @@ How to see it working: §Acceptance. The shortest proofs are:
   GREEN. serve-cli and serve-lazy are deferred to cua#145; the clipboard product edge is cua#144.
   - [x] (2026-10-15 23:30Z) Kit additions (`setup.fetch_depth`, `CI_KIT_BASE`/`CI_KIT_HEAD`): PR #3
     merged; `v1` moved to it.
-- [ ] M3 — doperpowers: adoption and timing-test stabilization
+- [x] (2026-10-16 09:50Z) M3 — doperpowers: adoption and timing-test stabilization.
+  SSFSKIM/doperpowers#198 merged (979192b8, 7.160.1) after medium reviews. A1: ten checks green
+  in 8m14s. A10: 20/20 consecutive `ci-gate` runs GREEN across nine gates (stabF1–20). Negative
+  shell-lint proof RED on SC2068 (run 38828692666). codex-companion is not gated (discarded by
+  the owner).
 - [x] (2026-10-15 22:10Z) M4 — Spike: the pool's boot path. Verdict ≤ 5 min; PR #1 merged
   (spike scripts and results under `spike/pool-boot/`).
 - [x] (2026-10-16 04:20Z) M5 — The pool
@@ -2905,6 +2909,24 @@ euros, jobs, and the projected month at the current rate.
     gains draining for unserved repos and a `ci-kit-config` label, re-baked before the first move.
     Ensure wakes a box only for `pool.json` repos.
   - **Date/Author:** 2026-10-16, CI-opt.
+
+- **Decision:** M3's resolutions (doperpowers#198).
+  - **Gates.**
+    - A `repo-checks` gate runs the hygiene suites; §5's table doesn't list it.
+    - The claude-code gate runs its four hermetic files directly.
+    - sminos splits as `core` and `suites` through `SMINOS_PART`. After DC7 merged, editing the
+      runner was allowed.
+    - No gate needs `fetch_depth`, because v1 fetches the change basis itself.
+  - **Waits.** One 30 s liveness ceiling applies everywhere. The one remaining 2 s clock wait,
+    `seen_waiting` in bridge-requests, has no product event to wait on, and its owner declined
+    to add one.
+  - **"Fails before" proofs at 8×.** Watcher-vs-retire and the daemons' delivery and nudge cases
+    never failed at 2×, so their before-fix failures are shown at 8×. All pass 20/20 after at
+    both 2× and 8×.
+  - **Left in TECH-DEBT** as candidates for a pinned-core `perf` gate: two speed claims owned by
+    DC4 and DC7 that only 8× breaks. They are test-uplink "within a second while the fetch hangs"
+    (17/20) and test_session_plane "presence within a second" (8/20).
+  - **Date/Author:** 2026-10-16, M3 executor, folded by plan-executor.
 
 ## Outcomes & Retrospective
 
