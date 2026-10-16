@@ -2057,6 +2057,7 @@ euros, jobs, and the projected month at the current rate.
    "machine_fallback":{"2":"c3d-highcpu-4"},
    "disk_gb":50,"max_run_minutes":120,"max_vcpus":64,
    "image_family":"ci-kit-runner","idle_runner_minutes":10,
+   "network":"ci-kit","subnetwork":"ci-kit-us-central1",
    "ledger":{"repo":"SSFSKIM/ci-kit-sandbox","issue_title":"pool ledger"}}
   ```
 
@@ -2077,10 +2078,19 @@ euros, jobs, and the projected month at the current rate.
   - The boot disk carries the same `ci-kit=gce` and `ci-kit-alloc` labels, and `autoDelete`.
   - The runner's name equals the instance name.
   - Runner labels: `self-hosted`, `ci-kit-pool`, `cpus-<N>`, `ci-kit-gce`.
-  - Metadata `ci-kit-jit` holds the JIT config.
+  - Metadata `ci-kit-jit` holds the JIT config, and `enable-guest-attributes=TRUE` is set. The VM
+    unit reports `ci-kit/job=exit:<N>` and works in `/var/lib/ci-kit/cache/work/<instance>`.
+  - **Network.** Every VM (job, builder and smoke) uses the kit's own VPC `ci-kit`, subnet
+    `ci-kit-us-central1` (10.64.0.0/20), with an ephemeral external IP for egress.
+    - Never the project's `default` network: it ships rules that open SSH and RDP to 0.0.0.0/0.
+    - The `ci-kit` network has no firewall rules, so GCE's implied deny-ingress holds.
+    - `gce/deploy.sh network` creates the network and subnet, and fails if any ingress-allow rule
+      targets the network.
+    - Networks cannot take labels, so the `ci-kit` name marks them instead.
 - **Images and builders.**
   - Images: family `ci-kit-runner`, labels `ci-kit=gce-image`, `ci-kit-commit=<sha>` and
-    `ci-kit-ready=true|false`.
+    `ci-kit-ready=true|false`. The launcher boots the newest image labelled `ci-kit-ready=true`. It
+    never uses `getFromFamily`, which returns unready images too.
   - Builders and smoke VMs: `ci-kit-gce-builder-<n>`, labelled `ci-kit=gce-builder`.
   - The guest attribute `ci-kit/bake` reports `ok` or `failed:<step>`.
 - **Control plane.**
