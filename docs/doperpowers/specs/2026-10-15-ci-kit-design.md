@@ -2061,6 +2061,20 @@ euros, jobs, and the projected month at the current rate.
     and A10's 20/20 restarts on them.
   - **Date/Author:** 2026-10-16, CI-opt from the owner, recorded by plan-executor.
 
+- **Decision:** M2's resolutions (cua PR #143).
+  - Budget arithmetic gets a controlled clock (node:test's mocked timers), so no product change
+    was needed.
+  - "Eventually" waits use liveness bounds of 10–20 s.
+  - Each A10 proof runs the file at `main` beside the fixed file, under `yes` loops at 2× cores on
+    a hosted macOS runner. The cdp flake reproduced only at 8× load (1 in 220), recorded as such.
+  - serve-cli and serve-lazy are deferred. Their failures come from `cua serve`'s own 5 s
+    teardown budget, which is product code.
+  - The plugin gate bounds each `claude` install with `perl alarm`, because macOS runners have no
+    `timeout`.
+  - Found and left for cua's owner: a clipboard paste can run after its caller was told
+    "timeout", in `src/browser-service`.
+  - **Date/Author:** 2026-10-16, M2 executor, folded by plan-executor.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
