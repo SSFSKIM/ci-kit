@@ -15,7 +15,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY entrypoint.sh /usr/local/bin/ci-kit-entrypoint
-COPY job-started.sh /usr/local/bin/ci-kit-job-started
-RUN chmod 0755 /usr/local/bin/ci-kit-entrypoint /usr/local/bin/ci-kit-job-started
+COPY job-started.sh /usr/local/bin/ci-kit-job-started.sh
+RUN chmod 0755 /usr/local/bin/ci-kit-entrypoint /usr/local/bin/ci-kit-job-started.sh
 USER runner
 ENTRYPOINT ["/usr/local/bin/ci-kit-entrypoint"]

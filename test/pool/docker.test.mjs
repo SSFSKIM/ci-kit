@@ -41,7 +41,8 @@ test('docker inspect is read back into the agent\'s container record', () => {
 
 test('every job container announces its cores in the job log, and a clamped one says so', () => {
   const plain = runArgs(spec);
-  assert.ok(plain.includes('ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/ci-kit-job-started'));
+  // The runner accepts a hook only by its extension (.sh, .ps1 or .js); seen live: 'is not a valid path to a script'.
+  assert.ok(plain.includes('ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/ci-kit-job-started.sh'));
   assert.ok(plain.includes('CI_KIT_CORES=4-7'));
   assert.ok(!plain.some((a) => a.startsWith('CI_KIT_CLAMPED=')));
   const clamped = runArgs({ ...spec, labels: ['self-hosted', 'ci-kit-pool', 'cpus-16'], cores: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], clamped: 16 });
