@@ -70,7 +70,10 @@ How to see it working: §Acceptance. The shortest proofs are:
   clones.
 - [x] (2026-10-15 23:20Z) M2/M3 prerequisite: the hosted probe report is committed to
   `ci-kit-sandbox` (`evidence/2026-10-15/hosted-probe.md`), and its results are folded into §5.
-- [ ] M2 — cua: adoption and timing-test stabilization
+- [x] (2026-10-16 04:10Z) M2 — cua: adoption and timing-test stabilization. SSFSKIM/cua#143
+  merged (45c003aa) after a medium review and one fix wave. A1: checks finished 5m10s after the
+  push. A2/A10: 20/20 consecutive `ci-gate` runs GREEN at 9ab5439, and the final head b45df7d is
+  GREEN. serve-cli and serve-lazy are deferred to cua#145; the clipboard product edge is cua#144.
   - [x] (2026-10-15 23:30Z) Kit additions (`setup.fetch_depth`, `CI_KIT_BASE`/`CI_KIT_HEAD`): PR #3
     merged; `v1` moved to it.
 - [ ] M3 — doperpowers: adoption and timing-test stabilization
