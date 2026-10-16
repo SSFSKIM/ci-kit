@@ -1,5 +1,4 @@
-{"repos":[{"repo":"SSFSKIM/ci-kit-sandbox","workflows":["ci.yml","maws-probe.yml"]},
-          {"repo":"SSFSKIM/MAWS","workflows":["gate.yml"]}],
+{"repos":[{"repo":"SSFSKIM/MAWS","workflows":["gate.yml"]}],
  "types":["cx53","cpx62"],"fallback_types":["cpx52","cpx42"],"locations":["hel1","fsn1","nbg1"],
  "poll_seconds":10,"idle_runner_minutes":10,"drain_minute":50,
  "memory_gb_per_cpu":2,"max_hours_per_day":8,
