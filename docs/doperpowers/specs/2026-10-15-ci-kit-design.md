@@ -798,6 +798,9 @@ The hosted-runner probe's report, folded on 2026-10-15, is at `ci-kit-sandbox`
     2026-10-16).
 - **P7 — Retire the load rule for gates.** Retire `waitload20.sh` and `with-slot.sh` for every gate
   P4's inventory moved off the MacBook. They stay for anything the inventory names as staying local.
+  - Context (owner ruling, relayed by maws-fe 2026-10-16): unit/DOM vitest, typecheck and eslint
+    runs on the MacBook are already exempt from the load wait. e2e, builds and measured bounds keep
+    it.
 
 ### 6. Test stabilization: the rule
 
@@ -2015,6 +2018,17 @@ euros, jobs, and the projected month at the current rate.
     It multiplies comments on the human-read ledger to close a window of milliseconds that the
     guard already heals.
   - **Date/Author:** 2026-10-16, plan-executor.
+
+- **Decision:** MAWS's macOS-only unit subset runs in maws-fe's own `unit:darwin` gate, not in
+  a sandbox runner.
+  - maws-fe is adding a MAWS-owned `unit-darwin` job on the macOS runner. It finds the §6 files by
+    their guard, is part of the macOS lane's default set, and is selectable with
+    `Gates: unit:darwin`.
+  - M7 registers no second runner on the mini. P4's unit part drops; its e2e routing and
+    build-once remain.
+  - A8's subset item is closed by one `scripts/ci-gate.sh --gates unit:darwin --runner macos` run
+    once that lands. Its report must show the 13 files' tests executed, not skipped.
+  - **Date/Author:** 2026-10-16, CI-opt from maws-fe, recorded by plan-executor.
 
 ## Outcomes & Retrospective
 
