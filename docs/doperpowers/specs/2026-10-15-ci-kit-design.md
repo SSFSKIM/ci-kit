@@ -617,7 +617,9 @@ project of its own, so a CI box cannot delete it.
 | CPX62, €/month | 29 | 44 | 59 | 74 |
 | CX53 (when in stock), €/month | 7 | 11 | 13 | 17 |
 
-Snapshots add about €0.30 a month. MAWS's plan jobs on hosted runners add about 1 minute per run,
+Snapshots add about €0.30 a month. Private repos' plan/ensure jobs and light gates stay on
+GitHub-hosted runners under an Actions budget of about $15 a month (owner, 2026-10-16), inside
+the ~$50 total. MAWS's plan jobs on hosted runners add about 1 minute per run,
 which goes on the cheapest hosted runner that can run `node`.
 
 Hours per day depend on how gates arrive through the day, not on their compute. That is the main
@@ -1370,6 +1372,8 @@ pattern, parentage and age together.
   PR bodies.
 - The kit's `npm test` is green.
 - The whole-range review of `main` (Decision Log) has run and its findings are addressed.
+- Outcomes reports MAWS's hosted minutes per day once P1 lands, to check the ~$15 a month Actions
+  budget.
 - `v1` points at the final `main`.
 - Outcomes & Retrospective is written, including:
   - the cost projection (A12);
@@ -1731,7 +1735,10 @@ euros, jobs, and the projected month at the current rate.
   is ko-KR, and maws-fe pins `--lang=en-US` in its launcher. The mac lane's job-started hook gains
   a desktop precondition (see the Decision Log).
 
-- **Observation (2026-10-16 ~05:28Z):** GitHub refused hosted jobs in `ci-kit-sandbox`. The
+- **Observation (2026-10-16 05:28–06:10Z):** GitHub refused hosted jobs in `ci-kit-sandbox`
+  until the human raised the account's spending limit; MAWS hosted plan jobs ran again from
+  06:10:56Z (run 38859758633). This is the known single point of failure: when the hosted budget
+  is exhausted, nothing wakes the pool for a private repo. Details: The
   annotation read: "recent account payments have failed or your spending limit needs to be
   increased". Two runs confirm it: 38855962530 and probe 38856777128. A MAWS hosted plan job ran
   normally at 05:32Z, so the block was not shown to be account-wide.
@@ -2168,6 +2175,17 @@ euros, jobs, and the projected month at the current rate.
   - A red counts as caused by the change when it fails 3 of 3 at the tested commit and passes, or
     does not exist, at the base.
   - **Date/Author:** 2026-10-16, M7 executor, folded by plan-executor.
+
+- **Decision:** a small Actions budget (owner, 2026-10-16).
+  - Private repos keep their plan/ensure job and their light gates on GitHub-hosted runners,
+    under an Actions budget of about $15 a month. Heavy MAWS jobs move to the pool. The total
+    stays inside the ~$50 a month target.
+  - **Rejected alternative:** no hosted spend at all, with a second, light runner on the mini for
+    plan jobs. The pool's wake would then depend on the mini being online, and the mini is a
+    single home machine.
+  - M9's Outcomes reports MAWS's hosted minutes per day once P1 lands, to check that the budget
+    holds.
+  - **Date/Author:** 2026-10-16, owner via CI-opt, recorded by plan-executor.
 
 ## Outcomes & Retrospective
 
