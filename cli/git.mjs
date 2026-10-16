@@ -55,19 +55,28 @@ export function resolveTarget(target) {
   return { dir: '.', sha, branch: null, dirty: false };
 }
 
-// The remote to push to: the one pointing at `repo` (origin first), and the repo origin names when none is given.
+// The remote to push to, and the repo it pushes to: the one whose push destination (`remote.<name>.pushurl`, else its
+// URL) is `repo` (origin first), and the repo origin pushes to when none is given. The run is polled in the repo the
+// ref lands in, so the fetch URL of a fork setup is never used. A remote with several push URLs pushes to all of
+// them and has no one destination: it is refused as ambiguous.
 export function resolveRemote(dir, repo) {
   const names = (tryGit(dir, ['remote']) ?? '').split('\n').filter(Boolean);
   names.sort((a, b) => (b === 'origin') - (a === 'origin'));
-  const remotes = names.map((name) => ({ name, repo: parseGitHubRemote(tryGit(dir, ['remote', 'get-url', name]) ?? '') }));
+  const remotes = names.map((name) => {
+    const urls = (tryGit(dir, ['remote', 'get-url', '--push', '--all', name]) ?? '').split('\n').filter(Boolean);
+    return { name, ambiguous: urls.length > 1, repo: urls.length === 1 ? parseGitHubRemote(urls[0]) : null };
+  });
+  const ambiguity = (r) => `remote ${r.name} has several push URLs, so ci-gate cannot tell which repo it pushes to`;
   if (!repo) {
     const origin = remotes.find((r) => r.name === 'origin');
-    if (!origin?.repo) throw new TargetError('origin is not a GitHub remote; pass --repo OWNER/NAME');
-    return origin;
+    if (origin?.ambiguous) throw new TargetError(ambiguity(origin));
+    if (!origin?.repo) throw new TargetError('origin does not push to a GitHub repo; pass --repo OWNER/NAME');
+    return { name: origin.name, repo: origin.repo };
   }
   const match = remotes.find((r) => r.repo?.toLowerCase() === repo.toLowerCase());
-  if (!match) throw new TargetError(`no remote of ${dir} points at ${repo}`);
-  return { name: match.name, repo };
+  if (match) return { name: match.name, repo };
+  const ambiguous = remotes.find((r) => r.ambiguous);
+  throw new TargetError(`no remote of ${dir} pushes to ${repo}${ambiguous ? ` (${ambiguity(ambiguous)})` : ''}`);
 }
 
 export function nonceCommit(dir, sha, message) {
