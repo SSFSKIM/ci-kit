@@ -1880,6 +1880,25 @@ euros, jobs, and the projected month at the current rate.
     in M6's hooks.
   - **Date/Author:** 2026-10-16, plan-executor.
 
+- **Decision:** the pool degrades gracefully when the Hetzner project's core limit is hit.
+  - **Ensure.** A create refused for the core limit moves on to a smaller type: cpx52 (12 vCPU),
+    then cpx42 (8 vCPU). It records the type in the ledger row and opens an alert naming the
+    cause. A smaller box is far better than a stranded gate. Gates whose `cpus` exceed the box wait
+    in GitHub's queue, as with any lack of capacity.
+  - **Bake.** A builder refused for the core limit waits and retries for at most 2 h, then fails
+    with an alert. It never fails silently.
+  - **Why.** The project's shared-core limit is below 20 vCPU. The 16-core pool box plus a foreign
+    2-core server leave no room for a builder. Raising the limit is with the human (asked
+    2026-10-16).
+  - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
+- **Decision:** the janitor's exclusions win over its patterns, with no exemption. The
+  codex-companion test broker (`app-server-broker.mjs serve …`) is therefore reported, not
+  killed. Its worker and the fake `codex app-server` are still killed. A `node --import tsx --test`
+  process (an option with a separate value) is never matched, which `docs/host.md` documents.
+  - **Rationale:** §7's safety rule says killing needs a positively one-shot command line. A
+    `serve` process is the case the exclusion exists for.
+  - **Date/Author:** 2026-10-16, plan-executor.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
