@@ -1968,6 +1968,26 @@ euros, jobs, and the projected month at the current rate.
     the project's limit removes both measures.
   - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
 
+- **Decision:** two M5 review findings resolved in the spec (2026-10-16).
+  - **A box smaller than a job runs it on all its cores, rather than counting as idle.** On a
+    fallback box (cpx52 or cpx42), a job whose `cpus-N` exceeds the box's cores gets an exclusive
+    cpuset of every core the box has, once the box is otherwise empty. The job's log records the
+    clamp. This replaces the executor's `servable()` idle rule. That rule could not see watched
+    runs, so a `cpus-16` gate kept a 12-core box alive. Dropping watched runs from idleness would
+    break the protection for late dependent jobs. A clamped gate is slower; a stranded one costs a
+    box-day.
+  - **Ledger coverage.** Every pool session gets a row before any deleter can need one:
+    - the agent writes a provisional `running` row at boot;
+    - the guard writes one for any pool server it sees without a row;
+    - deleters finalize that row.
+
+    The watchdog still deletes whether or not GitHub answers, because deletion must not depend on
+    GitHub. So a box that never reached GitHub and lived less than one guard cycle can go
+    unrecorded. That residue is accepted as an exception to I9's one row per session.
+    Duplicates from concurrent writers are reconciled deterministically: readers count one row per
+    server id, and a writer that finds two keeps the most final and deletes the rest.
+  - **Date/Author:** 2026-10-16, plan-executor.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
