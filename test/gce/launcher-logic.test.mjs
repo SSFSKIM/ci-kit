@@ -451,7 +451,8 @@ test('a VM that reported its job\'s end (ci-kit/job) is deleted on that tick, be
   assert.deepEqual(out, [
     [A(1), 'delete', 'done', 'job-exited', false],
     [A(2), 'delete', 'done', 'job-exited', false],
-    [A(3), 'delete', 'done', 'job-exited', true], // its container is gone, so the runner can never take a job
+    // A runner still registered is unregistered first, and a refusal (it took a job) keeps the VM.
+    [A(3), 'unregister-delete', 'done', 'job-exited', false],
   ], 'a busy runner\'s VM is left alone whatever it reports; no report, no early delete');
 });
 

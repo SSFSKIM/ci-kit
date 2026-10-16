@@ -508,3 +508,21 @@ test('step 4: an insert started late in the tick still waits its own deadline; t
   assert.ok(w.log.some((l) => /^insert-wait ci-kit-gce-\S+ 40000$/.test(l)), w.log.filter((l) => l.startsWith('insert-wait')).join('; '));
   assert.equal(vms(w).length, 1);
 });
+
+test('review (PR #20): a report beside a registered runner never deletes the VM if the runner takes a job before it is unregistered', async () => {
+  const { w, launcher } = setup();
+  w.sim.queue(SBX, L(4));
+  await launcher.tick();
+  const [name] = vms(w);
+  w.sim.boot(SBX, name);
+  w.sim.vm(name).attrs = { 'ci-kit/job': 'failed:unit' }; // a report left beside a runner that has not taken a job yet
+  const late = w.sim.queue(SBX, L(4));
+  w.hooks.beforeUnregister = (repo, r) => {
+    if (r?.name === name) w.sim.take(repo, name, late); // GitHub assigns it a job first: the unregister gets 422
+  };
+  w.advance(MIN);
+  await launcher.tick();
+  assert.ok(vms(w).includes(name), 'the VM survives the refused unregister');
+  const row = [...rows(w).values()].flat().find((r) => r.instance === name);
+  assert.equal(row.state, 'running', 'no deleting row: its job is running');
+});

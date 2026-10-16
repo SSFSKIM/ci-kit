@@ -229,7 +229,10 @@ export function reviewInstances({ instances, runnersOf, served, now, cfg, report
     } else if (runners === undefined || r?.busy) {
       continue;
     } else if (reports.get(i.name)) {
-      actions.push({ instance: i, action: 'delete', end: 'done', reason: 'job-exited', unregister: r !== null });
+      // A runner still registered is unregistered first, with the idle rule's veto: if GitHub refuses (it has just
+      // taken a job), the VM stays. A VM boots once (no restart policy), so its report is this boot's, but the veto
+      // does not rest on that.
+      actions.push({ instance: i, action: r ? 'unregister-delete' : 'delete', end: 'done', reason: 'job-exited' });
     } else if (r && (!served.has(i.repoLabel) || age >= idleMs)) {
       actions.push({ instance: i, action: 'unregister-delete', end: 'cancelled-idle', reason: served.has(i.repoLabel) ? 'idle-runner' : 'unserved' });
     } else if (!r && age >= idleMs) {
