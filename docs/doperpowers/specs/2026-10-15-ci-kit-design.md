@@ -727,7 +727,6 @@ The hosted-runner probe's report, folded on 2026-10-15, is at `ci-kit-sandbox`
   | `claude-code` | `hosted` | `tests/claude-code/run-skill-tests.sh`, non-live tier | pass |
   | `mods` | `hosted` | `tests/mods/run-mods-tests.sh` | `claude plugin test` with no credentials, 295 green |
   | `triaging-feedback` | `hosted` | `npm test` in `application-agents/triaging-feedback` | 117 pass |
-  | `codex-companion` | `hosted-macos` | its suite | see below |
 
   - **Shared setup on ubuntu:**
     - `bun`;
@@ -740,16 +739,8 @@ The hosted-runner probe's report, folded on 2026-10-15, is at `ci-kit-sandbox`
     order, so the expectation is made order-independent.
   - `test-execute-dispatch.sh` line 667 commits with an overridden `HOME`. The system identity above
     covers it.
-- **Why codex-companion runs on macOS.** On ubuntu, `state.test.mjs` fails because ext4 reuses an
-  inode right after `rm` and `mkdir`, and `lib/state.mjs:350` compares inodes. That is plugin code,
-  which this initiative does not touch. Its `test-resume.sh` phase 9 also flakes there (2 of 3).
-  - On `hosted-macos` it needs, via brew: `jq`, `tmux`, `shellcheck`, `coreutils` (with `gnubin`
-    on PATH, for `timeout`) and `flock`.
-  - If it ever starts Python HTTP servers there, it also needs a `sitecustomize.py` shim. On 2 of 3
-    hosted macOS VMs, `socket.getfqdn()` stalls 35 s per process. The shim
-    `socket.getfqdn = lambda name='': name or socket.gethostname()` took `test-bind` from 39.8 s to
-    3.0 s; `/etc/hosts` and DNS changes did not help.
-  - The ubuntu inode finding goes to the doperpowers owner as a finding.
+- **codex-companion is not gated.** The owner discarded the component on 2026-10-16, so it has
+  no CI gate and M3 changes none of its tests. Every doperpowers gate runs on `hosted`.
 - **Timing-flake targets.** `test-bridge-requests.sh` failed 1 full run and 2 of 5 reruns on macOS.
   It joins the T3 list in §6. Its gate (sminos) runs on ubuntu, where it passed.
 - **Excluded:** tests that spend model calls, need Docker plus `ARKHO_DIR`, or exercise the
@@ -1087,8 +1078,8 @@ These go up through the author session.
 
 - A suite that tests the installed plugin cache (`claude -p` without `--plugin-dir`) is not a gate.
   It proves the wrong tree.
-- `codex-companion`'s `pkill -f` cleanup is scoped to its own run, since CI and local runs must not
-  kill each other's processes.
+- (Superseded 2026-10-16: codex-companion is discarded and not gated, so its cleanup scoping is
+  dropped.)
 - doperpowers-74 is told before sminos tests change.
 
 **What it does not touch.** `skills/`, `agents/`, `hooks/`, `output-styles/`, plugin manifests and
@@ -2060,6 +2051,15 @@ euros, jobs, and the projected month at the current rate.
   runner, whose disk keeps the stores. A `warm` job on master fills the Linux caches that ci/ refs
   restore. M7's pool-vs-hosted comparisons record the MAWS sha and the cache state of each side.
   - **Date/Author:** 2026-10-16, CI-opt from maws-fe, recorded by plan-executor.
+
+- **Decision:** codex-companion is discarded (owner, 2026-10-16), so it has no doperpowers CI
+  gate. This supersedes the entry above that excluded two of its tests from the gate.
+  - M3's PR carries no edits to codex-companion's tests or runner. TECH-DEBT records only that the
+    component is not gated because it is discarded. The race signatures are dropped, since no one
+    will act on them.
+  - The only `hosted-macos` doperpowers gate goes with it. Every remaining gate is on `hosted`,
+    and A10's 20/20 restarts on them.
+  - **Date/Author:** 2026-10-16, CI-opt from the owner, recorded by plan-executor.
 
 ## Outcomes & Retrospective
 
