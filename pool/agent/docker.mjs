@@ -46,7 +46,7 @@ export function runArgs({ name, repo, runnerId, labels, cores, memoryGbPerCpu, c
     '--shm-size', '2g',
     '-v', `${CACHE}:${CACHE}`,
     '-e', 'CI_KIT_JIT',
-    '-e', 'ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/ci-kit-job-started',
+    '-e', 'ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/ci-kit-job-started.sh',
     '-e', `CI_KIT_CORES=${formatCpuset(cores)}`,
     ...(clamped ? ['-e', `CI_KIT_CLAMPED=${clamped}`] : []),
     ...Object.entries(CACHE_ENV).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
