@@ -21,7 +21,7 @@ and most of them never touch the pool.
 | bake | `.github/workflows/pool-bake.yml`, `pool/bake/` |
 | guard | `.github/workflows/pool-guard.yml`, `pool/guard.mjs`, rules in `pool/lib/guard.mjs` |
 | served repos and preferences | `pool/config/pool.json` |
-| GCE backend (§3a): image bake, VM unit, deploy | `gce/`, `lib/gce.mjs`, `pool/config/gce.json`; see "GCE" below |
+| GCE backend (§3a): launcher, image bake, VM unit, deploy | `gce/`, `lib/gce.mjs`, `pool/config/gce.json`; see "GCE" below |
 | ledger and alerts | issue "pool ledger" and issues labelled `ci-kit-alert` in `SSFSKIM/ci-kit-sandbox` |
 
 Every Hetzner resource the kit makes carries a `ci-kit=` label (`pool`, `pool-image`, `builder`), and every
@@ -214,17 +214,84 @@ and `ci-kit-state=booting` labels so the guard watches it, and delete it afterwa
 ## GCE
 
 The GCE backend (spec §3a) runs each pool job on its own spot VM in the project `ssfskim-ci-kit`, booted from the
-image family `ci-kit-runner`. Its launcher is not built yet (M10 step 3). This section covers what is: the image,
-its bake, the VM's job unit, and the credentials.
+image family `ci-kit-runner`. A repo listed in `pool/config/gce.json` is served by it; one in `pool.json` by the
+Hetzner box; a repo is never in both (the launcher serves neither copy and opens an alert, and the kit's test that
+the two files list no repo twice fails). Ensure prints `result=gce` for a GCE repo and touches nothing in Hetzner.
 
 | Piece | Where |
 |---|---|
+| launcher (Cloud Run service `ci-kit-launcher`) | `gce/launcher/`: `server.mjs` (the service), `launcher.mjs` (one tick), decisions in `logic.mjs`, ledger rows in `ledger.mjs` and `ledger-store.mjs`, configs from main in `source.mjs` |
 | bake (orchestrator, decisions) | `gce/bake/bake.mjs`, `gce/bake/plan.mjs` |
 | builder (startup script) | `gce/bake/builder.sh`, sharing `pool/bake/prepare.sh` with the Hetzner builder |
 | the VM's job unit and smoke check | `gce/vm/` (`ci-kit-gce-job.service`, `job.mjs`, `run.mjs`, `smoke.sh`) |
 | Compute Engine and Secret Manager client | `lib/gce.mjs` |
 | deploy | `gce/deploy.sh` |
-| config | `pool/config/gce.json` (I12; `repos` stays empty until the launcher serves one) |
+| config | `pool/config/gce.json` (I12) |
+
+**The launcher.** Cloud Scheduler's `ci-kit-launcher-tick` POSTs to `ci-kit-launcher` every minute with an OIDC
+token; the service has no public ingress (`--ingress=internal`, IAM-only), runs one instance at a time, one request
+at a time. Each request is one reconciliation, and nothing is kept between them: state is in GCE labels, the ledger
+and GitHub. A tick:
+
+1. reads `gce.json` and `pool.json` from the kit's main (the newest commit that changed each; on a failed read it
+   keeps the last good copy, and at a cold start without main, the copy in its own build);
+2. refuses public repos and any repo in both files;
+3. reads the ledger's last 26 h, then lists the `ci-kit=gce` instances and disks;
+4. lists each repo's `ci-kit-gce-*` runners, and its queued and in-progress runs and their jobs;
+5. cleans up (below), finalizes rows whose VM is gone, and records on each running row the job its runner holds;
+6. launches one VM per queued pool job not covered by an unclaimed VM (a runner registered, not busy, younger than
+   `idle_runner_minutes`; a busy one covers nothing), oldest job first, while the vCPUs in flight stay at or under
+   `max_vcpus`;
+7. once a day, in its first two hours (UTC), writes yesterday's daily line.
+
+A launch writes the `launching` row, mints the JIT config (runner name = instance name, labels `self-hosted`,
+`ci-kit-pool`, `cpus-N`, `ci-kit-gce`, work folder `/var/lib/ci-kit/cache/work/<instance>`), then creates
+`ci-kit-gce-<allocation id>` from the newest image labelled `ci-kit-ready=true`. It tries the size's machine as spot
+in each zone of `zones` in order, then on demand in each zone, then `machine_fallback` the same way.
+`ZONE_RESOURCE_POOL_EXHAUSTED*` moves to the next zone; a quota refusal skips the machine and ends the tick's
+launches (the job waits in GitHub's queue); an insert whose outcome is unknown is settled through its zone operation
+before any other zone is tried, and if it stays unknown the walk stops and the cleanup rules settle it. The VM:
+no service account, the JIT config in metadata `ci-kit-jit`, `maxRunDuration` = `max_run_minutes` with a `DELETE`
+action, a `pd-balanced` boot disk of `disk_gb` that goes with it, labels `ci-kit=gce`, `ci-kit-alloc`,
+`ci-kit-repo=<owner>--<repo>`, `ci-kit-cpus`, `ci-kit-provisioning=spot|standard` and `ci-kit-config=<gce.json
+commit, 8>`.
+
+Allocation ids are the launch minute in base36 (5 characters) and 5 random ones (about 60 million a minute), so a
+runner's age is read from its name, never more than the real one: the runners API gives no creation time.
+Admission reserves the largest machine a launch could land on (an `e2-highcpu-2` job reserves 4, its fallback
+`c3d-highcpu-4`'s), and no placement attempt starts once the tick's 45 s budget is spent; the job waits for the
+next tick.
+
+Cleanup, every tick:
+- a `TERMINATED` VM (its job ended and the guest powered off) is deleted;
+- an idle runner (registered, not busy, its VM older than `idle_runner_minutes`) is unregistered first and its VM
+  deleted only once GitHub has let go (or answers 404); `busy` or any error keeps the VM for the next tick, since
+  the runner may have just taken a job. A failed runner listing is never read as idleness;
+- a VM whose runner is gone but which is still up after `idle_runner_minutes` is deleted;
+- a VM older than `max_run_minutes` + 5 is deleted, and an alert opens (Compute Engine should have deleted it);
+- a `ci-kit-gce-*` runner with no VM, more than 5 min after its launch, is unregistered (a crash between the mint and
+  the insert);
+- a `ci-kit=gce` disk attached to nothing for 10 min, and a `ci-kit=gce-builder` instance older than 2 h, are
+  deleted;
+- a `launching` row with no VM and no runner 10 min after its launch is finalized `abandoned`.
+
+Deletes are not waited for: the row goes `deleting` (with its end) just before the delete call, and the next tick
+finds the VM gone and finalizes it. A VM missing from the listing is confirmed with a direct read before its row is
+finalized, since another tick may have just created it. When the aggregated listing reports a zone unreachable,
+the tick launches nothing and does nothing that rests on something being absent (finalizing a vanished VM's row,
+unregistering a runner with no VM); when GCE's operation history cannot be read, a vanished VM's row waits rather
+than being called `orphan`. Runners are listed for every repo with a row in the ledger's window, so a repo that has
+left `gce.json` is still cleaned until its last runner is gone.
+
+**Overlap.** Two ticks can run at once (Cloud Run can briefly exceed one instance; a deploy overlaps two revisions).
+Nothing depends on it never happening: deletes and unregisters treat 404 as done, rows are keyed by allocation and
+only move forward, two comments for one allocation converge on the most final, and an over-launch leaves idle runners
+that the idle rule removes within `idle_runner_minutes` (about $0.012 for a c3d-8). The project's vCPU quota is the
+hard cap.
+
+**Preemption** is recorded, not re-run. GCE deletes a preempted spot VM (its termination action), GitHub fails the
+job ("runner lost"), and the launcher finalizes the row `preempted` with the job the runner held, which it wrote on
+the row while the job ran. Re-run it, for example with `ci-gate` again.
 
 Every resource carries a `ci-kit` label: `gce-builder` (builders and smoke VMs, with `ci-kit-run=<run id>` and
 `ci-kit-role`), `gce-image` (images, with `ci-kit-commit` and `ci-kit-ready`). The bake selects by label and checks
@@ -286,10 +353,11 @@ CI_KIT_COMMIT=$(git rev-parse HEAD) node gce/bake/bake.mjs     # default commit:
    are dropped once 2 h old). It deletes an image only while that image carries its `ci-kit-run` label: an image
    insert refused because the name exists leaves the existing image alone.
 
-The Cloud Run job `ci-kit-bake` runs the same script as `ci-kit-launcher@`: `gce/deploy.sh base bake` deploys it,
-and `gce/deploy.sh bake-schedule` adds the weekly run (Sunday 18:00 UTC). Neither is deployed yet: the first ready
-image, `ci-kit-runner-20261016-100502-b4fc88e2`, was baked from the Mac (2026-10-16, 12.5 min: builder 8 min,
-image 1 min, smoke 2.5 min).
+The Cloud Run job `ci-kit-bake` runs the same script as `ci-kit-launcher@`, at main's head: `gce/deploy.sh bake`
+deploys it, and `gce/deploy.sh bake-schedule` adds the weekly run (Sunday 18:00 UTC). To run it now:
+`gcloud run jobs execute ci-kit-bake --region=us-central1 --project=ssfskim-ci-kit`. The first ready image,
+`ci-kit-runner-20261016-100502-b4fc88e2`, was baked from the Mac (2026-10-16, 12.5 min: builder 8 min, image 1 min,
+smoke 2.5 min).
 
 **Checking for leftovers.**
 
@@ -305,3 +373,93 @@ to `169.254.169.254` except port 53 (GCE's resolver lives there), runs one job c
 config from metadata `ci-kit-jit`, reports `ci-kit/job=exit:<code>`, and the unit powers the VM off. A VM with no
 `ci-kit-jit` and no `ci-kit-smoke` reports `ci-kit/job=failed:no-jit` and powers off. Every VM needs metadata
 `enable-guest-attributes=TRUE` for the reports.
+
+**Deploy.** From a clean checkout of a commit on GitHub, with gcloud's default account (an owner of the project):
+
+```
+gce/deploy.sh                       # every part, in order; or name parts:
+gce/deploy.sh base network          # APIs, the service account and its compute role; the VPC
+gce/deploy.sh bake bake-schedule    # the Cloud Run job ci-kit-bake and its weekly Scheduler job
+gce/deploy.sh launcher launcher-schedule   # the Cloud Run service ci-kit-launcher and its one-minute tick
+gce/deploy.sh alert                 # the failed-tick metric and its alert policy, mailed to the owner
+```
+
+Every part is idempotent. `base` also gives the project's default compute account `roles/run.builder`: Cloud Run
+source builds run as it in a project created after 2024, and no kit VM uses it. Both Cloud Run images are
+buildpack builds, so their command is the CNB `launcher` (`launcher node <script>`), which puts the image's node on
+the PATH. If every gcloud call stalls for minutes on the MacBook, its IPv6 route to Google is down (2026-10-16:
+`curl -6 https://run.googleapis.com/` timed out, `-4` answered at once) and gcloud's Python waits out each IPv6
+connect; a `sitecustomize.py` that filters `socket.getaddrinfo` to `AF_INET`, on `PYTHONPATH` with
+`CLOUDSDK_PYTHON_SITEPACKAGES=1`, gets it through. `launcher` builds from the checkout (Cloud Build, buildpacks) and records its commit as
+`CI_KIT_COMMIT`; the service reads its configs from main whatever commit it runs, so a config change needs no
+deploy. To pause the launcher: `gcloud scheduler jobs pause ci-kit-launcher-tick --location=us-central1
+--project=ssfskim-ci-kit` (and `resume`). Its logs: `gcloud run services logs read ci-kit-launcher
+--region=us-central1 --project=ssfskim-ci-kit`; each tick logs one line with what it launched, deleted and
+finalized, the gce.json commit it ran (`config`), and its GitHub budget.
+
+**Reading the GCE ledger.** The same issue as Hetzner's ("pool ledger" in `SSFSKIM/ci-kit-sandbox`), one comment
+per allocation:
+
+```
+| alloc | instance | repo | job (actual) | created (UTC) | deleted (UTC) | machine@zone | spot/standard | seconds | $ | end |
+```
+
+- The deleted column reads `launching` (before the VM exists), `running`, or `deleting <time>` until the row is
+  final. A row never moves back.
+- `job (actual)` is the job the runner held, by name and id: a runner takes any queued job of its repo and size,
+  so it may not be the one the launch was for.
+- `end`: `done` (its job ended, or its runner did), `cancelled-idle` (no job came within `idle_runner_minutes`, or
+  its repo stopped being served), `preempted`, `max-run` (Compute Engine's run limit, or the launcher's overage
+  rule), `abandoned` (no VM was created: every zone refused, quota, or a crash before the insert), `orphan` (a VM
+  the launcher had no row for, or one that vanished before its run limit with no preemption recorded: deleted by a
+  hand outside the launcher).
+- `seconds` runs from the VM's creation to its deletion, `$` at the rates in `gce/launcher/ledger.mjs` (us-central1,
+  2026-10-16), the address and the disk included.
+- The daily line, `**GCE pool, <day> (UTC):** …`, totals the day's VMs, seconds and dollars, projects the month at
+  that rate, and names the gce.json commit the launcher ran.
+- A writer reads a row's comment again just before updating it, and drops the write if the comment is already as
+  far along; a final row is never rewritten. Issue comments have no compare-and-swap, so during an overlap of two
+  ticks a row is eventually final rather than finalized once: a stale write that lands in the milliseconds after
+  another tick finalized the row rolls it back to running, and the next tick finalizes it again, possibly with a
+  later deletion time and charge.
+- A launcher outage of more than 26 hours leaves residue (a deferred review finding). A row not yet final falls out
+  of the window the launcher reads and stays unfinished in the ledger. Its VM is not necessarily gone:
+  `maxRunDuration` deletes only a VM that is still running, and a VM whose guest powered off after its job is
+  `TERMINATED` with its timer cleared, so it and its disk stay, costing about $0.007 a day at 50 GB, until the
+  launcher is back. Its first tick deletes the stopped VM, under a new row ended `orphan` (it finds no row for it),
+  so the old row stays unfinished beside it. The failed-tick alert fires within minutes of an outage, long before
+  26 hours.
+- Hidden markers `<!-- ci-kit-gce-ledger {…} -->` and `<!-- ci-kit-gce-daily {…} -->` hold the JSON the kit reads;
+  the Hetzner readers skip them.
+
+**Moving a repo between backends.** The preferred move is a window with the repo's pool lane off (spec §3a): the
+repo's owner unsets the toggle (MAWS: `GATE_RUNNER`), so its pool jobs run hosted and nothing is in flight on either
+backend; then one commit on main moves the repo between `pool.json` and `gce.json`; then the owner sets the toggle
+again. Before the commit:
+
+- From Hetzner: no job of the repo `in_progress` on a `ci-kit-pool-*` runner
+  (`gh api repos/<repo>/actions/runs?status=in_progress` and their jobs' `runner_name`), and no pool box serving it
+  (idle, or deleted by hand once idle, with a `manual` ledger row).
+- From GCE (the fallback, reversed): no `ci-kit=gce` instance with `ci-kit-repo=<owner>--<repo>`
+  (`gcloud compute instances list --project=ssfskim-ci-kit --filter='labels.ci-kit-repo=<owner>--<repo>'`).
+
+When the lane cannot be toggled, the move is fail-closed: remove the repo from its old file first, wait for its
+work there to end, then add it to the new file; jobs queued in between wait in GitHub's queue. A repo removed from
+`gce.json` is draining: the launcher launches nothing for it, leaves its busy VMs to finish, and unregisters its
+idle runners first, at once. To know the launcher runs the removal commit, read `config` in its tick log (a launcher
+that cannot read main keeps its last good copy, and its log says so).
+
+**Quotas and budget.** `max_vcpus` (64) is the launcher's soft cap on the vCPUs of its VMs in flight; the project's
+quotas are the hard cap, and a refusal is a wait. Granted on 2026-10-16 (Cloud Quotas): `CPUS-ALL-REGIONS` 96, C3D
+per-family 64 in us-central1, `IN-USE-ADDRESSES` 32, `SSD-TOTAL-GB` 2048. Not granted: E2 per-family stays at its
+default 24 (asked 64), so at most 12 `cpus-2` VMs run on E2 and the rest fall back to `c3d-highcpu-4`
+(`machine_fallback`). `INSTANCES` is 24 in us-central1: at most 24 job VMs at once, whatever `max_vcpus` says.
+`PREEMPTIBLE_CPUS` is 0, so spot VMs count against the ordinary CPU quotas. To check:
+
+```
+gcloud compute regions describe us-central1 --project=ssfskim-ci-kit --format=json | jq '.quotas[]|select(.metric|test("^(CPUS|E2_CPUS|INSTANCES|IN_USE_ADDRESSES|SSD_TOTAL_GB)$"))'
+```
+
+The billing budget alert on the project ($40, mails at 50/90/100 %) is the billing admin's to create (spec,
+Human-only steps). The Monitoring alert `ci-kit launcher ticks failing` mails the owner when three ticks fail within
+10 minutes.
