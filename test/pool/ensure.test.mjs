@@ -1,7 +1,7 @@
 // Ensure's branches (spec §3 Ensure, I7) against a fake Hetzner API.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ensure, ensureDecision, candidates, newestImage } from '../../pool/lib/ensure.mjs';
+import { ensure, ensureDecision, candidates, newestImage, backendOf, kitConfig, kitRepos, ensureForCaller } from '../../pool/lib/ensure.mjs';
 import { fakeHcloud, deletes } from './fake-hcloud.mjs';
 
 const CFG = { types: ['cx53', 'cpx62'], fallback_types: ['cpx52', 'cpx42'], locations: ['hel1', 'fsn1', 'nbg1'] };
@@ -196,4 +196,101 @@ test('ensure stamps a draining box too, so its agent can return it to ready inst
   assert.equal(await ensure(hc, CFG, opts()), 'existing');
   assert.ok(hc.state.servers.find((s) => s.id === 8).labels['ci-kit-want']);
   assert.ok(!hc.calls.some((c) => c.startsWith('create ')));
+});
+
+// Which backend serves the calling repo (spec §3a, Which backend serves a repo; I12): ensure wakes a Hetzner box only
+// for a repo in pool.json, so a repo in transit between backends never wakes a box that would not serve it.
+const SBX = 'SSFSKIM/ci-kit-sandbox';
+const MAWS = 'SSFSKIM/MAWS';
+
+test('backendOf: hetzner for a pool.json repo, gce for a gce.json repo, none for a repo in neither', () => {
+  assert.equal(backendOf(SBX, [SBX, MAWS], []), 'hetzner');
+  assert.equal(backendOf(MAWS, [SBX], [MAWS]), 'gce');
+  assert.equal(backendOf(MAWS, [SBX], []), 'none');
+  assert.equal(backendOf('ssfskim/maws', [MAWS], []), 'hetzner'); // GitHub names are case-insensitive
+});
+
+test('backendOf: a repo in both files is gce, the check §3a names first (the config test refuses that state)', () => {
+  assert.equal(backendOf(MAWS, [MAWS], [MAWS]), 'gce');
+});
+
+test('kitConfig reads the file on the kit\'s main, else the bundled copy, else null', async () => {
+  const parse = (t) => JSON.parse(t);
+  const fails = async () => { throw new Error('GET: 503'); };
+  assert.deepEqual(await kitConfig(parse, { fetchMain: async () => '{"at":"main"}', readBundled: async () => '{"at":"bundled"}' }), { at: 'main' });
+  assert.deepEqual(await kitConfig(parse, { fetchMain: fails, readBundled: async () => '{"at":"bundled"}' }), { at: 'bundled' });
+  // main's copy does not parse with this version's parser: the bundled one is used
+  assert.deepEqual(await kitConfig(parse, { fetchMain: async () => 'not json', readBundled: async () => '{"at":"bundled"}' }), { at: 'bundled' });
+  assert.equal(await kitConfig(parse, { fetchMain: fails, readBundled: fails }), null);
+});
+
+// Repo membership comes from main whenever main answered (review of PR #17): a main copy that the bundled operational
+// parser rejects must not bring the bundled list (and a repo main has removed) back.
+const httpFail = (status) => async () => { throw Object.assign(new Error(`GET: ${status}`), { status }); };
+const file = (obj) => async () => JSON.stringify(obj);
+const POOL_MAIN_AHEAD = { repos: [{ repo: SBX }], types: ['cpx62'] }; // MAWS removed, and no `workflows`: I8 moved on
+const POOL_BUNDLED = { repos: [{ repo: SBX, workflows: ['ci.yml'] }, { repo: MAWS, workflows: ['gate.yml'] }] };
+
+test('kitRepos: main\'s repos decide even when the bundled parser would reject main\'s copy', async () => {
+  assert.deepEqual(await kitRepos('pool.json', { fetchMain: file(POOL_MAIN_AHEAD), readBundled: file(POOL_BUNDLED) }), [SBX]);
+});
+
+test('kitRepos: main unreachable reads the bundled copy; absent on main (404) or absent everywhere is no repos', async () => {
+  assert.deepEqual(await kitRepos('pool.json', { fetchMain: httpFail(503), readBundled: file(POOL_BUNDLED) }), [SBX, MAWS]);
+  assert.deepEqual(await kitRepos('gce.json', { fetchMain: httpFail(404), readBundled: file({ repos: [{ repo: MAWS }] }) }), []);
+  assert.deepEqual(await kitRepos('gce.json', { fetchMain: httpFail(503), readBundled: async () => null }), []);
+});
+
+test('kitRepos: a copy on main whose repos cannot be read refuses, rather than falling back', async () => {
+  for (const text of ['not json', '{"repos":"MAWS"}', '{"repos":[{"name":"x"}]}']) {
+    await assert.rejects(kitRepos('pool.json', { fetchMain: async () => text, readBundled: file(POOL_BUNDLED) }), /pool\.json on the kit's main/);
+  }
+});
+
+const CALLER_POOL = { repos: [{ repo: SBX, workflows: ['ci.yml'] }], types: ['cpx62'], locations: ['hel1'] };
+const caller = (over = {}) => {
+  const made = [];
+  return {
+    made,
+    args: {
+      repo: MAWS, token: 'tok',
+      pool: { fetchMain: file(CALLER_POOL), readBundled: file(CALLER_POOL) },
+      gce: { fetchMain: file({ repos: [{ repo: MAWS }] }), readBundled: async () => null },
+      parsePool: (t) => JSON.parse(t),
+      createHcloud: (token) => { made.push(token); return fakeHcloud({ servers: [pool('ready')] }); },
+      opts: opts(),
+      ...over,
+    },
+  };
+};
+
+test('ensureForCaller: a GCE repo, or a repo in neither file, gets gce|none with no Hetzner token and no Hetzner client', async () => {
+  const gce = caller({ token: '' });
+  assert.equal(await ensureForCaller(gce.args), 'gce');
+  const none = caller({ token: undefined, repo: 'SSFSKIM/cua' });
+  assert.equal(await ensureForCaller(none.args), 'none');
+  assert.deepEqual([...gce.made, ...none.made], []);
+});
+
+test('ensureForCaller: a pool repo needs the token, and with it ensures the box', async () => {
+  await assert.rejects(ensureForCaller(caller({ repo: SBX, token: ' ' }).args), /HCLOUD_TOKEN/);
+  const ok = caller({ repo: SBX });
+  assert.equal(await ensureForCaller(ok.args), 'existing');
+  assert.deepEqual(ok.made, ['tok']);
+});
+
+test('ensureForCaller: a repo main removed from pool.json gets none, though the bundled copy lists it and main\'s does not parse', async () => {
+  const c = caller({
+    repo: MAWS, gce: { fetchMain: httpFail(404), readBundled: async () => null },
+    pool: { fetchMain: file(POOL_MAIN_AHEAD), readBundled: file(POOL_BUNDLED) },
+    parsePool: (t) => { const cfg = JSON.parse(t); if (!cfg.repos.every((r) => r.workflows)) throw new Error('workflows'); return cfg; },
+  });
+  assert.equal(await ensureForCaller(c.args), 'none');
+  assert.deepEqual(c.made, []);
+});
+
+test('ensureForCaller: an unreadable pool.json on main touches nothing in Hetzner', async () => {
+  const c = caller({ repo: SBX, pool: { fetchMain: async () => 'not json', readBundled: file(CALLER_POOL) } });
+  await assert.rejects(ensureForCaller(c.args), /pool\.json on the kit's main/);
+  assert.deepEqual(c.made, []);
 });

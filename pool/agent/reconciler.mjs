@@ -7,13 +7,16 @@ import { createLedgerStore } from '../lib/ledger-store.mjs';
 import { makeRow } from '../lib/ledger.mjs';
 import { createAlerts } from '../lib/alerts.mjs';
 import {
-  planStarts, reviewContainers, isIdle, poolJobs, wantOf, queuedPoolJobs, lifecycleAction, billedMinute, heartbeatDue,
-  runnerName, nextCounter,
+  planStarts, reviewContainers, unservedRepos, isIdle, poolJobs, wantOf, queuedPoolJobs, lifecycleAction, billedMinute,
+  heartbeatDue, runnerName, nextCounter,
 } from './logic.mjs';
 
 const KIT = 'SSFSKIM/ci-kit';
 const SCHEDULED = ['pool-guard.yml', 'pool-bake.yml'];
 const CONFIG_EVERY = 5 * 60_000;
+// A runner retired for being idle is unregistered first, and kept if GitHub refuses (it may have just taken a job).
+const IDLE = new Set(['idle-runner', 'unserved']);
+const configLabel = (commit) => commit.slice(0, 8);
 
 export class NotAPoolBox extends Error {}
 
@@ -24,8 +27,10 @@ function assertPoolBox(server, serverId) {
   }
 }
 
-// deps: {cfg, gh, hc, serverId, totalCores, docker: {list, start, remove}, work: {make, remove}, touchLastSuccess,
-//        blockMetadata, loadConfig, now, log}
+// deps: {cfg, configCommit, gh, hc, serverId, totalCores, docker: {list, start, remove}, work: {make, remove},
+//        touchLastSuccess, blockMetadata, loadConfig, now, log}
+// cfg is the pool config the agent runs and configCommit the kit commit it came from; loadConfig() fetches the one on
+// the kit's main as {cfg, commit}, and throws when it cannot.
 export class Agent {
   constructor(deps) {
     Object.assign(this, deps);
@@ -65,7 +70,8 @@ export class Agent {
       }
     }
     this.counter = nextCounter(this.serverId, { label: this.labels['ci-kit-jobs'], names });
-    await this.writeLabels(this.labels['ci-kit-state'] === 'draining' ? {} : { 'ci-kit-state': 'ready' });
+    const config = { 'ci-kit-config': configLabel(this.configCommit) };
+    await this.writeLabels(this.labels['ci-kit-state'] === 'draining' ? config : { ...config, 'ci-kit-state': 'ready' });
     this.log(`state ${this.labels['ci-kit-state']}; next runner ${runnerName(this.serverId, this.counter)}`);
     await this.reenableSchedules();
     await this.ledgerAtBoot(server);
@@ -173,13 +179,17 @@ export class Agent {
     if (this.unread.length) await this.refreshServed();
     if (this.unread.length) throw new Error(`cannot read ${this.unread.join(', ')}`);
     const containers = await this.docker.list();
+    const served = this.served.map((e) => e.repo);
+    const unserved = unservedRepos(containers, served);
     const runners = new Map();
     const queued = [];
     const active = [];
-    for (const { repo } of this.served) {
+    // An unserved repo's runners are still listed, so its busy ones finish their jobs (spec §3a); its jobs are not.
+    for (const repo of [...served, ...unserved]) {
       // Runners first: a job taken between the two reads then shows as not queued, never as double demand.
       const mine = (await this.gh.runners(repo)).filter((r) => r.name.startsWith('ci-kit-pool-'));
       runners.set(repo, new Map(mine.map((r) => [r.id, r])));
+      if (unserved.includes(repo)) continue;
       const runs = [...(await this.gh.runsByStatus(repo, 'queued')), ...(await this.gh.runsByStatus(repo, 'in_progress'))];
       for (const run of runs) {
         const jobs = (await this.gh.listJobs(repo, run.id)).map((j) => ({ ...j, repo }));
@@ -187,7 +197,24 @@ export class Agent {
         active.push(...poolJobs(jobs));
       }
     }
-    return { containers, runners, queued, active };
+    return { containers, runners, unserved: new Set(unserved), queued, active };
+  }
+
+  // The config on the kit's main, every 5 min. The `ci-kit-config` label names the commit of the config the agent
+  // runs, and changes only after a successful fetch: the move between backends waits on it (spec §3a). A failed
+  // fetch keeps the last good config and its label.
+  async refreshConfig() {
+    try {
+      const { cfg, commit } = await this.loadConfig();
+      this.cfg = cfg;
+      this.configCommit = commit;
+    } catch (err) {
+      this.log(`config: keeping the last good copy (${err.message})`);
+    }
+    await this.refreshServed();
+    if (this.labels['ci-kit-config'] !== configLabel(this.configCommit)) {
+      await this.writeLabels({ 'ci-kit-config': configLabel(this.configCommit) }).catch((err) => this.log(`labels: ${err.message}`));
+    }
   }
 
   // An idle runner is retired only once GitHub has let go of it: unregistered, or already gone (404). If the
@@ -198,7 +225,7 @@ export class Agent {
       try {
         await this.gh.deleteRunner(a.container.repo, a.container.runnerId);
       } catch (err) {
-        if (a.reason === 'idle-runner' && err.status !== 404) {
+        if (IDLE.has(a.reason) && err.status !== 404) {
           this.log(`kept ${a.container.name}: its runner could not be unregistered (${err.message}); looking again next tick`);
           return false;
         }
@@ -219,8 +246,8 @@ export class Agent {
   async tick() {
     if (this.disowned) return;
     if (this.now() - this.configAt >= CONFIG_EVERY) {
-      this.cfg = await this.loadConfig(this.cfg);
-      await this.refreshServed();
+      await this.refreshConfig();
+      if (this.disowned) return;
     }
     let seen;
     try {
@@ -231,7 +258,9 @@ export class Agent {
     }
     const now = this.now();
 
-    const review = reviewContainers({ containers: seen.containers, runners: seen.runners, memory: this.memory, now, cfg: this.cfg });
+    const review = reviewContainers({
+      containers: seen.containers, runners: seen.runners, unserved: seen.unserved, memory: this.memory, now, cfg: this.cfg,
+    });
     this.memory = review.memory;
     const retired = new Set();
     for (const a of review.actions) {

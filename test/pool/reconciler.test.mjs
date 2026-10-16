@@ -13,6 +13,7 @@ const CFG = {
   idle_runner_minutes: 10, drain_minute: 50, memory_gb_per_cpu: 2, max_hours_per_day: 8,
   ledger: { repo: SBX, issue_title: 'pool ledger' },
 };
+const BAKED = 'bake0000aaaabbbbccccddddeeeeffff00001111';
 const httpError = (status) => Object.assign(new Error(`HTTP ${status}`), { status });
 
 function world({ labels = { 'ci-kit': 'pool', 'ci-kit-state': 'booting' }, totalCores = 16 } = {}) {
@@ -22,7 +23,10 @@ function world({ labels = { 'ci-kit': 'pool', 'ci-kit-state': 'booting' }, total
     id: 55, name: 'ci-kit-pool', created: new Date(T0 - 5 * 60_000).toISOString(), labels: { ...labels },
     server_type: { name: 'cpx62', prices: [{ location: 'hel1', price_hourly: { gross: '0.2452' } }] }, location: { name: 'hel1' },
   };
-  const state = { runners: [], runs: [], jobs: new Map(), containers: [], comments: [], deleteRunnerError: null };
+  const state = {
+    runners: [], runs: [], jobs: new Map(), containers: [], comments: [], deleteRunnerError: null,
+    config: { cfg: CFG, commit: BAKED }, configError: null,
+  };
   let commentId = 1;
   const hc = {
     server: async (id) => {
@@ -34,8 +38,8 @@ function world({ labels = { 'ci-kit': 'pool', 'ci-kit-state': 'booting' }, total
   };
   const gh = {
     getRepo: async () => ({ private: true }),
-    runners: async () => state.runners.map((r) => ({ ...r })),
-    runsByStatus: async (_repo, status) => state.runs.filter((r) => r.status === status),
+    runners: async (repo) => state.runners.filter((r) => (r.repo ?? SBX) === repo).map((r) => ({ ...r })),
+    runsByStatus: async (repo, status) => state.runs.filter((r) => r.status === status && (r.repo ?? SBX) === repo),
     listJobs: async (_repo, id) => state.jobs.get(id) ?? [],
     deleteRunner: async (_repo, id) => {
       calls.push(`unregister ${id}`);
@@ -60,7 +64,11 @@ function world({ labels = { 'ci-kit': 'pool', 'ci-kit-state': 'booting' }, total
   const agent = new Agent({
     cfg: CFG, gh, hc, serverId: 55, totalCores, docker,
     work: { dir: (n) => `/w/${n}`, make: async () => {}, remove: async () => {} },
-    touchLastSuccess: async () => {}, blockMetadata: async () => {}, loadConfig: async (c) => c,
+    touchLastSuccess: async () => {}, blockMetadata: async () => {}, configCommit: BAKED,
+    loadConfig: async () => {
+      if (state.configError) throw new Error(state.configError);
+      return state.config;
+    },
     now: () => clock,
   });
   return { agent, calls, state, server, advance: (ms) => { clock += ms; } };
@@ -261,5 +269,71 @@ test('the agent\'s label writes read-modify-write: a heartbeat keeps the labels 
   assert.equal(w.server.labels['ci-kit-fallback'], 'core-limit');
   assert.equal(w.server.labels.other, 'kept');
   assert.ok(w.server.labels['ci-kit-heartbeat']);
+  assert.equal(w.server.labels['ci-kit'], 'pool');
+});
+
+// Moving a repo between backends (spec §3a): the agent's half. A repo removed from pool.json is draining.
+const MAWS = 'SSFSKIM/MAWS';
+const BOTH = { ...CFG, repos: [{ repo: SBX, workflows: ['ci.yml'] }, { repo: MAWS, workflows: ['gate.yml'] }] };
+const NEW = 'feed0000aaaabbbbccccddddeeeeffff00002222';
+
+test('a repo removed from pool.json drains: its in-flight job runs past 5 min and finishes, no queued job of it starts', async () => {
+  const w = world();
+  w.state.config = { cfg: BOTH, commit: BAKED };
+  w.agent.cfg = BOTH;
+  await w.agent.start();
+  w.state.containers = [{ ...idleContainer(), name: 'ci-kit-pool-55-1', repo: MAWS, runnerId: 7, created: T0 }];
+  w.state.runners = [{ id: 7, name: 'ci-kit-pool-55-1', busy: true, status: 'online', repo: MAWS }];
+  w.state.config = { cfg: CFG, commit: NEW }; // MAWS removed on main
+  w.advance(5 * 60_000);
+  await w.agent.tick(); // the config refresh
+  w.state.runs = [{ id: 2, status: 'in_progress', repo: MAWS }];
+  w.state.jobs.set(2, [{ id: 21, status: 'queued', labels: L4, created_at: new Date(T0).toISOString() }]);
+  w.calls.length = 0;
+  for (let i = 0; i < 40; i += 1) { // 6 min 40 s of ticks with the job busy
+    w.advance(10_000);
+    await w.agent.tick();
+  }
+  assert.deepEqual(w.calls.filter((c) => /^(unregister|remove|start|jit)/.test(c)), []);
+  assert.equal(w.state.containers.length, 1);
+  // The job ends; the JIT runner leaves GitHub and the container exits. It is removed, and nothing starts for MAWS.
+  w.state.runners = [];
+  w.state.containers = [{ ...w.state.containers[0], running: false }];
+  w.advance(10_000);
+  await w.agent.tick();
+  assert.deepEqual(w.calls.filter((c) => /^(unregister|remove|start|jit)/.test(c)), ['remove ci-kit-pool-55-1']);
+});
+
+test('a removed repo\'s idle runner is unregistered first, then its container stops; if GitHub refuses, it stays', async () => {
+  const w = world();
+  await w.agent.start(); // serves SBX only
+  w.state.containers = [{ ...idleContainer(), repo: MAWS, created: T0 }];
+  w.state.runners = [{ id: 7, name: 'ci-kit-pool-55-1', busy: false, status: 'online', repo: MAWS }];
+  w.state.deleteRunnerError = 422; // it took a job between our read and our call
+  w.calls.length = 0;
+  w.advance(10_000);
+  await w.agent.tick();
+  assert.deepEqual(w.calls.filter((c) => /^(unregister|remove)/.test(c)), ['unregister 7']);
+  assert.equal(w.state.containers.length, 1);
+  w.state.deleteRunnerError = null;
+  w.calls.length = 0;
+  w.advance(10_000);
+  await w.agent.tick();
+  assert.deepEqual(w.calls.filter((c) => /^(unregister|remove)/.test(c)), ['unregister 7', 'remove ci-kit-pool-55-1']);
+});
+
+test('ci-kit-config names the config commit: the baked one at boot, then each one fetched; a failed fetch keeps it', async () => {
+  const w = world();
+  w.state.configError = 'GET raw: 503';
+  await w.agent.start();
+  assert.equal(w.server.labels['ci-kit-config'], 'bake0000');
+  w.advance(5 * 60_000);
+  await w.agent.tick();
+  assert.equal(w.server.labels['ci-kit-config'], 'bake0000');
+  w.state.configError = null;
+  w.state.config = { cfg: CFG, commit: NEW };
+  w.advance(5 * 60_000);
+  await w.agent.tick();
+  assert.equal(w.server.labels['ci-kit-config'], 'feed0000');
   assert.equal(w.server.labels['ci-kit'], 'pool');
 });
