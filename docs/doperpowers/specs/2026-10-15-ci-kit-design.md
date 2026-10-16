@@ -2316,6 +2316,24 @@ euros, jobs, and the projected month at the current rate.
     once before a job adds nothing new.
   - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
 
+- **Decision:** MAWS's interface to the pool does not change between backends (CI-opt's
+  commitment to maws-fe, 2026-10-16). It binds any future GCE backend.
+  - The runner labels stay `[self-hosted, ci-kit-pool, cpus-N]`.
+  - `pool-ensure@v1` stays in MAWS's plan job, and pool.json chooses the backend. On a GCE backend,
+    ensure does nothing.
+  - **A GCE launcher** would be driven by the `workflow_job.queued` webhook, through the existing
+    ci-kit-runners App. It creates one spot VM per queued pool job, sized from `cpus-N`:
+    | label | machine |
+    |---|---|
+    | cpus-8 | c3d-highcpu-8 |
+    | cpus-4 | c3d-highcpu-4 |
+    | cpus-2 | e2-highcpu-2 |
+
+    No new secret goes into MAWS.
+  - **Rejected alternative:** a separate action and secret per backend. It puts a MAWS workflow
+    change on the critical path of every backend switch.
+  - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
