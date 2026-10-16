@@ -1556,7 +1556,9 @@ ci-gate [<worktree-or-sha>] [--gates a,b] [--repo OWNER/NAME] [--label NAME] [--
 
 **I8 — The pool config** (`pool/config/pool.json`, baked to `/etc/ci-kit/pool.json`).
 
-`repos[].workflows` lists the watched workflows (§3, Idle). MAWS's entry,
+`repos[].workflows` lists the watched workflows (§3, Idle). Since PR #16 (2026-10-16) the agent
+no longer reads it: only pool demand keeps a box alive. The key stays only because agents in
+older snapshots still require it, and it is dropped once every snapshot runs the new code (M9). MAWS's entry,
 `{"repo":"SSFSKIM/MAWS","workflows":["gate.yml"]}`, is added when maws-fe adopts P1.
 
 ```json
