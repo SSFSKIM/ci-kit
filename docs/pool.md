@@ -272,7 +272,9 @@ CI_KIT_COMMIT=$(git rev-parse HEAD) node gce/bake/bake.mjs     # default commit:
    are dropped once 2 h old).
 
 The Cloud Run job `ci-kit-bake` runs the same script as `ci-kit-launcher@`: `gce/deploy.sh base bake` deploys it,
-and `gce/deploy.sh bake-schedule` adds the weekly run (Sunday 18:00 UTC).
+and `gce/deploy.sh bake-schedule` adds the weekly run (Sunday 18:00 UTC). Neither is deployed yet: the first ready
+image, `ci-kit-runner-20261016-100502-b4fc88e2`, was baked from the Mac (2026-10-16, 12.5 min: builder 8 min,
+image 1 min, smoke 2.5 min).
 
 **Checking for leftovers.**
 
