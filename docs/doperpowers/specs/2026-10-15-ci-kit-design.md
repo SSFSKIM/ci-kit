@@ -1725,6 +1725,12 @@ euros, jobs, and the projected month at the current rate.
 - **Observation (M5 post-merge):** `systemctl mask` fails silently on a unit file that already
   exists in `/etc/systemd/system`. Test overrides use `disable --now`.
 
+- **Observation (2026-10-16):** a system modal alert held key focus on the mini. The frontmost app
+  was `UserNotificationCenter`, probably an unanswered Automation consent dialog. maws-fe's full
+  class-1b run went red in 7 groups, all of them focus and pasteboard failures. The mini's locale
+  is ko-KR, and maws-fe pins `--lang=en-US` in its launcher. The mac lane's job-started hook gains
+  a desktop precondition (see the Decision Log).
+
 ## Decision Log
 
 - **Decision:** the verification for this work.
@@ -2101,6 +2107,15 @@ euros, jobs, and the projected month at the current rate.
   - `docs/pool.md` gains one line on dispatching the guard by hand.
 
   No second scheduling mechanism is added.
+  - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
+
+- **Decision:** the mac lane's job-started hook fails a job at once when a system dialog holds
+  focus.
+  - The hook reads the frontmost app with `lsappinfo` only, never AppleScript or System Events,
+    which raise TCC prompts. If it is `UserNotificationCenter`, `CoreServicesUIAgent`,
+    `SecurityAgent` or `loginwindow`, the job fails with `ci-kit: a system dialog (<name>) holds
+    focus on the mini — dismiss it there and rerun`.
+  - **Rationale:** an hour of red e2e groups becomes one clear failure.
   - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
 
 ## Outcomes & Retrospective
