@@ -1650,6 +1650,12 @@ euros, jobs, and the projected month at the current rate.
   still quarantined and has never been launched. The first document or presentation group may
   raise a Gatekeeper prompt that only the human can answer.
 
+- **Observation (incident, 2026-10-15 ~23:00–23:50Z):** concurrent `ci-gate` pollers exhausted
+  the human's GitHub REST budget (5,000/h). The M2 and M3 executors had about 8 alive at once, each
+  making 2 requests every 10 s. Every session on the account shares that token: maws-fe's
+  `ci-gate.sh`, `gh` in every session, qa-loop merges. Executors were capped at 2 pollers until
+  the fix below landed.
+
 ## Decision Log
 
 - **Decision:** the verification for this work.
@@ -1825,6 +1831,27 @@ euros, jobs, and the projected month at the current rate.
     for that step.
   - `setup: false` leaves a gate at depth 1. Gate `env` may not use `CI_KIT_*` names.
   - **Date/Author:** 2026-10-15, m2-kit executor, folded by plan-executor.
+
+- **Decision:** `ci-gate` is a good citizen of the shared token. It is a kit fix wave before
+  the next `v1` move.
+  - Run and job polling use conditional requests (`If-None-Match`; a 304 does not count against
+    the limit).
+  - Jobs are polled every 15 s for the first 2 minutes, then every 30 s. Logs are fetched only for
+    failed jobs.
+  - `X-RateLimit-Remaining` is read on every response. Below 500, the poll stretches to 60 s and
+    `ci-gate` prints one line, `THROTTLE remaining=<n>`.
+  - Proof: a pure-function test of the schedule, and a live run that spends fewer than about 60
+    requests over 5 minutes.
+  - The pool agent polls on the App's installation token (its own budget) and uses the same ETag
+    behaviour.
+  - **Rationale:** adoption means many agents running `ci-gate` at once on one human's token. A
+    poller that can drain it breaks the whole account.
+  - **Date/Author:** 2026-10-15, CI-opt, recorded by plan-executor.
+- **Decision:** the DC7 owner (smns-erb-88) approved M3's three changes to DC7's tests. It declined
+  a test-only `saw_waiting` or presence counter on `GET /requests/<id>`; it does not belong in the
+  DX5 contract. The one 2 s wait in `test-bridge-requests.sh` stays. If it flakes in CI, the run id
+  is reported to CI-opt as a bug. The `launched_by` off-by-a-second finding is tracked in Arkho #84.
+  - **Date/Author:** 2026-10-15, CI-opt, recorded by plan-executor.
 
 ## Outcomes & Retrospective
 
