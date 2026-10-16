@@ -1809,6 +1809,22 @@ euros, jobs, and the projected month at the current rate.
   - cpx41 and cpx51 are measured before the human chooses a lever. pool.json's types and
     locations, and A9's activation, wait on that choice and on the owner's approval.
 
+- **Observation (2026-10-16, maws-fe's gate-offload DL 38, MAWS master a54943ff7):** P4 parts 2–4
+  landed and were measured on the mini.
+  - **Build cache.** Restoring `out/` takes 1 s, against a 33–41 s build. A job drops from about
+    1 m 30 s to about 50 s, and a full lane builds 2 times instead of 26, saving 14–16 minutes.
+  - **Default set.** browser-cua 7/7 and browser-chrome 7/7 joined it.
+  - **The packaged gate** ran green except for two known in-front cases:
+    - swiftc is present; build:app ran unsigned in 42 s; the fuses check passed;
+    - supervisor:packaged 1/1 and voice:packaged 1/1;
+    - e2e:packaged 86 pass and 2 fail of 150, the two being the known in-front cases.
+  - **Still waiting.** P4 step 1, the GATE_E2E_RUNNER flip, waits for the Terminal-in-front hook
+    and one whole green class-1b run.
+- **Decision record (2026-10-16):** a GCE spot measurement of MAWS class 1a is an added M7
+  evidence item, approved by the human, in project `ssfskim-ci-kit`. It is evidence only: the
+  Hetzner pool stays the built lane, and a GCE backend would be a spec revision with its own
+  milestone.
+
 ## Decision Log
 
 - **Decision:** the verification for this work.
