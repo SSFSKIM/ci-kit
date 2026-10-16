@@ -8,7 +8,7 @@ import { GceError } from '../../lib/gce.mjs';
 import {
   allocationId, allocationTime, instanceName, allocOf, repoLabel, runnerLabels, jobCpus, viewInstance, planLaunches,
   placements, insertOutcome, walkPlacements, reviewInstances, reviewRows, orphanRunners, orphanDisks, newestReadyImage,
-  jobInstance,
+  jobInstance, reportable,
 } from '../../gce/launcher/logic.mjs';
 import { parseGceConfig, servedRepos } from '../../gce/launcher/config.mjs';
 
@@ -437,4 +437,29 @@ test('review 3: an incomplete instance listing launches nothing and finalizes no
   assert.deepEqual(reviewRows({ rows: [row(a, 'running')], instances: [], complete: false, runnerKnown: () => true, runnerOf: () => null, preempted: new Set(), now: T0, cfg: CFG }), []);
   const old = instanceName(allocAt(T0 - 6 * MIN, 1));
   assert.deepEqual(orphanRunners({ runners: [runner(old)], instanceNames: new Set(), now: T0, complete: false }), []);
+});
+
+// Step 4 (A13 teardown): a VM whose job unit reported is deleted at once, not after the guest's power-off.
+test('a VM that reported its job\'s end (ci-kit/job) is deleted on that tick, before it powers off; unreported, it waits', () => {
+  const n = (k) => instanceName(A(k));
+  const runners = new Map([['ssfskim--ci-kit-sandbox', new Map([[n(3), runner(n(3), { status: 'offline' })], [n(4), runner(n(4), { busy: true })]])]]);
+  const reports = new Map([[n(1), 'exit:0'], [n(2), 'failed:unit'], [n(3), 'exit:1'], [n(4), 'exit:0']]);
+  const out = reviewInstances({
+    instances: [instance({ alloc: A(1), age: MIN }), instance({ alloc: A(2), age: MIN, status: 'STOPPING' }), instance({ alloc: A(3), age: MIN }), instance({ alloc: A(4), age: MIN }), instance({ alloc: A(5), age: MIN })].map(viewInstance),
+    runnersOf: () => runners.get('ssfskim--ci-kit-sandbox'), reports, served: new Set(['ssfskim--ci-kit-sandbox']), now: T0, cfg: CFG,
+  }).map((a) => [a.instance.alloc, a.action, a.end, a.reason, Boolean(a.unregister)]);
+  assert.deepEqual(out, [
+    [A(1), 'delete', 'done', 'job-exited', false],
+    [A(2), 'delete', 'done', 'job-exited', false],
+    // A runner still registered is unregistered first, and a refusal (it took a job) keeps the VM.
+    [A(3), 'unregister-delete', 'done', 'job-exited', false],
+  ], 'a busy runner\'s VM is left alone whatever it reports; no report, no early delete');
+});
+
+test('reportable: only a VM whose runner listing is known and whose runner is not busy is worth reading', () => {
+  const n = (k) => instanceName(A(k));
+  const runners = new Map([[n(2), runner(n(2), { busy: true })], [n(3), runner(n(3))]]);
+  const views = [instance({ alloc: A(1) }), instance({ alloc: A(2) }), instance({ alloc: A(3) }), instance({ alloc: A(4), status: 'TERMINATED' })].map(viewInstance);
+  assert.deepEqual(reportable(views, () => runners).map((v) => v.alloc), [A(1), A(3)]);
+  assert.deepEqual(reportable(views, () => undefined), []);
 });

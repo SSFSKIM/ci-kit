@@ -3,9 +3,11 @@ Description=ci-kit GCE job: this VM's one job container, then power off (spec §
 After=docker.service network-online.target
 Wants=network-online.target
 Requires=docker.service
-# The VM exists for one job. However the unit ends, the guest powers off, and the launcher deletes the stopped VM.
-SuccessAction=poweroff
-FailureAction=poweroff
+# The VM exists for one job. However the unit ends, the guest powers off at once, and the launcher deletes the stopped
+# VM. No orderly shutdown: the disk is discarded with the VM, the result is already reported (ci-kit/job), and an
+# orderly poweroff took about 85 s of billed time between the job's end and the VM's deletion (A13, 2026-10-16).
+SuccessAction=poweroff-immediate
+FailureAction=poweroff-immediate
 
 [Service]
 Type=exec

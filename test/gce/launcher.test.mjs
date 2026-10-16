@@ -204,7 +204,7 @@ test('an insert whose call timed out but which GCE accepted is found through its
   w.g.insertErrors.push({ match: () => true, accepted: true, error: () => new Error('The operation was aborted due to timeout') });
   await launcher.tick();
   assert.equal(vms(w).length, 1);
-  assert.equal(w.log.filter((l) => l.startsWith('insert')).length, 1);
+  assert.equal(w.log.filter((l) => l.startsWith('insert ')).length, 1);
   assert.equal(only(rows(w)).state, 'running');
 });
 
@@ -477,4 +477,52 @@ test('fix wave 2: an id already in the ledger window is never reused', async () 
   const out = await launcher.tick();
   assert.deepEqual(out.launched, [instanceName(allocationId(T0, () => 4))]);
   assert.equal([...rows(w).get(taken)].length, 1, 'the old row is untouched');
+});
+
+test('step 4: a VM whose job reported its end is deleted on the next tick, while the guest is still shutting down', async () => {
+  const { w, launcher } = setup();
+  const job = w.sim.queue(SBX, L(4));
+  await launcher.tick();
+  const [name] = vms(w);
+  w.sim.boot(SBX, name);
+  w.sim.take(SBX, name, job);
+  w.advance(MIN);
+  await launcher.tick();
+  assert.ok(!w.log.includes(`read ci-kit/job ${name}`), 'a busy runner\'s VM is not read');
+  w.sim.finish(SBX, name, job, { poweredOff: false });
+  w.advance(20_000);
+  await launcher.tick();
+  assert.deepEqual(vms(w), [], 'deleted before it powered off');
+  w.advance(MIN);
+  await launcher.tick();
+  const row = only(rows(w));
+  assert.deepEqual([row.state, row.end, row.job?.id], ['final', 'done', job.id]);
+  assert.deepEqual(leftovers(w), { instances: 0, disks: 0, runners: 0 });
+});
+
+test('step 4: an insert started late in the tick still waits its own deadline; the tick\'s budget only stops new attempts', async () => {
+  const { w, launcher } = setup();
+  w.sim.queue(SBX, L(4));
+  w.hooks.beforeJit = () => w.advance(44_000); // the mint returns 44 s into a 45 s budget
+  await launcher.tick();
+  assert.ok(w.log.some((l) => /^insert-wait ci-kit-gce-\S+ 40000$/.test(l)), w.log.filter((l) => l.startsWith('insert-wait')).join('; '));
+  assert.equal(vms(w).length, 1);
+});
+
+test('review (PR #20): a report beside a registered runner never deletes the VM if the runner takes a job before it is unregistered', async () => {
+  const { w, launcher } = setup();
+  w.sim.queue(SBX, L(4));
+  await launcher.tick();
+  const [name] = vms(w);
+  w.sim.boot(SBX, name);
+  w.sim.vm(name).attrs = { 'ci-kit/job': 'failed:unit' }; // a report left beside a runner that has not taken a job yet
+  const late = w.sim.queue(SBX, L(4));
+  w.hooks.beforeUnregister = (repo, r) => {
+    if (r?.name === name) w.sim.take(repo, name, late); // GitHub assigns it a job first: the unregister gets 422
+  };
+  w.advance(MIN);
+  await launcher.tick();
+  assert.ok(vms(w).includes(name), 'the VM survives the refused unregister');
+  const row = [...rows(w).values()].flat().find((r) => r.instance === name);
+  assert.equal(row.state, 'running', 'no deleting row: its job is running');
 });

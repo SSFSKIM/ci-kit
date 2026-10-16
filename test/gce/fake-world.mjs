@@ -42,7 +42,8 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
     listDisks: async () => ({ items: g.disks.filter((d) => !hooks.unreachable || !d.zone.endsWith(hooks.unreachable)).map((d) => structuredClone(d)), complete: !hooks.unreachable }),
     images: async () => g.images.map((i) => structuredClone(i)),
     instance: async (zone, name) => structuredClone(g.instances.find((i) => i.name === name && i.zone.endsWith(zone)) ?? null),
-    insertInstance: async (zone, body) => {
+    insertInstance: async (zone, body, opts = {}) => {
+      log.push(`insert-wait ${body.name} ${opts.deadlineMs}`);
       hooks.beforeInsert?.(zone, body);
       const i = g.insertErrors.findIndex((e) => e.match(zone, body));
       if (i >= 0) {
@@ -75,6 +76,12 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
     },
     zoneOperations: async (zone, filter) => g.ops.filter((o) => filter.includes(o.targetLink.split('/').pop()) && o.zone === zone).map((o) => structuredClone(o)),
     operation: async (link) => structuredClone(g.ops.find((o) => o.selfLink === link) ?? null),
+    guestAttribute: async (zone, name, path) => {
+      const inst = g.instances.find((i) => i.name === name);
+      if (!inst) throw new GceError(404, 'notFound', ['notFound']);
+      log.push(`read ${path} ${name}`);
+      return inst.attrs?.[path] ?? null;
+    },
   };
 
   function create(zone, body) {
@@ -167,11 +174,14 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
       job.runner_name = name;
       gh.runs.find((x) => x.id === job.run_id).status = 'in_progress';
     },
-    finish(repo, name, job) {
+    // The job ends: the JIT runner leaves, the unit reports ci-kit/job=exit:<code>, and the guest powers off, which
+    // takes it a while (`poweredOff: false` stops before the VM is TERMINATED).
+    finish(repo, name, job, { poweredOff = true, code = 0 } = {}) {
       job.status = 'completed';
       gh.runs.find((x) => x.id === job.run_id).status = 'completed';
       gh.runners.set(repo, runnersOf(repo).filter((r) => r.name !== name)); // a JIT runner leaves after its job
-      sim.vm(name).status = 'TERMINATED';
+      sim.vm(name).attrs = { ...sim.vm(name).attrs, 'ci-kit/job': `exit:${code}` };
+      if (poweredOff) sim.vm(name).status = 'TERMINATED';
     },
     preempt(name) {
       const inst = sim.vm(name);

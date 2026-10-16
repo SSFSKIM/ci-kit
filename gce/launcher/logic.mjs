@@ -210,8 +210,11 @@ export function newestReadyImage(images, family) {
 // instance's repo, or undefined when that listing failed or the repo is unknown: then only the stopped and overage
 // rules apply, since a failed listing is never read as idleness. served: Set of served repo labels; an instance of
 // an unserved repo is draining (its idle runner goes at once, its busy one finishes).
+// reports: Map instance name → its job unit's `ci-kit/job` report (`exit:<code>` or `failed:<step>`), read for the
+// instances reportable() names. A VM that reported is deleted at once: its job is over and its runner gone or dead,
+// and the guest's power-off takes about a minute and a half more (A13: the VM gone within 2 min of the job's end).
 // Returns [{instance, action: 'delete'|'unregister-delete', end, reason, unregister?, alert?}].
-export function reviewInstances({ instances, runnersOf, served, now, cfg }) {
+export function reviewInstances({ instances, runnersOf, served, now, cfg, reports = new Map() }) {
   const idleMs = cfg.idle_runner_minutes * MIN;
   const actions = [];
   for (const i of instances) {
@@ -225,6 +228,11 @@ export function reviewInstances({ instances, runnersOf, served, now, cfg }) {
       actions.push({ instance: i, action: 'delete', end: 'max-run', reason: 'overage', unregister: r !== null && !r.busy, alert: true });
     } else if (runners === undefined || r?.busy) {
       continue;
+    } else if (reports.get(i.name)) {
+      // A runner still registered is unregistered first, with the idle rule's veto: if GitHub refuses (it has just
+      // taken a job), the VM stays. A VM boots once (no restart policy), so its report is this boot's, but the veto
+      // does not rest on that.
+      actions.push({ instance: i, action: r ? 'unregister-delete' : 'delete', end: 'done', reason: 'job-exited' });
     } else if (r && (!served.has(i.repoLabel) || age >= idleMs)) {
       actions.push({ instance: i, action: 'unregister-delete', end: 'cancelled-idle', reason: served.has(i.repoLabel) ? 'idle-runner' : 'unserved' });
     } else if (!r && age >= idleMs) {
@@ -233,6 +241,15 @@ export function reviewInstances({ instances, runnersOf, served, now, cfg }) {
     }
   }
   return actions;
+}
+
+// The instances worth reading `ci-kit/job` for: up (not TERMINATED, which the stopped rule takes), their repo's
+// runners listed, and their runner not busy (a busy runner's job is still running).
+export function reportable(instances, runnersOf) {
+  return instances.filter((i) => {
+    const runners = runnersOf(i);
+    return isGce(i.raw) && !DONE_STATUSES.has(i.status) && runners !== undefined && !runners.get(i.name)?.busy;
+  });
 }
 
 // What to do with each ledger row that is not final (spec §3a, I12): a launching row whose VM exists is recorded

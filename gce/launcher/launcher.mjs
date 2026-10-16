@@ -12,13 +12,13 @@ import { staleBakeInstances } from '../bake/plan.mjs';
 import { servedRepos } from './config.mjs';
 import {
   allocationId, instanceName, repoLabel, viewInstance, isGce, planLaunches, placements, insertOutcome, walkPlacements,
-  jobInstance, jitRequest, newestReadyImage, reviewInstances, reviewRows, orphanRunners, orphanDisks,
+  jobInstance, jitRequest, newestReadyImage, reviewInstances, reviewRows, orphanRunners, orphanDisks, reportable,
 } from './logic.mjs';
 import { launchRow, runningRow, withJob, finalRow, dailyLine } from './ledger.mjs';
 
 export const TICK_BUDGET_MS = 45_000;
 const INSERT_DEADLINE_MS = 40_000;
-const PARALLEL_LAUNCHES = 6;
+const PARALLEL_LAUNCHES = 16; // a burst launches in one round: each insert waits ~10–20 s for its operation
 const DAILY_WITHIN_MS = 2 * 3600_000; // the 26 h ledger window holds all of yesterday only early in the day
 const zoneOf = (r) => r.zone.split('/').pop();
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -175,12 +175,19 @@ export class Launcher {
 
   async cleanInstances(seen, out) {
     const served = new Set(seen.served.map(repoLabel));
-    const actions = reviewInstances({
-      instances: seen.instances,
-      runnersOf: (v) => seen.runners.get(this.repoOf(seen, v)),
-      served, now: this.now(), cfg: this.cfg,
-    });
-    for (const a of actions) await this.retire(seen, a, out);
+    const runnersOf = (v) => seen.runners.get(this.repoOf(seen, v));
+    // A VM whose job has ended says so in ci-kit/job before its guest powers off; reading it saves that wait.
+    const reports = new Map(await Promise.all(reportable(seen.instances, runnersOf).map(async (v) => {
+      try {
+        return [v.name, await this.gce.guestAttribute(v.zone, v.name, 'ci-kit/job')];
+      } catch (err) {
+        if (err.status !== 404) this.log(`ci-kit/job of ${v.name}: ${err.message}`);
+        return [v.name, null];
+      }
+    })));
+    const actions = reviewInstances({ instances: seen.instances, runnersOf, reports, served, now: this.now(), cfg: this.cfg });
+    // Each retirement touches only its own VM, runner and row, so they run together: a VM waits for no other.
+    await Promise.all(actions.map((a) => this.retire(seen, a, out)));
   }
 
   // Unregister first (for an idle runner: GitHub refuses a runner that just took a job, and the VM then stays), then
@@ -360,12 +367,13 @@ export class Launcher {
       await this.write(finalRow(row, { end: 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb }));
       return {};
     }
-    // Each attempt waits for its operation at most until the tick's deadline (and never under 5 s); an insert whose
-    // operation outlives that is uncertain, reconciled now, and if still unsettled left for the next tick.
+    // The tick's deadline stops new attempts; an attempt already started waits for its operation up to its own
+    // deadline, since giving up early saves nothing (the operation runs on) and only defers what it decides. An
+    // operation that outlives that wait is uncertain, reconciled now, and if still unsettled left for the next tick.
     const result = await walkPlacements(placements(cpus, this.cfg), {
       attempt: (p) => this.gce.insertInstance(p.zone, jobInstance({
         alloc, ...p, repo, cpus, image: image.selfLink, jit: jit.encoded_jit_config, cfg: this.cfg, config: this.config,
-      }), { deadlineMs: Math.max(5_000, Math.min(this.insertDeadlineMs, deadline - this.now())) }),
+      }), { deadlineMs: this.insertDeadlineMs }),
       reconcile: (p, err) => this.reconcileInsert(p.zone, name, err),
       now: this.now, deadline,
     });

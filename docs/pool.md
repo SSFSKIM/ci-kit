@@ -260,9 +260,13 @@ Allocation ids are the launch minute in base36 (5 characters) and 5 random ones 
 runner's age is read from its name, never more than the real one: the runners API gives no creation time.
 Admission reserves the largest machine a launch could land on (an `e2-highcpu-2` job reserves 4, its fallback
 `c3d-highcpu-4`'s), and no placement attempt starts once the tick's 45 s budget is spent; the job waits for the
-next tick.
+next tick. An attempt already started waits for its operation up to 40 s whatever the budget, since giving up early
+only defers what the operation decides. Up to 16 launches run at once, so a burst launches in one round.
 
 Cleanup, every tick:
+- a VM whose job unit reported `ci-kit/job=exit:<code>` (or `failed:<step>`) is deleted on that tick, without
+  waiting for the guest's power-off, which takes about 85 s more. Only a VM whose runner is not busy is read, so a
+  running job is never touched;
 - a `TERMINATED` VM (its job ended and the guest powered off) is deleted;
 - an idle runner (registered, not busy, its VM older than `idle_runner_minutes`) is unregistered first and its VM
   deleted only once GitHub has let go (or answers 404); `busy` or any error keeps the VM for the next tick, since
@@ -370,7 +374,8 @@ gcloud compute disks list --project=ssfskim-ci-kit --filter='labels.ci-kit:*'
 **The job VM.** At boot, `ci-kit-gce-job.service` runs `gce/vm/job.mjs`: it drops the job container's TCP and UDP
 to `169.254.169.254` except port 53 (GCE's resolver lives there), runs one job container from
 `ci-kit-runner:latest` on all of the VM's vCPUs with the Hetzner container's mounts and environment and the JIT
-config from metadata `ci-kit-jit`, reports `ci-kit/job=exit:<code>`, and the unit powers the VM off. A VM with no
+config from metadata `ci-kit-jit`, reports `ci-kit/job=exit:<code>`, and the unit powers the VM off at once
+(`poweroff-immediate`: no orderly shutdown, since the disk is discarded; an orderly one took about 85 s). A VM with no
 `ci-kit-jit` and no `ci-kit-smoke` reports `ci-kit/job=failed:no-jit` and powers off. Every VM needs metadata
 `enable-guest-attributes=TRUE` for the reports.
 
