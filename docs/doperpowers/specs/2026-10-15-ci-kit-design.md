@@ -2316,6 +2316,18 @@ euros, jobs, and the projected month at the current rate.
     apart. M7's shard evidence (6/14 vs 4/14 red) does. The confirming check is the first 16-core
     pool run after GATE_RUNNER flips: its unit log should show maxWorkers=8 on a 16-core host
     (M9, post-flip, not a blocker).
+- **Observation (A9 post-flip, 2026-10-16):** MAWS flipped GATE_RUNNER=pool. Its first production
+  pool run, 38884821068 (master cd44b560a), ran class 1a on box 170733794 (cpx62@hel1, 16 vCPU).
+  - **Box creation.** Ensure created the box at 10:04:56Z; the plan job ran 10:04:51–10:04:58Z.
+  - **Runners and times.** Every job ran on a `ci-kit-pool-170733794-*` runner and passed:
+    - probes on `-1` (cpus-2): 39 s;
+    - static on `-2` (cpus-4): 3 m 37 s;
+    - unit on `-3` (cpus-8): 5 m 11 s.
+  - **Unit log.** It shows `cores 8-15 (nproc 8)` from the pre-job hook and `vitest run --maxWorkers=8`
+    on the 16-vCPU host: 14,974 tests passed, 1068 files.
+  - **Post-flip check confirmed.** On a host wider than its job, the gate sized to the cpuset, not
+    the host. The unit log prints no getconf; M4 measured it at 16 in the same container shape.
+  - **Total.** About 6 min 23 s from push to verdict.
 - **Observation (2026-10-16):** the scheduled guard fired once, at 07:29:36Z. That is 3 h 40 min
   after the schedule was re-registered, and nearly 8 h after the workflow was created.
 - **Observation (2026-10-16):** a MAWS e2e test leaked an open-URL into the owner's real Chrome on
