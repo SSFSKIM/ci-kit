@@ -65,16 +65,16 @@ test('the LSDisplayName shape is read too', () => {
   assert.match(run.stderr, /\(SecurityAgent\) holds focus/);
 });
 
-test('an ordinary app in front passes', () => {
+test('an ordinary app in front passes once Terminal is brought over it', () => {
   for (const output of [asnShape('Terminal'), pairShape('Google Chrome'), asnShape('Electron')]) {
-    const run = check(output);
+    const run = check(output, 0, { afterOpen: asnShape('Terminal') });
     assert.equal(run.status, 0, run.stderr);
     assert.equal(run.stderr, '');
   }
 });
 
 test('a name that only contains a listed one passes', () => {
-  assert.equal(check(asnShape('loginwindowhelper')).status, 0);
+  assert.equal(check(asnShape('loginwindowhelper'), 0, { afterOpen: asnShape('Terminal') }).status, 0);
 });
 
 test('empty output passes, and is logged', () => {
@@ -125,12 +125,32 @@ test('open failing fails the job', () => {
   assert.match(run.stderr, /^ci-kit: could not open Terminal on the mini/m);
 });
 
-test('an app other than Finder in front is left alone: nothing opened', () => {
-  for (const output of [asnShape('Terminal'), asnShape('Electron'), pairShape('Google Chrome')]) {
-    const run = check(output, 0, { afterOpen: asnShape('Terminal') });
+test('Terminal already in front, by name or by bundle id under a localized name, is left alone: nothing opened', () => {
+  for (const output of [asnShape('Terminal'), pairShape('Terminal'), asnShape('터미널', 'com.apple.Terminal'), pairShape('터미널', 'com.apple.Terminal')]) {
+    const run = check(output, 0, { afterOpen: asnShape('Finder') });
     assert.equal(run.status, 0, run.stderr);
     assert.deepEqual(run.opened, []);
+    assert.match(run.stdout, /desktop-check .*frontmost is (Terminal|터미널)$/m);
   }
+});
+
+test('any other app in front (Chrome, Electron, Finder) gets Terminal brought over it, before and after logged', () => {
+  for (const [output, before] of [
+    [asnShape('Google Chrome', 'com.google.Chrome'), 'Google Chrome'],
+    [pairShape('Electron', 'com.github.Electron'), 'Electron'],
+    [asnShape('Finder', 'com.apple.finder'), 'Finder'],
+  ]) {
+    const run = check(output, 0, { afterOpen: asnShape('터미널', 'com.apple.Terminal') });
+    assert.equal(run.status, 0, run.stderr);
+    assert.deepEqual(run.opened, ['-a Terminal']);
+    assert.match(run.stdout, new RegExp(`frontmost before=${before} after=터미널`));
+  }
+});
+
+test('Chrome staying in front fails the job fast, naming it', () => {
+  const run = check(asnShape('Google Chrome', 'com.google.Chrome'));
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /^ci-kit: Terminal did not come to the front on the mini \(Google Chrome is\) — check its desktop and rerun$/m);
 });
 
 test('an unreadable frontmost app still lets the job run, and nothing is opened', () => {
@@ -148,8 +168,8 @@ test('names are localized: Finder and Terminal are told by bundle id (the mini s
   }
 });
 
-test('a localized Finder is opened over too, and an app merely named Terminal is not taken for it', () => {
-  const run = check(asnShape('파인더', 'com.apple.finder'), 0, { afterOpen: asnShape('Terminal', 'com.example.fake') });
+test('an app merely named Terminal under another bundle id is brought Terminal over it, and is not taken for it after', () => {
+  const run = check(asnShape('Terminal', 'com.example.fake'), 0, { afterOpen: asnShape('Terminal', 'com.example.fake') });
   assert.equal(run.status, 1);
   assert.deepEqual(run.opened, ['-a Terminal']);
   assert.match(run.stderr, /Terminal did not come to the front on the mini \(Terminal is\)/);

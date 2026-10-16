@@ -98,19 +98,21 @@ Dismissing it is the human's, in the mini's GUI session (never an agent, never c
 AppleScript or System Events would raise TCC prompts. When `lsappinfo` fails or prints nothing, the job is not blocked;
 the miss is logged. Every check logs a `desktop-check` line (the frontmost app) to the job's log and the hooks log.
 
-**Every job starts with Terminal in front, not Finder.** When an e2e app quits, focus falls to Finder, and some of
-MAWS's paste and to-human results depend on the app in front, so a job's outcome depended on what the job before it
-left. When Finder is in front (after the dialog check), the hook runs `open -a Terminal`, which goes through
-LaunchServices (no Apple Events, no Automation consent), and re-reads the frontmost app for up to about 5 s. The job log
-gets `frontmost before=Finder after=Terminal`. If Terminal is not in front by then, the job fails at "Set up runner":
+**Every job starts with Terminal in front.** Some of MAWS's paste and to-human results depend on the app in front, and
+what is in front depended on what came before: Finder when an e2e app quits, or Chrome after a test leaked an open-URL
+into the owner's browser (2026-10-16). So whenever any app other than Terminal is in front (after the dialog check),
+the hook runs `open -a Terminal`, which goes through LaunchServices (no Apple Events, no Automation consent), and
+re-reads the frontmost app for up to about 5 s. The job log gets `frontmost before=<app> after=Terminal`. If Terminal is
+not in front by then, the job fails at "Set up runner":
 
 ```
 ci-kit: Terminal did not come to the front on the mini (<name> is) — check its desktop and rerun
 ```
 
-Finder and Terminal are told by bundle id (`com.apple.finder`, `com.apple.Terminal`): `lsappinfo`'s names are
-localized, and the mini shows Terminal as `터미널`. Any other app in front is left as it is. The hook acts only before the job, so it never fights MAWS's own
-`MAWS_E2E_FOREGROUND=1`.
+Terminal is told by its bundle id, `com.apple.Terminal`: `lsappinfo`'s names are localized, and the mini shows
+Terminal as `터미널`. System dialogs are never touched, and an unreadable frontmost app still lets the job run. The hook
+acts only before the job, so it never fights MAWS's own `MAWS_E2E_FOREGROUND=1`, and it does take the front from
+whoever is using the mini's desktop when a job starts.
 
 Before each job and after it, the hooks kill every process of the runner's user that a job left behind:
 
