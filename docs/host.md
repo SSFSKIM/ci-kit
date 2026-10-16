@@ -13,7 +13,7 @@ A process is killed only when all of these hold:
 - it has run for more than `min_age_hours` (2);
 - its command line matches one of `patterns` in `host/janitor.json`, and none of `exclude`.
 
-It gets SIGTERM, then SIGKILL if it is still running 10 s later, unchanged. Each kill is a line in
+It gets SIGTERM, then SIGKILL if it still runs 10 s later as the same process (see Signals). Each kill is a line in
 `~/Library/Logs/ci-kit/janitor.log`, and a macOS notification says how many were killed.
 
 **Why that rule.** A one-shot test process that `launchd` has adopted, two hours on, has outlived the session that
@@ -23,30 +23,43 @@ reported, never killed.
 
 ### The patterns
 
-Each pattern is a JavaScript regex over the whole command line, as `ps -o command` prints it. Most patterns are
-anchored on the executable (`^\S*\bnode\s`), because the words they look for also appear in the arguments of
-processes that must never be killed: a `claude` session resumed with a prompt that mentions `vitest`, a `zsh -c`
-wrapper whose script runs `node --test`.
+Each pattern is a JavaScript regex over the whole command line, as `ps -o command` prints it, and must be a
+non-empty string. The patterns match what a process *runs*, not what its arguments mention. A pattern names the
+interpreter (`node`, Python), lets only that interpreter's own options (`-x`, `--x=y`) come before the script, and
+then requires a test entrypoint as the script, or the runner's own flag in the runner's position. So
+`node …/claude-code/cli.js --resume "… vitest run …"`, `node daemon.mjs --test-mode` and
+`node daemon.mjs --config heartbeat.test.mjs` never qualify. An interpreter option that takes a separate value
+(`node --import tsx --test`) also stops a match; such a process is not killed.
 
 | Pattern targets | Example command line |
 |---|---|
-| the `node --test` runner | `node --test test/` |
-| a test file run by node, as the runner's children are | `node /x/test/eof-drain.test.mjs` |
-| `vitest` | `node /x/node_modules/vitest/vitest.mjs run` |
-| the Playwright test runner (not `@playwright/cli` or MCP) | `node /x/node_modules/.bin/playwright test` |
-| Electron with a worktree path (`.claude/worktrees/`, `.worktrees/`, `<repo>-wt-<x>`) | `…/Electron.app/Contents/MacOS/Electron /x/MAWS-wt-95/out/main/index.js` |
-| cua's `fake-upstream-process.mjs` fixture | `node /x/test/fixtures/fake-upstream-process.mjs` |
-| sminos test stand-ins: scripts under `tests/sminos/` or a test's `/tmp/sm?.XXXXXX/` | `Python /tmp/smc.Ab3dE9/ctl.py supervisor …` |
-| codex-companion test workspaces | `node /var/…/T/codex-plugin-test-Qx81/codex app-server` |
+| the `node --test` runner (exactly `--test`, among node's options) | `node --test test/` |
+| a test file as the script, as the runner's children are | `node /x/test/eof-drain.test.mjs` |
+| vitest's entrypoint (`vitest/vitest.mjs`, `.bin/vitest`) | `node /x/node_modules/vitest/vitest.mjs run` |
+| the Playwright test runner's entrypoint, then `test` (not `@playwright/cli` or MCP) | `node /x/node_modules/.bin/playwright test` |
+| Electron as Playwright's `_electron.launch` starts it (its loader, then `--inspect=0 --remote-debugging-port=0`) | `…/Electron -r …/playwright-core/lib/server/electron/loader.js --inspect=0 --remote-debugging-port=0 …` |
+| Electron with a worktree path (`.claude/worktrees/`, `.worktrees/`, `<repo>-wt-<x>`): reported only, see below | `…/Electron /x/MAWS-wt-95/out/main/index.js` |
+| cua's `fake-upstream-process.mjs` fixture as the script | `node /x/test/fixtures/fake-upstream-process.mjs` |
+| sminos test stand-ins: a script under `tests/sminos/` or in a test's `/tmp/sm?.XXXXXX/` | `Python /tmp/smc.Ab3dE9/ctl.py supervisor …` |
+| codex-companion: a script inside a `codex-plugin-test-*` workspace, or a task worker serving one | `node /var/…/T/codex-plugin-test-Qx81/codex app-server` |
 
 ### The exclusions
 
 An exclusion is checked after the patterns and always wins. A process that matches a pattern and an exclusion is
 listed in the report under "Left running" and is not touched.
 
-- watch, UI and server modes, as separate arguments: `--watch`, `-w`, `--ui`, `serve`, `dev`, `preview`;
-- `vitest` without a `run` or `--run` argument, since bare `vitest` watches. This also spares vitest's worker
-  processes, whose command lines do not say how their parent was started.
+- watch, UI and server modes, as separate arguments: `--watch`, `-w`, `--ui`, `serve`, `dev`, `preview`. This
+  also spares a codex-companion broker serving a test workspace (`app-server-broker.mjs serve`);
+- vitest's entrypoint without a `run` subcommand or a `--run` flag, since bare `vitest` watches;
+- Electron without Playwright's launch flags. A developer may leave an app from a worktree open on purpose, so
+  only a test launch is killed; the rest is reported.
+
+### Signals
+
+Each process is chosen with its birth identity: its uid and start time (`ps -o lstart`, under the C locale).
+Immediately before SIGTERM, and again before SIGKILL, a fresh `ps -p` of the chosen pids checks that each pid
+still holds that identity. A pid that a new process took meanwhile, even one with the same command line, gets
+nothing. This is M6's `mac/hooks/terminate.mjs`, which the janitor calls.
 
 ## What it reports
 
@@ -69,7 +82,7 @@ Limits of the worktree list:
 
 ## Cost per run
 
-One `ps` call for the whole machine. For each repo under `repos_root` that has linked worktrees (checked on disk,
+One `ps` call for the whole machine; when it kills, a `ps -p` of just those pids every half second of the grace. For each repo under `repos_root` that has linked worktrees (checked on disk,
 no git call otherwise): three git calls, plus a `git status` for each worktree whose branch is merged. All git
 calls use `--no-optional-locks`, so the janitor never rewrites an index an agent is using. One `tart list` where
 tart is installed. Run by hand on the MacBook at load 180, that is about 2 s of wall time and 0.7 s of CPU.

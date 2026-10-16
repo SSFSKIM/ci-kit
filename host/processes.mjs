@@ -1,6 +1,8 @@
 // The janitor's process side: one ps listing, the rule that picks orphaned one-shot test processes, and the kill.
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
+import { identityOf } from '../mac/hooks/strays.mjs';
+import { terminate as sharedTerminate } from '../mac/hooks/terminate.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -12,23 +14,27 @@ export function parseEtime(etime) {
   return ((Number(d) * 24 + Number(h)) * 60 + Number(min)) * 60 + Number(s);
 }
 
-// BSD-style options without a dash work on macOS and procps alike; `ww` keeps command lines whole.
-const PS_ARGS = ['axww', '-o', 'uid=,pid=,ppid=,etime=,rss=,command='];
+// BSD-style options without a dash work on macOS and procps alike; `ww` keeps command lines whole. lstart is the
+// start time, in one fixed format under the C locale: with the uid it is a process's birth identity.
+const PS_COLUMNS = 'uid=,pid=,ppid=,etime=,rss=,lstart=,command=';
+const PS_ENV = { ...process.env, LC_ALL: 'C' };
+const LSTART = String.raw`\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}`;
 
 export function parsePs(text) {
+  const row = new RegExp(String.raw`^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\d+)\s+(${LSTART})\s(.*)$`);
   const procs = [];
   for (const line of text.split('\n')) {
-    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\d+)\s(.*)$/.exec(line);
+    const m = row.exec(line);
     if (!m) continue;
-    const [, uid, pid, ppid, etime, rss, command] = m;
-    procs.push({ uid: Number(uid), pid: Number(pid), ppid: Number(ppid), age: parseEtime(etime), rss: Number(rss), command: command.trim() });
+    const [, uid, pid, ppid, etime, rss, started, command] = m;
+    procs.push({ uid: Number(uid), pid: Number(pid), ppid: Number(ppid), age: parseEtime(etime), rss: Number(rss), started, command: command.trim() });
   }
   return procs;
 }
 
 // Every process on the machine, in one ps call: the kill rule, the VM ages and the memory report all read it.
 export async function listProcesses() {
-  const { stdout } = await execFileAsync('ps', PS_ARGS, { maxBuffer: 64 * 1024 * 1024 });
+  const { stdout } = await execFileAsync('ps', ['axww', '-o', PS_COLUMNS], { env: PS_ENV, maxBuffer: 64 * 1024 * 1024 });
   return parsePs(stdout);
 }
 
@@ -36,6 +42,8 @@ function compileList(config, key) {
   const list = config[key];
   if (!Array.isArray(list)) throw new Error(`config: ${key} must be a list of regexes`);
   return list.map((source, i) => {
+    // new RegExp would coerce anything else: {} becomes /[object Object]/, which matches almost any command line.
+    if (typeof source !== 'string' || source === '') throw new Error(`config: ${key}[${i}] must be a non-empty regex string, not ${JSON.stringify(source)}`);
     try {
       return { source, re: new RegExp(source) };
     } catch (err) {
@@ -63,64 +71,50 @@ export function classify(procs, rules, { uid, selfPid }) {
     const pattern = rules.patterns.find(({ re }) => re.test(p.command));
     if (!pattern) continue;
     const excludedBy = rules.exclude.find(({ re }) => re.test(p.command));
-    if (excludedBy) spare.push({ ...p, pattern: pattern.source, excludedBy: excludedBy.source });
-    else kill.push({ ...p, pattern: pattern.source });
+    const identity = identityOf(p);
+    if (excludedBy) spare.push({ ...p, identity, pattern: pattern.source, excludedBy: excludedBy.source });
+    else kill.push({ ...p, identity, pattern: pattern.source });
   }
   return { kill, spare };
 }
 
-const exists = (pid) => {
+// pid → birth identity of those of the given pids that run now. ps exits 1 when none of them does.
+export function snapshotOf(pids) {
+  if (pids.length === 0) return new Map();
+  let stdout;
   try {
-    process.kill(pid, 0);
-    return true;
+    stdout = execFileSync('ps', ['ww', '-o', PS_COLUMNS, '-p', pids.join(',')], { encoding: 'utf8', env: PS_ENV, stdio: ['ignore', 'pipe', 'ignore'] });
   } catch (err) {
-    return err.code === 'EPERM';
+    if (err.status !== 1) throw err;
+    stdout = err.stdout ?? '';
   }
-};
-
-// The listed pids that still run, as ps sees them now.
-async function psSurvivors(pids) {
-  if (pids.length === 0) return [];
-  try {
-    const { stdout } = await execFileAsync('ps', ['ww', '-o', 'uid=,pid=,ppid=,etime=,rss=,command=', '-p', pids.join(',')]);
-    return parsePs(stdout);
-  } catch (err) {
-    // ps exits 1 when none of the pids exists.
-    if (err.code === 1) return parsePs(err.stdout ?? '');
-    throw err;
-  }
+  return new Map(parsePs(stdout).map((p) => [p.pid, identityOf(p)]));
 }
 
-// SIGTERM to every victim, then SIGKILL after the grace to those still running. A pid is SIGKILLed only while ps
-// still shows it with the parent and command line it was chosen for, so a pid reused meanwhile is left alone.
-// Each result is terminated (ended on SIGTERM), killed (SIGKILL), gone (ended before SIGTERM) or failed: <reason>.
-export async function terminate(victims, { graceMs = 10_000, survivors = psSurvivors } = {}) {
-  const results = victims.map((v) => ({ ...v, result: 'terminated' }));
-  const pending = [];
-  for (const r of results) {
-    try {
-      process.kill(r.pid, 'SIGTERM');
-      pending.push(r);
-    } catch (err) {
-      r.result = err.code === 'ESRCH' ? 'gone' : `failed: ${err.code ?? err.message}`;
-    }
-  }
-  const deadline = Date.now() + graceMs;
-  while (pending.some((r) => exists(r.pid)) && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, Math.min(250, graceMs)));
-  }
-  const left = pending.filter((r) => exists(r.pid));
-  if (left.length === 0) return results;
-  const now = new Map((await survivors(left.map((r) => r.pid))).map((p) => [p.pid, p]));
-  for (const r of left) {
-    const seen = now.get(r.pid);
-    if (!seen || seen.ppid !== r.ppid || seen.command !== r.command) continue;
-    try {
-      process.kill(r.pid, 'SIGKILL');
-      r.result = 'killed';
-    } catch (err) {
-      if (err.code !== 'ESRCH') r.result = `failed: ${err.code ?? err.message}`;
-    }
-  }
-  return results;
+// SIGTERM, then SIGKILL after the grace to what is left: M6's terminate (mac/hooks/terminate.mjs), which signals a
+// pid only while the process holding it still has the birth identity it was chosen with, checked against a fresh
+// snapshot just before each round. Each victim's result: terminated (ended after SIGTERM), killed (SIGKILL sent),
+// gone (ended before SIGTERM), replaced (its pid held by another process before SIGTERM: not signalled),
+// survived (still there after SIGKILL) or failed: <code>.
+export async function terminate(victims, { graceMs = 10_000, snapshot, signal = (pid, name) => process.kill(pid, name), sleep } = {}) {
+  const pids = victims.map((v) => v.pid);
+  const io = {
+    snapshot: snapshot ?? (() => snapshotOf(pids)),
+    signal,
+    sleep: sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+    graceMs,
+    pollMs: Math.min(500, graceMs),
+  };
+  const { events, survivors } = await sharedTerminate(victims, io);
+  return victims.map((v) => {
+    const term = events.find((e) => e.pid === v.pid && e.signal === 'SIGTERM');
+    const kill = events.find((e) => e.pid === v.pid && e.signal === 'SIGKILL');
+    let result;
+    if (term.outcome === 'error') result = `failed: ${term.code}`;
+    else if (term.outcome !== 'sent') result = term.outcome;
+    else if (kill?.outcome === 'error') result = `failed: ${kill.code}`;
+    else if (survivors.includes(v.pid)) result = 'survived';
+    else result = kill?.outcome === 'sent' ? 'killed' : 'terminated';
+    return { ...v, result };
+  });
 }

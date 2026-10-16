@@ -1,20 +1,23 @@
 {
   "patterns": [
-    "^\\S*\\bnode\\s(?:.*\\s)?--test\\b",
-    "^\\S*\\bnode\\s(?:.*\\s)?\\S+\\.test\\.[cm]?[jt]sx?(?:\\s|$)",
-    "^\\S*\\bnode\\s.*\\bvitest\\b",
-    "^\\S*\\bnode\\s.*\\bplaywright\\S*\\s+test(?:\\s|$)",
+    "^\\S*\\bnode(?:\\s+-\\S+)*\\s+--test(?=\\s|$)",
+    "^\\S*\\bnode(?:\\s+-\\S+)*\\s+\\S+\\.test\\.[cm]?[jt]sx?(?=\\s|$)",
+    "^\\S*\\bnode(?:\\s+-\\S+)*\\s+\\S*/(?:vitest/vitest\\.mjs|\\.bin/vitest)(?=\\s|$)",
+    "^\\S*\\bnode(?:\\s+-\\S+)*\\s+\\S*/(?:\\.bin/playwright|@playwright/test/cli\\.js|playwright/cli\\.js)\\s+test(?=\\s|$)",
+    "^\\S*/[Ee]lectron(?:\\s+-r\\s+\\S*/playwright-core/lib/server/electron/loader\\.js)?(?:\\s+--no-sandbox)?\\s+--inspect=0\\s+--remote-debugging-port=0(?=\\s|$)",
     "^(?=\\S*/[Ee]lectron(?:\\s|$)).*(?:/\\.claude/worktrees/|/\\.worktrees/|/[^/\\s]+-wt-[^/\\s]+(?:/|\\s|$))",
-    "^\\S*\\bnode\\s.*\\bfake-upstream-process\\.mjs\\b",
-    "^\\S*\\b[Pp]ython[\\d.]*\\s.*(?:/tests/sminos/[^/\\s]+\\.py|/tmp/sm[a-z]\\.[A-Za-z0-9]{6}/[^/\\s]+\\.py)(?:\\s|$)",
-    "^\\S*\\bnode\\s.*codex-plugin-test-"
+    "^\\S*\\bnode(?:\\s+-\\S+)*\\s+(?:\\S*/)?fake-upstream-process\\.mjs(?=\\s|$)",
+    "^\\S*\\b[Pp]ython[\\d.]*(?:\\s+-\\S+)*\\s+(?:\\S*/tests/sminos/[^/\\s]+\\.py|(?:/private)?/tmp/sm[a-z]\\.[A-Za-z0-9]{6}/[^/\\s]+\\.py)(?=\\s|$)",
+    "^\\S*\\bnode(?:\\s+-\\S+)*\\s+\\S*/codex-plugin-test-[^/\\s]+/\\S+",
+    "^\\S*\\bnode(?:\\s+-\\S+)*\\s+\\S*/(?:app-server-broker\\.mjs\\s+serve|codex-companion\\.mjs\\s+task-worker)(?=\\s).*\\s--cwd\\s+\\S*/codex-plugin-test-[^/\\s]+(?=\\s|$)"
   ],
   "exclude": [
     "\\s--watch(?:[=\\s]|$)",
     "\\s-w(?:\\s|$)",
     "\\s--ui(?:[=\\s]|$)",
     "\\s(?:serve|dev|preview)(?:\\s|$)",
-    "^(?!.*\\s(?:run|--run)(?:\\s|$)).*\\bvitest\\b"
+    "^\\S*\\bnode(?:\\s+-\\S+)*\\s+\\S*/(?:vitest/vitest\\.mjs|\\.bin/vitest)(?!\\s+run(?=\\s|$))(?!.*\\s--run(?=\\s|$))",
+    "^(?=\\S*/[Ee]lectron(?:\\s|$))(?!\\S*/[Ee]lectron(?:\\s+-r\\s+\\S*/playwright-core/lib/server/electron/loader\\.js)?(?:\\s+--no-sandbox)?\\s+--inspect=0\\s+--remote-debugging-port=0(?=\\s|$))"
   ],
   "min_age_hours": 2,
   "vm_report_hours": 12,

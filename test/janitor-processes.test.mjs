@@ -11,7 +11,7 @@ const ME = 501;
 const HOURS = 3600;
 
 // One orphaned process of this user, 3 h old, with the given command line.
-const orphan = (command, over = {}) => ({ uid: ME, pid: 4242, ppid: 1, age: 3 * HOURS, rss: 1000, command, ...over });
+const orphan = (command, over = {}) => ({ uid: ME, pid: 4242, ppid: 1, age: 3 * HOURS, rss: 1000, started: 'Thu Oct 15 20:00:00 2026', command, ...over });
 const verdict = (command, over) => {
   const { kill, spare } = classify([orphan(command, over)], rules, { uid: ME, selfPid: 1 });
   if (kill.length) return 'kill';
@@ -28,22 +28,24 @@ test('etime parses every ps form into seconds', () => {
   assert.ok(Number.isNaN(parseEtime('soon')));
 });
 
-test('the ps listing keeps the whole command line, spaces included', () => {
+test('the ps listing keeps the whole command line, spaces included, and each process its start time', () => {
   const text = [
-    '  501 90860     1       02:00:02    5120 node --test /tmp/a b/a11.test.mjs',
-    '    0     1     0 17-07:32:17   20480 /sbin/launchd',
-    '  501   684     1 17-07:32:15  307200 /Applications/KakaoTalk.app/Contents/MacOS/KakaoTalk',
+    '  501 90860     1       02:00:02    5120 Thu Oct 15 22:46:22 2026 node --test /tmp/a b/a11.test.mjs',
+    '    0     1     0 17-07:32:17   20480 Mon Sep 28 15:10:01 2026 /sbin/launchd',
+    '  501   684     1 17-07:32:15  307200 Mon Sep  8 15:10:03 2026 /Applications/KakaoTalk.app/Contents/MacOS/KakaoTalk',
     '',
   ].join('\n');
   assert.deepEqual(parsePs(text), [
-    { uid: 501, pid: 90860, ppid: 1, age: 7202, rss: 5120, command: 'node --test /tmp/a b/a11.test.mjs' },
-    { uid: 0, pid: 1, ppid: 0, age: 1495937, rss: 20480, command: '/sbin/launchd' },
-    { uid: 501, pid: 684, ppid: 1, age: 1495935, rss: 307200, command: '/Applications/KakaoTalk.app/Contents/MacOS/KakaoTalk' },
+    { uid: 501, pid: 90860, ppid: 1, age: 7202, rss: 5120, started: 'Thu Oct 15 22:46:22 2026', command: 'node --test /tmp/a b/a11.test.mjs' },
+    { uid: 0, pid: 1, ppid: 0, age: 1495937, rss: 20480, started: 'Mon Sep 28 15:10:01 2026', command: '/sbin/launchd' },
+    { uid: 501, pid: 684, ppid: 1, age: 1495935, rss: 307200, started: 'Mon Sep  8 15:10:03 2026', command: '/Applications/KakaoTalk.app/Contents/MacOS/KakaoTalk' },
   ]);
 });
 
+const node = '/Users/new/.nvm/versions/node/v22.23.2/bin/node';
+const wt = '/Users/new/Developer/GitHub/MAWS/.claude/worktrees/agent-a1b2';
+
 test('one-shot test commands are killed', () => {
-  const node = '/Users/new/.nvm/versions/node/v22.23.2/bin/node';
   for (const command of [
     'node --test',
     `${node} --test --test-concurrency=1 test/`,
@@ -59,9 +61,11 @@ test('one-shot test commands are killed', () => {
     '/Library/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python /tmp/smc.Ab3dE9/ctl.py supervisor /tmp/x/sup ok',
     'python3 /Users/new/Developer/GitHub/doperpowers/tests/sminos/hub_standin.py /tmp/sms.x/hub.port cid-0 secret-0 1000',
     `${node} /var/folders/7x/abc/T/codex-plugin-test-Qx81/codex app-server`,
-    `${node} /Users/new/.claude/plugins/codex/broker.mjs --cwd /var/folders/7x/abc/T/codex-plugin-test-Qx81`,
-    '/Users/new/Developer/GitHub/MAWS/.claude/worktrees/agent-a1b2/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron --inspect=0 --remote-debugging-port=0 /Users/new/Developer/GitHub/MAWS/.claude/worktrees/agent-a1b2/out/main/index.js',
-    '/Users/new/Developer/GitHub/MAWS/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron /Users/new/Developer/GitHub/MAWS-wt-95/out/main/index.js',
+    `${node} /x/skills/codex-companion/runtime/scripts/codex-companion.mjs task-worker --cwd /var/folders/7x/abc/T/codex-plugin-test-Qx81 --job-id j1`,
+    // Electron as Playwright's _electron.launch starts it (playwright-core 1.63): its loader, then these two flags.
+    `${wt}/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron -r ${wt}/node_modules/playwright-core/lib/server/electron/loader.js --inspect=0 --remote-debugging-port=0 ${wt}/out/main/index.js`,
+    // ...and with an executablePath: no loader. Positive evidence of a test launch, wherever the app lives.
+    '/Users/new/Developer/GitHub/MAWS/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron --inspect=0 --remote-debugging-port=0 /Users/new/Developer/GitHub/MAWS/out/main/index.js',
   ]) {
     assert.equal(verdict(command), 'kill', command);
   }
@@ -74,12 +78,17 @@ test('watch, UI and server modes are reported and left running', () => {
     'node /x/node_modules/vitest/vitest.mjs run --watch',
     'node /x/node_modules/vitest/vitest.mjs run --ui',
     'node /x/node_modules/vitest/vitest.mjs -w',
-    'node /x/node_modules/vitest/dist/workers/forks.js', // a worker: its parent's mode is unknowable
     'node --test --watch test/',
     'node --watch /x/a.test.mjs',
     'node /x/node_modules/.bin/playwright test --ui',
     'node /x/node_modules/@playwright/test/cli.js test --ui=true',
     '/Users/new/Developer/GitHub/MAWS-wt-3/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron /Users/new/Developer/GitHub/MAWS-wt-3 dev',
+    // Electron from or for a worktree with no test-launch flags: a developer may have left the app open on purpose.
+    `${wt}/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron ${wt}/out/main/index.js`,
+    '/Users/new/Developer/GitHub/MAWS/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron /Users/new/Developer/GitHub/MAWS-wt-95/out/main/index.js',
+    `${wt}/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron --inspect=9229 ${wt}/out/main/index.js`,
+    // A codex-companion broker serving a test workspace: a server mode, so the exclusion wins.
+    `${node} /x/skills/codex-companion/runtime/scripts/app-server-broker.mjs serve --endpoint unix:/tmp/b.sock --cwd /var/folders/7x/abc/T/codex-plugin-test-Qx81 --pid-file /tmp/b.pid`,
   ]) {
     assert.equal(verdict(command), 'spare', command);
   }
@@ -98,6 +107,23 @@ test('everything else is ignored, however it reads', () => {
     '/Users/new/Developer/GitHub/MAWS/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron /Users/new/Developer/GitHub/MAWS/out/main/index.js',
     '/Users/new/.nvm/versions/node/v22.23.2/bin/node /Users/new/Developer/GitHub/cua/bin/cua.mjs agent run --relay',
     '/opt/homebrew/bin/nodemon --test',
+    // Node-hosted CLIs and scripts whose later arguments merely mention tests (the M8 review's probes).
+    'node /x/node_modules/@anthropic-ai/claude-code/cli.js --resume investigate vitest run failures',
+    `${node} /x/node_modules/@anthropic-ai/claude-code/cli.js -p "run node --test and playwright test, then fake-upstream-process.mjs"`,
+    'node /srv/daemon.mjs --test-mode',
+    'node /srv/daemon.mjs --test',
+    'node --test-mode /srv/daemon.mjs',
+    'node /srv/daemon.mjs --config /srv/heartbeat.test.mjs',
+    'node /srv/runner.mjs /x/node_modules/vitest/vitest.mjs run',
+    'node /srv/tool.mjs /x/node_modules/.bin/playwright test',
+    'node /srv/tool.mjs /x/test/fixtures/fake-upstream-process.mjs',
+    'node /srv/watch.mjs --dir /var/folders/7x/abc/T/codex-plugin-test-Qx81/state',
+    'python3 /srv/daemon.py /Users/new/Developer/GitHub/doperpowers/tests/sminos/hub_standin.py',
+    'python3 /srv/daemon.py --log /tmp/smc.Ab3dE9/ctl.py',
+    // A vitest worker: its parent's mode is unknowable, and it is not an entrypoint.
+    'node /x/node_modules/vitest/dist/workers/forks.js',
+    // Electron with only a debugger port is not Playwright's launch.
+    '/Applications/Some.app/Contents/MacOS/Electron --remote-debugging-port=9222',
   ]) {
     assert.equal(verdict(command), 'ignore', command);
   }
@@ -123,6 +149,7 @@ test('a kill names the pattern that matched; a spare names the exclusion that wo
   assert.equal(kill.length, 1);
   assert.equal(kill[0].pid, 1);
   assert.match(kill[0].pattern, /--test/);
+  assert.equal(kill[0].identity, `${ME} Thu Oct 15 20:00:00 2026`, 'chosen with its birth identity');
   assert.equal(spare.length, 1);
   assert.equal(spare[0].pid, 2);
   assert.match(spare[0].pattern, /vitest/);
@@ -134,4 +161,14 @@ test('a bad regex in the config is refused, naming the list and the entry', () =
   assert.throws(() => compileRules({ ...shipped, exclude: ['['] }), /exclude\[0\]/);
   assert.throws(() => compileRules({ ...shipped, min_age_hours: -1 }), /min_age_hours/);
   assert.throws(() => compileRules({ ...shipped, patterns: [] }), /patterns/);
+});
+
+test('every pattern and exclusion must be a non-empty string: new RegExp would coerce the rest into broad regexes', () => {
+  // {} would become /[object Object]/ and [] the empty regex, which matches every command line.
+  assert.throws(() => compileRules({ ...shipped, patterns: [{}] }), /patterns\[0\] must be a non-empty regex string, not \{\}/);
+  assert.throws(() => compileRules({ ...shipped, patterns: ['^node --test', []] }), /patterns\[1\]/);
+  assert.throws(() => compileRules({ ...shipped, exclude: ['x', 'y', 7] }), /exclude\[2\]/);
+  assert.throws(() => compileRules({ ...shipped, exclude: [null] }), /exclude\[0\]/);
+  assert.throws(() => compileRules({ ...shipped, patterns: [''] }), /patterns\[0\]/);
+  assert.throws(() => compileRules({ ...shipped, exclude: 'x' }), /exclude must be a list/);
 });
