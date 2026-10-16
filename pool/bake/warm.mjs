@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// Warms the pool image's caches on the bake's builder (spec §3 Caches, Bake step 1): for MAWS, `pnpm fetch`
-// against its lockfile (read with an App token, contents read), and the Playwright browsers and Electron binary
-// at the versions its lockfile pins. Each step is best effort; what happened goes to /var/lib/ci-kit/cache/warm.json,
+// Warms the pool image's caches on a bake's builder, on either backend (spec §3 Caches, §3a Image): for MAWS,
+// `pnpm fetch` against its lockfile, and the Playwright browsers and Electron binary at the versions its lockfile
+// pins. The lockfile is read with the installation token in CI_KIT_GH_TOKEN (MAWS contents, read: WARM_SCOPE); this
+// script never sees an App key. Each step is best effort; what happened goes to /var/lib/ci-kit/cache/warm.json,
 // and the exit status is non-zero when any step failed.
 // The record is written to the cache directory, so a job on the pool can read it too.
 import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
@@ -11,15 +12,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
 import { createGitHub } from '../../lib/github.mjs';
-import { createAppTokens } from '../../lib/github-app.mjs';
 import { CACHE, CACHE_ENV } from '../agent/docker.mjs';
 
 const sh = promisify(execFile);
-const ETC = process.env.CI_KIT_ETC ?? '/etc/ci-kit';
 const MAWS = 'SSFSKIM/MAWS';
 const FILES = ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', '.npmrc'];
 const env = { ...process.env, ...CACHE_ENV, COREPACK_ENABLE_DOWNLOAD_PROMPT: '0', CI: 'true' };
 const results = {};
+
+// What the warming token needs, and all a bake should ask the App for.
+export const WARM_SCOPE = { repositories: ['MAWS'], permissions: { contents: 'read' } };
 
 // The version a lockfile resolved for a root dependency (pnpm lockfile v9: importers['.']), without peer suffixes.
 export function lockedVersion(lock, name) {
@@ -38,8 +40,9 @@ async function step(name, fn) {
 }
 
 async function main() {
-  const tokens = createAppTokens({ appId: (await readFile(`${ETC}/app_id`, 'utf8')).trim(), pem: await readFile(`${ETC}/app.pem`, 'utf8'), owner: 'SSFSKIM' });
-  const gh = createGitHub(tokens);
+  const token = process.env.CI_KIT_GH_TOKEN?.trim();
+  if (!token) throw new Error('CI_KIT_GH_TOKEN is not set (an installation token that can read MAWS)');
+  const gh = createGitHub(token);
   const dir = await mkdtemp(join(tmpdir(), 'ci-kit-warm-'));
   let lock = null;
   await step('maws-files', async () => {

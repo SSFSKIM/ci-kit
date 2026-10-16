@@ -1,0 +1,15 @@
+[Unit]
+Description=ci-kit GCE job: this VM's one job container, then power off (spec §3a)
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+# The VM exists for one job. However the unit ends, the guest powers off, and the launcher deletes the stopped VM.
+SuccessAction=poweroff
+FailureAction=poweroff
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/node /opt/ci-kit/gce/vm/job.mjs
+
+[Install]
+WantedBy=multi-user.target

@@ -43,16 +43,22 @@ export function runArgs({ name, repo, runnerId, labels, cores, memoryGbPerCpu, c
     ...Object.entries(labelArgs).flatMap(([k, v]) => ['--label', `${k}=${v}`]),
     '--cpuset-cpus', formatCpuset(cores),
     '--memory', `${gb}g`, '--memory-swap', `${gb}g`,
-    '--shm-size', '2g',
-    '-v', `${CACHE}:${CACHE}`,
-    '-e', 'CI_KIT_JIT',
-    '-e', 'ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/ci-kit-job-started.sh',
     '-e', `CI_KIT_CORES=${formatCpuset(cores)}`,
     ...(clamped ? ['-e', `CI_KIT_CLAMPED=${clamped}`] : []),
-    ...Object.entries(CACHE_ENV).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+    ...jobEnvironmentArgs(),
     image,
   ];
 }
+
+// What every job container gets on either backend (the Hetzner box here, a GCE VM in gce/vm/run.mjs): the cache
+// mount and the tools pointed at it, the JIT config by name, and the job-started hook.
+export const jobEnvironmentArgs = () => [
+  '--shm-size', '2g',
+  '-v', `${CACHE}:${CACHE}`,
+  '-e', 'CI_KIT_JIT',
+  '-e', 'ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/ci-kit-job-started.sh',
+  ...Object.entries(CACHE_ENV).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+];
 
 export function fromInspect(c) {
   const l = c.Config.Labels ?? {};
