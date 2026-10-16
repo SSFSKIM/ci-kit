@@ -29,7 +29,7 @@ test('a repeated poll sends If-None-Match and a 304 returns the cached body', as
   assert.deepEqual(await gh.getRun('o/r', 7), RUN);
   assert.equal(f.requests[0].headers['if-none-match'], undefined);
   assert.equal(f.requests[1].headers['if-none-match'], 'W/"abc"');
-  assert.deepEqual(gh.stats(), { requests: 2, notModified: 1, remaining: 4900 });
+  assert.deepEqual(gh.stats(), { requests: 2, notModified: 1, remaining: 4900, reset: null });
 });
 
 test('a changed resource replaces the cached body and ETag', async () => {
@@ -95,4 +95,26 @@ test('remaining is the lowest budget among the windows still open (GitHub report
   assert.equal(gh.stats().remaining, 4675);
   nowMs = 1792112100 * 1000; // the first window has reset
   assert.equal(gh.stats().remaining, 4827);
+});
+
+test('a transport failure is counted and reported to onRequest, then rethrown', async () => {
+  const seen = [];
+  const gh = createGitHub('t', {
+    fetchImpl: async () => { throw new TypeError('fetch failed'); },
+    onRequest: (r) => seen.push(r),
+  });
+  await assert.rejects(gh.getRun('o/r', 1), /fetch failed/);
+  assert.equal(gh.stats().requests, 1);
+  assert.deepEqual(seen, [{ method: 'GET', path: '/repos/o/r/actions/runs/1', status: 'failed: fetch failed', remaining: null }]);
+});
+
+test('stats reports the reset of the lowest open window', async () => {
+  const f = fakeFetch([
+    { status: 200, body: RUN, headers: { 'x-ratelimit-remaining': '10', 'x-ratelimit-reset': '1792112074' } },
+    { status: 200, body: RUN, headers: { 'x-ratelimit-remaining': '4827', 'x-ratelimit-reset': '1792112484' } },
+  ]);
+  const gh = createGitHub('t', { fetchImpl: f.impl, now: () => 1792112000 * 1000 });
+  await gh.getRun('o/r', 1);
+  await gh.getRun('o/r', 2);
+  assert.deepEqual([gh.stats().remaining, gh.stats().reset], [10, 1792112074]);
 });

@@ -228,14 +228,11 @@ test('jobEvents reports each job once', () => {
   assert.equal(jobEvents(jobs, seen, T0).length, 0);
 });
 
-test('pollInterval: 15 s for the first 2 minutes, then 30 s; 60 s when the token runs low', () => {
-  assert.equal(pollInterval(0, null), 15_000);
-  assert.equal(pollInterval(119_999, 4000), 15_000);
-  assert.equal(pollInterval(120_000, 4000), 30_000);
-  assert.equal(pollInterval(3_600_000, 4000), 30_000);
-  assert.equal(pollInterval(0, 499), 60_000);
-  assert.equal(pollInterval(600_000, 0), 60_000);
-  assert.equal(pollInterval(0, 500), 15_000);
+test('pollInterval: 15 s for the first 2 minutes, then 30 s (the pacer stretches it when the token runs low)', () => {
+  assert.equal(pollInterval(0), 15_000);
+  assert.equal(pollInterval(119_999), 15_000);
+  assert.equal(pollInterval(120_000), 30_000);
+  assert.equal(pollInterval(3_600_000), 30_000);
 });
 
 test('the loop follows the schedule: 15 s polls for 2 minutes, then 30 s', async () => {

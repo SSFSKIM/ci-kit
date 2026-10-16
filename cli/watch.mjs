@@ -1,16 +1,15 @@
 // Watches one run of the reusable workflow and turns its jobs into ci-gate's lines (spec I5).
 // The gate jobs are the matrix of gates.yml, named after their gate; `plan` and `verdict` are the workflow's own.
 import { formatDuration } from './naming.mjs';
+import { createPacer } from './pace.mjs';
 
 const WAIT_AFTER_MS = 2 * 60 * 1000;
 // The poll schedule (spec Decision Log, "ci-gate is a good citizen of the shared token"): every session on the human's
-// account shares one REST budget of 5,000 requests an hour, so a poller backs off as a run ages and when the budget
-// runs low.
+// account shares one REST budget of 5,000 requests an hour, so the watch backs off as a run ages; the pacer
+// (pace.mjs) stretches any poll to 60 s while the budget is low.
 const FAST_MS = 15_000;
 const FAST_FOR_MS = 2 * 60 * 1000;
 const SLOW_MS = 30_000;
-const THROTTLED_MS = 60_000;
-export const THROTTLE_BELOW = 500;
 // A job not yet on a runner. Its started_at is no signal: GitHub sets it to created_at while the job is queued.
 const QUEUED = ['queued', 'waiting', 'pending', 'requested'];
 const GATE_RE = /^[a-z0-9][a-z0-9-]*$/;
@@ -90,29 +89,20 @@ function verdict(run, jobs, runUrl) {
   return { line: `RED ${failed}/${gates.length} ${runUrl}`, code: 1 };
 }
 
-// How long to wait before the next poll: 15 s for the first 2 minutes of watching, 30 s after, and 60 s whenever the
-// token's remaining budget (null until a response reports it) is below THROTTLE_BELOW.
-export function pollInterval(elapsedMs, remaining) {
-  if (remaining !== null && remaining < THROTTLE_BELOW) return THROTTLED_MS;
+// How long to wait before the next poll with a healthy budget: 15 s for the first 2 minutes of watching, 30 s after.
+export function pollInterval(elapsedMs) {
   return elapsedMs < FAST_FOR_MS ? FAST_MS : SLOW_MS;
 }
 
 // Polls until the run completes or its plan ends unsuccessfully. Returns the final line and the exit code.
 //   gh: { getRun(repo, id), listJobs(repo, id), stats() → { remaining } }; emit(line): one stdout line;
-//   onFail(job, gate) → the path of the failed gate's downloaded log; planError(job) → the plan's error message.
-export async function watchRun({ gh, repo, runId, runUrl, emit, onFail, planError, now, sleep, maxUnreadable = 20 }) {
+//   onFail(job, gate) → the path of the failed gate's downloaded log; planError(job) → the plan's error message;
+//   pacer: the call's pacer, shared with discovery so THROTTLE is said once (one is made when none is given).
+export async function watchRun({ gh, repo, runId, runUrl, emit, onFail, planError, now, sleep, pacer = createPacer(gh, emit), maxUnreadable = 20 }) {
   const seen = new Map();
   const started = now();
-  let throttled = false;
   let unreadable = 0;
-  const wait = () => {
-    const { remaining } = gh.stats();
-    if (!throttled && remaining !== null && remaining < THROTTLE_BELOW) {
-      throttled = true; // said once; the stretched poll itself lasts as long as the budget stays low
-      emit(`THROTTLE remaining=${remaining}`);
-    }
-    return sleep(pollInterval(now() - started, remaining));
-  };
+  const wait = () => sleep(pacer.wait(pollInterval(now() - started)));
   for (;;) {
     let run;
     let jobs;

@@ -9,33 +9,17 @@ import { createGitHub, ghToken } from '../lib/github.mjs';
 import { parseArgs, UsageError, USAGE } from './args.mjs';
 import { deleteRef, nonceCommit, pushRef, resolveRemote, resolveTarget, TargetError } from './git.mjs';
 import { cleanLog, nonceMessage, refName, sanitizeLabel } from './naming.mjs';
+import { findRun } from './discover.mjs';
+import { createPacer } from './pace.mjs';
 import { watchRun } from './watch.mjs';
 
 const CALLER = '.github/workflows/ci.yml';
-const FIND_RUN_MS = 2 * 60 * 1000;
-// A run appears a few seconds after the push; the listing is conditional, so the polls that find nothing new are free.
-const FIND_RUN_EVERY_MS = 5000;
 // CI_GATE_DEBUG=1 prints every API request and a final count on stderr.
 const DEBUG = process.env.CI_GATE_DEBUG === '1';
 const LOG_ATTEMPTS = 6; // a job's log can lag its completion by a few seconds
 
 const out = (line) => process.stdout.write(line + '\n');
 const note = (line) => process.stderr.write(`ci-gate: ${line}\n`);
-
-async function findRun(gh, repo, commit) {
-  const deadline = Date.now() + FIND_RUN_MS;
-  while (Date.now() < deadline) {
-    await sleep(FIND_RUN_EVERY_MS);
-    try {
-      const runs = await gh.runsForCommit(repo, commit);
-      const run = runs.find((r) => r.event === 'push' && r.path === CALLER);
-      if (run) return run;
-    } catch {
-      // the next poll retries
-    }
-  }
-  return null;
-}
 
 function failureSaver(gh, repo, runId, dir) {
   return async (job, gate) => {
@@ -163,8 +147,10 @@ function failure(e) {
 }
 
 async function follow(gh, repo, commit, ref, onRun) {
-  const run = await findRun(gh, repo, commit);
-  if (!run) return { line: `ERROR no run of ${CALLER} appeared within 2 min of the push to ${ref}`, code: 2 };
+  const pacer = createPacer(gh, out); // one per call: discovery and the watch say THROTTLE at most once between them
+  const found = await findRun({ gh, repo, commit, caller: CALLER, ref, pacer, now: Date.now, sleep });
+  if (found.error) return { line: `ERROR ${found.error}`, code: 2 };
+  const { run } = found;
   onRun(run.id);
   note(`run ${run.html_url}`);
   const [owner, name] = repo.split('/');
@@ -178,6 +164,7 @@ async function follow(gh, repo, commit, ref, onRun) {
     planError: planErrorReader(gh, repo),
     now: Date.now,
     sleep,
+    pacer,
   });
 }
 
