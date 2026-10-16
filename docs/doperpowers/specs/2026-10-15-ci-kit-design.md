@@ -1825,6 +1825,25 @@ euros, jobs, and the projected month at the current rate.
   Hetzner pool stays the built lane, and a GCE backend would be a spec revision with its own
   milestone.
 
+- **Observation (A9, 2026-10-16):** MAWS run 38868739039 (branch gate-offload-linux, 43fffa11b)
+  ran class 1a on the pool, on box 170701310 (cpx41@ash, 8 cores).
+  - The plan job ran hosted (07:40:45–07:40:53Z), and pool-ensure logged `existing`.
+  - The jobs ran on `ci-kit-pool-*` runners:
+    - probes on `ci-kit-pool-170701310-9`: 23 s;
+    - unit on `-10`: 5 m 37 s, `vitest --maxWorkers=8`, 14,224 tests;
+    - static on `-11`: 4 m 14 s. It queued behind unit, because unit's cpus-8 held the whole 8-core
+      box.
+  - All jobs passed, and the whole gate took about 11 minutes.
+  - **A9 passes.** On an 8-core box `nproc` and `getconf` both read 8, so this run cannot tell them
+    apart. M7's shard evidence (6/14 vs 4/14 red) does. The confirming check is the first 16-core
+    pool run after GATE_RUNNER flips: its unit log should show maxWorkers=8 on a 16-core host
+    (M9, post-flip, not a blocker).
+- **Observation (2026-10-16):** the scheduled guard fired once, at 07:29:36Z. That is 3 h 40 min
+  after the schedule was re-registered, and nearly 8 h after the workflow was created.
+- **Observation (2026-10-16):** a MAWS e2e test leaked an open-URL into the owner's real Chrome on
+  the mini. LaunchServices `open` ran at 07:19:24Z, during e2e:tools (run 38866065402), and Chrome
+  took focus a second later. CI-opt told maws-fe.
+
 ## Decision Log
 
 - **Decision:** the verification for this work.
@@ -2276,6 +2295,26 @@ euros, jobs, and the projected month at the current rate.
   - **Rejected alternative:** refusing to run when Finder is in front. That would fail nearly
     every job after the first e2e app quits.
   - **Date/Author:** 2026-10-16, CI-opt from maws-fe, recorded by plan-executor.
+
+- **Decision:** only demand for the pool extends a box's life. A watched run with no pool demand
+  never pins the box (CI-opt, 2026-10-16).
+  - **Demand is either:**
+    - a job with pool labels queued or in progress in a served repo; or
+    - a recent ensure call. Ensure stamps the box with `ci-kit-want=<unix ts>`, on both its create
+      and existing paths, and the agent treats now < want + 15 min as busy.
+  - **Label writes.** Hetzner label updates replace the whole set. So ensure and the agent
+    read-modify-write, and the agent re-reads the labels right before every write.
+  - **Why.** Live, MAWS's watched gate.yml runs (116 a day across 23 hours, almost none using the
+    pool) pinned a box past minute 50.
+  - **Rejected alternatives:** "any watched run pins the box" (the original design), and a grace
+    period after every watched run's plan job. At MAWS's rate both keep a box up nearly all day.
+  - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
+- **Decision:** the mac lane brings Terminal to the front before a job whenever any other app is
+  in front, not just Finder (CI-opt, as the lane's owner).
+  - System dialogs are still refused and never touched.
+  - **Why.** The mini is a CI host, and GUI e2e jobs take focus at launch anyway, so moving focus
+    once before a job adds nothing new.
+  - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
 
 ## Outcomes & Retrospective
 
