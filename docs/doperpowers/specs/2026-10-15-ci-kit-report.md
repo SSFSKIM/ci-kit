@@ -18,3 +18,4 @@ Decision Log carry the folded results; this file carries the execution mechanics
 - 2026-10-16: M8 merged (PR #6) after four review rounds ending in an argv parser; janitor live on both Macs from the main clones. Medium review of doperpowers #198 clean after one fix wave; M5 in its third review round.
 - 2026-10-16: M5 code merged (PR #7) after three review rounds; v1 → 86069cf. Post-merge guard proofs dispatched. Janitor report headers confirmed live on both Macs (02:12Z runs).
 - 2026-10-16: M2 merged (cua#143). M3 reworked after the owner discarded codex-companion; its 20-run series is running. M7 waits for the pool.
+- 2026-10-16: M5 complete (PR #8 post-merge fixes). v1 moved. Pool handed to M7.

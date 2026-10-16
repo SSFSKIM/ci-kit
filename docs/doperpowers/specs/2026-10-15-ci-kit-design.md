@@ -79,10 +79,14 @@ How to see it working: §Acceptance. The shortest proofs are:
 - [ ] M3 — doperpowers: adoption and timing-test stabilization
 - [x] (2026-10-15 22:10Z) M4 — Spike: the pool's boot path. Verdict ≤ 5 min; PR #1 merged
   (spike scripts and results under `spike/pool-boot/`).
-- [ ] M5 — The pool
+- [x] (2026-10-16 04:20Z) M5 — The pool
   - [x] (2026-10-16 02:40Z) Code reviewed clean after three rounds; PR #7 merged; `v1` moved to
     86069cf. A5, A6 and the box-local A7 parts proven live from the branch.
-  - [ ] Post-merge proofs: the guard-dependent A7 parts, a re-bake from `main`, cleanup.
+  - [x] (2026-10-16 04:20Z) Post-merge proofs on dispatched guard runs from `main` (stale
+    heartbeat, wrong key with the watchdog stopped, wake, re-enable), a re-bake (cpx12 holds it),
+    the clamp, and cleanup. PR #8 merged; `v1` moved. Still open: the guard's *scheduled* runs
+    had not fired 85 minutes after the merge, so the timing "within two guard cycles" on the real
+    schedule is checked in M9.
 - [x] (2026-10-16 00:05Z) M6 — The mac lane on the mini. PR #4 merged; runner `ci-kit-mac-mini`
   live on MAWS; `e2e:composer` 10/10, ship. A8's macOS-only unit subset is M7's.
 - [ ] M7 — MAWS: evidence and proposals for maws-fe
@@ -1709,6 +1713,17 @@ euros, jobs, and the projected month at the current rate.
 - **Observation (M7):** Electron 44 has no install script, so `npm install electron` never
   downloads it, and the pool's Electron cache was empty. The bake now warms it through
   `install-electron`.
+
+- **Observation (M5 post-merge, 2026-10-16):** GitHub did not fire `pool-guard.yml`'s schedule
+  for 85+ minutes after it reached `main`, though dispatch worked. Community reports give
+  touching the file as the remedy (PR #8). Re-check in M9.
+- **Observation (M5 post-merge):** the Actions runner accepts a job-started hook only when its
+  filename ends in `.sh`, `.ps1` or `.js`. The first image baked from `main` failed every job in
+  setup, and only a live probe caught it: the bake's smoke test runs no real job.
+- **Observation (M5 post-merge):** a cpx12 builder holds the image build (233–279 s, peak memory
+  plus swap 1.1–1.3 GB). The snapshot is 3.5 GB on a 40 GB disk.
+- **Observation (M5 post-merge):** `systemctl mask` fails silently on a unit file that already
+  exists in `/etc/systemd/system`. Test overrides use `disable --now`.
 
 ## Decision Log
 
