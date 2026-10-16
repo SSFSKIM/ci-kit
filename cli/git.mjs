@@ -83,8 +83,23 @@ export function nonceCommit(dir, sha, message) {
   return git(dir, ['commit-tree', `${sha}^{tree}`, '-p', sha, '-F', '-'], { input: message, env: IDENTITY });
 }
 
-export function pushRef(dir, remote, commit, ref) {
-  git(dir, ['push', '--quiet', '--force', remote, `${commit}:refs/heads/${ref}`]);
+// GitHub sometimes refuses a push transiently while others push to the same repo
+// ("remote rejected (failed)", an index-pack race). The ref is unique to this call and the commit is
+// fixed, so pushing it again is safe.
+export function pushRef(dir, remote, commit, ref, { attempts = 3, delays = [3000, 8000], sleep = sleepSync } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      git(dir, ['push', '--quiet', '--force', remote, `${commit}:refs/heads/${ref}`]);
+      return;
+    } catch (err) {
+      if (attempt >= attempts) throw err;
+      sleep(delays[Math.min(attempt - 1, delays.length - 1)]);
+    }
+  }
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 // Compare-and-delete: only while the ref still points at this call's nonce commit.

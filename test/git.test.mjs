@@ -95,3 +95,21 @@ test('compare-and-delete removes only a ref still at this call\'s commit', () =>
   assert.equal(deleteRef(work, 'origin', theirs, 'ci/x'), true);
   assert.equal(remoteRef('ci/x'), '');
 });
+
+test('a transiently refused push is retried, and a lasting refusal still fails after the last attempt', () => {
+  const sha = git(work, 'rev-parse', 'HEAD');
+  const commit = nonceCommit(work, sha, 'ci-gate cccccccccccc\n');
+  const late = join(root, 'late.git'); // absent until the first wait: the first push fails
+  git(work, 'remote', 'add', 'late', late);
+  const waits = [];
+  pushRef(work, 'late', commit, 'ci/y', {
+    sleep: (ms) => { waits.push(ms); execFileSync('git', ['init', '-q', '--bare', late]); },
+  });
+  assert.deepEqual(waits, [3000]);
+  assert.equal(git(late, 'for-each-ref', '--format=%(objectname)', 'refs/heads/ci/y'), commit);
+
+  git(work, 'remote', 'add', 'gone', join(root, 'never.git'));
+  const tries = [];
+  assert.throws(() => pushRef(work, 'gone', commit, 'ci/y', { sleep: (ms) => tries.push(ms) }));
+  assert.deepEqual(tries, [3000, 8000]);
+});
