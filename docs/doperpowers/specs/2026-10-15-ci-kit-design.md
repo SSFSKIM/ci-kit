@@ -2348,6 +2348,16 @@ euros, jobs, and the projected month at the current rate.
   `SSD-TOTAL-GB` was added beyond the spec's list. pd-balanced disks count against it, and at
   `max_vcpus` 64 with 2-vCPU jobs and 50 GB disks the pool needs up to 1,600 GB.
 
+- **Observation (guard schedule, window 03:49:48–09:50Z on 2026-10-16):** `pool-guard.yml`'s
+  `*/10` schedule fired once, at 07:29:36Z, where 36 runs were expected. The workflow is active,
+  the repo is public with Actions on, and dispatch works. The GitHub schedule is not a backstop to
+  rely on, so the guard also runs from the mini (Decision Log).
+- **Observation (M10, 2026-10-16):** the human uploaded the App key for GCE to Secret Manager,
+  because agents' secret-store writes are blocked here. Only `ci-kit-launcher@` can read it. A
+  double generate created a third App key (fingerprint 9NaIZCKu…); its downloaded file was
+  deleted, and the M10 worker revokes the key on GitHub. The remaining two are yj//oTVK… (Hetzner)
+  and qQgu9F… (GCE).
+
 ## Decision Log
 
 - **Decision:** the verification for this work.
@@ -2927,6 +2937,11 @@ euros, jobs, and the projected month at the current rate.
     DC4 and DC7 that only 8× breaks. They are test-uplink "within a second while the fetch hangs"
     (17/20) and test_session_plane "presence within a second" (8/20).
   - **Date/Author:** 2026-10-16, M3 executor, folded by plan-executor.
+
+- **Decision:** the guard runs from the mini as a LaunchAgent every 10 minutes, beside the
+  janitor, and the GitHub schedule stays in place. The schedule fired once in 6 hours, so the
+  fallback agreed earlier applies: a single run is no more of a backstop than none.
+  - **Date/Author:** 2026-10-16, plan-executor, applying CI-opt's fallback.
 
 ## Outcomes & Retrospective
 
