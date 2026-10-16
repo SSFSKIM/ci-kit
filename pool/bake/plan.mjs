@@ -55,12 +55,16 @@ export async function createBuilder(hc, { userData, runId, builder, sleep, now =
   }
 }
 
+// Whether a server is still this run's builder. An operator who keeps the machine for debugging removes or replaces
+// its labels; from then on it is theirs, and the bake neither labels, snapshots nor deletes it.
+export const ownsBuilder = (server, runId) => hasKitLabel(server, 'builder') && server.labels['ci-kit-run'] === String(runId);
+
 // What a bake run leaves when it does not complete: its builders, and snapshots it started that never became
 // available. Matched by the run id label, so concurrent or earlier bakes are never touched.
 export function bakeLeftovers({ servers, images, runId }) {
   const ours = (r) => r.labels?.['ci-kit-run'] === String(runId);
   return {
-    servers: servers.filter((s) => hasKitLabel(s, 'builder') && ours(s)),
+    servers: servers.filter((s) => ownsBuilder(s, runId)),
     images: images.filter((i) => hasKitLabel(i, 'pool-image') && ours(i) && i.status !== 'available'),
   };
 }
@@ -75,8 +79,8 @@ export function snapshotsToPrune(images, keep) {
 
 // Fills the builder template's placeholders. Every placeholder must be known: a missed one would bake a broken
 // image, and a value is never interpolated by the shell (the template quotes its heredocs).
-export function builderUserData(template, { sha, appId, appKey, hcloudToken }) {
-  const values = { __KIT_SHA__: sha, __APP_ID__: String(appId), __APP_KEY__: appKey.trim(), __HCLOUD_TOKEN__: hcloudToken.trim() };
+export function builderUserData(template, { sha, runId, appId, appKey, hcloudToken }) {
+  const values = { __KIT_SHA__: sha, __RUN_ID__: String(runId), __APP_ID__: String(appId), __APP_KEY__: appKey.trim(), __HCLOUD_TOKEN__: hcloudToken.trim() };
   const out = template.replace(/__[A-Z_]+__/g, (name) => {
     if (!(name in values)) throw new Error(`ci-kit: builder template has an unknown placeholder ${name}`);
     return values[name];

@@ -6,17 +6,21 @@
 # before the snapshot.
 set -euo pipefail
 KIT_SHA=__KIT_SHA__
+RUN_ID=__RUN_ID__
 CACHE=/var/lib/ci-kit/cache
 export DEBIAN_FRONTEND=noninteractive
 step=start
 label() {
-  # Merge one label into this server's labels through the Hetzner API (the token is in /etc/ci-kit by then).
+  # Merge one label into this server's labels through the Hetzner API (the token is in /etc/ci-kit by then). Only
+  # while the server is still this bake's builder: an operator who relabelled it to keep it for debugging owns it.
   local token id labels
   token=$(cat /etc/ci-kit/hcloud_token 2>/dev/null || true)
   id=$(curl -sf --max-time 10 http://169.254.169.254/hetzner/v1/metadata/instance-id || true)
   [ -n "$token" ] && [ -n "$id" ] || return 0
   command -v jq > /dev/null || return 0
-  labels=$(curl -sf --max-time 20 -H "Authorization: Bearer $token" "https://api.hetzner.cloud/v1/servers/$id" | jq -c --arg k "$1" --arg v "$2" '.server.labels + {($k): $v}') || return 0
+  labels=$(curl -sf --max-time 20 -H "Authorization: Bearer $token" "https://api.hetzner.cloud/v1/servers/$id" | jq -c --arg k "$1" --arg v "$2" --arg run "$RUN_ID" \
+    'select(.server.labels["ci-kit"] == "builder" and .server.labels["ci-kit-run"] == $run) | .server.labels + {($k): $v}') || return 0
+  [ -n "$labels" ] || return 0
   curl -sf --max-time 20 -X PUT -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
     -d "{\"labels\": $labels}" "https://api.hetzner.cloud/v1/servers/$id" > /dev/null || true
 }
