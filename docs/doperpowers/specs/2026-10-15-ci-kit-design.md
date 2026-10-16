@@ -1336,8 +1336,16 @@ plist, `host/install.sh`, and `docs/host.md`.
   - sminos test stand-in supervisors;
   - `codex-plugin-test-`.
 
-  Each pattern is a regex over the full command line. The exclusion patterns of §7 are checked
-  after the kill patterns, and an exclusion always wins.
+  Each pattern is a regex over the normalized invocation (revised 2026-10-16, M8 review):
+  - `host/invocation.mjs` parses the command line and walks node's or python's own options by an
+    arity table in code;
+  - patterns see `node [--test] <entry> <args…>` or `python <entry> <args…>`, never the whole
+    line;
+  - execution modes, unknown options and missing values match nothing;
+  - watch options make a match report-only.
+
+  The exclusion patterns of §7 are checked after the kill patterns, and an exclusion always
+  wins.
 - The process listing uses `ps -axo pid,ppid,etime,command` for the current user only. The janitor
   never touches other users' or root's processes.
 - The worktree report reads `git worktree list --porcelain` per repo under `~/Developer/GitHub`, plus
@@ -1918,8 +1926,9 @@ euros, jobs, and the projected month at the current rate.
   - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
 - **Decision:** the janitor's exclusions win over its patterns, with no exemption. The
   codex-companion test broker (`app-server-broker.mjs serve …`) is therefore reported, not
-  killed. Its worker and the fake `codex app-server` are still killed. A `node --import tsx --test`
-  process (an option with a separate value) is never matched, which `docs/host.md` documents.
+  killed. Its worker and the fake `codex app-server` are still killed. (Superseded by the M8
+  parser: options with a separate value are consumed by arity, so `node --import tsx --test` now
+  parses.)
   - **Rationale:** §7's safety rule says killing needs a positively one-shot command line. A
     `serve` process is the case the exclusion exists for.
   - **Date/Author:** 2026-10-16, plan-executor.
