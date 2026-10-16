@@ -134,15 +134,27 @@ export function reviewContainers({ containers, runners, memory, now, cfg }) {
   return { actions, memory: next };
 }
 
-const fileOf = (path) => (path ?? '').split('@')[0].split('/').at(-1);
-
-export function watchedRuns(runs, workflows) {
-  return runs.filter((r) => (r.status === 'queued' || r.status === 'in_progress') && workflows.includes(fileOf(r.path)));
+// Pool demand: the queued or in-progress jobs that carry ci-kit-pool, in any workflow of a served repo.
+export function poolJobs(jobs) {
+  return jobs.filter((j) => (j.status === 'queued' || j.status === 'in_progress') && j.labels.includes('ci-kit-pool'));
 }
 
-// Idle (spec §3): no running job container, no queued pool job, no queued or in-progress watched run.
-export function isIdle({ containers, queued, watched }) {
-  return !containers.some((c) => c.running) && queued.length === 0 && watched.length === 0;
+// How long an ensure call holds the box (spec Decision Log, 2026-10-16): the plan job that called ensure queues its
+// pool jobs later, sometimes behind slow hosted jobs.
+export const WANT_HOLD = 15 * MIN;
+
+// The `ci-kit-want` stamp ensure writes on the box, as epoch ms, or null.
+export function wantOf(labels) {
+  const seconds = Number(labels?.['ci-kit-want']);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : null;
+}
+
+// Idle: no pool demand (spec Decision Log, 2026-10-16: only demand for the pool extends a box's life). No running
+// job container, no queued or in-progress pool job, and no ensure stamp younger than 15 min. A run of a served
+// repo's workflow with no pool job does not count, however long it runs.
+export function isIdle({ containers, poolJobs, want, now }) {
+  const wanted = want !== null && now - want < WANT_HOLD;
+  return !containers.some((c) => c.running) && poolJobs.length === 0 && !wanted;
 }
 
 // Minutes into the current billed hour, counted from the server's created time.

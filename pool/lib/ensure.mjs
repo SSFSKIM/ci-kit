@@ -11,6 +11,17 @@ export const CORE_LIMIT = 'resource_limit_exceeded';
 
 export const poolServers = (servers) => servers.filter((s) => hasKitLabel(s, 'pool'));
 
+// Stamp a pool box with `ci-kit-want=<now>`: pool demand is coming, and its agent holds the box for 15 min (spec
+// Decision Log, 2026-10-16). A read-modify-write of the labels as they are now, on a box that still carries
+// ci-kit=pool; Hetzner replaces the whole set on a write. A stamp lost to a racing write costs nothing lasting: the
+// pool jobs this call was for keep the box once they queue.
+export async function stampWant(hc, serverId, nowMs) {
+  const current = await hc.server(serverId);
+  if (!hasKitLabel(current, 'pool')) return false;
+  await hc.setLabels(serverId, { ...current.labels, 'ci-kit-want': String(Math.floor(nowMs / 1000)) });
+  return true;
+}
+
 // 'existing' when a box is booting or ready, 'wait' when the only box is draining, else 'create'.
 export function ensureDecision(pool) {
   if (pool.length === 0) return 'create';
@@ -61,7 +72,16 @@ export async function poolFirewall(hc) {
 // its agent turns into an alert; `warn` reports it in the calling workflow. Jobs asking for more cores than a
 // smaller box run on all its cores once it is otherwise empty (clamped; logic.mjs planStarts).
 export async function ensure(hc, cfg, { sleep, now = Date.now, log = () => {}, warn = log, userData } = {}) {
-  let decision = ensureDecision(poolServers(await hc.servers('ci-kit=pool')));
+  const found = poolServers(await hc.servers('ci-kit=pool'));
+  // Every box found is stamped, a draining one too: its agent sees the stamp at its re-check and returns to ready.
+  for (const s of found) {
+    try {
+      await stampWant(hc, s.id, now());
+    } catch (err) {
+      warn(`ci-kit pool: could not stamp ${s.name} (${s.id}) with ci-kit-want: ${err.message}`);
+    }
+  }
+  let decision = ensureDecision(found);
   if (decision === 'wait') {
     log('a draining pool box exists; waiting for it to be gone (at most 3 min)');
     const start = now();
@@ -90,7 +110,7 @@ export async function ensure(hc, cfg, { sleep, now = Date.now, log = () => {}, w
           location,
           image: image.id,
           firewalls: [{ firewall: firewall.id }],
-          labels,
+          labels: { ...labels, 'ci-kit-want': String(Math.floor(now() / 1000)) },
           ...(userData ? { user_data: userData } : {}),
         });
         log(`created ${POOL_NAME} (${type}@${location}) from snapshot ${image.id}`);

@@ -7,6 +7,12 @@ just-in-time runner and an exclusive set of cores, and deletes the box when it i
 billed hour. The **watchdog** on the box and the **guard** workflow are the backstops. The **bake** builds the
 snapshot weekly.
 
+**Idle** means no pool demand: no running job container, no queued or in-progress job carrying `ci-kit-pool` in
+a served repo, and no ensure call in the last 15 minutes. Ensure stamps the box `ci-kit-want=<unix seconds>` on
+every call, on an existing box as well as a new one, because the job it is for may queue minutes later behind
+hosted jobs. A served repo's runs that use no pool job keep nothing alive. MAWS runs over a hundred gates a day,
+and most of them never touch the pool.
+
 | Piece | Where |
 |---|---|
 | ensure | `pool-ensure/` (the action), `pool/lib/ensure.mjs` |
@@ -26,8 +32,10 @@ resources; anything without the label is never touched.
 A private repo's gate goes on the pool with `lane: pool` and `cpus: 2|4|8|16` in `.github/ci-kit.yml`
 (see `docs/adopting.md`), plus two things only the operator can do:
 
-1. **Serve the repo.** Add it to `repos` in `pool/config/pool.json` with the workflows that use the pool:
-   `{"repo": "SSFSKIM/<name>", "workflows": ["ci.yml"]}`. Commit to `main`. The agent re-reads the config every
+1. **Serve the repo.** Add it to `repos` in `pool/config/pool.json`:
+   `{"repo": "SSFSKIM/<name>", "workflows": ["ci.yml"]}`. The current agent no longer reads `workflows`: demand
+   comes from pool jobs in any workflow. Boxes from images baked before 2026-10-16 still read it, so give it the
+   workflows that use the pool until those images are gone. Commit to `main`. The agent re-reads the config every
    5 minutes, so no re-bake or restart is needed. A repo the API reports as public is refused.
 2. **Install the App and set the secret.** Add the repo to the `ci-kit-runners` installation
    (github.com/settings/installations → ci-kit-runners → Configure), and set `HCLOUD_TOKEN`:
@@ -181,6 +189,6 @@ and `ci-kit-state=booting` labels so the guard watches it, and delete it afterwa
 | ensure fails "no snapshot labelled ci-kit=pool-image" | run the bake |
 | ensure warns "the project's core limit refused …", or an alert names a smaller box or a refused bake | the project's shared-core limit (above); list the project's servers, and ask Hetzner for a higher limit if this recurs |
 | An alert "heartbeat stale" | the agent could not reconcile (GitHub unreachable, App key revoked, crash); the box is already deleted; check the App and the last bake |
-| A box up more than 12 h | a gate that never ends, or a watched workflow stuck in progress; cancel it, the box then idles out |
+| A box up more than 12 h | a pool job that never ends, or ensure called over and over (each call holds the box 15 min); cancel the job or find the caller, and the box then idles out |
 | The guard has no scheduled runs (`gh api 'repos/SSFSKIM/ci-kit/actions/runs?event=schedule'`) an hour after its file changed | GitHub has not registered the schedule; commit any change to `.github/workflows/pool-guard.yml` on `main`. Meanwhile `gh workflow run pool-guard.yml -R SSFSKIM/ci-kit` runs one cycle |
 | The guard or bake stopped running | GitHub disables scheduled workflows in a repo with no activity for 60 days; each pool boot re-enables them, or `gh workflow enable pool-guard.yml -R SSFSKIM/ci-kit` |

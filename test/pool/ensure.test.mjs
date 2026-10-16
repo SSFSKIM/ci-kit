@@ -57,7 +57,7 @@ test('no pool server: the box is created from the snapshot with the firewall and
   const made = hc.state.servers.at(-1);
   assert.deepEqual(
     { name: made.name, image: made.image, firewalls: made.firewalls, labels: made.labels },
-    { name: 'ci-kit-pool', image: 301, firewalls: [{ firewall: 401 }], labels: { 'ci-kit': 'pool', 'ci-kit-state': 'booting' } },
+    { name: 'ci-kit-pool', image: 301, firewalls: [{ firewall: 401 }], labels: { 'ci-kit': 'pool', 'ci-kit-state': 'booting', 'ci-kit-want': '1792105200' } },
   );
 });
 
@@ -123,7 +123,7 @@ test('the core limit (Hetzner: 403 resource_limit_exceeded) moves on to the fall
   assert.equal(await ensure(hc, CFG, { ...opts(), warn: (m) => warnings.push(m) }), 'created:cpx52@hel1');
   // The limit is the project's, so the other locations of a type that is too big are not tried.
   assert.deepEqual(hc.calls.filter((c) => c.startsWith('create')), ['create cpx62@hel1', 'create cpx52@hel1']);
-  assert.deepEqual(hc.state.servers.at(-1).labels, { 'ci-kit': 'pool', 'ci-kit-state': 'booting', 'ci-kit-fallback': 'core-limit' });
+  assert.deepEqual(hc.state.servers.at(-1).labels, { 'ci-kit': 'pool', 'ci-kit-state': 'booting', 'ci-kit-fallback': 'core-limit', 'ci-kit-want': '1792105200' });
   assert.match(warnings.join('\n'), /core limit.*cpx62.*cpx52/);
 });
 
@@ -163,5 +163,37 @@ test('a firewall name taken by a foreign, unlabelled firewall is refused, not us
     throw new HcloudError(409, 'uniqueness_error', 'name is already used');
   };
   await assert.rejects(ensure(hc, CFG, opts()), /firewall named ci-kit-pool exists without the ci-kit=pool label/);
+  assert.ok(!hc.calls.some((c) => c.startsWith('create ')));
+});
+
+test('ensure stamps ci-kit-want on an existing box, keeping its other labels (read-modify-write)', async () => {
+  const box = { ...pool('ready', 7), labels: { 'ci-kit': 'pool', 'ci-kit-state': 'ready', 'ci-kit-heartbeat': '1792100000', 'ci-kit-fallback': 'core-limit' } };
+  const hc = fakeHcloud({ servers: [box], images: [IMAGE], firewalls: [FIREWALL], serverTypes: TYPES });
+  const o = opts();
+  assert.equal(await ensure(hc, CFG, o), 'existing');
+  const labels = hc.state.servers.find((s) => s.id === 7).labels;
+  assert.deepEqual(labels, { ...box.labels, 'ci-kit-want': String(Math.floor(o.now() / 1000)) });
+});
+
+test('a box ensure creates carries ci-kit-want from the start', async () => {
+  const hc = fakeHcloud({ images: [IMAGE], firewalls: [FIREWALL], serverTypes: TYPES });
+  const o = opts();
+  await ensure(hc, CFG, o);
+  assert.equal(hc.state.servers.at(-1).labels['ci-kit-want'], String(Math.floor(o.now() / 1000)));
+});
+
+test('ensure stamps a draining box too, so its agent can return it to ready instead of a new box booting', async () => {
+  const draining = pool('draining', 8);
+  const hc = fakeHcloud({ servers: [draining], images: [IMAGE], firewalls: [FIREWALL], serverTypes: TYPES });
+  const realServers = hc.servers;
+  let calls = 0;
+  hc.servers = async (sel) => {
+    calls += 1;
+    // The agent undrains once it sees the stamp.
+    if (calls > 1) hc.state.servers.find((s) => s.id === 8).labels['ci-kit-state'] = 'ready';
+    return realServers(sel);
+  };
+  assert.equal(await ensure(hc, CFG, opts()), 'existing');
+  assert.ok(hc.state.servers.find((s) => s.id === 8).labels['ci-kit-want']);
   assert.ok(!hc.calls.some((c) => c.startsWith('create ')));
 });
