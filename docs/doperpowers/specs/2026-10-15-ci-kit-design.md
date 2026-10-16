@@ -1630,6 +1630,11 @@ pattern, parentage and age together.
      - `CPUS_ALL_REGIONS` 32 → 96;
      - `IN_USE_ADDRESSES` (us-central1) 8 → 32;
      - any regional C3D or E2 limit below `max_vcpus`.
+     - `SSD-TOTAL-GB` (us-central1) 500 → 2048. pd-balanced disks count against it; at
+       `max_vcpus` 64 with 2-vCPU jobs and 50 GB disks the pool needs up to 1,600 GB. Filed
+       2026-10-16.
+     - If e2 is refused (its per-family quota read 0 in the API when filed), `cpus-2` falls back to
+       c3d-highcpu-4, a few cents more a day. A13's first e2 launch settles it.
   2. The image.
   3. The launcher, serving the sandbox only.
   4. A13 on the sandbox.
