@@ -13,7 +13,8 @@ import { fakeGce, instanceShape, imageShape, FOREIGN } from './fake-gce.mjs';
 
 const CFG = JSON.parse(readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
 const SHA = 'a'.repeat(40);
-const RUN = '20261016-094500';
+const RUN = '20261016-094500-k3x9';
+const SUBNET = 'regions/us-central1/subnetworks/ci-kit-us-central1';
 const MIN = 60_000;
 
 test('a builder is ok only once it reported ok and powered off', () => {
@@ -78,17 +79,21 @@ test('an insert refused for capacity moves to the next zone, one refused for quo
 });
 
 test('names: the run id is UTC seconds, and builder, smoke and image names fit Compute Engine\'s rules', () => {
-  const run = bakeRunId(new Date('2026-10-16T09:45:00.123Z'));
-  assert.equal(run, '20261016-094500');
+  const run = bakeRunId(new Date('2026-10-16T09:45:00.123Z'), () => 'k3x9');
+  assert.equal(run, '20261016-094500-k3x9');
   const n = bakeNames(run, SHA);
-  assert.deepEqual(n, { builder: 'ci-kit-gce-builder-20261016-094500', smoke: 'ci-kit-gce-builder-20261016-094500-smoke', image: `ci-kit-runner-20261016-094500-${SHA.slice(0, 8)}` });
+  assert.deepEqual(n, { builder: 'ci-kit-gce-builder-20261016-094500-k3x9', smoke: 'ci-kit-gce-builder-20261016-094500-k3x9-smoke', image: `ci-kit-runner-20261016-094500-k3x9-${SHA.slice(0, 8)}` });
   for (const name of Object.values(n)) assert.match(name, /^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$/);
+  // Two bakes started in the same second still get ids of their own, so neither owns the other's resources.
+  const at = new Date('2026-10-16T09:45:00Z');
+  assert.notEqual(bakeRunId(at), bakeRunId(at));
+  assert.match(bakeRunId(at), /^\d{8}-\d{6}-[a-z0-9]{4}$/);
   assert.equal(machineCpus('e2-highcpu-2'), 2);
   assert.equal(machineCpus('c3d-highcpu-16'), 16);
 });
 
 test('the builder has no service account, carries only a token in its metadata, and is deleted by GCE at the latest after its run limit', () => {
-  const body = builderInstance({ name: 'ci-kit-gce-builder-x', zone: 'us-central1-a', machine: 'e2-standard-4', runId: RUN, script: '#!/bin/bash\n', token: 'ghs_x', diskGb: 30 });
+  const body = builderInstance({ name: 'ci-kit-gce-builder-x', zone: 'us-central1-a', machine: 'e2-standard-4', runId: RUN, script: '#!/bin/bash\n', token: 'ghs_x', diskGb: 30, subnetwork: SUBNET });
   assert.deepEqual(body.serviceAccounts, []);
   assert.deepEqual(body.labels, { 'ci-kit': 'gce-builder', 'ci-kit-run': RUN, 'ci-kit-role': 'builder' });
   assert.deepEqual(body.disks[0].initializeParams.labels, body.labels);
@@ -100,16 +105,19 @@ test('the builder has no service account, carries only a token in its metadata, 
   assert.equal(body.scheduling.instanceTerminationAction, 'DELETE');
   assert.ok(Number(body.scheduling.maxRunDuration.seconds) > BAKE_TIMEOUT_MS / 1000);
   assert.equal(body.machineType, 'zones/us-central1-a/machineTypes/e2-standard-4');
+  // The kit's own network, which has no ingress rules; never the project's default network.
+  assert.deepEqual(body.networkInterfaces, [{ subnetwork: 'regions/us-central1/subnetworks/ci-kit-us-central1', accessConfigs: [{ type: 'ONE_TO_ONE_NAT', name: 'External NAT' }] }]);
 });
 
 test('the smoke VM boots the new image like a job VM, with no JIT config and the vCPUs it must see', () => {
-  const body = smokeInstance({ name: 's', zone: 'us-central1-b', machine: 'e2-highcpu-2', runId: RUN, image: 'projects/ssfskim-ci-kit/global/images/i', diskGb: 50 });
+  const body = smokeInstance({ name: 's', zone: 'us-central1-b', machine: 'e2-highcpu-2', runId: RUN, image: 'projects/ssfskim-ci-kit/global/images/i', diskGb: 50, subnetwork: SUBNET });
   assert.deepEqual(body.serviceAccounts, []);
   assert.equal(body.labels['ci-kit-role'], 'smoke');
   assert.equal(body.disks[0].initializeParams.sourceImage, 'projects/ssfskim-ci-kit/global/images/i');
   assert.equal(body.disks[0].initializeParams.diskSizeGb, '50');
   const meta = Object.fromEntries(body.metadata.items.map((i) => [i.key, i.value]));
   assert.deepEqual(meta, { 'enable-guest-attributes': 'TRUE', 'ci-kit-smoke': '2' });
+  assert.equal(body.networkInterfaces[0].subnetwork, 'regions/us-central1/subnetworks/ci-kit-us-central1');
 });
 
 test('the image goes into the family unready, labelled with the kit commit and the run', () => {
@@ -146,6 +154,7 @@ test('an ok builder and a passing smoke publish one ready image, and leave no bu
   const gce = fakeGce({ scripts: { builder: OK_BUILDER, smoke: OK_SMOKE } });
   const result = await bake(gce);
   assert.equal(result.image, `ci-kit-runner-${RUN}-aaaaaaaa`);
+  assert.ok(gce.inserted.every((b) => b.networkInterfaces[0].subnetwork === SUBNET), 'every VM is on the kit\'s subnetwork, from gce.json');
   assert.deepEqual(ready(gce), [result.image]);
   assert.deepEqual(leftInstances(gce), []);
   const i = gce.calls.indexOf(`insert image ${result.image} from ci-kit-gce-builder-${RUN}`);
@@ -220,4 +229,32 @@ test('a builder another party relabelled is left alone', async () => {
   };
   await assert.rejects(bake(gce), /no longer this bake's/);
   assert.deepEqual(gce.state.instances.filter((i) => i.name === `ci-kit-gce-builder-${RUN}`).length, 1);
+});
+
+test('an image insert refused because the name exists never deletes that image: it is not this bake\'s', async () => {
+  const theirs = imageShape({ name: `ci-kit-runner-${RUN}-aaaaaaaa`, created: '2026-10-16T09:00:00.000Z', labels: { owner: 'someone-else' } });
+  const gce = fakeGce({ images: [theirs], scripts: { builder: OK_BUILDER, smoke: OK_SMOKE } });
+  await assert.rejects(bake(gce), /already exists/);
+  assert.deepEqual(gce.state.images.filter((i) => i.name === theirs.name).map((i) => i.labels), [{ owner: 'someone-else' }]);
+  assert.ok(!gce.calls.includes(`delete image ${theirs.name}`));
+  assert.deepEqual(leftInstances(gce), []);
+});
+
+test('an image insert the server accepted but whose call failed is cleaned up, since its labels say it is this bake\'s', async () => {
+  const gce = fakeGce({ imageInsert: 'accepted-timeout', scripts: { builder: OK_BUILDER, smoke: OK_SMOKE } });
+  await assert.rejects(bake(gce), /timeout/);
+  assert.ok(!gce.state.images.some((i) => i.name.startsWith(`ci-kit-runner-${RUN}`)));
+  assert.deepEqual(leftInstances(gce), []);
+});
+
+test('the cleanup deletes an image by this run\'s name only while it carries this run\'s labels', async () => {
+  // A smoke failure: the image is this run's and goes. Then the same name relabelled by an operator stays.
+  const gce = fakeGce({ scripts: { builder: OK_BUILDER, smoke: [{ status: 'RUNNING', attrs: { 'ci-kit/smoke': 'failed:dns' } }] } });
+  const real = gce.insertImage;
+  gce.insertImage = async (body) => {
+    await real(body);
+    gce.state.images.find((i) => i.name === body.name).labels = { kept: 'debugging' };
+  };
+  await assert.rejects(bake(gce), /failed:dns/);
+  assert.equal(gce.state.images.filter((i) => i.name === `ci-kit-runner-${RUN}-aaaaaaaa`).length, 1);
 });

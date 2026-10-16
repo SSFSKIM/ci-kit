@@ -46,7 +46,9 @@ export const FOREIGN = {
 
 // insertErrors: codes the next inserts fail with, in order ('' for success). scripts: per role ('builder', 'smoke'),
 // the states an instance created for that role goes through.
-export function fakeGce({ instances = [], images = [], insertErrors = [], scripts = {} } = {}) {
+// imageInsert: 'accepted-timeout' makes the image insert succeed on the server but fail the call, as a lost response
+// or an operation wait that times out does.
+export function fakeGce({ instances = [], images = [], insertErrors = [], scripts = {}, imageInsert } = {}) {
   const state = { instances: [...FOREIGN.instances, ...instances], images: [...FOREIGN.images, ...images] };
   const progress = new Map(); // name → { steps, at }
   const calls = [];
@@ -100,9 +102,15 @@ export function fakeGce({ instances = [], images = [], insertErrors = [], script
       return inst.attrs?.[path] ?? null;
     },
     images: async () => state.images.map((i) => ({ ...i, labels: { ...i.labels } })),
+    image: async (name) => {
+      const i = state.images.find((x) => x.name === name);
+      return i ? { ...i, labels: { ...i.labels } } : null;
+    },
     insertImage: async (body) => {
       calls.push(`insert image ${body.name} from ${body.sourceDisk.split('/').pop()}`);
+      if (state.images.some((i) => i.name === body.name)) throw new GceError(409, `The resource '${body.name}' already exists`, ['alreadyExists']);
       state.images.push(imageShape({ name: body.name, family: body.family, labels: { ...body.labels }, created: '2026-10-16T10:00:00.000Z' }));
+      if (imageInsert === 'accepted-timeout') throw new Error('The operation was aborted due to timeout');
     },
     setImageLabels: async (name, labels) => {
       calls.push(`label image ${name} ${JSON.stringify(labels)}`);

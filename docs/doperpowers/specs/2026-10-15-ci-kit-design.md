@@ -3044,7 +3044,7 @@ euros, jobs, and the projected month at the current rate.
 - **Decision:** one App key per backend (CI-opt, 2026-10-16; M10 step 2). The GCE key,
   `SHA256:qQgu9FOJPM9maxPvDhd8nV+AyYS+tXW6+mp2RGiXvAg=`, lives only in Secret Manager
   (`ci-kit-app-key`). The Hetzner key, `SHA256:yj//oTVKm3OJamD12RO3JYnGFdQxzGoFYRmFkD90cYU=`, is
-  in the GitHub secrets and the snapshots. Retiring Hetzner revokes the first without touching GCE.
+  in the GitHub secrets and the snapshots. Retiring Hetzner revokes the Hetzner key without touching GCE.
   The fingerprints are GitHub's, from the App's Key pairs page; `docs/pool.md` (GCE) has them too.
   - **Date/Author:** 2026-10-16, M10 step 2 executor, at CI-opt's request.
 

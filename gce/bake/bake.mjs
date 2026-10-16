@@ -13,7 +13,7 @@ import { createGce, accessToken, GceError } from '../../lib/gce.mjs';
 import { createAppTokens } from '../../lib/github-app.mjs';
 import { WARM_SCOPE } from '../../pool/bake/warm.mjs';
 import {
-  reportOutcome, ownsBakeInstance, staleBakeInstances, imagesToPrune, placements, refusal, bakeRunId, bakeNames,
+  reportOutcome, ownsBakeInstance, ownsBakeImage, refusedOutright, staleBakeInstances, imagesToPrune, placements, refusal, bakeRunId, bakeNames,
   builderInstance, smokeInstance, imageBody, fillBuilderScript, BUILDER_MACHINES, BAKE_TIMEOUT_MS, SMOKE_TIMEOUT_MS,
 } from './plan.mjs';
 
@@ -79,6 +79,7 @@ async function deleteIfOwned(gce, vm, runId, log) {
 // One bake. Returns { image } once the image is ready; throws with the reason otherwise.
 export async function runBake(gce, { cfg, sha, runId, token, script, sleep, now = Date.now, log = () => {} }) {
   const names = bakeNames(runId, sha);
+  const subnetwork = `regions/${cfg.region}/subnetworks/${cfg.subnetwork}`;
   const wait = { runId, sleep, now, log };
   let image = null;
   let ready = false;
@@ -88,22 +89,28 @@ export async function runBake(gce, { cfg, sha, runId, token, script, sleep, now 
   }
   try {
     const builder = await createFirst(gce, placements(BUILDER_MACHINES, cfg.zones),
-      ({ machine, zone }) => builderInstance({ name: names.builder, zone, machine, runId, script, token }), log);
+      ({ machine, zone }) => builderInstance({ name: names.builder, zone, machine, runId, script, token, subnetwork }), log);
     const built = await awaitReport(gce, builder, 'ci-kit/bake', BAKE_TIMEOUT_MS, wait);
     if (!built.ok) throw new Error(`ci-kit: the builder did not finish: ${built.reason}`);
 
     // The disk is consistent: the guest powered off after reporting. Re-check ownership right before imaging it.
     const owned = await gce.instance(builder.zone, builder.name);
     if (!owned || !ownsBakeInstance(owned, runId)) throw new Error(`ci-kit: ${builder.name} is gone or no longer this bake's`);
-    // Named before the insert, so that an insert that fails or times out midway is deleted by the cleanup too.
+    // An insert refused outright made nothing of this run's (a name collision leaves the other image alone). One
+    // whose outcome is uncertain may have made the image, so the cleanup looks for it, and deletes it only by label.
+    try {
+      await gce.insertImage(imageBody({ name: names.image, family: cfg.image_family, zone: builder.zone, disk: builder.name, sha, runId }));
+    } catch (err) {
+      if (!refusedOutright(err)) image = names.image;
+      throw err;
+    }
     image = names.image;
-    await gce.insertImage(imageBody({ name: names.image, family: cfg.image_family, zone: builder.zone, disk: builder.name, sha, runId }));
     log(`image ${image} created (unready)`);
     await deleteIfOwned(gce, builder, runId, log);
 
     const smokeMachines = [cfg.machines['2'], cfg.machine_fallback?.['2']].filter(Boolean);
     const smoke = await createFirst(gce, placements(smokeMachines, cfg.zones),
-      ({ machine, zone }) => smokeInstance({ name: names.smoke, zone, machine, runId, image: `projects/${cfg.project}/global/images/${image}`, diskGb: cfg.disk_gb }), log);
+      ({ machine, zone }) => smokeInstance({ name: names.smoke, zone, machine, runId, image: `projects/${cfg.project}/global/images/${image}`, diskGb: cfg.disk_gb, subnetwork }), log);
     const checked = await awaitReport(gce, smoke, 'ci-kit/smoke', SMOKE_TIMEOUT_MS, wait);
     if (!checked.ok) throw new Error(`ci-kit: the smoke VM did not pass: ${checked.reason}`);
 
@@ -135,6 +142,12 @@ async function cleanUp(gce, { cfg, runId, image, now, log }) {
   });
   if (image) {
     await step('image', async () => {
+      const found = await gce.image(image);
+      if (!found) return;
+      if (!ownsBakeImage(found, runId)) {
+        log(`cleanup: image ${image} is not this bake's (labels ${JSON.stringify(found.labels ?? {})}); left untouched`);
+        return;
+      }
       await gce.deleteImage(image);
       log(`cleanup: unready image ${image} deleted`);
     });

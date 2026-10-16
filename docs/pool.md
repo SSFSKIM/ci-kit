@@ -237,7 +237,7 @@ the label again before it acts.
 - The App has one key per backend, told apart by fingerprint (GitHub's App settings → Credentials → Key pairs):
   `SHA256:yj//oTVKm3OJamD12RO3JYnGFdQxzGoFYRmFkD90cYU=` is the Hetzner key (GitHub secrets `CI_KIT_APP_KEY`, baked
   into the snapshots); `SHA256:qQgu9FOJPM9maxPvDhd8nV+AyYS+tXW6+mp2RGiXvAg=` is the GCE key (Secret Manager), added
-  2026-10-16. Retiring Hetzner revokes the first without touching GCE.
+  2026-10-16. Retiring Hetzner revokes the Hetzner key without touching GCE.
 - **Writing Secret Manager is a human-only step on this machine.** The agent's permission classifier refuses
   secret-store writes, so a rotation goes to the human from the start: generate a new key on the App's Key pairs
   page, then, with the `.pem` in a 0600 file under `mktemp -d`,
@@ -247,6 +247,19 @@ the label again before it acts.
   MAWS's contents (`WARM_SCOPE` in `pool/bake/warm.mjs`), in its metadata; the image is made from its disk, never
   from its metadata.
 
+**The network.** Every builder, smoke VM and job VM sits on the subnetwork `ci-kit-us-central1` (10.64.0.0/20) of
+the VPC `ci-kit`, named in `gce.json` (`network`, `subnetwork`), with an ephemeral external address for outbound
+traffic. The VPC has no firewall rule: GCE's implied rules deny all ingress and allow all egress. The project's
+`default` network is never used, since its stock rules open ssh and RDP to the internet. `gce/deploy.sh network`
+creates both idempotently and fails if any rule allows ingress into `ci-kit`. Networks and firewall rules take no
+labels; the names carry the kit's. To check:
+
+```
+gcloud compute networks list --project=ssfskim-ci-kit
+gcloud compute networks subnets list --project=ssfskim-ci-kit --network=ci-kit
+gcloud compute firewall-rules list --project=ssfskim-ci-kit --filter='network~/ci-kit$'   # expect: none
+```
+
 **The bake.** From the Mac (gcloud's default account), at a commit pushed to GitHub:
 
 ```
@@ -254,7 +267,8 @@ CI_KIT_COMMIT=$(git rev-parse HEAD) node gce/bake/bake.mjs     # default commit:
 ```
 
 1. It deletes builders and smoke VMs any bake left more than 2 h ago.
-2. It creates `ci-kit-gce-builder-<run id>` (on demand: `e2-standard-4`, else `n2d-standard-4` when E2 is refused,
+2. It creates `ci-kit-gce-builder-<run id>` (the run id is UTC seconds plus four random characters, so two bakes
+   never share one; on demand: `e2-standard-4`, else `n2d-standard-4` when E2 is refused,
    zones in `gce.json` order) from `ubuntu-2404-lts-amd64`. Its startup script (`gce/bake/builder.sh`) installs
    Docker, clones the kit at the commit, runs `pool/bake/prepare.sh` (Node, the runner image, the caches), requires
    every cache warmed, installs and enables `ci-kit-gce-job.service`, cleans the disk, reports
@@ -269,7 +283,8 @@ CI_KIT_COMMIT=$(git rev-parse HEAD) node gce/bake/bake.mjs     # default commit:
 5. On a pass the image is labelled `ci-kit-ready=true`; the launcher uses only ready images (never
    `getFromFamily`, which would return an unready one). On any failure the bake deletes its own image.
 6. On every exit it deletes its instances, and keeps the two newest ready images (unready images of other runs
-   are dropped once 2 h old).
+   are dropped once 2 h old). It deletes an image only while that image carries its `ci-kit-run` label: an image
+   insert refused because the name exists leaves the existing image alone.
 
 The Cloud Run job `ci-kit-bake` runs the same script as `ci-kit-launcher@`: `gce/deploy.sh base bake` deploys it,
 and `gce/deploy.sh bake-schedule` adds the weekly run (Sunday 18:00 UTC). Neither is deployed yet: the first ready
