@@ -11,7 +11,7 @@ all) run there instead of on the MacBook. The design is §4 of the
 | Labels | `self-hosted`, `macOS`, `ARM64` (what MAWS's `gate.yml` targets), `ci-kit-mac` |
 | Directory | `~/actions-runner-maws` (work directory `~/actions-runner-maws/_work`) |
 | LaunchAgent | `com.ssfskim.ci-kit.mac-runner` — RunAtLoad, KeepAlive, `ProcessType` Interactive, Aqua session only |
-| Hooks | `~/actions-runner-maws/ci-kit/hooks/job-started.sh`, `job-completed.sh` (copied from `mac/hooks/`) |
+| Hooks | `~/actions-runner-maws/ci-kit/hooks/job-started.sh` (the desktop check, then the sweep), `job-completed.sh` (copied from `mac/hooks/`) |
 | Logs | `~/Library/Logs/ci-kit/mac-runner-hooks.log` (the hooks), `mac-runner.out.log` / `.err.log` (the runner), `~/actions-runner-maws/_diag/` |
 
 **Why a LaunchAgent.** Electron windows need a WindowServer, which only the user's GUI session has; a LaunchDaemon runs
@@ -83,6 +83,20 @@ ssh mini 'rm -rf ~/actions-runner-maws'
 ```
 
 ## The job hooks
+
+**A system dialog in front fails the job at once.** Before anything else, the job-started hook
+(`mac/hooks/desktop-check.sh`) reads the frontmost app with `lsappinfo`. If it is `UserNotificationCenter`,
+`CoreServicesUIAgent`, `SecurityAgent` or `loginwindow`, a system dialog or the login screen holds key focus, and every
+e2e group would fail on focus and pasteboard (2026-10-16: seven groups red with `UserNotificationCenter` frontmost). The
+job then fails at "Set up runner" with:
+
+```
+ci-kit: a system dialog (<name>) holds focus on the mini — dismiss it there and rerun
+```
+
+Dismissing it is the human's, in the mini's GUI session (never an agent, never cua). The check uses `lsappinfo` alone:
+AppleScript or System Events would raise TCC prompts. When `lsappinfo` fails or prints nothing, the job is not blocked;
+the miss is logged. Every check logs a `desktop-check` line (the frontmost app) to the hooks log.
 
 Before each job and after it, the hooks kill every process of the runner's user that a job left behind:
 

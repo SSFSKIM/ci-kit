@@ -92,8 +92,8 @@ fi
 # runner gives every job and hook. English messages: the jobs parse tool output, and this Mac's locale is Korean.
 mkdir -p "$RUNNER_DIR/ci-kit/hooks" "$LOG_DIR" "$(dirname "$PLIST")"
 rm -f "$RUNNER_DIR/ci-kit/hooks/"*
-cp "$here/hooks/job-started.sh" "$here/hooks/job-completed.sh" "$here/hooks/sweep.mjs" "$here/hooks/strays.mjs" \
-  "$here/hooks/terminate.mjs" "$RUNNER_DIR/ci-kit/hooks/"
+cp "$here/hooks/job-started.sh" "$here/hooks/job-completed.sh" "$here/hooks/desktop-check.sh" "$here/hooks/sweep.mjs" \
+  "$here/hooks/strays.mjs" "$here/hooks/terminate.mjs" "$RUNNER_DIR/ci-kit/hooks/"
 chmod +x "$RUNNER_DIR/ci-kit/hooks/"*.sh
 cat >"$RUNNER_DIR/.env" <<EOF
 LANG=en_US.UTF-8
