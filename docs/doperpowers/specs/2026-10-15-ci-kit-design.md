@@ -5,7 +5,9 @@
 **Design history.** Brainstormed on 2026-10-15 in the doperpowers session named "CI-opt", from
 three peer sessions' bottleneck reports, a mining of 4,021 session transcripts (09-22..10-15),
 GitHub Actions run data for MAWS, and measurements of both Macs. The human approved the design with
-the Hetzner on-demand pool, over GCE spot VMs and Namespace. The working evidence was gathered under
+the Hetzner on-demand pool, over GCE spot VMs and Namespace. On 2026-10-16, with MAWS's real
+arrival rate measured, the human moved private Linux gates to GCE spot VMs (§3a); the Hetzner
+pool serves until that backend is live. The working evidence was gathered under
 `/tmp/ci-analysis/` on the MacBook. `/tmp` is purged, so a copy that names private MAWS internals
 is kept in the private repo `SSFSKIM/ci-kit-sandbox` under `evidence/2026-10-15/`. The numbers this
 spec relies on are copied into §Context.
@@ -30,7 +32,9 @@ After this work:
 - **Free PR checks for public repos.** cua and doperpowers get PR checks on GitHub's free hosted
   runners, configured by two files.
 - **No MAWS gate on the MacBook.** Both moves depend on maws-fe adopting the proposals.
-  - MAWS's Linux gates run on a 16-vCPU Hetzner server that exists only while gates run.
+  - MAWS's Linux gates run on GCE spot VMs, one per job, each sized to its job and deleted after
+    it (§3a). Until that backend is live, they run on a Hetzner server that exists only while
+    gates run (§3).
   - MAWS's Electron e2e runs on the Mac mini.
 - **No timing flakes on gate lanes.** Tests assert that events happened, not how fast the machine
   was.
@@ -97,6 +101,7 @@ How to see it working: §Acceptance. The shortest proofs are:
   dry-run would-kill lists were empty on both Macs; the janitor runs live from the main clones on
   both.
 - [ ] M9 — Acceptance
+- [ ] M10 — The GCE backend and cutover
 
 ## Context: what was measured (2026-10-15)
 
@@ -205,6 +210,20 @@ Each item is a behavior someone can check. The commands are in Concrete Steps un
     - At finish, Outcomes records the cost per day projected from the days observed so far, and
       whether it fits $50/month.
 
+13. **A13 — The GCE backend.**
+    - With a repo on `backend: gce`, each pool job gets a VM of its mapped machine type, and its
+        runner name is `ci-kit-gce-*`.
+    - The median time from queue to start is at most 2.5 min, over at least 10 jobs.
+    - A job's VM is gone within 2 min of the job's end.
+    - An hour with no pool demand leaves no `ci-kit=gce` instances or disks.
+    - A VM whose job was cancelled before pickup is gone within 12 min.
+    - Every VM shows `maxRunDuration` and a `DELETE` termination action.
+    - A simulated preemption (`gcloud compute instances simulate-maintenance-event` on a spot VM)
+      fails the job. The launcher re-runs it once, and the re-run passes.
+    - The ledger holds a row per VM and a daily line. Outcomes records the month projected from
+      MAWS's observed rate.
+    - MAWS's `gate.yml` is byte-identical before and after the cutover.
+
 ## Design
 
 ### Terms
@@ -214,7 +233,8 @@ Each item is a behavior someone can check. The commands are in Concrete Steps un
 - **Lane.** Where a gate runs.
   - `hosted`: GitHub's `ubuntu-latest`.
   - `hosted-macos`: GitHub's `macos-latest`. Free on public repos.
-  - `pool`: the Hetzner box. Private repos only.
+  - `pool`: private Linux capacity. It is the Hetzner box (§3) or, once live, GCE spot VMs
+    (§3a), chosen per repo by `pool.json`'s `backend`. Private repos only.
   - `mac`: the Mac mini's self-hosted runner. Private repos only.
 - **Kit.** This repository:
   - the reusable workflow (`.github/workflows/gates.yml`);
@@ -646,6 +666,167 @@ The guard alerts. The choice between those levers is the human's.
 - **Ubicloud.** Hetzner-backed and cheap, but its support for personal accounts is unconfirmed.
 - **Cloud Run jobs.** No GitHub checks integration, at most 8 vCPU, and no macOS.
 
+### 3a. The GCE backend (private Linux, from M10)
+
+**Why it replaces the Hetzner box.**
+- MAWS's gates arrive all day: 116 gate runs across 23 of the 24 hours of 10-15 (Actions API).
+- The Hetzner box deletes itself only when it is idle. At that arrival rate it is almost never
+  idle, so it bills its monthly cap: €82 (CPX42) to €153 (CPX62).
+- GCE spot bills per second, with a 1-minute minimum, only for the minutes jobs actually run.
+- The owner moved private Linux gates to GCE spot on 2026-10-16 (Decision Log). The Hetzner pool
+  serves until this backend is live, and it stays as a fallback behind the same interface.
+
+**Shape.**
+- **One spot VM per pool job.** It runs in the project `ssfskim-ci-kit`, region `us-central1`. The
+  zones are tried in the configured order.
+- **The machine comes from the job's `cpus-N` label** (I12):
+
+  | Label | Machine | vCPU / GiB |
+  |---|---|---|
+  | `cpus-2` | `e2-highcpu-2` | 2 / 2 |
+  | `cpus-4` | `c3d-highcpu-4` | 4 / 8 |
+  | `cpus-8` | `c3d-highcpu-8` | 8 / 16 |
+  | `cpus-16` | `c3d-highcpu-16` | 16 / 32 |
+
+  C3D's smallest shape is 4 vCPU, so `cpus-2` uses E2.
+- **The job runs in one container from the same pool runner image as on the Hetzner box.** The
+  container gets all of the VM's cores and the same cache mounts, so a job sees the same
+  environment on either backend. `nproc` is N because the VM has N vCPUs, which is what A5 checks.
+- **Spot first.** When every configured zone refuses spot capacity, the launcher creates the same
+  machine on demand, so a gate is never stranded by stock. Each fallback is recorded in the ledger.
+- **A hard lifetime on every VM.** Each VM is created with `instanceTerminationAction=DELETE` and
+  `maxRunDuration` (default 120 min). Compute Engine deletes it at that age, whatever else fails.
+  MAWS's longest pool job takes about 6 minutes. A repo whose pool gates run longer raises
+  `max_run_minutes`.
+- **No credentials on the VM.**
+  - VMs have no service account, so job code that reaches the metadata server finds no
+    credentials.
+  - The metadata does hold the JIT config, so the container's traffic to `169.254.169.254` is
+    dropped, as on the Hetzner box.
+- **Network.** Each VM has an ephemeral external IPv4 for outbound traffic. The VPC has no inbound
+  firewall rules.
+
+**VM lifecycle.**
+1. The launcher mints a JIT config, with runner labels `self-hosted`, `ci-kit-pool`, `cpus-N` and
+   `ci-kit-gce`, and the runner named after the instance.
+2. It creates the instance from the newest image in the family `ci-kit-runner`. The JIT config goes
+   into metadata, and the instance gets the I12 labels.
+3. At boot, a systemd unit in the image reads the JIT config, runs the job container, and powers
+   the VM off when the container exits.
+4. On its next tick, the launcher deletes every `ci-kit=gce` instance it finds `TERMINATED`. A
+   stopped VM bills only its disk until then.
+5. A VM whose runner has been registered and idle for 10 minutes is deleted, and its runner
+   unregistered. This happens when its job was cancelled or another runner took it.
+6. `maxRunDuration` is the backstop for everything above.
+
+**The launcher.** It is a Cloud Run service, `ci-kit-launcher`, running the kit's Node code with no
+public ingress. Cloud Scheduler invokes it every minute with an OIDC token. Each invocation is one
+reconciliation, and every invocation can act as the first: all state lives in GCE labels and
+GitHub.
+
+- **Demand.** Count, for each label set, the queued jobs carrying `ci-kit-pool` in the served
+  repos. Use the Hetzner agent's listing, ETag-conditional. Subtract the VMs already launched for
+  that label set whose runner has not yet taken a job. An instance counts as unclaimed until its
+  runner shows `busy` in the runners API, or until it is older than `idle_runner_minutes`. Launch
+  one VM per remaining unit.
+  - The instance name is `ci-kit-gce-<job id>`, which de-duplicates overlapping invocations: an
+    `alreadyExists` error means "already launched".
+  - Jobs with the same label set are interchangeable, so a runner that takes a different job than
+    the one it was named for is fine.
+- **Cleanup.**
+  - Delete `TERMINATED` instances.
+  - Delete idle runners' instances, per lifecycle step 5.
+  - Delete any `ci-kit=gce` instance older than `max_run_minutes` + 5 and open an alert. This
+    should never happen.
+  - Delete builders older than 2 h.
+- **Preemption.** A job fails with its runner lost when its VM was preempted. The launcher sees the
+  preemption in the instance's operation log, re-runs the failed jobs once
+  (`POST .../runs/{id}/rerun-failed-jobs`; the App has Actions write), and writes a ledger line. A
+  second preemption in the same run is left red.
+- **Cap.** The total vCPUs in flight stay at or below `max_vcpus`, which is itself at or below the
+  project's quota. Excess demand waits in GitHub's queue.
+- **Scope.** Public repos are refused, as on the Hetzner box. The launcher touches only instances
+  labelled `ci-kit=gce` in its own project.
+- **Ledger.** It writes one row per VM at deletion (I12) and a daily summary line.
+
+**Why a one-minute reconciler, not the webhook.**
+- One mechanism does both launch and cleanup.
+- There is no public endpoint.
+- The App's event subscriptions do not change.
+
+The cost is up to 60 s of queue latency on top of boot. A webhook fast path, the App's
+`workflow_job` event into the same service, is added only if A13's measured median from queue to
+start is above 2 min.
+
+**Image.** The family `ci-kit-runner` is built by a Cloud Run job, `ci-kit-bake`, weekly (Cloud
+Scheduler) and on demand:
+1. Create a builder VM from `ubuntu-2404-lts-amd64`.
+   - It runs the same bake script as the Hetzner snapshot (`pool/bake/`).
+   - Its metadata carries a one-hour App installation token for warming MAWS's caches. The App key
+     never reaches a VM.
+2. Wait for the builder to power off, for at most 30 min.
+3. Create an image from its disk, into the family, labelled `ci-kit=gce-image` and
+   `ci-kit-commit=<sha>`.
+4. Delete the builder.
+5. Keep the two newest images.
+
+**Credentials.**
+- The App's id and key are in Secret Manager in `ssfskim-ci-kit` (`ci-kit-app-id`,
+  `ci-kit-app-key`).
+- The launcher and the bake run as `ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com`, which
+  holds `roles/compute.instanceAdmin.v1` on the project and secret access to those two secrets only.
+- No GCP credential exists in GitHub. `gce/deploy.sh` deploys idempotently from the MacBook with
+  gcloud's default account.
+- MAWS holds nothing new. Its `HCLOUD_TOKEN` is removed when the Hetzner pool retires.
+
+**Cost.** These are estimates. M10 replaces them with M7's measured GCE table
+(`ci-kit-sandbox` `evidence/maws/`).
+- Unit prices are the live Cloud Billing catalog on 2026-10-16, us-central1, spot:
+  - C3D: $0.00715 per vCPU-h plus $0.00096 per GiB-h;
+  - E2: $0.01309 per vCPU-h plus $0.001754 per GiB-h.
+- One MAWS class-1a gate is unit, static and probes, with the cpx62 job times plus about 70 s of
+  boot each:
+  - c3d-8 for 380 s;
+  - c3d-4 for 277 s;
+  - e2-2 for 104 s.
+
+  That is about $0.011 of compute. Disk ($0.10/GB-month for 50 GB, per second) and a spot
+  external IP add about $0.002, so the total is about $0.013 per gate.
+- At 116 gates a day, that is about $47 a month. Images add about $3, and the control plane stays
+  inside the free tiers: two Scheduler jobs and about 43k short Cloud Run requests a month.
+- That sits at the edge of the $50 target. The levers, in order:
+  - a 30 GB disk;
+  - fewer MAWS gate runs that touch the pool;
+  - c3d-4 for unit. That is slower, so the owner decides it.
+- A billing budget alert on the project, at $40 with 50/90/100% emails, is created by the billing
+  admin (Human-only steps).
+
+**Backends after cutover.**
+- `pool.json` selects the backend per repo, with a default.
+- `hetzner` stays a working fallback: ensure, the agent, the guard, the bake and the snapshots keep
+  their code.
+- Once GCE has run a week clean, CI-opt proposes retiring the Hetzner pieces to the owner:
+  - the guard's schedule;
+  - the snapshots;
+  - MAWS's `HCLOUD_TOKEN`.
+
+**Alternatives considered.**
+- **gcrunner** (MIT; github.com/CamdenClark/gcrunner, with an active fork at appwrite-labs). It is
+  the closest prior art: a webhook-driven Go service on Cloud Run that runs per-job spot VMs sized
+  by `runs-on` labels and that delete themselves.
+  - It lost because its label grammar (`gcrunner=<run_id>/machine=…`) would change MAWS's workflow,
+    which breaks the interface commitment. The kit also already has the JIT, App, runner-image and
+    ledger pieces in Node.
+  - Borrowed from it:
+    - a lifetime cap on every VM (appwrite-labs PR #16 added one after stray VMs);
+    - the fallback from spot to on-demand.
+- **One 16-vCPU VM per gate.** About $55 a month, against about $47 for per-job VMs. It lost to
+  per-job sizing, which the owner asked for and which leaves no cores idle.
+- **A managed instance group with an autoscaler** (terraform-google-github-actions-runners). It
+  scales on CPU, keeps minimum replicas, and has no ephemeral runner per job.
+- **Serverless runners** (Cloud Run, Fargate). See §3's alternatives: 5–9× the price per vCPU, an
+  8-vCPU cap, and no privileged mode or user namespaces.
+
 ### 4. The mac lane
 
 **Runner setup.**
@@ -933,6 +1114,8 @@ the one these peers already address (`@doperpowers/CI-opt`).
 - Each milestone deletes what it created for testing before it ends, except the pool's own box,
   which the agent handles.
 - Leftovers are found with `hcloud`-style API listing by label.
+- Every GCP resource this work creates carries a `ci-kit` label and lives in `ssfskim-ci-kit`.
+  Nothing in any other GCP project is touched.
 
 **Language.**
 
@@ -958,6 +1141,8 @@ the one these peers already address (`@doperpowers/CI-opt`).
 - Any purchase beyond pool usage.
 - The desktop-lease decision (§4).
 - Changing server types for cost.
+- The GCP billing budget alert (§3a, Cost): it needs the billing admin. Also any quota increase
+  the Quotas API does not approve on its own.
 
 These go up through the author session.
 
@@ -1387,6 +1572,83 @@ pattern, parentage and age together.
 
 **What it proves.** A1–A12.
 
+#### M10 — The GCE backend and cutover
+
+**What exists at its end.**
+
+- In `ssfskim-ci-kit`, deployed by `gce/deploy.sh`:
+  - the launcher service and its one-minute Scheduler job;
+  - the bake job and its weekly Scheduler job;
+  - the two secrets;
+  - the service account.
+- The image family `ci-kit-runner` holds a baked image.
+- The sandbox's pool gates and MAWS's pool jobs are served by GCE (`backend: gce` for both repos in
+  `pool.json` on `main`).
+- The Hetzner pool is left as a fallback, with no box up.
+- `docs/pool.md` has a GCE section covering:
+  - deploy;
+  - rotating the App key in Secret Manager;
+  - reading the ledger;
+  - switching a repo back to `hetzner`;
+  - the quota and budget settings.
+
+**What it touches.**
+
+- In the kit:
+  - `gce/`: the launcher service, the bake job, `deploy.sh`, and the VM's systemd unit;
+  - `lib/gce.mjs`: a small REST client for Compute Engine and Secret Manager, which takes its token
+    from the metadata server on Cloud Run and from `gcloud auth print-access-token` on the Mac;
+  - the backend switch in `pool-ensure`;
+  - `pool/config/pool.json`;
+  - `docs/pool.md`.
+- GCP resources, in `ssfskim-ci-kit` only.
+- The ledger issue.
+
+**Interfaces.** Produces I12. Consumes I6–I9.
+
+**Decisions.**
+
+- §3a applies.
+- The VM runs the existing pool runner image (`pool/image/Dockerfile`). It does not run a second
+  image.
+- The launcher's decision logic is in pure functions, tested against recorded Compute and Actions
+  API shapes:
+  - demand per label set;
+  - the cleanup predicates;
+  - the preemption re-run rule (once per run);
+  - the label-to-machine mapping;
+  - the order of zone, spot and on-demand attempts;
+  - ledger rows.
+- **The order of work.**
+  1. File the quota requests first, because approval can take time. Through the Cloud Quotas API:
+     - `CPUS_ALL_REGIONS` 32 → 96;
+     - `IN_USE_ADDRESSES` (us-central1) 8 → 32;
+     - any regional C3D or E2 limit below `max_vcpus`.
+  2. The image.
+  3. The launcher, serving the sandbox only.
+  4. A13 on the sandbox.
+  5. MAWS's cutover, a `pool.json` commit. CI-opt tells maws-fe before and after.
+- **When MAWS cuts over.** MAWS cuts over after maws-fe has flipped `GATE_RUNNER=pool`, onto the
+  Hetzner pool, after PR #16's drain proof. The switch to GCE is then invisible to MAWS.
+- **Every GCE resource:**
+  - carries a `ci-kit` label;
+  - lives in `ssfskim-ci-kit`;
+  - is listed and cleaned at the end of each test step.
+
+  Never touch another project.
+
+**What it does not touch.** MAWS's workflow, which is byte-identical across the cutover, and MAWS's
+secrets.
+
+**What it proves.**
+
+- A13.
+- On GCE, A5 (the job log shows `nproc` = N), A7 (no stray instances, disks or images beyond the
+  newest two) and A12 (cost is visible).
+
+**Review.** M10 gets a high-rung milestone review, as M5 did. The launcher creates paid resources
+and holds the App key.
+
 ### Concrete Steps
 
 **Working directories.**
@@ -1601,6 +1863,55 @@ euros, jobs, and the projected month at the current rate.
 - LaunchAgent `com.ssfskim.ci-kit.janitor`, every 1800 s.
 - Outputs `~/Library/Logs/ci-kit/janitor.log` and `report.md`.
 
+**I12 — The GCE backend: config, names, labels and ledger rows.**
+
+- `pool.json` gains a top-level `"backend": "hetzner"` (the default for every repo) and an optional
+  per-repo `"backend"` that overrides it, plus a `gce` block:
+
+  ```json
+  "gce": {"project":"ssfskim-ci-kit","region":"us-central1",
+          "zones":["us-central1-a","us-central1-b","us-central1-c","us-central1-f"],
+          "machines":{"2":"e2-highcpu-2","4":"c3d-highcpu-4","8":"c3d-highcpu-8","16":"c3d-highcpu-16"},
+          "disk_gb":50,"max_run_minutes":120,"max_vcpus":64,
+          "image_family":"ci-kit-runner","idle_runner_minutes":10}
+  ```
+
+- **Ensure, when the calling repo's backend is `gce`.**
+  - It reads `pool.json` from the kit's `main`, as the agent does, falling back to its bundled
+    copy.
+  - It prints `result=gce` and exits 0 without calling Hetzner.
+  - I7's `result` gains the value `gce`.
+- **Each repo is served by exactly one backend.** The Hetzner agent and guard serve only repos
+  whose backend is `hetzner`, and the launcher serves only repos whose backend is `gce`, so the
+  two never both answer one job.
+- **Instances.**
+  - Name `ci-kit-gce-<job id>`.
+  - Labels:
+    - `ci-kit=gce`;
+    - `ci-kit-job=<job id>`;
+    - `ci-kit-repo=<owner>--<repo>`, lowercased;
+    - `ci-kit-cpus=<N>`;
+    - `ci-kit-provisioning=spot|standard`.
+  - The runner's name equals the instance name.
+  - Runner labels: `self-hosted`, `ci-kit-pool`, `cpus-<N>`, `ci-kit-gce`.
+  - Metadata `ci-kit-jit` holds the JIT config.
+- **Images and builders.**
+  - Images: family `ci-kit-runner`, labels `ci-kit=gce-image` and `ci-kit-commit=<sha>`.
+  - Builders: `ci-kit-gce-builder-<n>`, labelled `ci-kit=gce-builder`.
+- **Control plane.**
+  - Cloud Run service `ci-kit-launcher` and job `ci-kit-bake`.
+  - Scheduler jobs `ci-kit-launcher-tick` (`* * * * *`) and `ci-kit-bake-weekly`.
+  - Service account `ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com`.
+  - Secrets `ci-kit-app-id` and `ci-kit-app-key`.
+- **Ledger rows** go on the same issue:
+
+  ```
+  | instance | job | created (UTC) | deleted (UTC) | machine@zone | spot/standard | seconds | $ | end |
+  ```
+
+  `end` is one of `done`, `cancelled-idle`, `preempted`, `max-run` or `orphan`. A daily line totals
+  the VMs, seconds and dollars, and projects the month.
+
 **External dependencies.**
 
 | Dependency | Use |
@@ -1610,6 +1921,7 @@ euros, jobs, and the projected month at the current rate.
 | GitHub's `actions-runner` container image | pinned by digest in `pool/image/Dockerfile` |
 | Hetzner Cloud API v1 | `servers`, `images`, `firewalls`, `server_types`. The `datacenters` endpoint was removed on 2026-06-02; availability is read from `server_types[].locations[].available` |
 | `yaml` (npm) | the planner's YAML parser |
+| Google Compute Engine API v1, Cloud Run, Cloud Scheduler, Secret Manager, Cloud Quotas | the GCE backend (§3a, I12), in project `ssfskim-ci-kit` |
 | `gh` CLI | `ci-gate` and setup scripts on the Macs |
 
 ## Surprises & Discoveries
@@ -2335,6 +2647,39 @@ euros, jobs, and the projected month at the current rate.
   - **Rejected alternative:** a separate action and secret per backend. It puts a MAWS workflow
     change on the critical path of every backend switch.
   - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
+
+- **Decision:** the lane policy (owner, 2026-10-16). In their words: "okay 비공개만 Linux를 GCE spot,
+  macOS를 mini로 돌리는것 확정".
+  - **Private repos:**
+    - Linux pool jobs run on GCE spot VMs (§3a).
+    - macOS jobs run on the mini.
+    - Light jobs (plan, ensure) stay on GitHub-hosted runners.
+  - **Public repos** stay on GitHub-hosted runners only, with no overflow to self-hosted capacity.
+    - Measured hosted queue waits since 10-14: cua macOS median 7 s, p90 10 s, max 47 s; cua Linux
+      median 2 s; doperpowers Linux median 2 s, max 7 min.
+    - A fork PR can rewrite its workflow's `runs-on` to target any registered runner label, so
+      overflow would expose the mini or paid VMs to strangers.
+  - **Rejected alternatives:**
+    - the Hetzner pool as MAWS's lasting backend. At MAWS's measured rate of 116 gates over 23 of
+      24 hours, it bills its monthly cap of €82–153;
+    - overflow of public repos to GCE or the mini when concurrency is short.
+  - **Date/Author:** 2026-10-16, owner, recorded by CI-opt.
+- **Decision:** the GCE backend's shape (§3a, M10; CI-opt, 2026-10-16):
+  - one spot VM per pool job, sized from `cpus-N`;
+  - VMs run the existing pool runner image;
+  - no service account on VMs;
+  - a `maxRunDuration` with a `DELETE` action on every VM;
+  - spot falls back to on-demand;
+  - a per-repo `backend` in `pool.json` for a staged cutover.
+  - **The launcher is a one-minute Cloud Scheduler reconciler on Cloud Run, not the webhook.** This
+    revises the GCE launcher line of the interface decision above (2026-10-16, CI-opt): one
+    mechanism does both launch and cleanup, with no public endpoint and no change to the App's
+    events. The webhook stays a fast path, added only if A13's measured latency is missed.
+  - **Built in the kit rather than adopting gcrunner.** Its label grammar would change MAWS's
+    workflow. Its safeguards are borrowed: the lifetime cap and the on-demand fallback.
+  - **MAWS goes to the Hetzner pool first** (after PR #16's drain proof) and moves to GCE by a
+    `pool.json` commit. Its hosted burn of about $13.50 a day stops in the meantime.
+  - **Date/Author:** 2026-10-16, CI-opt.
 
 ## Outcomes & Retrospective
 
