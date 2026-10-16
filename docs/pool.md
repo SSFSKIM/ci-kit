@@ -49,9 +49,11 @@ cpus-<N>]`, and a step before the pool jobs queue:
   with: {hcloud-token: "${{ secrets.HCLOUD_TOKEN }}"}
 ```
 
-Ensure reads which repos the pool serves from the kit's `main` (falling back to the copy bundled with `v1`). It
-wakes or stamps a box only for a repo in `pool.json`. For a repo in `pool/config/gce.json` its result is `gce`, and
-for a repo in neither it is `none`. In both cases it touches nothing in Hetzner.
+Ensure reads which repos the pool serves from the kit's `main`. It uses the copy bundled with `v1` only when `main`
+cannot be reached. It wakes or stamps a box only for a repo in `pool.json`. For a repo in `pool/config/gce.json`
+its result is `gce`, and for a repo in neither it is `none`. In both cases it touches nothing in Hetzner and needs
+no `hcloud-token`. A config on `main` whose `repos` cannot be read fails ensure rather than falling back to the
+bundled list, which may still hold a repo that `main` has moved.
 
 **Removing a repo** from `repos` drains it within 5 minutes, when the agent next reads the config. No new
 container starts for the repo. Its busy runners finish their jobs, or run until the 6 h 15 min container

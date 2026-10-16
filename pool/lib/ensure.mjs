@@ -31,8 +31,39 @@ export function backendOf(repo, poolRepos, gceRepos) {
   return has(poolRepos) ? 'hetzner' : 'none';
 }
 
-// A kit config file as the kit's main has it, else this version's bundled copy (one that main's copy does not parse
-// with is bundled too), else null when neither can be read. `parse` throws on a file it does not accept.
+// The repos a kit config file lists. Membership is read on its own terms, apart from the file's operational schema,
+// so a copy on main that this version's parser would reject still says which repos it serves.
+function reposOf(text, where) {
+  let repos;
+  try {
+    repos = JSON.parse(text).repos;
+  } catch {
+    repos = null;
+  }
+  if (!Array.isArray(repos) || !repos.every((r) => typeof r?.repo === 'string')) {
+    throw new Error(`ci-kit: ${where} has no readable repos list; ensure touches nothing in Hetzner until it is fixed`);
+  }
+  return repos.map((r) => r.repo);
+}
+
+// Which repos a kit config file (`name`) lists. The kit's main decides whenever it answered: absent there (404) is no
+// repos, and a copy whose repos cannot be read refuses rather than falling back, since the bundled list may still
+// hold a repo main has moved (spec §3a). Only when main cannot be reached is the bundled copy read; readBundled
+// resolves null when this version bundles no such file.
+export async function kitRepos(name, { fetchMain, readBundled }) {
+  let text;
+  try {
+    text = await fetchMain();
+  } catch (err) {
+    if (err.status === 404) return [];
+    const bundled = await readBundled();
+    return bundled === null ? [] : reposOf(bundled, `the bundled ${name}`);
+  }
+  return reposOf(text, `${name} on the kit's main`);
+}
+
+// The operational pool config (types, locations, …) as the kit's main has it, else this version's bundled copy (also
+// when main's copy does not parse with this version's parser), else null. It never decides membership: kitRepos does.
 export async function kitConfig(parse, { fetchMain, readBundled }) {
   try {
     return parse(await fetchMain());
@@ -43,6 +74,20 @@ export async function kitConfig(parse, { fetchMain, readBundled }) {
       return null;
     }
   }
+}
+
+// The ensure action for the calling repo (I7, I12): 'gce' or 'none' for a repo the Hetzner pool does not serve, with
+// no Hetzner token needed and nothing in Hetzner touched; else ensure's own result. pool and gce: {fetchMain,
+// readBundled} for pool/config/pool.json and gce.json.
+export async function ensureForCaller({ repo, token, pool, gce, parsePool, createHcloud, opts }) {
+  const gceRepos = await kitRepos('gce.json', gce);
+  if (backendOf(repo, [], gceRepos) === 'gce') return 'gce';
+  const backend = backendOf(repo, await kitRepos('pool.json', pool), gceRepos);
+  if (backend !== 'hetzner') return backend;
+  if (!token?.trim()) throw new Error('ci-kit: the pool needs the HCLOUD_TOKEN secret (pool-ensure input hcloud-token)');
+  const cfg = await kitConfig(parsePool, pool);
+  if (!cfg) throw new Error('ci-kit: the pool config could not be read from the kit\'s main or its bundled copy');
+  return ensure(createHcloud(token.trim()), cfg, opts);
 }
 
 // 'existing' when a box is booting or ready, 'wait' when the only box is draining, else 'create'.

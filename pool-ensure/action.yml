@@ -6,8 +6,9 @@ name: ci-kit pool ensure
 description: Make sure the ci-kit pool box exists (created from the newest pool snapshot if not).
 inputs:
   hcloud-token:
-    description: Hetzner Cloud API token of the pool's project
-    required: true
+    description: Hetzner Cloud API token of the pool's project; needed only by a repo in pool/config/pool.json
+    required: false
+    default: ''
 outputs:
   result:
     description: existing | created:<type>@<location> | raced | gce | none
