@@ -81,6 +81,10 @@ A public repo whose config puts any gate on `pool` or `mac` fails its plan with
 `ci-kit: lane "pool" is for private repos only (gate "<name>")`: a stranger's fork PR must never reach a self-hosted
 machine.
 
+A `pool` gate needs the repo served by the pool and the `HCLOUD_TOKEN` secret; see [pool.md](pool.md), "Using the
+pool from a repo". The `plan` job then creates the box if none exists, and the gate's first run on a cold box waits
+about a minute for it (`ci-gate` prints `WAIT` after 2 minutes). Inside the job, `nproc` reports the gate's `cpus`.
+
 ### Which gates run
 
 1. **An explicit list wins.** On a dispatch, the `gates` input; on a `ci/**` push, the head commit's `CI-Gates: a,b`
