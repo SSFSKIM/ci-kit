@@ -2164,6 +2164,32 @@ euros, jobs, and the projected month at the current rate.
   the mini. LaunchServices `open` ran at 07:19:24Z, during e2e:tools (run 38866065402), and Chrome
   took focus a second later. CI-opt told maws-fe.
 
+- **Observation (M7 GCE evidence, 2026-10-16; sandbox `evidence/maws/gce-spot.md`):** MAWS
+  class 1a on GCE spot, MAWS dfb01258a, six passes, no preemptions.
+  - **One VM per gate** (c3d-highcpu-16): the gate took 346 s cold and 315–324 s warm, and cost
+    $0.0149–0.0174 a gate.
+  - **One VM per job** (c3d-8 + c3d-4 + e2-2): the gate took 412 s cold and 321–325 s warm, and
+    cost $0.0117 a gate warm.
+  - **Boot.** VM create to runner online took 33–55 s warm, and 61–137 s cold, when packages
+    install at boot.
+  - **Monthly at 116 gates a day:** about $41 (€36) warm per job, $52 warm per gate, and $57–61
+    cold. The Hetzner caps are €82 for cpx42 and €153 for cpx62. The GCE figure covers MAWS class
+    1a only.
+  - c3d-highcpu-16 spot was out of stock once in us-central1-a and -b. The retry in -c took 15 s.
+  - The unit job was red in all six passes, on the known import-test timeout.
+- **Observation (M10 step 1, 2026-10-16):** quota preferences were filed through the Cloud Quotas
+  API in `ssfskim-ci-kit`. All were reconciling when filed.
+  | quota | current | requested |
+  |---|---|---|
+  | `CPUS-ALL-REGIONS` | 32 | 96 |
+  | C3D per-family (us-central1) | 24 | 64 |
+  | E2 per-family (us-central1) | reported 0 | 64 |
+  | `IN-USE-ADDRESSES` (us-central1) | 8 | 32 |
+  | `SSD-TOTAL-GB` (us-central1) | 500 | 2048 |
+
+  `SSD-TOTAL-GB` was added beyond the spec's list. pd-balanced disks count against it, and at
+  `max_vcpus` 64 with 2-vCPU jobs and 50 GB disks the pool needs up to 1,600 GB.
+
 ## Decision Log
 
 - **Decision:** the verification for this work.
