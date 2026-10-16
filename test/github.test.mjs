@@ -80,3 +80,19 @@ test('an error response still updates remaining, and throws with its status', as
   await assert.rejects(gh.getRun('o/r', 1), (e) => e.status === 403 && /rate limit exceeded/.test(e.message));
   assert.equal(gh.stats().remaining, 0);
 });
+
+test('remaining is the lowest budget among the windows still open (GitHub reports more than one)', async () => {
+  // Recorded 2026-10-15: one poll's run and jobs responses carried different windows (resets 1792112074 and
+  // 1792112484, remaining 4675 and 4827).
+  const f = fakeFetch([
+    { status: 200, body: RUN, headers: { 'x-ratelimit-remaining': '4675', 'x-ratelimit-reset': '1792112074' } },
+    { status: 200, body: RUN, headers: { 'x-ratelimit-remaining': '4827', 'x-ratelimit-reset': '1792112484' } },
+  ]);
+  let nowMs = 1792112000 * 1000;
+  const gh = createGitHub('t', { fetchImpl: f.impl, now: () => nowMs });
+  await gh.getRun('o/r', 1);
+  await gh.getRun('o/r', 2);
+  assert.equal(gh.stats().remaining, 4675);
+  nowMs = 1792112100 * 1000; // the first window has reset
+  assert.equal(gh.stats().remaining, 4827);
+});
