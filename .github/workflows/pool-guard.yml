@@ -1,5 +1,7 @@
 # The pool's guard (spec §3 Guard): the backstop, every 10 minutes. GitHub's cron can run late; the main path is
-# ensure and the agent. Scheduled workflows run from the default branch only.
+# ensure and the agent. Scheduled workflows run from the default branch only. GitHub registers the schedule when
+# this file changes there; after M5's merge (2026-10-16) no scheduled run came for over 85 minutes, and a commit
+# that touches this file is the documented way to make GitHub register it again.
 name: pool-guard
 on:
   schedule:
