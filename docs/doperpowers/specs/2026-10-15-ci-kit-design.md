@@ -114,7 +114,11 @@ How to see it working: §Acceptance. The shortest proofs are:
   - [x] (2026-10-16 12:35Z) Step 2: the bake split and a ready image. PR #18 merged 40e5584 after
     three task-review rounds (image ownership on cleanup, the no-ingress `ci-kit` VPC, an accepted
     insert followed by a 4xx). Ready images `…-100502-b4fc88e2` and `…-110845-zxbj-b15da26f`.
-  - [ ] Step 3: the launcher, with only the sandbox in `gce.json`.
+  - [x] (2026-10-16 15:45Z) Step 3: the launcher, with only the sandbox in `gce.json`. PR #19
+    merged b721a04 after three high-rung review rounds: 2 P1s and 9 P2s fixed, three dispositioned
+    (Decision Log). `gce/deploy.sh` is live. The sandbox moved by a direct commit on main, f71afcb.
+    Round trips 38921909804 and 38923752949 both ran on c3d-highcpu-4 spot, nproc 4, with queue to
+    start in 1 m 25 s and 1 m 49 s.
   - [ ] Step 4: A13 on the sandbox.
   - [ ] Step 5: MAWS's move in one window with `GATE_RUNNER` unset.
 
@@ -2448,6 +2452,24 @@ euros, jobs, and the projected month at the current rate.
     executor deleted it by hand at 08:09:55Z without writing a `manual` row. The hours and euros
     are right, and the row is left as written.
 
+- **Observation (M10 step 3, 2026-10-16):** the first real GCE deploy and its live round trips.
+  - **Fixes the real `deploy.sh` needed:**
+    - the default compute account needs `roles/run.builder` for Cloud Run source builds;
+    - both Cloud Run images start through the CNB `launcher`, because `node` is not on their bare
+      PATH;
+    - gcloud's first alpha/beta call prints installer lines to stdout.
+  - **Quotas.** The E2 request was refused (preferred 64, granted 0), so E2 stays at the default 24
+    and `INSTANCES` is 24 VMs at once. CPUS-ALL-REGIONS 96, C3D 64, addresses 32 and SSD 2048 were
+    granted.
+  - **Teardown.** A VM was gone 2 m 19 s and 2 m 10 s after its job ended, against A13's 2 min.
+    About 85 s of that is the guest shutting down after the job, before a tick sees `TERMINATED`.
+  - **Network stall.** The MacBook's IPv6 route to Google is dead, so every gcloud call stalled
+    5–10 min. An IPv4-only resolver shim for the executor's own commands worked around it, with no
+    system change; it is documented in `docs/pool.md`.
+  - **Ledger load.** At MAWS's rate the shared ledger issue gains about 350 GCE comments a day.
+    Hetzner's ledger code reads the whole issue on every write. That matters only until Hetzner
+    retires.
+
 ## Decision Log
 
 - **Decision:** the verification for this work.
@@ -3111,6 +3133,21 @@ euros, jobs, and the projected month at the current rate.
     - A row left unresolved after a launcher outage longer than 26 h, with its stopped VM waiting
       for the launcher. The failed-tick alert fires long before that.
   - **Date/Author:** 2026-10-16, plan-executor.
+
+- **Decision (M10 step 3, the executor's calls, accepted):**
+  - **Allocation ids** are the launch minute plus 5 random base36 characters. The runners API
+    gives no creation time, so a runner's age comes from its id. A repeated id is drawn again.
+  - **Deletes don't wait.** Rows go `launching → running → deleting → final`, and the next tick
+    finalises.
+  - **Unknown inserts.** An insert whose outcome stays unknown ends that placement walk, and
+    cleanup settles it.
+  - **Ledger window.** The ledger reads the last 26 h of comments, and the daily line posts in the
+    first 2 h of the UTC day.
+  - **Alerting.** The alert fires on more than 2 failed ticks in 10 min.
+  - **Launcher ingress** is `internal` plus IAM.
+  - **The sandbox moved by a direct commit on main**, because the launcher reads its config from
+    main.
+  - **Date/Author:** 2026-10-16, task-executor, recorded by plan-executor.
 
 ## Outcomes & Retrospective
 
