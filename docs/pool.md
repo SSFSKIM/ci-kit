@@ -215,8 +215,8 @@ and `ci-kit-state=booting` labels so the guard watches it, and delete it afterwa
 
 The GCE backend (spec §3a) runs each pool job on its own spot VM in the project `ssfskim-ci-kit`, booted from the
 image family `ci-kit-runner`. A repo listed in `pool/config/gce.json` is served by it; one in `pool.json` by the
-Hetzner box; a repo is never in both (the launcher serves neither copy and opens an alert, and the kit test
-`one file per repo` fails). Ensure prints `result=gce` for a GCE repo and touches nothing in Hetzner.
+Hetzner box; a repo is never in both (the launcher serves neither copy and opens an alert, and the kit's test that
+the two files list no repo twice fails). Ensure prints `result=gce` for a GCE repo and touches nothing in Hetzner.
 
 | Piece | Where |
 |---|---|
