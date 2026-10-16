@@ -1784,6 +1784,31 @@ euros, jobs, and the projected month at the current rate.
   - **Host-readiness rule:** no app that can raise a keychain or permission prompt runs in the
     runner's GUI session.
 
+- **Observation (2026-10-16, CI-opt from the MAWS Actions API):** MAWS's gate rate breaks the
+  pool's cost model.
+  - On 10-15 UTC, 116 gate runs arrived across 23 of 24 hours. That is far more often than every
+    50 minutes, so an on-demand box would almost never idle-delete, and its bill reaches the
+    monthly cap:
+    | type | cores | monthly cap |
+    |---|---|---|
+    | cpx62 | 16 | €152.99 |
+    | cpx52 | 12 | €118.99 |
+    | cpx42 | 8 | €81.99 |
+  - The 4–10 h/day cost table does not fit this rate, and the 8 h/day guard alert would fire
+    every day.
+  - Hosted that day: 2,253 billed minutes (unit 1,153, e2e 621, static 291, plan 116, probes 72),
+    about $13.50 at $0.006/min. The billing block came from Pro's 3,000 included minutes running
+    out.
+  - Stock that day:
+    | type | shape | price | stock |
+    |---|---|---|---|
+    | cx53 | 16 cores | €34.99/mo | none |
+    | cax41 (ARM) | 16 cores | €48.49/mo | none |
+    | cpx41 | 8 cores / 16 GB | €0.0609/h, €37.99/mo cap | ash and hil only |
+    | cpx51 | 16 cores / 32 GB | €0.1338/h, €83.49/mo cap | ash and hil only |
+  - cpx41 and cpx51 are measured before the human chooses a lever. pool.json's types and
+    locations, and A9's activation, wait on that choice and on the owner's approval.
+
 ## Decision Log
 
 - **Decision:** the verification for this work.
