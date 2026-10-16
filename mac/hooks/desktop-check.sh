@@ -19,14 +19,20 @@ log() {
     tee -a "$HOME/Library/Logs/ci-kit/mac-runner-hooks.log"
 }
 
-# `lsappinfo info -only name` prints either `"LSDisplayName"="<name>"` or, on macOS 27, `"<name>" ASN:0x…: …`.
-front_name() {
+# `lsappinfo info -only name -only bundleid` prints `"LSDisplayName"="<name>"` and `"CFBundleIdentifier"="<id>"`, or,
+# on macOS 27, `"<name>" ASN:0x…: …` and `bundleID="<id>"`. The name is localized (Terminal is `터미널` on the mini), so
+# Finder and Terminal are told by bundle id, and by name only where no bundle id is printed.
+read_front() {
   local info
-  info=$(lsappinfo info -only name "$(lsappinfo front 2>/dev/null)" 2>/dev/null) || info=''
-  sed -n -E 's/^"LSDisplayName"="(.*)"$/\1/p; s/^"([^"]*)" ASN:.*/\1/p' <<<"$info" | head -1
+  info=$(lsappinfo info -only name -only bundleid "$(lsappinfo front 2>/dev/null)" 2>/dev/null) || info=''
+  name=$(sed -n -E 's/^"LSDisplayName"="(.*)"$/\1/p; s/^"([^"]*)" ASN:.*/\1/p' <<<"$info" | head -1)
+  bundle=$(sed -n -E 's/^"CFBundleIdentifier"="(.*)"$/\1/p; s/^[[:space:]]*bundleID="([^"]*)".*/\1/p' <<<"$info" | head -1)
+}
+is_app() { # <bundle id> <name>: whether the frontmost app read last is that app
+  [[ $bundle == "$1" || (-z $bundle && $name == "$2") ]]
 }
 
-name=$(front_name)
+read_front
 if [[ -z $name ]]; then
   log "could not read the frontmost app; not blocking the job"
   exit 0
@@ -40,28 +46,26 @@ case $name in
     ;;
 esac
 
-if [[ $name != Finder ]]; then
+if ! is_app com.apple.finder Finder; then
   log "frontmost is $name"
   exit 0
 fi
 
+before=$name
 if ! open -a Terminal; then
-  log "frontmost before=Finder; open -a Terminal failed; failing the job"
-  echo "ci-kit: could not open Terminal on the mini (Finder is in front) — check its desktop and rerun" >&2
+  log "frontmost before=$before; open -a Terminal failed; failing the job"
+  echo "ci-kit: could not open Terminal on the mini ($before is in front) — check its desktop and rerun" >&2
   exit 1
 fi
-after=''
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-  after=$(front_name)
-  [[ $after == Terminal ]] && break
+  read_front
+  is_app com.apple.Terminal Terminal && break
   sleep 0.5
 done
-log "frontmost before=Finder after=${after:-unreadable}"
-case $after in
-  Terminal) ;;
-  '') log "could not read the frontmost app after opening Terminal; not blocking the job" ;;
-  *)
-    echo "ci-kit: Terminal did not come to the front on the mini ($after is) — check its desktop and rerun" >&2
-    exit 1
-    ;;
-esac
+log "frontmost before=$before after=${name:-unreadable}"
+if [[ -z $name ]]; then
+  log "could not read the frontmost app after opening Terminal; not blocking the job"
+elif ! is_app com.apple.Terminal Terminal; then
+  echo "ci-kit: Terminal did not come to the front on the mini ($name is) — check its desktop and rerun" >&2
+  exit 1
+fi

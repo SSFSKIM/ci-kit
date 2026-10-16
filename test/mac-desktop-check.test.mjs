@@ -45,8 +45,10 @@ function check(output, status = 0, { afterOpen, openStatus = 0 } = {}) {
   };
 }
 // The two shapes lsappinfo prints for `info -only name`: macOS 27 over ssh, and the LSDisplayName pair.
-const asnShape = (name) => `"${name}" ASN:0x0-0x48b78b3: (in front) \n    bundleID=[ NULL ] \n`;
-const pairShape = (name) => `"LSDisplayName"="${name}"\n`;
+// With a bundle id, each also prints it: `bundleID="<id>"` and `"CFBundleIdentifier"="<id>"` (both checked live).
+const asnShape = (name, bundle) =>
+  `"${name}" ASN:0x0-0x48b78b3: (in front) \n    bundleID=${bundle ? `"${bundle}"` : '[ NULL ]'} \n    bundle path=[ NULL ] \n`;
+const pairShape = (name, bundle) => `"LSDisplayName"="${name}"\n${bundle ? `"CFBundleIdentifier"="${bundle}"\n` : ''}`;
 
 for (const name of ['UserNotificationCenter', 'CoreServicesUIAgent', 'SecurityAgent', 'loginwindow']) {
   test(`a system dialog in front (${name}) fails the job at once, saying what to do`, () => {
@@ -135,4 +137,20 @@ test('an unreadable frontmost app still lets the job run, and nothing is opened'
   const run = check('', 0, { afterOpen: asnShape('Terminal') });
   assert.equal(run.status, 0);
   assert.deepEqual(run.opened, []);
+});
+
+test('names are localized: Finder and Terminal are told by bundle id (the mini shows Terminal as 터미널)', () => {
+  for (const shape of [asnShape, pairShape]) {
+    const run = check(shape('Finder', 'com.apple.finder'), 0, { afterOpen: shape('터미널', 'com.apple.Terminal') });
+    assert.equal(run.status, 0, run.stderr);
+    assert.deepEqual(run.opened, ['-a Terminal']);
+    assert.match(run.stdout, /frontmost before=Finder after=터미널/);
+  }
+});
+
+test('a localized Finder is opened over too, and an app merely named Terminal is not taken for it', () => {
+  const run = check(asnShape('파인더', 'com.apple.finder'), 0, { afterOpen: asnShape('Terminal', 'com.example.fake') });
+  assert.equal(run.status, 1);
+  assert.deepEqual(run.opened, ['-a Terminal']);
+  assert.match(run.stderr, /Terminal did not come to the front on the mini \(Terminal is\)/);
 });

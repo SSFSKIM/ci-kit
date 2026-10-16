@@ -108,7 +108,8 @@ gets `frontmost before=Finder after=Terminal`. If Terminal is not in front by th
 ci-kit: Terminal did not come to the front on the mini (<name> is) — check its desktop and rerun
 ```
 
-Any other app in front is left as it is. The hook acts only before the job, so it never fights MAWS's own
+Finder and Terminal are told by bundle id (`com.apple.finder`, `com.apple.Terminal`): `lsappinfo`'s names are
+localized, and the mini shows Terminal as `터미널`. Any other app in front is left as it is. The hook acts only before the job, so it never fights MAWS's own
 `MAWS_E2E_FOREGROUND=1`.
 
 Before each job and after it, the hooks kill every process of the runner's user that a job left behind:
