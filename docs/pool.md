@@ -4,7 +4,7 @@ The pool is one Hetzner server, `ci-kit-pool`, that exists only while private re
 (design: spec §3). A workflow's `plan` job runs **ensure**, which creates the box from the newest pool snapshot
 if none exists. The **agent** on the box starts one Docker container per queued pool job, each with a fresh
 just-in-time runner and an exclusive set of cores, and deletes the box when it is idle at minute ≥ 50 of its
-billed hour. The **watchdog** on the box and the **guard** workflow are the backstops. The **bake** builds the
+billed hour. The **watchdog** on the box and the **guard** are the backstops; the guard runs from the mini every 10 minutes and from a GitHub schedule. The **bake** builds the
 snapshot weekly.
 
 **Idle** means no pool demand: no running job container, no queued or in-progress job carrying `ci-kit-pool` in
@@ -19,7 +19,7 @@ and most of them never touch the pool.
 | agent, watchdog | `pool/agent/` (`agent.mjs`, `watchdog.mjs`, `systemd/`), decisions in `logic.mjs` |
 | job container image | `pool/image/` |
 | bake | `.github/workflows/pool-bake.yml`, `pool/bake/` |
-| guard | `.github/workflows/pool-guard.yml`, `pool/guard.mjs`, rules in `pool/lib/guard.mjs` |
+| guard | `.github/workflows/pool-guard.yml`, `pool/guard.mjs`, rules in `pool/lib/guard.mjs`; on the mini, `host/guard.mjs` (below) |
 | served repos and preferences | `pool/config/pool.json` |
 | ledger and alerts | issue "pool ledger" and issues labelled `ci-kit-alert` in `SSFSKIM/ci-kit-sandbox` |
 
@@ -180,6 +180,46 @@ shell script that cloud-init runs once): for example writing a wrong key to `/et
 `systemctl restart ci-kit-agent`, or `systemctl disable --now ci-kit-watchdog.timer`. Give it the `ci-kit=pool`
 and `ci-kit-state=booting` labels so the guard watches it, and delete it afterwards.
 
+## The guard on the mini
+
+GitHub's `*/10` schedule for `pool-guard.yml` fired once in its first 6 hours, so the same guard cycle also runs
+on the mini, which is always on. The LaunchAgent `com.ssfskim.ci-kit.guard` runs `host/guard.mjs` at load and
+every 10 minutes. The GitHub schedule stays in place.
+
+```bash
+ssh mini '~/Developer/GitHub/ci-kit/host/guard-install.sh'               # install or reload; prints the first cycle
+ssh mini 'tail -20 ~/Library/Logs/ci-kit/guard.log'
+ssh mini '~/Developer/GitHub/ci-kit/host/guard-install.sh --uninstall'
+```
+
+The guard reads its credentials from files in `~/.config/ci-kit/` on the mini, never from arguments, and refuses
+any file whose mode lets group or others read it:
+
+| File | Holds | Needed for |
+|---|---|---|
+| `hcloud_token` | the Hetzner token | everything; required |
+| `app_id`, `app.pem` | the App's id and private key (both or neither) | the ledger rows, alerts, the weekly summary, and waking a box for stranded jobs |
+
+Place a credential with `umask 077` and a pipe, so it never shows in an argument list or a terminal:
+`… | ssh mini 'umask 077; mkdir -p ~/.config/ci-kit; cat > ~/.config/ci-kit/<file>'`.
+
+**Without `app_id` and `app.pem`, only the Hetzner half runs.** The guard still deletes a pool box whose heartbeat
+is stale or that has been up 24 h, and a builder older than 2 h, with the same rules. But it writes no ledger row,
+opens no alert, and cannot see queued jobs to wake a box for. Stopping a box that bills without limit comes
+first. The next guard cycle that has GitHub (the schedule, or a dispatch) finalizes the deleted box's row as
+`vanished` from its last sighting.
+
+**Two guards at once** (the mini's and a scheduled run) are safe, and need no lock:
+
+- Ledger rows converge: concurrent writers re-read and keep one comment per server (above).
+- A second `ensure` meets the server name's uniqueness and reports `raced`.
+- A box or builder both try to delete is gone for the second, which logs a failed delete (HTTP 404) and exits 1
+  for that cycle only.
+- An alert is opened once per title, but two cycles that start within the same second can each open one, as they
+  can each post a weekly summary. That is a duplicate issue or comment, never a missed one.
+
+launchd never starts a second copy of the agent while one runs, so the mini's cycles never overlap each other.
+
 ## When something goes wrong
 
 | Symptom | Look at |
@@ -190,5 +230,6 @@ and `ci-kit-state=booting` labels so the guard watches it, and delete it afterwa
 | ensure warns "the project's core limit refused …", or an alert names a smaller box or a refused bake | the project's shared-core limit (above); list the project's servers, and ask Hetzner for a higher limit if this recurs |
 | An alert "heartbeat stale" | the agent could not reconcile (GitHub unreachable, App key revoked, crash); the box is already deleted; check the App and the last bake |
 | A box up more than 12 h | a pool job that never ends, or ensure called over and over (each call holds the box 15 min); cancel the job or find the caller, and the box then idles out |
-| The guard has no scheduled runs (`gh api 'repos/SSFSKIM/ci-kit/actions/runs?event=schedule'`) an hour after its file changed | GitHub has not registered the schedule; commit any change to `.github/workflows/pool-guard.yml` on `main`. Meanwhile `gh workflow run pool-guard.yml -R SSFSKIM/ci-kit` runs one cycle |
+| The guard has no scheduled runs (`gh api 'repos/SSFSKIM/ci-kit/actions/runs?event=schedule'`) an hour after its file changed | GitHub has not registered the schedule; commit any change to `.github/workflows/pool-guard.yml` on `main`. Meanwhile the mini's guard runs every 10 minutes, and `gh workflow run pool-guard.yml -R SSFSKIM/ci-kit` runs one cycle |
+| The mini's guard log (`ssh mini tail ~/Library/Logs/ci-kit/guard.log`) is silent, or ends in errors | `ssh mini 'launchctl print gui/$(id -u)/com.ssfskim.ci-kit.guard'` for its last exit; a credential refused for its mode is named in the log |
 | The guard or bake stopped running | GitHub disables scheduled workflows in a repo with no activity for 60 days; each pool boot re-enables them, or `gh workflow enable pool-guard.yml -R SSFSKIM/ci-kit` |

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The pool's guard on the mini (host/guard.mjs). host/guard-install.sh fills the __PLACEHOLDERS__ and loads it.
+     It carries no credential: the guard reads its 0600 files under ~/.config/ci-kit/ itself. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ssfskim.ci-kit.guard</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__GUARD__</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>600</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__PATH__</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/guard.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/guard.log</string>
+</dict>
+</plist>
