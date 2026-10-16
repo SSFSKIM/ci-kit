@@ -787,6 +787,10 @@ The hosted-runner probe's report, folded on 2026-10-15, is at `ci-kit-sandbox`
   - `src/main/sessions/recovery.test.ts`;
   - the `pause-take-over` pty test;
   - `resource.test.tsx` 5 s.
+  - the history-rail day-boundary test (expected "Today, Yesterday", got "Yesterday, October 13" when
+    a Linux run crossed the UTC day). It needs an injected clock. If M7's recall or shard
+    measurements hit it, it is labelled clock-dependent, not a lane or shard effect (maws-fe,
+    2026-10-16).
 - **P7 — Retire the load rule for gates.** Retire `waitload20.sh` and `with-slot.sh` for every gate
   P4's inventory moved off the MacBook. They stay for anything the inventory names as staying local.
 
@@ -1853,6 +1857,13 @@ euros, jobs, and the projected month at the current rate.
   DX5 contract. The one 2 s wait in `test-bridge-requests.sh` stays. If it flakes in CI, the run id
   is reported to CI-opt as a bug. The `launched_by` off-by-a-second finding is tracked in Arkho #84.
   - **Date/Author:** 2026-10-15, CI-opt, recorded by plan-executor.
+
+- **Decision:** the ci-gate rate-limit fix wave merged (PR #5), and `v1` moved to it. One pacer
+  covers discovery and watching. An exhausted budget during discovery is a named rate-limit
+  `ERROR`. The budget is the lowest remaining across the rate-limit windows that are still open:
+  the run and jobs endpoints reported different windows in one poll. The 2-poller cap on
+  executors is lifted.
+  - **Date/Author:** 2026-10-16, plan-executor.
 
 ## Outcomes & Retrospective
 
