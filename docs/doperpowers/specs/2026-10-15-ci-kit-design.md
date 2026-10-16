@@ -2118,6 +2118,14 @@ euros, jobs, and the projected month at the current rate.
   - **Rationale:** an hour of red e2e groups becomes one clear failure.
   - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
 
+- **Decision:** M3 merges doperpowers `main` into its branch and bumps the version with
+  `scripts/bump-version.sh` above main's (7.157.4). This amends M3's "no versions" line, at the
+  author's instruction.
+  - The new waits from main's #201 get the same 30 s liveness bound, so the race class M3 fixed
+    does not return through main.
+  - The 20-run A10 series runs on the merged head.
+  - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
