@@ -95,8 +95,9 @@ export async function runBake(gce, { cfg, sha, runId, token, script, sleep, now 
     // The disk is consistent: the guest powered off after reporting. Re-check ownership right before imaging it.
     const owned = await gce.instance(builder.zone, builder.name);
     if (!owned || !ownsBakeInstance(owned, runId)) throw new Error(`ci-kit: ${builder.name} is gone or no longer this bake's`);
-    await gce.insertImage(imageBody({ name: names.image, family: cfg.image_family, zone: builder.zone, disk: builder.name, sha, runId }));
+    // Named before the insert, so that an insert that fails or times out midway is deleted by the cleanup too.
     image = names.image;
+    await gce.insertImage(imageBody({ name: names.image, family: cfg.image_family, zone: builder.zone, disk: builder.name, sha, runId }));
     log(`image ${image} created (unready)`);
     await deleteIfOwned(gce, builder, runId, log);
 
