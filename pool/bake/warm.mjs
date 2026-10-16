@@ -69,8 +69,13 @@ async function main() {
     if (electron) {
       await step('electron', async () => {
         const prefix = await mkdtemp(join(tmpdir(), 'ci-kit-electron-'));
-        await sh('npm', ['install', '--no-save', '--no-audit', '--no-fund', `electron@${electron}`], { cwd: prefix, env, maxBuffer: 64 << 20, timeout: 15 * 60_000 });
+        await sh('npm', ['install', '--no-save', '--no-audit', '--no-fund', '--ignore-scripts', `electron@${electron}`], { cwd: prefix, env, maxBuffer: 64 << 20, timeout: 15 * 60_000 });
+        // Electron 44's package has no install script: its binary comes from the `install-electron` bin, which MAWS's
+        // postinstall runs, and which is what fills electron_config_cache. So the warm step runs it too.
+        await sh(process.execPath, [join(prefix, 'node_modules/electron/install.js')], { cwd: prefix, env, maxBuffer: 64 << 20, timeout: 15 * 60_000 });
         await rm(prefix, { recursive: true, force: true });
+        const { stdout } = await sh('find', [CACHE_ENV.electron_config_cache, '-name', `electron-v${electron}-*.zip`]);
+        if (!stdout.trim()) throw new Error(`no electron-v${electron} zip under ${CACHE_ENV.electron_config_cache}`);
         return electron;
       });
     }
