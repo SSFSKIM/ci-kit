@@ -826,7 +826,7 @@ Scheduler) and on demand:
   - Borrowed from it:
     - a lifetime cap on every VM (appwrite-labs PR #16 added one after stray VMs);
     - the fallback from spot to on-demand.
-- **One 16-vCPU VM per gate.** About $55 a month, against about $47 for per-job VMs. It lost to
+- **One 16-vCPU VM per gate.** $52 a month measured, against $41 for per-job VMs. It lost to
   per-job sizing, which the owner asked for and which leaves no cores idle.
 - **A managed instance group with an autoscaler** (terraform-google-github-actions-runners). It
   scales on CPU, keeps minimum replicas, and has no ephemeral runner per job.
