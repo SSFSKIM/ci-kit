@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The mac lane's runner (I10), a LaunchAgent so it runs in the logged-in user's GUI session, where Electron windows have
+  a WindowServer (a LaunchDaemon has none). mac/install.sh fills in __RUNNER_DIR__ and __LOG_DIR__ and installs it as
+  ~/Library/LaunchAgents/com.ssfskim.ci-kit.mac-runner.plist. runsvc.sh is the runner's own service wrapper; it reads
+  the runner's .path, and the runner reads its .env, which carries the job hooks.
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.ssfskim.ci-kit.mac-runner</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>__RUNNER_DIR__/runsvc.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__RUNNER_DIR__</string>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>ACTIONS_RUNNER_SVC</key>
+      <string>1</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/mac-runner.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/mac-runner.err.log</string>
+  </dict>
+</plist>
