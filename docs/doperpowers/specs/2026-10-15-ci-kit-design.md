@@ -1709,8 +1709,9 @@ euros, jobs, and the projected month at the current rate.
   reds. P3 as written would select the full suite every time. M7 measures scoping by the import
   graph alone.
 - **Observation (M7):** MAWS's `unit:darwin` (maws-fe, master 7180fe78) ran 13 files and 263 tests
-  on the mini, none skipped (run 38841090087). The job took 5 min, of which 4 min 24 s was setup
-  and 15 s was tests. That is the ci/ cache-miss cost.
+  on the mini, none skipped (run 38841090087), closing A8's subset item. The job took 5 min 07 s:
+  setup 16 s, tests 15 s, and 4 min 24 s in the setup action's Post step, which saves the Electron
+  and pnpm-store caches. A `ci/` ref can never restore them. That is the ci/ cache-miss cost.
 - **Observation (M7):** Electron 44 has no install script, so `npm install electron` never
   downloads it, and the pool's Electron cache was empty. The bake now warms it through
   `install-electron`.
