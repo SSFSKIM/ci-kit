@@ -145,7 +145,9 @@ export class Agent {
 
   // Every label write checks ownership on the server as it is now: a server relabelled away from ci-kit=pool is no
   // longer this agent's, and it stops managing it (`disowned`; agent.mjs exits 78) rather than writing the label
-  // back. A relabel between this read and the write is not caught; the next write's check is.
+  // back. The check and the write are two calls, not one: a relabel that lands between them is overwritten by this
+  // write (a full label set that includes ci-kit=pool), so the next check passes and the relabel is lost. Narrowing
+  // that window would need a conditional write, which the Hetzner API does not offer.
   async writeLabels() {
     const current = await this.hc.server(this.serverId);
     try {
