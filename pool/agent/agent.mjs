@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// The pool agent (spec §3 Pool agent): a systemd service on the pool box. Every poll it reads GitHub (queued pool
-// jobs, watched runs, its runners) and Docker (its job containers), starts a container with a fresh JIT runner for
+// The pool agent (spec §3 Pool agent): a systemd service on the pool box. Every poll it reads GitHub (queued and
+// in-progress pool jobs, its runners) and Docker (its job containers), starts a container with a fresh JIT runner for
 // each unit of demand that fits, retires containers past their deadlines, and deletes the box when it is idle at
 // minute ≥ 50 of its billed hour. Its state is memory plus the server's labels; a restart rebuilds it.
 // The reconciler (reconciler.mjs) does the work; this file wires it to the box. On a server that does not carry

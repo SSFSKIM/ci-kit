@@ -166,3 +166,100 @@ test('ownership lost before a state change: draining is not written either', asy
   assert.deepEqual(w.calls.filter((c) => c.startsWith('labels') || c.startsWith('delete server')), []);
   assert.equal(w.agent.disowned, true);
 });
+
+// The idle rule (spec Decision Log, 2026-10-16: only demand for the pool extends a box's life). The world's box was
+// created at T0 - 5 min, so its minute 50 falls at T0 + 45 min.
+const MINUTE50 = 45 * 60_000;
+const hostedGate = (w) => {
+  // A watched MAWS-style gate run in progress whose jobs are all hosted: no pool demand.
+  w.state.runs = [{ id: 1, status: 'in_progress', path: '.github/workflows/ci.yml' }];
+  w.state.jobs.set(1, [{ id: 21, status: 'in_progress', labels: ['ubuntu-latest'], created_at: new Date(T0).toISOString() }]);
+};
+// The state changes and deletion among the calls since `w.calls` was last cleared. Every label write carries the whole
+// set, so only a write whose state differs from the one before it is a transition.
+const lifecycle = (w) => {
+  const out = [];
+  let state = 'ready';
+  for (const c of w.calls) {
+    if (c.startsWith('delete server')) out.push('delete');
+    if (!c.startsWith('labels ')) continue;
+    const next = JSON.parse(c.slice(7))['ci-kit-state'];
+    if (next !== state) out.push(next);
+    state = next;
+  }
+  return out;
+};
+
+test('a watched run with no pool demand does not pin the box: it drains and deletes itself at minute 50', async () => {
+  const w = world();
+  await w.agent.start();
+  hostedGate(w);
+  w.calls.length = 0;
+  w.advance(MINUTE50);
+  await w.agent.tick();
+  w.advance(10_000);
+  await w.agent.tick();
+  assert.deepEqual(lifecycle(w), ['draining', 'delete']);
+});
+
+test('an ensure stamp pins the box for 15 min, then releases it', async () => {
+  const w = world();
+  await w.agent.start();
+  hostedGate(w);
+  w.advance(MINUTE50);
+  // ensure stamped the box 10 min ago (ci-kit-want), written into the server's labels by ensure, not by the agent
+  w.server.labels = { ...w.server.labels, 'ci-kit-want': String(Math.floor((T0 + MINUTE50 - 10 * 60_000) / 1000)) };
+  w.calls.length = 0;
+  await w.agent.tick();
+  assert.deepEqual(lifecycle(w), []);
+  w.advance(4 * 60_000 + 50_000); // the stamp is 14 min 50 s old
+  await w.agent.tick();
+  assert.deepEqual(lifecycle(w), []);
+  w.advance(10_000); // 15 min: released
+  await w.agent.tick();
+  w.advance(10_000);
+  await w.agent.tick();
+  assert.deepEqual(lifecycle(w), ['draining', 'delete']);
+});
+
+test('an ensure stamp that lands while the box drains brings it back to ready', async () => {
+  const w = world();
+  await w.agent.start();
+  w.advance(MINUTE50);
+  w.calls.length = 0;
+  await w.agent.tick();
+  w.server.labels = { ...w.server.labels, 'ci-kit-want': String(Math.floor((T0 + MINUTE50) / 1000)) };
+  w.advance(10_000);
+  await w.agent.tick();
+  assert.deepEqual(lifecycle(w), ['draining', 'ready']);
+});
+
+test('a queued pool job pins the box (the agent starts it), and so does one in progress', async () => {
+  const w = world();
+  await w.agent.start();
+  w.advance(MINUTE50);
+  w.state.runs = [{ id: 1, status: 'in_progress', path: '.github/workflows/gate.yml' }];
+  w.state.jobs.set(1, [{ id: 11, status: 'queued', labels: L4, created_at: new Date(T0).toISOString() }]);
+  w.calls.length = 0;
+  await w.agent.tick();
+  assert.ok(w.calls.some((c) => c.startsWith('start ')));
+  // In progress on a runner whose container this tick did not list (a racing read): still demand.
+  w.state.jobs.set(1, [{ id: 11, status: 'in_progress', labels: L4, created_at: new Date(T0).toISOString() }]);
+  w.advance(10_000);
+  await w.agent.tick();
+  assert.deepEqual(lifecycle(w), []);
+});
+
+test('the agent\'s label writes read-modify-write: a heartbeat keeps the labels others wrote', async () => {
+  const w = world();
+  await w.agent.start();
+  const want = String(Math.floor(T0 / 1000));
+  w.server.labels = { ...w.server.labels, 'ci-kit-want': want, 'ci-kit-fallback': 'core-limit', other: 'kept' };
+  w.advance(61_000);
+  await w.agent.tick();
+  assert.equal(w.server.labels['ci-kit-want'], want);
+  assert.equal(w.server.labels['ci-kit-fallback'], 'core-limit');
+  assert.equal(w.server.labels.other, 'kept');
+  assert.ok(w.server.labels['ci-kit-heartbeat']);
+  assert.equal(w.server.labels['ci-kit'], 'pool');
+});

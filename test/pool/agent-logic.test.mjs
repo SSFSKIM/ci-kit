@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  cpusOf, parseCpuset, formatCpuset, allocateCores, planStarts, reviewContainers, isIdle, watchedRuns, queuedPoolJobs,
+  cpusOf, parseCpuset, formatCpuset, allocateCores, planStarts, reviewContainers, isIdle, poolJobs, wantOf, queuedPoolJobs,
   lifecycleAction, billedMinute, heartbeatDue, watchdogVerdict, runnerName, nextCounter,
 } from '../../pool/agent/logic.mjs';
 
@@ -151,23 +151,25 @@ test('memory forgets containers that are gone', () => {
   assert.equal(memory.size, 0);
 });
 
-test('watched runs are queued or in-progress runs of a watched workflow file', () => {
-  const runs = [
-    { id: 1, status: 'in_progress', path: '.github/workflows/ci.yml' },
-    { id: 2, status: 'queued', path: '.github/workflows/other.yml' },
-    { id: 3, status: 'queued', path: '.github/workflows/maws-probe.yml' },
-    { id: 4, status: 'completed', path: '.github/workflows/ci.yml' },
-  ];
-  assert.deepEqual(watchedRuns(runs, ['ci.yml', 'maws-probe.yml']).map((r) => r.id), [1, 3]);
+test('pool jobs are the queued or in-progress jobs that carry ci-kit-pool, whatever workflow they are in', () => {
+  const jobs = [job(1), job(2, { status: 'in_progress' }), job(3, { labels: ['ubuntu-latest'] }), job(4, { status: 'completed' }), job(5, { status: 'in_progress', labels: ['ubuntu-latest'] })];
+  assert.deepEqual(poolJobs(jobs).map((j) => j.id), [1, 2]);
 });
 
-test('idle needs no running container, no queued pool job and no watched run — an in-progress run alone keeps the box', () => {
-  const none = { containers: [], queued: [], watched: [] };
+test('only pool demand keeps a box: a running container, a queued or in-progress pool job, or an ensure stamp under 15 min old', () => {
+  const T = T0;
+  const none = { containers: [], poolJobs: [], want: null, now: T };
   assert.equal(isIdle(none), true);
-  assert.equal(isIdle({ ...none, watched: [{ id: 1, status: 'in_progress' }] }), false);
-  assert.equal(isIdle({ ...none, queued: [job(1)] }), false);
+  assert.equal(isIdle({ ...none, poolJobs: [job(1)] }), false);
+  assert.equal(isIdle({ ...none, poolJobs: [job(2, { status: 'in_progress' })] }), false);
   assert.equal(isIdle({ ...none, containers: [container('a', { runnerId: 1 })] }), false);
   assert.equal(isIdle({ ...none, containers: [container('a', { runnerId: 1, running: false })] }), true);
+  // ensure's stamp holds the box for 15 min, then releases it
+  assert.equal(isIdle({ ...none, want: T - 14 * MIN - 59_000 }), false);
+  assert.equal(isIdle({ ...none, want: T - 15 * MIN }), true);
+  assert.equal(wantOf({ 'ci-kit-want': String(Math.floor(T / 1000)) }), T);
+  assert.equal(wantOf({ 'ci-kit-want': 'garbage' }), null);
+  assert.equal(wantOf({}), null);
 });
 
 test('billedMinute counts minutes into the current billed hour from the server\'s created time', () => {

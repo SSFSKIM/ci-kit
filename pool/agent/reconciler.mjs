@@ -7,7 +7,7 @@ import { createLedgerStore } from '../lib/ledger-store.mjs';
 import { makeRow } from '../lib/ledger.mjs';
 import { createAlerts } from '../lib/alerts.mjs';
 import {
-  planStarts, reviewContainers, isIdle, watchedRuns, queuedPoolJobs, lifecycleAction, billedMinute, heartbeatDue,
+  planStarts, reviewContainers, isIdle, poolJobs, wantOf, queuedPoolJobs, lifecycleAction, billedMinute, heartbeatDue,
   runnerName, nextCounter,
 } from './logic.mjs';
 
@@ -65,8 +65,7 @@ export class Agent {
       }
     }
     this.counter = nextCounter(this.serverId, { label: this.labels['ci-kit-jobs'], names });
-    if (this.labels['ci-kit-state'] !== 'draining') this.labels['ci-kit-state'] = 'ready';
-    await this.writeLabels();
+    await this.writeLabels(this.labels['ci-kit-state'] === 'draining' ? {} : { 'ci-kit-state': 'ready' });
     this.log(`state ${this.labels['ci-kit-state']}; next runner ${runnerName(this.serverId, this.counter)}`);
     await this.reenableSchedules();
     await this.ledgerAtBoot(server);
@@ -143,12 +142,15 @@ export class Agent {
     }
   }
 
-  // Every label write checks ownership on the server as it is now: a server relabelled away from ci-kit=pool is no
-  // longer this agent's, and it stops managing it (`disowned`; agent.mjs exits 78) rather than writing the label
-  // back. The check and the write are two calls, not one: a relabel that lands between them is overwritten by this
-  // write (a full label set that includes ci-kit=pool), so the next check passes and the relabel is lost. Narrowing
-  // that window would need a conditional write, which the Hetzner API does not offer.
-  async writeLabels() {
+  // Every label write is a read-modify-write of the server as it is now. Hetzner replaces the whole label set on a
+  // write, and ensure writes `ci-kit-want` here too, so the agent merges its own keys (`changes`) into the labels it
+  // just read rather than writing back a map it read earlier. The read also checks ownership: a server relabelled
+  // away from ci-kit=pool is no longer this agent's, and it stops managing it (`disowned`; agent.mjs exits 78)
+  // rather than writing the label back. The read and the write are two calls, not one: a write by someone else that
+  // lands between them is overwritten (a relabel is undone and the next check passes; an ensure stamp is lost, and
+  // the pool job that ensure was for keeps the box once it queues). Narrowing that window would need a conditional
+  // write, which the Hetzner API does not offer.
+  async writeLabels(changes = {}) {
     const current = await this.hc.server(this.serverId);
     try {
       assertPoolBox(current, this.serverId);
@@ -156,7 +158,9 @@ export class Agent {
       this.disown(err);
       throw err;
     }
-    await this.hc.setLabels(this.serverId, this.labels);
+    const next = { ...current.labels, ...changes };
+    await this.hc.setLabels(this.serverId, next);
+    this.labels = next;
   }
 
   disown(err) {
@@ -171,18 +175,19 @@ export class Agent {
     const containers = await this.docker.list();
     const runners = new Map();
     const queued = [];
-    const watched = [];
-    for (const { repo, workflows } of this.served) {
+    const active = [];
+    for (const { repo } of this.served) {
       // Runners first: a job taken between the two reads then shows as not queued, never as double demand.
       const mine = (await this.gh.runners(repo)).filter((r) => r.name.startsWith('ci-kit-pool-'));
       runners.set(repo, new Map(mine.map((r) => [r.id, r])));
       const runs = [...(await this.gh.runsByStatus(repo, 'queued')), ...(await this.gh.runsByStatus(repo, 'in_progress'))];
-      watched.push(...watchedRuns(runs, workflows));
       for (const run of runs) {
-        queued.push(...queuedPoolJobs(await this.gh.listJobs(repo, run.id)).map((j) => ({ ...j, repo })));
+        const jobs = (await this.gh.listJobs(repo, run.id)).map((j) => ({ ...j, repo }));
+        queued.push(...queuedPoolJobs(jobs));
+        active.push(...poolJobs(jobs));
       }
     }
-    return { containers, runners, queued, watched };
+    return { containers, runners, queued, active };
   }
 
   // An idle runner is retired only once GitHub has let go of it: unregistered, or already gone (404). If the
@@ -252,12 +257,18 @@ export class Agent {
       }
     }
 
-    const idle = started === 0 && isIdle({ containers: live, queued: seen.queued, watched: seen.watched });
-    const action = lifecycleAction({ state: this.labels['ci-kit-state'], idle, minute: billedMinute(this.created, now), drainMinute: this.cfg.drain_minute });
+    const minute = billedMinute(this.created, now);
+    let idle = started === 0 && isIdle({ containers: live, poolJobs: seen.active, want: null, now });
+    if (idle && (minute >= this.cfg.drain_minute || this.labels['ci-kit-state'] === 'draining')) {
+      // About to drain or delete: an ensure stamp is demand too, and only the server's labels as they are now carry it.
+      const fresh = await this.hc.server(this.serverId);
+      idle = isIdle({ containers: live, poolJobs: seen.active, want: wantOf(fresh.labels), now });
+    }
+    const action = lifecycleAction({ state: this.labels['ci-kit-state'], idle, minute, drainMinute: this.cfg.drain_minute });
     if (action === 'drain' || action === 'undrain' || action === 'ready') {
-      this.labels['ci-kit-state'] = action === 'drain' ? 'draining' : 'ready';
-      this.log(`state → ${this.labels['ci-kit-state']}`);
-      await this.writeLabels().catch((err) => this.log(`labels: ${err.message}`));
+      const state = action === 'drain' ? 'draining' : 'ready';
+      this.log(`state → ${state}`);
+      await this.writeLabels({ 'ci-kit-state': state }).catch((err) => this.log(`labels: ${err.message}`));
       if (this.disowned) return;
     } else if (action === 'delete') {
       await this.deleteSelf();
@@ -267,9 +278,8 @@ export class Agent {
     if (heartbeatDue({ tickOk: true, lastBeat: this.lastBeat, now })) {
       this.lastBeat = now;
       await this.touchLastSuccess().catch((err) => this.log(`last-success: ${err.message}`));
-      this.labels['ci-kit-heartbeat'] = String(Math.floor(now / 1000));
-      this.labels['ci-kit-jobs'] = String(this.counter - 1);
-      await this.writeLabels().catch((err) => this.log(`heartbeat: ${err.message}`));
+      await this.writeLabels({ 'ci-kit-heartbeat': String(Math.floor(now / 1000)), 'ci-kit-jobs': String(this.counter - 1) })
+        .catch((err) => this.log(`heartbeat: ${err.message}`));
     }
   }
 
