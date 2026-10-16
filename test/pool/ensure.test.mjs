@@ -1,7 +1,7 @@
 // Ensure's branches (spec §3 Ensure, I7) against a fake Hetzner API.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ensure, ensureDecision, candidates, newestImage } from '../../pool/lib/ensure.mjs';
+import { ensure, ensureDecision, candidates, newestImage, backendOf, kitConfig } from '../../pool/lib/ensure.mjs';
 import { fakeHcloud, deletes } from './fake-hcloud.mjs';
 
 const CFG = { types: ['cx53', 'cpx62'], fallback_types: ['cpx52', 'cpx42'], locations: ['hel1', 'fsn1', 'nbg1'] };
@@ -196,4 +196,30 @@ test('ensure stamps a draining box too, so its agent can return it to ready inst
   assert.equal(await ensure(hc, CFG, opts()), 'existing');
   assert.ok(hc.state.servers.find((s) => s.id === 8).labels['ci-kit-want']);
   assert.ok(!hc.calls.some((c) => c.startsWith('create ')));
+});
+
+// Which backend serves the calling repo (spec §3a, Which backend serves a repo; I12): ensure wakes a Hetzner box only
+// for a repo in pool.json, so a repo in transit between backends never wakes a box that would not serve it.
+const SBX = 'SSFSKIM/ci-kit-sandbox';
+const MAWS = 'SSFSKIM/MAWS';
+
+test('backendOf: hetzner for a pool.json repo, gce for a gce.json repo, none for a repo in neither', () => {
+  assert.equal(backendOf(SBX, [SBX, MAWS], []), 'hetzner');
+  assert.equal(backendOf(MAWS, [SBX], [MAWS]), 'gce');
+  assert.equal(backendOf(MAWS, [SBX], []), 'none');
+  assert.equal(backendOf('ssfskim/maws', [MAWS], []), 'hetzner'); // GitHub names are case-insensitive
+});
+
+test('backendOf: a repo in both files is gce, the check §3a names first (the config test refuses that state)', () => {
+  assert.equal(backendOf(MAWS, [MAWS], [MAWS]), 'gce');
+});
+
+test('kitConfig reads the file on the kit\'s main, else the bundled copy, else null', async () => {
+  const parse = (t) => JSON.parse(t);
+  const fails = async () => { throw new Error('GET: 503'); };
+  assert.deepEqual(await kitConfig(parse, { fetchMain: async () => '{"at":"main"}', readBundled: async () => '{"at":"bundled"}' }), { at: 'main' });
+  assert.deepEqual(await kitConfig(parse, { fetchMain: fails, readBundled: async () => '{"at":"bundled"}' }), { at: 'bundled' });
+  // main's copy does not parse with this version's parser: the bundled one is used
+  assert.deepEqual(await kitConfig(parse, { fetchMain: async () => 'not json', readBundled: async () => '{"at":"bundled"}' }), { at: 'bundled' });
+  assert.equal(await kitConfig(parse, { fetchMain: fails, readBundled: fails }), null);
 });

@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   cpusOf, parseCpuset, formatCpuset, allocateCores, planStarts, reviewContainers, isIdle, poolJobs, wantOf, queuedPoolJobs,
-  lifecycleAction, billedMinute, heartbeatDue, watchdogVerdict, runnerName, nextCounter,
+  lifecycleAction, billedMinute, heartbeatDue, watchdogVerdict, runnerName, nextCounter, unservedRepos,
 } from '../../pool/agent/logic.mjs';
 
 const T0 = Date.parse('2026-10-15T12:00:00Z');
@@ -144,6 +144,35 @@ test('a runner idle for 10 min is unregistered and its container stopped; a busy
   assert.deepEqual(step(700, false), []); // idle from 700 now, not from the container's start
   assert.deepEqual(step(1299, false), []);
   assert.deepEqual(step(1300, false), [['kill', 'idle-runner', true]]);
+});
+
+// A repo the agent no longer serves (removed from pool.json, or found public) is draining (spec §3a, Moving a repo
+// between backends): its in-flight jobs finish, and its idle runners are unregistered at once, not after 10 min.
+test('unservedRepos: the repos of containers on the box that the agent does not serve', () => {
+  const containers = [container('a', { runnerId: 1 }), container('b', { repo: MAWS, runnerId: 2 }), container('c', { repo: MAWS, runnerId: 3 })];
+  assert.deepEqual(unservedRepos(containers, [SBX]), [MAWS]);
+  assert.deepEqual(unservedRepos(containers, [SBX, MAWS]), []);
+});
+
+test('an unserved repo\'s busy runner keeps its container past the 5 min runner-gone grace, until its job ends', () => {
+  const c = container('a', { repo: MAWS, runnerId: 1 });
+  let memory = new Map();
+  const step = (s, runners) => {
+    const r = reviewContainers({ containers: [c], runners: index({ [MAWS]: runners }), unserved: new Set([MAWS]), memory, now: T0 + s * 1000, cfg: CFG });
+    memory = r.memory;
+    return r.actions.map((a) => [a.kind, a.reason, a.unregister]);
+  };
+  assert.deepEqual(step(60, [runner(1, { busy: true })]), []);
+  assert.deepEqual(step(20 * 60, [runner(1, { busy: true })]), []);
+  assert.deepEqual(step(20 * 60 + 10, [runner(1, { busy: false })]), [['kill', 'unserved', true]]);
+});
+
+test('an unserved repo\'s idle runner is unregistered at once; an exited container is removed; the deadline still holds', () => {
+  const review = (c, runners, s) => reviewContainers({ containers: [c], runners: index({ [MAWS]: runners }), unserved: new Set([MAWS]), memory: new Map(), now: T0 + s * 1000, cfg: CFG })
+    .actions.map((a) => [a.kind, a.reason, a.unregister]);
+  assert.deepEqual(review(container('a', { repo: MAWS, runnerId: 1 }), [runner(1)], 5), [['kill', 'unserved', true]]);
+  assert.deepEqual(review(container('a', { repo: MAWS, runnerId: 1, running: false }), [], 5), [['remove', 'exited', false]]);
+  assert.deepEqual(review(container('a', { repo: MAWS, runnerId: 1 }), [runner(1, { busy: true })], 6 * 3600 + 15 * 60), [['kill', 'max-age', true]]);
 });
 
 test('memory forgets containers that are gone', () => {

@@ -18,7 +18,9 @@ import { listContainers, startContainer, removeContainer, workDir } from './dock
 
 const ETC = process.env.CI_KIT_ETC ?? '/etc/ci-kit';
 const LAST_SUCCESS = '/var/lib/ci-kit/last-success';
-const CONFIG_URL = 'https://raw.githubusercontent.com/SSFSKIM/ci-kit/main/pool/config/pool.json';
+const KIT_COMMIT = '/var/lib/ci-kit/kit-commit'; // the bake's commit, written by builder.sh
+const KIT = 'SSFSKIM/ci-kit';
+const CONFIG_PATH = 'pool/config/pool.json';
 const RUNNER_UID = 1001; // the actions-runner image's `runner` user
 const METADATA = 'http://169.254.169.254/hetzner/v1/metadata';
 
@@ -31,14 +33,13 @@ const fetchText = async (url) => {
   return res.text();
 };
 
-async function loadConfig(fallback) {
-  try {
-    return parsePoolConfig(await fetchText(CONFIG_URL));
-  } catch (err) {
-    log(`config: keeping the last good copy (${err.message})`);
-    return fallback;
-  }
-}
+// The pool config on the kit's main, with its commit: the newest commit that changed it, read at that commit (a raw
+// read of a commit is never a stale cached copy of main).
+const configLoader = (gh) => async () => {
+  const last = await gh.lastCommit(KIT, CONFIG_PATH);
+  if (!last) throw new Error(`no commit of ${CONFIG_PATH} on ${KIT} main`);
+  return { cfg: parsePoolConfig(await fetchText(`https://raw.githubusercontent.com/${KIT}/${last.sha}/${CONFIG_PATH}`)), commit: last.sha };
+};
 
 // The host drops container traffic to the metadata address, so job code cannot read the box's user-data.
 async function blockMetadata() {
@@ -60,19 +61,26 @@ async function touch(path) {
 }
 
 async function main() {
-  const [appId, pem, token, serverId, baked] = await Promise.all([
+  const [appId, pem, token, serverId, baked, bakedCommit] = await Promise.all([
     readFile(`${ETC}/app_id`, 'utf8'),
     readFile(`${ETC}/app.pem`, 'utf8'),
     readFile(`${ETC}/hcloud_token`, 'utf8'),
     fetchText(`${METADATA}/instance-id`),
     readFile(`${ETC}/pool.json`, 'utf8'),
+    readFile(KIT_COMMIT, 'utf8'),
   ]);
-  let cfg = parsePoolConfig(baked);
-  cfg = await loadConfig(cfg);
   const gh = createGitHub(createAppTokens({ appId: appId.trim(), pem, owner: 'SSFSKIM' }));
+  const loadConfig = configLoader(gh);
+  // The baked config, with the bake's commit, until the first fetch from main succeeds.
+  let config = { cfg: parsePoolConfig(baked), commit: bakedCommit.trim() };
+  try {
+    config = await loadConfig();
+  } catch (err) {
+    log(`config: running the baked copy (${err.message})`);
+  }
   const hc = createHcloud(token.trim());
   const agent = new Agent({
-    cfg, gh, hc,
+    cfg: config.cfg, configCommit: config.commit, gh, hc,
     serverId: Number(serverId.trim()),
     totalCores: os.cpus().length,
     docker: { list: listContainers, start: startContainer, remove: removeContainer },
@@ -98,8 +106,8 @@ async function main() {
         console.error(err.message);
         process.exit(78);
       }
-      log(`start failed, retrying in ${cfg.poll_seconds} s: ${err.message}`);
-      await sleep(cfg.poll_seconds * 1000);
+      log(`start failed, retrying in ${agent.cfg.poll_seconds} s: ${err.message}`);
+      await sleep(agent.cfg.poll_seconds * 1000);
     }
   }
   while (!agent.deleted && !agent.disowned) {

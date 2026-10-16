@@ -49,6 +49,19 @@ cpus-<N>]`, and a step before the pool jobs queue:
   with: {hcloud-token: "${{ secrets.HCLOUD_TOKEN }}"}
 ```
 
+Ensure reads which repos the pool serves from the kit's `main` (falling back to the copy bundled with `v1`). It
+wakes or stamps a box only for a repo in `pool.json`. For a repo in `pool/config/gce.json` its result is `gce`, and
+for a repo in neither it is `none`. In both cases it touches nothing in Hetzner.
+
+**Removing a repo** from `repos` drains it within 5 minutes, when the agent next reads the config. No new
+container starts for the repo. Its busy runners finish their jobs, or run until the 6 h 15 min container
+deadline. Its idle runners are unregistered, then their containers stop. Jobs it queues meanwhile wait in GitHub's
+queue. Each box labels itself `ci-kit-config=<sha8>`, the commit of the config it runs: the newest commit on `main`
+that changed `pool.json`, or the snapshot's bake commit until a fetch from `main` succeeds. A box showing the
+removal commit, or a later one, has stopped serving the repo. A box on an older commit has not: its config fetch is
+failing, or it booted from a snapshot whose baked list still has the repo. The agents in snapshots baked before this
+change kill a removed repo's containers after 5 minutes, busy or not.
+
 Inside a `cpus-N` container, `nproc` and Node's `os.availableParallelism()` report N; `getconf
 _NPROCESSORS_ONLN` reports the host's cores. Size worker pools from `nproc`.
 

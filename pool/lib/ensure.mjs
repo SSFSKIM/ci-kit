@@ -22,6 +22,29 @@ export async function stampWant(hc, serverId, nowMs) {
   return true;
 }
 
+// The backend that serves `repo` (spec §3a, Which backend serves a repo; I12): 'gce' for a repo in gce.json,
+// 'hetzner' for one in pool.json, 'none' for one in neither (a repo in transit between backends). gce.json is checked
+// first, as §3a orders it; a repo in both is a config error the planner's config test and the launcher refuse.
+export function backendOf(repo, poolRepos, gceRepos) {
+  const has = (list) => list.some((r) => r.toLowerCase() === repo.toLowerCase());
+  if (has(gceRepos)) return 'gce';
+  return has(poolRepos) ? 'hetzner' : 'none';
+}
+
+// A kit config file as the kit's main has it, else this version's bundled copy (one that main's copy does not parse
+// with is bundled too), else null when neither can be read. `parse` throws on a file it does not accept.
+export async function kitConfig(parse, { fetchMain, readBundled }) {
+  try {
+    return parse(await fetchMain());
+  } catch {
+    try {
+      return parse(await readBundled());
+    } catch {
+      return null;
+    }
+  }
+}
+
 // 'existing' when a box is booting or ready, 'wait' when the only box is draining, else 'create'.
 export function ensureDecision(pool) {
   if (pool.length === 0) return 'create';

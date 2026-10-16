@@ -93,11 +93,19 @@ export function planStarts({ queued, idleRunners, totalCores, usedCores }) {
   return { starts, waiting, unservable };
 }
 
-// What to do with each job container (spec §3 Pool agent steps 4–5, Container deadline).
-// containers: [{name, running, created, repo, runnerId}]; runners: Map repo → Map runner id → GitHub runner.
+// The repos of the box's containers that the agent does not serve: removed from pool.json, or found public. Such a
+// repo is draining (spec §3a, Moving a repo between backends): no container starts for it, its busy runners finish
+// their jobs, and its idle runners are unregistered.
+export function unservedRepos(containers, served) {
+  return [...new Set(containers.map((c) => c.repo))].filter((repo) => !served.includes(repo));
+}
+
+// What to do with each job container (spec §3 Pool agent steps 4–5, Container deadline; §3a for unserved repos).
+// containers: [{name, running, created, repo, runnerId}]; runners: Map repo → Map runner id → GitHub runner, for
+// the served and the unserved repos alike. unserved: Set of draining repos, whose idle runners go at once.
 // memory: Map container name → {goneSince?, idleSince?, sawBusy?}, carried from tick to tick.
 // Returns {actions: [{container, kind: 'remove'|'kill', reason, unregister}], memory}.
-export function reviewContainers({ containers, runners, memory, now, cfg }) {
+export function reviewContainers({ containers, runners, unserved = new Set(), memory, now, cfg }) {
   const next = new Map();
   const actions = [];
   const idleLimit = cfg.idle_runner_minutes * MIN;
@@ -122,6 +130,9 @@ export function reviewContainers({ containers, runners, memory, now, cfg }) {
     } else if (runner.busy) {
       seen.sawBusy = true;
       delete seen.idleSince;
+    } else if (unserved.has(c.repo)) {
+      actions.push({ container: c, kind: 'kill', reason: 'unserved', unregister: true });
+      continue;
     } else {
       seen.idleSince ??= seen.sawBusy ? now : c.created;
       if (now - seen.idleSince >= idleLimit) {

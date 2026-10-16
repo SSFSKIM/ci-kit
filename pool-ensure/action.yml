@@ -10,7 +10,7 @@ inputs:
     required: true
 outputs:
   result:
-    description: existing | created:<type>@<location> | raced
+    description: existing | created:<type>@<location> | raced | gce | none
     value: ${{ steps.ensure.outputs.result }}
 runs:
   using: composite
