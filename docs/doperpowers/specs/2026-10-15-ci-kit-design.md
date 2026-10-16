@@ -1952,6 +1952,22 @@ euros, jobs, and the projected month at the current rate.
     client on the App's installation token. The guard, a fresh process every 10 minutes, does not.
   - **Date/Author:** 2026-10-16, M5 executor, folded by plan-executor.
 
+- **Decision:** the kit lives within the Hetzner project's current core limit. This is now a
+  design fact: the human cannot raise the limit for now, and `session-mirror` is not ours and
+  stays.
+  - **Ensure** falls back on a core-limit refusal to cpx52, then cpx42 (above). The ledger row
+    records the type, and an alert names the cause.
+  - **Bake schedule.** The bake runs at an hour when no pool box usually exists, picked from the
+    ledger's created times so far, or else Sunday 18:00Z (03:00 KST Monday).
+    - If a pool box exists when it starts, or the builder create hits the core limit, it retries
+      every 15 minutes for up to 2 hours, then fails with an alert. The previous snapshot stays in
+      use.
+  - **Builder size.** The builder is the smallest type that holds the image build: cpx22, or cpx12
+    if the build fits in 2 GB with swap.
+  - **`docs/pool.md`** states the limit, what a fallback looks like in the ledger, and that raising
+    the project's limit removes both measures.
+  - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
