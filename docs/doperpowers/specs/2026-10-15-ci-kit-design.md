@@ -1554,7 +1554,9 @@ Secrets go beside it as `/etc/ci-kit/app.pem`, `/etc/ci-kit/app_id` and `/etc/ci
 | server id | created (UTC) | deleted (UTC) | type@location | billed h | € | jobs | end |
 ```
 
-- `end` is one of `idle`, `stale-heartbeat`, `watchdog`, `max-uptime` or `manual`.
+- `end` is one of `idle`, `stale-heartbeat`, `watchdog`, `max-uptime`, `manual` or `vanished`.
+  `vanished` means the guard found a `running` row whose server was gone. Its deletion time is
+  estimated from the last sighting, at most one guard cycle late.
 - A row is written as `deleting` before the delete call, and finalized in place once the server is
   confirmed gone (M5 Decisions).
 - At most one row is written per server id. The guard checks for an existing row before it writes
@@ -1986,6 +1988,18 @@ euros, jobs, and the projected month at the current rate.
     unrecorded. That residue is accepted as an exception to I9's one row per session.
     Duplicates from concurrent writers are reconciled deterministically: readers count one row per
     server id, and a writer that finds two keeps the most final and deletes the rest.
+  - **Date/Author:** 2026-10-16, plan-executor.
+
+- **Decision:** a ledger row overwritten by a stale concurrent PATCH is accepted, not
+  coordinated (M5 re-review).
+  - GitHub's comment API has no conditional update. A guard and a deleter that read the same row
+    within milliseconds can leave a `final` row back at `running`.
+  - The guard's own rule repairs this. A `running` row whose server is gone is finalized as
+    `vanished` within one guard cycle. The damage is limited to one session's end reason and up to
+    10 minutes of estimated hours.
+  - **Alternative rejected:** one comment per state transition, with readers taking the most final.
+    It multiplies comments on the human-read ledger to close a window of milliseconds that the
+    guard already heals.
   - **Date/Author:** 2026-10-16, plan-executor.
 
 ## Outcomes & Retrospective
