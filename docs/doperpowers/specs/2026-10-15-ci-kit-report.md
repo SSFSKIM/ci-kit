@@ -16,3 +16,4 @@ Decision Log carry the folded results; this file carries the execution mechanics
 - 2026-10-15: probe landed (e1cfd8a). Dispatched m2-kit (kit additions), M2 (cua) and M3 (doperpowers); coordination decisions recorded (c7ea5f3). Running: M2k, M2, M3, M5, M6, M8.
 - 2026-10-16: M6 merged (PR #4) after one fix wave (PID identity, signal errors). Rate-limit incident (~23:00Z): executors drained the shared GitHub token; capped at 2 pollers; ci-gate fix wave dispatched (branch ci-gate-ratelimit).
 - 2026-10-16: M8 merged (PR #6) after four review rounds ending in an argv parser; janitor live on both Macs from the main clones. Medium review of doperpowers #198 clean after one fix wave; M5 in its third review round.
+- 2026-10-16: M5 code merged (PR #7) after three review rounds; v1 → 86069cf. Post-merge guard proofs dispatched. Janitor report headers confirmed live on both Macs (02:12Z runs).
