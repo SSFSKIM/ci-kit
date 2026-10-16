@@ -747,10 +747,23 @@ its repo and label set, so a job-derived name would be wrong as soon as it does.
 **The launcher.** It is a Cloud Run service, `ci-kit-launcher`, running the kit's Node code with no
 public ingress. Cloud Scheduler invokes it every minute with an OIDC token.
 
-- **Single writer.** The service runs with `max-instances=1` and `concurrency=1`, so reconciliations
-  never overlap, including a manual invocation or a Scheduler retry.
-  - Each reconciliation has a 45 s budget, and the request timeout is 300 s, so a request is never
-    abandoned while its handler still runs.
+- **Overlap is rare, and nothing depends on it never happening.**
+  - The service runs with `max-instances=1` and `concurrency=1`. Each reconciliation has a 45 s
+    budget, and the request timeout is 300 s.
+  - These settings make overlapping reconciliations rare, but they are not a guarantee. Cloud Run
+    can briefly exceed its maximum instances, and two revisions overlap during a deploy.
+  - Correctness therefore rests on three things:
+    - **The project's vCPU quota is the hard cap.** Compute Engine refuses an insert over quota
+      atomically. `max_vcpus` is the launcher's soft target below it.
+    - **Every write is idempotent.** Deletes and unregisters treat 404 as done. Ledger rows are
+      keyed by allocation id, and a provisional row for an allocation that never got an instance
+      is finalized `abandoned`.
+    - **An over-launch heals itself.** Two overlapping reconciliations can each launch for the same
+      queued jobs. The extra VMs' runners stay idle and are cleaned up by lifecycle step 5 within
+      `idle_runner_minutes`. That costs a few cents, about $0.012 for a c3d-8 for 10 minutes.
+  - **Rejected: a lease** (a GCS object with generation preconditions). It is real coordination,
+    but it adds a store, expiry and lease-loss handling to prevent an outcome that is already
+    bounded and self-healing.
   - All state lives in GCE labels, the ledger and GitHub. Every reconciliation can act as the first.
 - **Demand.** Demand is keyed by (repo, label set).
   - Count the queued jobs carrying `ci-kit-pool` in each served repo, using the Hetzner agent's
@@ -880,16 +893,44 @@ does not know the other backend still behaves correctly.
 - **A repo is never in both files.** The planner's config test and the launcher both refuse a repo
   listed in both, and the launcher then serves neither.
 
-**Moving a repo between backends** (MAWS's workflow never changes):
-1. Remove the repo from the old backend's file.
-2. Wait until the old backend has stopped serving it. On Hetzner, that means two agent refreshes
-   (10 min) plus whatever is still in flight:
-   - no pool job of that repo is in progress on a Hetzner runner;
-   - its idle Hetzner runners are unregistered, which the agent does within `idle_runner_minutes`.
-   Pool jobs queued meanwhile wait in GitHub's queue: the move fails closed.
-3. Add the repo to the new backend's file.
+**Moving a repo between backends.** MAWS's workflow never changes. The move works only with agents
+that support it. M10 changes the Hetzner agent and re-bakes before the first move. Today's agent,
+once a repo is removed, stops listing that repo's runners but still lists its containers. After
+5 minutes it kills them as runner-gone, without unregistering, which would kill an in-flight job.
 
-The reverse move is the fallback, by the same three steps.
+**What M10 adds to the Hetzner agent:**
+- A repo it no longer serves is **draining**:
+  - it starts no new containers for it;
+  - it keeps listing the repo's runners and leaves running containers alone until their jobs end,
+    or until the 6 h 15 min container deadline;
+  - it unregisters the repo's idle runners by the existing unregister-first protocol.
+- The agent writes the commit of the `pool.json` it is running as a server label,
+  `ci-kit-config=<sha8>`. It is written only after a successful fetch, or from the baked copy at
+  boot, which carries its bake commit.
+
+**Ensure** creates a Hetzner box only for a calling repo listed in `pool.json` (the kit's `main`,
+falling back to its bundled copy). For any other repo it returns `result=gce` or `result=none`, so a
+repo in transit never wakes a box that would not serve it.
+
+**The move, from Hetzner to GCE:**
+1. Remove the repo from `pool.json` on `main`. Note the commit.
+2. Wait until every `ci-kit=pool` box shows that commit (or a later one) in `ci-kit-config`, or no
+   box exists. A box stuck on an older config (a failed fetch, or a snapshot booted with its baked
+   list) blocks the move. It is deleted once it has no running containers, and the move waits.
+3. Wait until the repo has no pool job in progress on a `ci-kit-pool-*` runner (Actions API).
+4. Unregister any `ci-kit-pool-*` runner still registered to the repo.
+5. Re-bake, so no snapshot's baked config still lists the repo. Delete older snapshots that list
+   it.
+6. Add the repo to `gce.json`.
+
+Pool jobs queued during the move wait in GitHub's queue: the move fails closed.
+
+**The reverse move, GCE to Hetzner,** is the fallback. It follows the same steps with the
+launcher's equivalents:
+- a repo removed from `gce.json` is draining: no launches, busy VMs left to finish, idle runners
+  unregistered first;
+- the launcher writes the `gce.json` commit it ran, in the ledger's daily line and in a
+  `ci-kit-config` label on every instance it creates.
 
 **Retirement.**
 - `hetzner` stays a working fallback: ensure, the agent, the guard, the bake and the snapshots keep
@@ -1692,7 +1733,9 @@ pattern, parentage and age together.
     takes its token from the metadata server on Cloud Run and from
     `gcloud auth print-access-token` on the Mac;
   - the provider-neutral split of `pool/bake/` (`warm.mjs` takes an installation token);
-  - ensure's `gce.json` check;
+  - ensure's `gce.json` check, and the rule that ensure creates a box only for repos in `pool.json`;
+  - the Hetzner agent: draining for unserved repos, and the `ci-kit-config` label (§3a, Moving a
+    repo between backends). Re-baked before the first move;
   - `pool/config/gce.json`;
   - `docs/pool.md`.
 - GCP resources, in `ssfskim-ci-kit` only.
@@ -1715,9 +1758,14 @@ pattern, parentage and age together.
   - ledger rows: provisional, finalized and idempotent;
   - the one-file-per-repo rule.
 - **Tests beyond the pure functions:**
-  - **Concurrency:** two reconciliations with different demand snapshots, whether overlapping by
-    a manual invocation or by a Scheduler retry after a timeout. With `concurrency=1` they
-    serialize, and `max_vcpus` holds.
+  - **Concurrency:** two independent launcher processes run against the same GCE and GitHub
+    state with different demand snapshots. The test checks three things:
+    - every ledger row is unique per allocation;
+    - there are no double deletes or unregisters beyond the idempotent 404;
+    - over-launched VMs are cleaned up by the idle rule. A quota refusal is handled as "wait".
+  - **The move:** a busy job lasting more than 5 min is in flight when its repo is removed from
+    `pool.json`, and it finishes. A failed config refresh (a stale `ci-kit-config`) blocks step 2.
+    Queued jobs start only after step 6. The same checks run in reverse for `gce.json`.
   - **The idle race:** a runner takes a job between the idle read and the unregister call. Its VM
     survives.
   - **Crash windows:** after the provisional row, after the JIT mint, after an accepted insert,
@@ -2842,6 +2890,18 @@ euros, jobs, and the projected month at the current rate.
     would also re-run genuine failures. A correlated, job-scoped re-run is built only if
     preemption exceeds 1% of pool jobs over two weeks.
   - **The whole budget is stated:** about $47 a month, with e2e on the mini.
+  - **Date/Author:** 2026-10-16, CI-opt.
+
+- **Decision:** the GCE design's second review round (2026-10-16, CI-opt). Eight of the ten
+  findings were confirmed closed. Two stayed open, and are resolved as follows:
+  - **Overlapping reconciliations.** Cloud Run can briefly exceed `max-instances`. Correctness
+    does not rest on a single writer. The project's vCPU quota is GCE's atomic hard cap, every
+    write is idempotent, and an over-launch is a few idle VMs that the idle rule removes.
+    Rejected: a GCS lease, coordination machinery for an outcome that is already bounded and
+    heals itself.
+  - **Moving between backends.** The move is a six-step protocol with checks. The Hetzner agent
+    gains draining for unserved repos and a `ci-kit-config` label, re-baked before the first move.
+    Ensure wakes a box only for `pool.json` repos.
   - **Date/Author:** 2026-10-16, CI-opt.
 
 ## Outcomes & Retrospective
