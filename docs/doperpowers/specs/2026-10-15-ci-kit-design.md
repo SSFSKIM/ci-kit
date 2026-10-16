@@ -105,7 +105,18 @@ How to see it working: §Acceptance. The shortest proofs are:
   dry-run would-kill lists were empty on both Macs; the janitor runs live from the main clones on
   both.
 - [ ] M9 — Acceptance
+  - [x] (2026-10-16 12:30Z) A1–A12 walk: all PASS except A12's budget fit. A7 passes with the
+    accepted scheduled-cadence deviation. A2's red and concurrency cases ran on cua today.
+    `npm test` 344/344. Still open: MAWS hosted minutes and mini queue waits for UTC 10-17; A13;
+    v1; Outcomes.
 - [ ] M10 — The GCE backend and cutover
+  - [x] (2026-10-16) Step 1: quota requests filed.
+  - [x] (2026-10-16 12:35Z) Step 2: the bake split and a ready image. PR #18 merged 40e5584 after
+    three task-review rounds (image ownership on cleanup, the no-ingress `ci-kit` VPC, an accepted
+    insert followed by a 4xx). Ready images `…-100502-b4fc88e2` and `…-110845-zxbj-b15da26f`.
+  - [ ] Step 3: the launcher, with only the sandbox in `gce.json`.
+  - [ ] Step 4: A13 on the sandbox.
+  - [ ] Step 5: MAWS's move in one window with `GATE_RUNNER` unset.
 
 ## Context: what was measured (2026-10-15)
 
@@ -680,7 +691,9 @@ The guard alerts. The choice between those levers is the human's.
 **Why it replaces the Hetzner box.**
 - MAWS's gates arrive all day: 116 gate runs across 23 of the 24 hours of 10-15 (Actions API).
 - The Hetzner box deletes itself only when it is idle. At that arrival rate it is almost never
-  idle, so it bills its monthly cap: €82 (CPX42) to €153 (CPX62).
+  idle. The monthly cap does not bound the bill, because it applies per server and a box that
+  deletes itself and is re-created never reaches it. Measured after MAWS's flip, about 24–27
+  billed cpx62 hours a day come to about €180–200 a month (M9 walk, 2026-10-16).
 - GCE spot bills per second, with a 1-minute minimum, only for the minutes jobs actually run.
 - The owner moved private Linux gates to GCE spot on 2026-10-16 (Decision Log). The Hetzner pool
   serves until this backend is live, and it stays as a fallback behind the same interface.
@@ -2415,6 +2428,26 @@ euros, jobs, and the projected month at the current rate.
   - Ledger row: `| 170721447 | … 09:05:21 | … 09:57:33 | cx23@hel1 | 1 | 0.01 | 1 | idle |`.
   - The `draining` label lasts one 10 s tick, too short for 30 s sampling to see.
 
+- **Observation (M9 walk, 2026-10-16; ledger task-9 report):**
+  - **A1:** cua run 38866370437 took 4 m 18 s; doperpowers run 38890300672 took 5 m 17 s. Both
+    ran hosted, on `v1`.
+  - **A2 on cua:**
+    - Red: `FAIL test 3m51s log=…/38895117790/test.log` (the log holds the assertion), then
+      `RED 1/2`, exit 1.
+    - Concurrency: two calls 5 s apart got separate refs and runs (38895613991, 38895622734), both
+      GREEN, neither cancelled, and `ci/*` was empty afterwards.
+  - **A3:** run 38895148322 on cua printed `ci-kit: lane "pool" is for private repos only (gate
+    "big")`, and ci-gate exited 2.
+  - **A4:** `ci.yml` is byte-identical to `docs/adopting.md` in all three repos.
+  - **A12 for Hetzner:** 13 ledger rows and one weekly summary. All rows together: €2.01 over
+    12.4 h, most of it test boxes. Since MAWS's flip, the interim costs about €180–200 a month,
+    roughly 4× the $50 budget. GCE (M10) is what brings A12 within budget.
+  - **Price correction:** cpx41 costs €0.2267/h (€141.49/mo cap) in ash and hil, its only stock.
+    The 10-16 stock table's €0.0609/h is wrong. The ledger used the right price.
+  - **Ledger-row correction:** box 170701310's row says `vanished` at 07:29:46Z. In fact the M7
+    executor deleted it by hand at 08:09:55Z without writing a `manual` row. The hours and euros
+    are right, and the row is left as written.
+
 ## Decision Log
 
 - **Decision:** the verification for this work.
@@ -3047,6 +3080,20 @@ euros, jobs, and the projected month at the current rate.
   in the GitHub secrets and the snapshots. Retiring Hetzner revokes the Hetzner key without touching GCE.
   The fingerprints are GitHub's, from the App's Key pairs page; `docs/pool.md` (GCE) has them too.
   - **Date/Author:** 2026-10-16, M10 step 2 executor, at CI-opt's request.
+
+- **Decision (M9: A7 and A10 dispositions):**
+  - **A7 passes.** Every backstop was proven in M5. The "within two guard cycles" timing holds on
+    hand-dispatched guard runs but not on GitHub's schedule, which ran once in 7 h 58 min. The
+    mini-guard decision above already accepts that deviation for the Hetzner interim, and GCE's
+    Cloud Scheduler reconciler replaces the guard.
+  - **A10 passes on structural evidence for two cua tests**, eof-drain and the chrome-host-run
+    ceiling. Neither failed before its fix at any load on a hosted runner, so the before-fix
+    failure was never shown. The fix removes the timing dependence by construction, and both pass
+    20/20 after it.
+    - Rejected: buying hosted macOS minutes for 8× before-runs. That proves the old code flaky
+      and adds nothing about the new code.
+    - This parallels M3's 8× entry.
+  - **Date/Author:** 2026-10-16, plan-executor.
 
 ## Outcomes & Retrospective
 
