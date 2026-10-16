@@ -77,7 +77,8 @@ How to see it working: §Acceptance. The shortest proofs are:
 - [x] (2026-10-15 22:10Z) M4 — Spike: the pool's boot path. Verdict ≤ 5 min; PR #1 merged
   (spike scripts and results under `spike/pool-boot/`).
 - [ ] M5 — The pool
-- [ ] M6 — The mac lane on the mini
+- [x] (2026-10-16 00:05Z) M6 — The mac lane on the mini. PR #4 merged; runner `ci-kit-mac-mini`
+  live on MAWS; `e2e:composer` 10/10, ship. A8's macOS-only unit subset is M7's.
 - [ ] M7 — MAWS: evidence and proposals for maws-fe
 - [ ] M8 — Host janitor
 - [ ] M9 — Acceptance
