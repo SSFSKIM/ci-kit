@@ -100,14 +100,16 @@ export function rowsOf(comments) {
 const dayStart = (ms) => ms - (ms % DAY);
 
 // Billed pool hours on `day`'s UTC day (default: today): each billed hour counts on the day it begins. A session
-// runs from its created time to its deleted time; a live one to now; a running row whose server is gone, to when
-// the row was last written. Live servers without a row count too.
+// runs from its created time: a server confirmed live, to now; otherwise to its row's deleted time, or for a
+// running row whose server is gone, to when the row was last written. Live servers without a row count too.
 export function hoursOnDay(rows, liveServers, now, day = now) {
   const from = dayStart(day);
   const to = from + DAY;
   const live = new Map(liveServers.map((s) => [s.id, s]));
   const sessions = rows.map((r) => {
-    const end = r.deleted ? Date.parse(r.deleted) : live.has(r.server) ? now : Date.parse(r.seen);
+    // A server confirmed live runs to now whatever its row says (a crash between a deleting row and its delete call
+    // leaves a provisional row on a box that resumed work).
+    const end = live.has(r.server) ? now : r.deleted ? Date.parse(r.deleted) : Date.parse(r.seen);
     return [Date.parse(r.created), end];
   });
   const withRow = new Set(rows.map((r) => r.server));

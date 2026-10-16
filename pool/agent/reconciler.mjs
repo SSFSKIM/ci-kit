@@ -143,8 +143,23 @@ export class Agent {
     }
   }
 
+  // Every label write checks ownership on the server as it is now: a server relabelled away from ci-kit=pool is no
+  // longer this agent's, and it stops managing it (`disowned`; agent.mjs exits 78) rather than writing the label
+  // back. A relabel between this read and the write is not caught; the next write's check is.
   async writeLabels() {
+    const current = await this.hc.server(this.serverId);
+    try {
+      assertPoolBox(current, this.serverId);
+    } catch (err) {
+      this.disown(err);
+      throw err;
+    }
     await this.hc.setLabels(this.serverId, this.labels);
+  }
+
+  disown(err) {
+    if (!this.disowned) this.log(`${err.message}; this agent stops managing it`);
+    this.disowned = true;
   }
 
   async observe() {
@@ -195,6 +210,7 @@ export class Agent {
   }
 
   async tick() {
+    if (this.disowned) return;
     if (this.now() - this.configAt >= CONFIG_EVERY) {
       this.cfg = await this.loadConfig(this.cfg);
       await this.refreshServed();
@@ -240,6 +256,7 @@ export class Agent {
       this.labels['ci-kit-state'] = action === 'drain' ? 'draining' : 'ready';
       this.log(`state → ${this.labels['ci-kit-state']}`);
       await this.writeLabels().catch((err) => this.log(`labels: ${err.message}`));
+      if (this.disowned) return;
     } else if (action === 'delete') {
       await this.deleteSelf();
       return;
@@ -284,7 +301,12 @@ export class Agent {
   // without the row the box stays up and the next tick retries.
   async deleteSelf() {
     const server = await this.hc.server(this.serverId);
-    assertPoolBox(server, this.serverId);
+    try {
+      assertPoolBox(server, this.serverId);
+    } catch (err) {
+      this.disown(err);
+      throw err;
+    }
     const row = makeRow(this.session(server), { deleted: this.now(), end: 'idle', state: 'deleting' });
     try {
       await this.ledger().upsertRow(row);

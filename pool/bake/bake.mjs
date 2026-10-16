@@ -5,6 +5,7 @@
 //   node pool/bake/bake.mjs cleanup   delete this run's builders and unfinished snapshots (runs on every exit)
 // Env: HCLOUD_TOKEN, CI_KIT_APP_ID, CI_KIT_APP_KEY, GITHUB_SHA (the kit commit baked), GITHUB_RUN_ID.
 import { readFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 import { createHcloud, waitAction } from '../../lib/hcloud.mjs';
 import { createGitHub } from '../../lib/github.mjs';
 import { createAppTokens } from '../../lib/github-app.mjs';
@@ -93,8 +94,9 @@ async function untilUnlocked(fn) {
   }
 }
 
-async function cleanup(hc) {
-  const runId = env('GITHUB_RUN_ID');
+// Deletes this run's builders and unfinished snapshots, and nothing else (selected by plan.mjs bakeLeftovers).
+export async function cleanup(hc, runId, { log: say = log } = {}) {
+  const log = say;
   const left = bakeLeftovers({ servers: await hc.servers('ci-kit=builder'), images: await hc.images('ci-kit=pool-image'), runId });
   for (const s of left.servers) {
     await untilUnlocked(() => hc.deleteServer(s.id));
@@ -107,14 +109,16 @@ async function cleanup(hc) {
   if (!left.servers.length && !left.images.length) log('cleanup: nothing left behind');
 }
 
-const command = process.argv[2];
-const hc = createHcloud(process.env.HCLOUD_TOKEN?.trim());
-const run = { bake, cleanup }[command];
-if (!run) {
-  console.error('usage: bake.mjs bake|cleanup');
-  process.exit(2);
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const command = process.argv[2];
+  const hc = createHcloud(process.env.HCLOUD_TOKEN?.trim());
+  const run = { bake, cleanup: (h) => cleanup(h, env('GITHUB_RUN_ID')) }[command];
+  if (!run) {
+    console.error('usage: bake.mjs bake|cleanup');
+    process.exit(2);
+  }
+  run(hc).catch((err) => {
+    console.error(err.message);
+    process.exit(1);
+  });
 }
-run(hc).catch((err) => {
-  console.error(err.message);
-  process.exit(1);
-});

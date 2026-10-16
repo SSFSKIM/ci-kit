@@ -137,3 +137,32 @@ test('a cpus-16 job on a 12-core box starts on all 12 cores, marked clamped', as
   await w.agent.tick();
   assert.ok(w.calls.includes('start ci-kit-pool-55-1 12 cores clamped 16'), w.calls.join('\n'));
 });
+
+test('ownership lost mid-life: the next tick writes no label (no heartbeat putting ci-kit=pool back), and the agent stops managing the server', async () => {
+  const w = world();
+  await w.agent.start();
+  w.server.labels = { owner: 'other' };
+  w.calls.length = 0;
+  w.advance(61_000); // a heartbeat is due
+  await w.agent.tick();
+  assert.deepEqual(w.calls.filter((c) => c.startsWith('labels') || c.startsWith('delete server')), []);
+  assert.deepEqual(w.server.labels, { owner: 'other' });
+  assert.equal(w.agent.disowned, true);
+  // Nothing further: no containers, no labels, no deletion, whatever is queued.
+  w.state.runs = [{ id: 1, status: 'in_progress', path: '.github/workflows/ci.yml' }];
+  w.state.jobs.set(1, [{ id: 11, status: 'queued', labels: L4, created_at: new Date(T0).toISOString() }]);
+  w.advance(10_000);
+  await w.agent.tick();
+  assert.deepEqual(w.calls.filter((c) => /^(labels|delete server|start|jit)/.test(c)), []);
+});
+
+test('ownership lost before a state change: draining is not written either', async () => {
+  const w = world();
+  await w.agent.start();
+  w.server.labels = {};
+  w.calls.length = 0;
+  w.advance(50 * 60_000); // minute ≥ 50 and idle: the lifecycle wants to drain
+  await w.agent.tick();
+  assert.deepEqual(w.calls.filter((c) => c.startsWith('labels') || c.startsWith('delete server')), []);
+  assert.equal(w.agent.disowned, true);
+});

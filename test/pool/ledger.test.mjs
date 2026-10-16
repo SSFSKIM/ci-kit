@@ -64,13 +64,23 @@ test('pool hours on a day count the billed hours that begin in that UTC day, acr
     makeRow({ ...server, id: 1, created: '2026-10-15T08:00:00Z' }, { deleted: t('2026-10-15T09:50:00Z'), end: 'idle', state: 'final' }),
     // 23:30 on the 14th to 00:50: two billed hours, 23:30 (the 14th) and 00:30 (the 15th).
     makeRow({ ...server, id: 2, created: '2026-10-14T23:30:00Z' }, { deleted: t('2026-10-15T00:50:00Z'), end: 'idle', state: 'final' }),
-    // A deleting row of a server still listed: its row's deleted time ends it.
-    makeRow({ ...server, id: 3, created: '2026-10-15T14:00:00Z' }, { deleted: t('2026-10-15T14:50:00Z'), end: 'idle', state: 'deleting' }),
   ];
   // A live server without a row, up since 13:10: 13:10, 14:10, 15:10 so far.
-  const live = [{ id: 3, created: '2026-10-15T14:00:00Z' }, { id: 4, created: '2026-10-15T13:10:00Z' }];
-  assert.equal(hoursOnDay(rows, live, now), 2 + 1 + 1 + 3);
+  const live = [{ id: 4, created: '2026-10-15T13:10:00Z' }];
+  assert.equal(hoursOnDay(rows, live, now), 2 + 1 + 3);
   assert.equal(hoursOnDay(rows, live, now, t('2026-10-14T12:00:00Z')), 1);
+});
+
+test('a server confirmed live counts to now whatever its row says: a provisional deleting row does not freeze its hours', () => {
+  // The agent wrote `deleting` at 14:50 and crashed before its delete call; a restarted agent resumed work, and the
+  // server is still listed at 17:20. Its billed hours begin 14:00, 15:00, 16:00, 17:00.
+  const row = makeRow({ ...server, id: 3, created: '2026-10-15T14:00:00Z' }, { deleted: t('2026-10-15T14:50:00Z'), end: 'idle', state: 'deleting' });
+  const live = [{ id: 3, created: '2026-10-15T14:00:00Z' }];
+  assert.equal(hoursOnDay([row], live, t('2026-10-15T17:20:00Z')), 4);
+  // Once it is gone, the row's deleted time ends it again.
+  assert.equal(hoursOnDay([row], [], t('2026-10-15T17:20:00Z')), 1);
+  // A final row of a live server (a stale write healed later) counts to now as well.
+  assert.equal(hoursOnDay([{ ...row, state: 'final' }], live, t('2026-10-15T17:20:00Z')), 4);
 });
 
 test('a live session that started yesterday counts only its hours since midnight today', () => {

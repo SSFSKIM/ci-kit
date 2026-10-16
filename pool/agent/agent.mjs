@@ -102,7 +102,7 @@ async function main() {
       await sleep(cfg.poll_seconds * 1000);
     }
   }
-  while (!agent.deleted) {
+  while (!agent.deleted && !agent.disowned) {
     const began = Date.now();
     try {
       await agent.tick();
@@ -111,6 +111,7 @@ async function main() {
     }
     await sleep(Math.max(1000, agent.cfg.poll_seconds * 1000 - (Date.now() - began)));
   }
+  if (agent.disowned) process.exit(78); // the server is no longer a pool box: nothing for this agent to do
   log('server deleted; waiting for shutdown');
   await new Promise(() => {});
 }

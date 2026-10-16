@@ -4,6 +4,7 @@
 // 24 h, reap old bake builders, finalize ledger rows, alert, and post the weekly cost summary.
 // Env: HCLOUD_TOKEN, CI_KIT_APP_ID, CI_KIT_APP_KEY. Exits 1 when any action failed, after trying them all.
 import { readFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 import { createHcloud, serverLocation, serverPriceHourly, waitAction } from '../lib/hcloud.mjs';
 import { createGitHub } from '../lib/github.mjs';
 import { createAppTokens } from '../lib/github-app.mjs';
@@ -32,16 +33,16 @@ async function queuedJobs(gh, cfg) {
   return queued;
 }
 
-async function main() {
-  const cfg = parsePoolConfig(await readFile(new URL('./config/pool.json', import.meta.url), 'utf8'));
-  const hc = createHcloud(process.env.HCLOUD_TOKEN?.trim());
-  const gh = createGitHub(createAppTokens({ appId: process.env.CI_KIT_APP_ID?.trim(), pem: process.env.CI_KIT_APP_KEY, owner: 'SSFSKIM' }));
+// One guard cycle against the given clients. Returns the number of actions that failed.
+export async function runGuard({ hc, gh, cfg, now: clock = Date.now, sleep: wait = sleep, log: say = log, error = (m) => console.error(m) }) {
+  const log = say;
+  const sleep = wait;
   const ledger = createLedgerStore(gh, cfg.ledger);
   const alertsRepo = cfg.ledger.repo;
 
   const [servers, queued, comments] = await Promise.all([hc.servers('ci-kit'), queuedJobs(gh, cfg), ledger.comments()]);
   const rows = rowsOf(comments);
-  const now = Date.now();
+  const now = clock();
   const actions = guardPlan({ now, servers, queued, rows, summaryAt: lastSummaryAt(comments), cfg });
   log(`guard: ${servers.length} labelled servers, ${queued.length} queued pool jobs, ${rows.length} ledger rows; ${actions.length} actions`);
 
@@ -50,7 +51,7 @@ async function main() {
   // Row first (deleting), then the delete, then the row finalized once the delete action has finished (I9).
   async function deletePoolServer(server, end) {
     const session = sessionOf(server);
-    const deleted = Date.now();
+    const deleted = clock();
     await ledger.upsertRow(makeRow(session, { deleted, end, state: 'deleting' }));
     const action = await hc.deleteServer(server.id);
     await waitAction(hc, action.id, { sleep });
@@ -72,7 +73,7 @@ async function main() {
         await ledger.upsertRow(a.row);
         log(`finalized the ledger row of server ${a.row.server} (${a.row.end})`);
       } else if (a.kind === 'record') {
-        await ledger.upsertRow(makeRow(sessionOf(a.server), { state: 'running', at: Date.now() }));
+        await ledger.upsertRow(makeRow(sessionOf(a.server), { state: 'running', at: clock() }));
       } else if (a.kind === 'alert') {
         await alert(a);
       } else if (a.kind === 'ensure') {
@@ -85,13 +86,22 @@ async function main() {
       }
     } catch (err) {
       failed += 1;
-      console.error(`guard: ${a.kind} failed: ${err.message}`);
+      error(`guard: ${a.kind} failed: ${err.message}`);
     }
   }
-  if (failed) process.exit(1);
+  return failed;
 }
 
-main().catch((err) => {
-  console.error(`guard: ${err.stack ?? err.message}`);
-  process.exit(1);
-});
+async function main() {
+  const cfg = parsePoolConfig(await readFile(new URL('./config/pool.json', import.meta.url), 'utf8'));
+  const hc = createHcloud(process.env.HCLOUD_TOKEN?.trim());
+  const gh = createGitHub(createAppTokens({ appId: process.env.CI_KIT_APP_ID?.trim(), pem: process.env.CI_KIT_APP_KEY, owner: 'SSFSKIM' }));
+  if (await runGuard({ hc, gh, cfg })) process.exit(1);
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error(`guard: ${err.stack ?? err.message}`);
+    process.exit(1);
+  });
+}
