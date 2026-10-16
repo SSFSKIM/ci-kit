@@ -1540,7 +1540,7 @@ ci-gate [<worktree-or-sha>] [--gates a,b] [--repo OWNER/NAME] [--label NAME] [--
 
 ```json
 {"repos":[{"repo":"SSFSKIM/ci-kit-sandbox","workflows":["ci.yml","maws-probe.yml"]}],
- "types":["cx53","cpx62"],"locations":["hel1","fsn1","nbg1"],
+ "types":["cx53","cpx62"],"fallback_types":["cpx52","cpx42"],"locations":["hel1","fsn1","nbg1"],
  "poll_seconds":10,"idle_runner_minutes":10,"drain_minute":50,
  "memory_gb_per_cpu":2,"max_hours_per_day":8,
  "ledger":{"repo":"SSFSKIM/ci-kit-sandbox","issue_title":"pool ledger"}}
@@ -1661,6 +1661,29 @@ euros, jobs, and the projected month at the current rate.
   making 2 requests every 10 s. Every session on the account shares that token: maws-fe's
   `ci-gate.sh`, `gh` in every session, qa-loop merges. Executors were capped at 2 pollers until
   the fix below landed.
+
+- **Observation (M5, 2026-10-16):** the pool's round trip works live, run from the branch.
+  - **A5.** A cold box went from push to PASS in about 1.3 minutes (the bound is 5). Inside it,
+    `nproc` = 4 and `getconf` = 16. It deleted itself at minute 50, and its ledger row went from
+    `deleting` to finalized.
+  - **A6.** Four `cpus-4` gates started within 3 s of each other; the fifth started after the
+    first finished.
+  - **A7, box-local parts.** The watchdog deleted a box with a wrong App key at 30.7 minutes. A
+    container whose runner had left was killed at 5 min 52 s. A cancelled bake and a failed bake
+    each left no builder.
+  - **Isolation.** A job container cannot reach the metadata service, has no Docker socket, has no
+    `/etc/ci-kit`, and runs as `runner`. The private-repo base fetch works inside a pool container
+    (git 2.55).
+- **Observation (M5):** the Hetzner project's shared-core limit is below 20 vCPU. A bake failed
+  with `403 resource_limit_exceeded (shared core limit exceeded)` while the pool box and a foreign
+  2-core server (`session-mirror`, unlabelled) existed. Hetzner uses the same code for other
+  project limits, such as server count.
+- **Observation (M5):** the Electron cache stays empty after the bake, though the warm step
+  reports ok. This is left for M7.
+- **Observation (M5):** a JIT runner's work folder must be a real directory under the cache mount.
+  A symlink broke checkout's credentials.
+- **Observation (M5):** the App `ci-kit-runners` (id 5337915) was created through the human's
+  Chrome with the manifest flow, without escalation.
 
 ## Decision Log
 
@@ -1898,6 +1921,36 @@ euros, jobs, and the projected month at the current rate.
   - **Rationale:** §7's safety rule says killing needs a positively one-shot command line. A
     `serve` process is the case the exclusion exists for.
   - **Date/Author:** 2026-10-16, plan-executor.
+
+- **Decision:** M5's resolutions of gaps the spec left open.
+  - **Watchdog.** It reads the App key only to write its ledger row, and deletes the box whether or
+    not that write succeeds. A box it deletes while GitHub is unreachable gets no row.
+  - **Agent state.** The job count lives in a server label, `ci-kit-jobs`. A restarted agent
+    resumes its runner counter past that label, its containers and its runner names.
+  - **Admission.** Strictly first in, first out. A job no box size could ever serve is logged and
+    passed over rather than blocking the queue.
+  - **Idle (`servable`).** A queued job too large for this box does not keep it alive. A
+    smaller fallback box holding only such jobs deletes itself at minute 50, and the guard's wake
+    rule asks for a full-size box again.
+  - **Draining.** A box that is draining when its hour turns goes back to `ready`, since that hour
+    is already paid.
+  - **A served repo that cannot be read** fails the tick, so the heartbeat does not advance.
+  - **Ensure.**
+    - It moves on to the next type or location on `placement_error` as well as
+      `resource_unavailable`.
+    - On a name clash, it reports `raced` only when a labelled pool box exists.
+    - A core-limit refusal skips that type in every location. The fallback types are
+      `fallback_types` in I8. A fallback box carries `ci-kit-fallback=core-limit`, and its agent
+      opens the alert at boot, because callers hold only `HCLOUD_TOKEN`.
+  - **Guard.** Heartbeat age counts from creation until the first heartbeat. Each alert opens at
+    most once while an issue with that title is open. The weekly summary is due 7 days after the
+    last one.
+  - **Bake.** The builder reports through its own server labels. Cache warming is best effort and
+    recorded in a file jobs can read. A core-limit refusal retries every 5 minutes for 2 hours, so
+    the workflow timeout is 180 minutes. Alerts are one shared module.
+  - **Polling.** The agent's run, runner and job listings use the kit's conditional-request
+    client on the App's installation token. The guard, a fresh process every 10 minutes, does not.
+  - **Date/Author:** 2026-10-16, M5 executor, folded by plan-executor.
 
 ## Outcomes & Retrospective
 
