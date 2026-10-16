@@ -2245,6 +2245,22 @@ euros, jobs, and the projected month at the current rate.
     watchdog is dead bills without limit.
   - **Date/Author:** 2026-10-16, CI-opt, recorded by plan-executor.
 
+- **Decision:** the mac lane makes the desktop deterministic before each job by putting Terminal
+  in front (maws-fe's gate-offload DL 37, approved by CI-opt).
+  - **What happens before a job.** If the frontmost app is Finder, the job-started hook runs
+    `open -a Terminal`. This goes through LaunchServices, so there are no Apple Events and no
+    Automation consent. The hook then re-reads the frontmost app with the same `lsappinfo` parse,
+    polling for up to 5 seconds. If Terminal is not in front by then, the job fails fast.
+  - **What does not change.** System dialogs are still refused, and the hook never tries to clear
+    them. The before and after frontmost apps are logged.
+  - The hook acts only before the job, so it never fights MAWS's own `MAWS_E2E_FOREGROUND=1`.
+  - **Why.** Some of MAWS's paste and to-human results depend on which app is in front. When an
+    e2e app quits, focus falls to Finder, so a job's outcome depended on what the last job left
+    behind.
+  - **Rejected alternative:** refusing to run when Finder is in front. That would fail nearly
+    every job after the first e2e app quits.
+  - **Date/Author:** 2026-10-16, CI-opt from maws-fe, recorded by plan-executor.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
