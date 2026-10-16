@@ -11,7 +11,7 @@ import { createGitHub } from '../../lib/github.mjs';
 import { createAppTokens } from '../../lib/github-app.mjs';
 import { parsePoolConfig } from '../lib/config.mjs';
 import { createAlerts } from '../lib/alerts.mjs';
-import { bakeLeftovers, snapshotsToPrune, builderUserData, createBuilder, BakeBlockedError, BUILDER_TYPES } from './plan.mjs';
+import { bakeLeftovers, ownsBuilder, snapshotsToPrune, builderUserData, createBuilder, BakeBlockedError, BUILDER_TYPES } from './plan.mjs';
 
 const BUILDER = { types: BUILDER_TYPES, locations: ['hel1', 'fsn1', 'nbg1'] };
 const OFF_TIMEOUT = 30 * 60_000;
@@ -43,7 +43,7 @@ async function bake(hc) {
   const sha = env('GITHUB_SHA');
   const runId = env('GITHUB_RUN_ID');
   const template = await readFile(new URL('./builder.sh', import.meta.url), 'utf8');
-  const userData = builderUserData(template, { sha, appId: env('CI_KIT_APP_ID'), appKey: env('CI_KIT_APP_KEY'), hcloudToken: env('HCLOUD_TOKEN') });
+  const userData = builderUserData(template, { sha, runId, appId: env('CI_KIT_APP_ID'), appKey: env('CI_KIT_APP_KEY'), hcloudToken: env('HCLOUD_TOKEN') });
   let builder;
   try {
     builder = await createBuilder(hc, { userData, runId, builder: BUILDER, sleep, log });
@@ -52,18 +52,35 @@ async function bake(hc) {
     throw err;
   }
 
-  const start = Date.now();
+  await snapshotBuilder(hc, builder, { sha, runId, sleep, log });
+}
+
+// The fresh server behind a builder, or a failed bake when it is no longer this run's: the bake waits long enough
+// for an operator to relabel the machine to keep it for debugging, and a relabelled machine is left as it is.
+async function ownedBuilder(hc, id, runId) {
+  const s = await hc.server(id);
+  if (!ownsBuilder(s, runId)) {
+    throw new Error(`ci-kit: server ${id} is no longer this bake's builder (labels ${JSON.stringify(s.labels ?? {})}); left untouched`);
+  }
+  return s;
+}
+
+// Wait for the builder to power off, snapshot it, delete it, prune. Ownership is revalidated on every fetch and
+// immediately before the snapshot and the delete, so nothing here acts on a server the bake no longer owns.
+export async function snapshotBuilder(hc, builder, { sha, runId, sleep, log, now = Date.now }) {
+  const start = now();
   let s;
   for (;;) {
     await sleep(15_000);
-    s = await hc.server(builder.id);
-    if (s.status === 'off' && Date.now() - start > 60_000) break;
-    if (Date.now() - start > OFF_TIMEOUT) throw new Error(`ci-kit: builder ${builder.id} did not power off within 30 min`);
+    s = await ownedBuilder(hc, builder.id, runId);
+    if (s.status === 'off' && now() - start > 60_000) break;
+    if (now() - start > OFF_TIMEOUT) throw new Error(`ci-kit: builder ${builder.id} did not power off within 30 min`);
   }
   const mark = s.labels['ci-kit-bake'];
-  log(`builder off after ${Math.round((Date.now() - start) / 1000)} s, marked ${mark ?? '(nothing)'}; caches warmed: ${s.labels['ci-kit-warm'] ?? 'unknown'}; peak memory + swap ${s.labels['ci-kit-mem-peak'] ?? '?'} MB`);
+  log(`builder off after ${Math.round((now() - start) / 1000)} s, marked ${mark ?? '(nothing)'}; caches warmed: ${s.labels['ci-kit-warm'] ?? 'unknown'}; peak memory + swap ${s.labels['ci-kit-mem-peak'] ?? '?'} MB`);
   if (mark !== 'ok') throw new Error(`ci-kit: the builder did not finish (${mark ?? 'no mark: it failed before it could label itself'})`);
 
+  await ownedBuilder(hc, builder.id, runId);
   const { image, action } = await hc.createImage(builder.id, {
     type: 'snapshot',
     description: `ci-kit pool image ${sha.slice(0, 8)}`,
@@ -72,6 +89,7 @@ async function bake(hc) {
   await waitAction(hc, action.id, { sleep, timeoutMs: 30 * 60_000, interval: 10_000 });
   const made = await hc.image(image.id);
   log(`snapshot ${made.id}: ${made.status}, ${made.image_size} GB compressed, disk ${made.disk_size} GB`);
+  await ownedBuilder(hc, builder.id, runId);
   await hc.deleteServer(builder.id);
   log(`builder ${builder.id} deleted`);
 

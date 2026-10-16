@@ -95,6 +95,9 @@ export function fakeHcloud({ servers = [], firewalls = [], images = [], serverTy
       mutations.push({ op: 'snapshot', server: serverId });
       return { image: { id: 7000 }, action: { id: 2 } };
     },
+    async image(id) {
+      return { id, status: 'available', image_size: 1.5, disk_size: 40 };
+    },
     async deleteImage(id) {
       calls.push(`delete image ${id}`);
       mutations.push({ op: 'delete image', image: id });

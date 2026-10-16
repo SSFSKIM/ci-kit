@@ -27,19 +27,20 @@ test('pruning keeps the two newest available pool snapshots and never touches fo
 
 test('the builder user-data carries the kit commit and the credentials, and a template placeholder is never left behind', () => {
   const template = '#!/bin/bash\nKIT_SHA=__KIT_SHA__\nAPP_ID=__APP_ID__\ncat > key <<\'K\'\n__APP_KEY__\nK\nTOKEN=__HCLOUD_TOKEN__\n';
-  const ud = builderUserData(template, { sha: 'abc123', appId: '5', appKey: '-----BEGIN-----\nx\n-----END-----', hcloudToken: 'tok' });
+  const ud = builderUserData(template, { sha: 'abc123', runId: 1, appId: '5', appKey: '-----BEGIN-----\nx\n-----END-----', hcloudToken: 'tok' });
   assert.match(ud, /KIT_SHA=abc123/);
   assert.match(ud, /-----BEGIN-----\nx\n-----END-----/);
   assert.doesNotMatch(ud, /__[A-Z_]+__/);
-  assert.throws(() => builderUserData(template + '__OTHER__\n', { sha: 'a', appId: '5', appKey: 'k', hcloudToken: 't' }), /placeholder __OTHER__/);
+  assert.throws(() => builderUserData(template + '__OTHER__\n', { sha: 'a', runId: 1, appId: '5', appKey: 'k', hcloudToken: 't' }), /placeholder __OTHER__/);
 });
 
 test('the shipped builder script fills with no unknown placeholder, quotes the secrets, and never traces them', async () => {
   const { readFileSync } = await import('node:fs');
   const template = readFileSync(new URL('../../pool/bake/builder.sh', import.meta.url), 'utf8');
-  const ud = builderUserData(template, { sha: 'f'.repeat(40), appId: '5337915', appKey: '-----BEGIN RSA PRIVATE KEY-----\nAAA$HOME`x`\n-----END RSA PRIVATE KEY-----\n', hcloudToken: 'tok$x' });
+  const ud = builderUserData(template, { sha: 'f'.repeat(40), runId: 4242, appId: '5337915', appKey: '-----BEGIN RSA PRIVATE KEY-----\nAAA$HOME`x`\n-----END RSA PRIVATE KEY-----\n', hcloudToken: 'tok$x' });
   assert.ok(Buffer.byteLength(ud) < 32 * 1024, 'Hetzner user-data is limited to 32 KiB');
   assert.match(ud, /<<'CI_KIT_APP_KEY'\n-----BEGIN RSA PRIVATE KEY-----\nAAA\$HOME`x`\n-----END RSA PRIVATE KEY-----\nCI_KIT_APP_KEY\n/);
+  assert.match(ud, /^RUN_ID=4242$/m);
   assert.doesNotMatch(ud, /set -[a-z]*x|set -o xtrace/);
 });
 

@@ -44,10 +44,35 @@ test('a target that is neither a directory nor a commit is refused', () => {
   assert.throws(() => resolveTarget('no-such-thing-0123'), /no commit no-such-thing-0123/);
 });
 
-test('--repo picks the remote that points at it; origin must be on GitHub otherwise', () => {
+test('--repo picks the remote that pushes to it; origin must push to GitHub otherwise', () => {
   assert.deepEqual(resolveRemote(work, 'other/thing'), { name: 'upstream', repo: 'other/thing' });
   assert.throws(() => resolveRemote(work, 'SSFSKIM/nope'), /no remote/);
-  assert.throws(() => resolveRemote(work, null), /origin is not a GitHub remote/);
+  assert.throws(() => resolveRemote(work, null), /origin does not push to a GitHub repo/);
+});
+
+// A fork setup: origin fetches from the upstream repo and pushes to the fork (remote.origin.pushurl). The run is
+// polled where the ref lands, so the push destination decides the repo, for the default and for --repo.
+test('the repo is the remote\'s push destination, not its fetch URL', () => {
+  const fork = join(root, 'fork');
+  execFileSync('git', ['init', '-q', fork]);
+  git(fork, 'remote', 'add', 'origin', 'https://github.com/upstream/repo.git');
+  assert.deepEqual(resolveRemote(fork, null), { name: 'origin', repo: 'upstream/repo' });
+  git(fork, 'config', 'remote.origin.pushurl', 'git@github.com:me/repo.git');
+  assert.deepEqual(resolveRemote(fork, null), { name: 'origin', repo: 'me/repo' });
+  assert.deepEqual(resolveRemote(fork, 'me/repo'), { name: 'origin', repo: 'me/repo' });
+  assert.throws(() => resolveRemote(fork, 'upstream/repo'), /no remote .* pushes to upstream\/repo/);
+});
+
+test('a remote with several push URLs is ambiguous: refused as the default, and never matched by --repo', () => {
+  const dir = join(root, 'multi');
+  execFileSync('git', ['init', '-q', dir]);
+  git(dir, 'remote', 'add', 'origin', 'https://github.com/a/one.git');
+  git(dir, 'remote', 'add', 'other', 'https://github.com/c/three.git');
+  git(dir, 'config', '--add', 'remote.origin.pushurl', 'https://github.com/a/one.git');
+  git(dir, 'config', '--add', 'remote.origin.pushurl', 'https://github.com/b/two.git');
+  assert.throws(() => resolveRemote(dir, null), /remote origin has several push URLs/);
+  assert.throws(() => resolveRemote(dir, 'b/two'), /no remote .* pushes to b\/two .*several push URLs/);
+  assert.deepEqual(resolveRemote(dir, 'c/three'), { name: 'other', repo: 'c/three' });
 });
 
 test('the nonce commit has the tested tree, the tested parent and the exact message', () => {

@@ -5,7 +5,7 @@ export const USAGE = `usage: ci-gate [<worktree-or-sha>] [--gates a,b] [--repo O
 Runs the repo's ci-kit gates for one commit on GitHub Actions and reports each gate as it finishes.
   <worktree-or-sha>  a worktree (its HEAD is tested) or a commit; default: the current directory
   --gates a,b        exactly these gates (the CI-Gates trailer); default: selected by the changed files
-  --repo OWNER/NAME  the GitHub repo; default: the one origin points at
+  --repo OWNER/NAME  the GitHub repo; default: the one origin pushes to
   --label NAME       the ci ref's label; default: the branch name, else "gate"
   --keep             leave the ci/ ref on the remote
 Stdout: WAIT/PASS/FAIL/SKIP/CANCEL <gate> lines as gates progress; THROTTLE remaining=<n> once if the token's REST
