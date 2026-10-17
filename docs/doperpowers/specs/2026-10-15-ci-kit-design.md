@@ -127,6 +127,13 @@ How to see it working: §Acceptance. The shortest proofs are:
     - PR #20 merged 04c0bd9 after one review fix: a VM is deleted when its job reports exit,
       unregister first, and kept when GitHub refuses. The VM powers off without an orderly shutdown.
     - The launcher runs revision 00008 from main 04c0bd9.
+    - [x] (2026-10-17 02:18Z) A13's last clause passes: the first daily line, for 10-16, posted
+      at 00:00:09Z on 10-17 (ci-kit-sandbox#1, issuecomment-6226993042). It reads 99 VMs, 23686
+      VM-seconds, $0.3873, projected month $11.62, ends done 97, preempted 1, cancelled-idle 1,
+      abandoned 1, config 892028c3. There are 100 ends against 99 VMs because an `abandoned` row
+      never got a VM and so carries no seconds. The figure is plausible: MAWS was on GCE only from
+      18:08Z, and $0.3873 is about 22 gates at $0.0172. The projection multiplies a partial day by
+      30 and so understates the month; the 10-17 line gives the measured month (residue 4).
   - [x] (2026-10-16 18:48Z) Step 5: MAWS moved in one window with `GATE_RUNNER` unset.
     - maws-fe unset it at 18:08:10Z, PR #21 merged at 18:17:15Z, and the Hetzner box
       idle-deleted at 18:37:51Z.
@@ -3234,7 +3241,7 @@ euros, jobs, and the projected month at the current rate.
 - **A7.** The "within two guard cycles" timing holds only on hand-dispatched guard runs. GitHub's schedule ran once in 7 h 58 min. The Decision Log accepts this deviation, and GCE's one-minute Scheduler reconciler replaces the guard for every live repo.
 - **A10.** Two cua tests, eof-drain and the chrome-host-run ceiling, pass on structural evidence. Their before-fix failure was never shown (Decision Log).
 - **A12 for Hetzner.** Cost is visible, but the Hetzner interim did not fit the budget. A box stayed up about 24–27 h a day once MAWS flipped, about €180–200 a month. That lasted from 10:04 to 18:38Z on 10-16 only.
-- **A13.** Everything passes except the daily ledger line, which first posts after 00:00Z on 10-17 and is handed to CI-opt. GitHub reports a simulated preemption as "The operation was canceled" (exit 130), not "runner lost".
+- **A13.** Everything passes. The daily ledger line, the last clause, first posted at 00:00:09Z on 10-17 (Progress, M10 step 4). GitHub reports a simulated preemption as "The operation was canceled" (exit 130), not "runner lost".
 
 **Cost (A12).**
 - **GCE ledger rows so far.**
