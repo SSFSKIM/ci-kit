@@ -86,7 +86,20 @@ fi
 
 if pgrep -qf "$RUNNER_DIR/bin/Runner.Worker"; then die 'a job is running on this runner; re-run when it is idle'; fi
 
-# 2. The runner's files, at a pinned version (it updates itself from there).
+# 2. The runner's name, before anything changes, so every refusal over it leaves the Mac as it was. A registered
+# runner keeps its name: .runner (JSON behind a byte-order mark) has it. An unregistered one takes --name.
+if [[ -f $RUNNER_DIR/.runner ]]; then
+  RUNNER_NAME=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig"))["agentName"])' \
+    "$RUNNER_DIR/.runner" 2>/dev/null) || RUNNER_NAME=
+  [[ -n $RUNNER_NAME ]] || die "cannot read the runner's name from $RUNNER_DIR/.runner"
+  [[ -z $name || $name == "$RUNNER_NAME" ]] ||
+    die "this runner is registered as $RUNNER_NAME; to rename it, remove it (docs/mac-lane.md) and register again with --name $name"
+else
+  [[ -n $name ]] || die "name the runner to register it: --name ${RUNNER_PREFIX}<machine> (the mini is ${RUNNER_PREFIX}mini)"
+  RUNNER_NAME=$name
+fi
+
+# 3. The runner's files, at a pinned version (it updates itself from there).
 if [[ ! -x $RUNNER_DIR/config.sh ]]; then
   tmp=$(mktemp -d)
   tarball=actions-runner-osx-arm64-$RUNNER_VERSION.tar.gz
@@ -97,17 +110,9 @@ if [[ ! -x $RUNNER_DIR/config.sh ]]; then
   tar -xzf "$tmp/$tarball" -C "$RUNNER_DIR"
 fi
 
-# 3. Registration, once. Repository level: a personal account cannot register a runner any higher. Not ephemeral: the
-# hooks clean between jobs. A registered runner keeps its name: .runner (JSON behind a byte-order mark) has it.
-if [[ -f $RUNNER_DIR/.runner ]]; then
-  RUNNER_NAME=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig"))["agentName"])' \
-    "$RUNNER_DIR/.runner" 2>/dev/null) || RUNNER_NAME=
-  [[ -n $RUNNER_NAME ]] || die "cannot read the runner's name from $RUNNER_DIR/.runner"
-  [[ -z $name || $name == "$RUNNER_NAME" ]] ||
-    die "this runner is registered as $RUNNER_NAME; to rename it, remove it (docs/mac-lane.md) and register again with --name $name"
-else
-  [[ -n $name ]] || die "name the runner to register it: --name ${RUNNER_PREFIX}<machine> (the mini is ${RUNNER_PREFIX}mini)"
-  RUNNER_NAME=$name
+# 4. Registration, once. Repository level: a personal account cannot register a runner any higher. Not ephemeral: the
+# hooks clean between jobs.
+if [[ ! -f $RUNNER_DIR/.runner ]]; then
   [[ -t 0 ]] && die 'pipe a registration token on stdin (gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token)'
   IFS= read -r token || true
   [[ -n $token ]] || die 'no registration token on stdin'
@@ -118,7 +123,7 @@ fi
 machine=${RUNNER_NAME#"$RUNNER_PREFIX"}
 [[ -n $machine ]] || machine=$RUNNER_NAME
 
-# 4. The hooks, copied into the runner so it never depends on where the kit is checked out, and the environment the
+# 5. The hooks, copied into the runner so it never depends on where the kit is checked out, and the environment the
 # runner gives every job and hook. English messages: the jobs parse tool output, and the mini's locale is Korean.
 mkdir -p "$RUNNER_DIR/ci-kit" "$LOG_DIR" "$(dirname "$PLIST")"
 # A sibling keeps staging on the same volume. Nothing touches the live set until every required file is ready.
@@ -172,7 +177,7 @@ EOF
 echo "$RUNNER_PATH" >"$RUNNER_DIR/.path"
 cp "$RUNNER_DIR/bin/runsvc.sh" "$RUNNER_DIR/runsvc.sh"
 
-# 5. The LaunchAgent, reloaded so a re-run takes effect.
+# 6. The LaunchAgent, reloaded so a re-run takes effect.
 sed -e "s|__RUNNER_DIR__|$RUNNER_DIR|g" -e "s|__LOG_DIR__|$LOG_DIR|g" "$here/$AGENT.plist" >"$PLIST"
 plutil -lint -s "$PLIST"
 # bootout returns while the runner is still shutting down, and bootstrap fails (5: Input/output error) until it is gone.

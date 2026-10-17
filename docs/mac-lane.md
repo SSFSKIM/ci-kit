@@ -271,8 +271,9 @@ ssh mini 'xattr -p com.apple.quarantine /Applications/LibreOffice.app'
 ## Adding a Mac
 
 A second machine runs a second runner with the same labels, so MAWS's `[self-hosted, macOS, ARM64]` jobs go to
-whichever machine is idle. Below, `<host>` is the MacBook's `ssh` host for it and `<name>` its short name: the runner is
-`ci-kit-mac-<name>`, and its refusals and alert say "on the <name>", so pick a word that reads there.
+whichever machine is idle. Below, `<host>` is the MacBook's `ssh` host for it and `<name>` its short name, a lowercase
+word of letters, digits and `-`: the runner is `ci-kit-mac-<name>`, and its refusals and alert say "on the <name>", so
+pick a word that reads there.
 
 **The machine.** Apple silicon, 16 GB or more (the mini is an M2 Pro with 16 GB), macOS 27 like the mini (27.0).
 

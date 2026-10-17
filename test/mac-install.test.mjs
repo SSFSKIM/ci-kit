@@ -30,7 +30,7 @@ function fixture({ registered = 'ci-kit-mac-mini' } = {}) {
   fake('uname', 'if [[ $1 == -m ]]; then echo arm64; else echo Darwin; fi');
   for (const name of ['node', 'corepack', 'git', 'soffice']) fake(name, 'echo fixture-tool');
   // Never download/register a runner or invoke any real compiler or desktop tool.
-  fake('curl', 'exit 90');
+  fake('curl', 'echo "$*" >> "$HOME/curl.calls"\nexit 90');
   fake('xcrun', `if [[ $1 == clang ]]; then echo fixture-clang; exit 0; fi
 [[ $1 == swiftc && $2 == -O && $3 == -o ]] || exit 91
 printf '#!/bin/bash\\necho cursor-park\\n' > "$4"
@@ -236,6 +236,18 @@ test('a name that is not the registered one, or missing at registration, is refu
     assert.equal(existsSync(join(f.home, 'launchctl.calls')), false);
   }
   assert.equal(fixture().run(undefined, ['--name']).status, 2, '--name without a value prints the usage');
+});
+
+test('a missing name at registration is refused before the runner is downloaded', macOnly, () => {
+  const f = fixture({ registered: null });
+  rmSync(join(f.runner, 'config.sh'));
+  const before = f.snapshot();
+  const result = f.run(undefined, ['--disabled'], {}, 'registration-token-123\n');
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /name the runner to register it/);
+  assert.equal(existsSync(join(f.home, 'curl.calls')), false, 'nothing downloaded');
+  assert.deepEqual(f.snapshot(), before);
+  assert.equal(readFileSync(join(f.runner, '.env'), 'utf8'), 'old environment\n');
 });
 
 function readPlist(path) {
