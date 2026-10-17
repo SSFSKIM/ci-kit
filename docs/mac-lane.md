@@ -318,7 +318,8 @@ ssh $host '~/Developer/GitHub/ci-kit/mac/install.sh --check'
 gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token \
   | ssh $host "~/Developer/GitHub/ci-kit/mac/install.sh --disabled --name ci-kit-mac-$name"
 ssh $host '~/Developer/GitHub/ci-kit/host/install.sh'
-ssh $host 'umask 077; mkdir -p ~/.config/ci-kit && cat >~/.config/ci-kit/alert-token' <~/.config/ci-kit/alert-token
+printf '%s\n' "$(cat ~/.config/claude-secrets/CI_KIT_ALERT_TOKEN)" \
+  | ssh $host 'umask 077; mkdir -p ~/.config/ci-kit && cat >~/.config/ci-kit/alert-token'
 ssh $host 'GH_TOKEN=$(cat ~/.config/ci-kit/alert-token) /opt/homebrew/bin/gh issue list -R SSFSKIM/ci-kit-sandbox -L 1 >/dev/null && echo token ok'
 ```
 
@@ -332,8 +333,8 @@ ssh $host 'GH_TOKEN=$(cat ~/.config/ci-kit/alert-token) /opt/homebrew/bin/gh iss
   step 4 turns it on.
 - The host janitor runs as on the mini ([host.md](host.md)), from the clone that stays.
 - The alert token is the owner's to make, once for every rented Mac: a fine-grained personal access token with resource
-  owner SSFSKIM, repository access to `SSFSKIM/ci-kit-sandbox` alone, and Issues read and write. The owner keeps it on
-  the MacBook as `~/.config/ci-kit/alert-token` (mode 600), and the copy goes through stdin, so it is never an argument
+  owner SSFSKIM, repository access to `SSFSKIM/ci-kit-sandbox` alone, and Issues read and write. The owner stores it on
+  the MacBook with `/secret CI_KIT_ALERT_TOKEN`, and the copy goes through stdin, so it is never an argument
   or printed. The last line checks it reads the sandbox's issues. When it expires, the alert fails (the hooks log says
   `dialog alert issue creation failed or timed out`), and the job is still refused.
 
