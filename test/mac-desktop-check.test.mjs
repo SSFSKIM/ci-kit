@@ -89,9 +89,9 @@ if [[ $1 == issue && $2 == create ]]; then echo https://github.com/SSFSKIM/ci-ki
 }
 // The two shapes lsappinfo prints for `info -only name`: macOS 27 over ssh, and the LSDisplayName pair.
 // With a bundle id, each also prints it: `bundleID="<id>"` and `"CFBundleIdentifier"="<id>"` (both checked live).
-const asnShape = (name, bundle) =>
-  `"${name}" ASN:0x0-0x48b78b3: (in front) \n    bundleID=${bundle ? `"${bundle}"` : '[ NULL ]'} \n    bundle path=[ NULL ] \n`;
-const pairShape = (name, bundle) => `"LSDisplayName"="${name}"\n${bundle ? `"CFBundleIdentifier"="${bundle}"\n` : ''}`;
+const asnShape = (name, bundle, pid) =>
+  `"${name}" ASN:0x0-0x48b78b3: (in front) \n    bundleID=${bundle ? `"${bundle}"` : '[ NULL ]'} \n    bundle path=[ NULL ] \n${pid === undefined ? '' : `    pid = ${pid} (0xb84f)\n`}`;
+const pairShape = (name, bundle, pid) => `"LSDisplayName"="${name}"\n${bundle ? `"CFBundleIdentifier"="${bundle}"\n` : ''}${pid === undefined ? '' : `"pid"=${pid}\n`}`;
 
 for (const name of ['UserNotificationCenter', 'CoreServicesUIAgent', 'SecurityAgent', 'loginwindow']) {
   test(`a system dialog in front (${name}) fails the job at once, saying what to do`, () => {
@@ -256,6 +256,98 @@ test('the first dialog failure names the newest firewall source and creates one 
   assert.match(body, /123456/);
   assert.equal(run.state.trim(), alertURL);
   assert.equal(argValue(run.logArgs, '--last'), '15m');
+});
+
+const tccFront = '2026-10-17 16:57:14.175 Df launchservicesd[151:60ee7ba] [com.apple.processmanager:front-35286506] SETFRONT: pid=47183 asn=0x-0x48b78b3 foreground=0 oldFrontPid=402 oldFrontASN=0x-0x73746';
+const tccRequests = [
+  '2026-10-17 16:57:13.268 A SkyComputerUseService[36230:60ee877] (TCC) TCCAccessRequest() IPC',
+  '2026-10-17 16:57:13.286 A Finder[417:101d] (TCC) TCCAccessRequest() IPC',
+  '2026-10-17 16:57:13.396 A CursorUIViewService[648:1948] (TCC) TCCAccessRequest() IPC',
+  '2026-10-17 16:57:13.693 A SkyComputerUseService[36230:60ee7e1] (TCC) TCCAccessRequest() IPC',
+];
+
+test('UserNotificationCenter names deduplicated TCC callers just before its own front transition, not background noise', () => {
+  const run = check(asnShape('UserNotificationCenter', undefined, 47183), 0, { logOutput: [
+    '2026-10-17 16:57:09.174 A OldClient[10:20] (TCC) TCCAccessRequest() IPC',
+    ...tccRequests,
+    '2026-10-17 16:57:14.000 A mds[11:21] (TCC) TCCAccessRequest() IPC',
+    '2026-10-17 16:57:14.001 A coreaudiod[12:22] (TCC) TCCAccessRequest() IPC',
+    '2026-10-17 16:57:14.002 A WindowServer[13:23] (TCC) TCCAccessRequest() IPC',
+    tccFront,
+    '2026-10-17 16:57:14.176 A LaterClient[14:24] (TCC) TCCAccessRequest() IPC',
+    tccFront.replace('16:57:14.175', '16:57:15.000').replace('pid=47183 ', 'pid=471830 '),
+  ].join('\n') });
+  assert.equal(run.status, 1, run.stderr);
+  const source = 'TCC requests before it came to front: SkyComputerUseService, Finder, CursorUIViewService';
+  assert.ok(run.stderr.includes(`UserNotificationCenter: ${source})`));
+  assert.ok(run.log.includes(`UserNotificationCenter: ${source};`));
+  assert.equal(argValue(run.ghCalls[0], '--title'), `ci-kit alert: system dialog on the mini (UserNotificationCenter: ${source})`);
+  const body = argValue(run.ghCalls[0], '--body');
+  assert.ok(body.includes(`Likely source: ${source}\nSource line: ${tccFront}\n`));
+  assert.equal(argValue(run.logArgs, '--style'), 'compact');
+  assert.ok(run.logArgs.includes('--info'));
+  const predicate = argValue(run.logArgs, '--predicate');
+  assert.ok(predicate.includes('process == "socketfilterfw"'));
+  assert.ok(predicate.includes('eventMessage CONTAINS "TCCAccessRequest"'));
+  assert.ok(predicate.includes('process == "launchservicesd" AND eventMessage CONTAINS "SETFRONT"'));
+});
+
+test('the LSDisplayName shape with a quoted pid also supports TCC attribution', () => {
+  const run = check(pairShape('UserNotificationCenter', undefined, 47183), 0, {
+    logOutput: [...tccRequests, tccFront].join('\n'),
+  });
+  assert.equal(run.status, 1, run.stderr);
+  assert.match(run.stderr, /UserNotificationCenter: TCC requests before it came to front: SkyComputerUseService, Finder, CursorUIViewService\)/);
+});
+
+test('the five-second TCC window includes its boundary across midnight but not older or later requests', () => {
+  const front = tccFront.replace('2026-10-17 16:57:14.175', '2026-10-18 00:00:02.175');
+  const run = check(asnShape('UserNotificationCenter', undefined, 47183), 0, { logOutput: [
+    '2026-10-17 23:59:57.174 A TooOld[10:20] (TCC) TCCAccessRequest() IPC',
+    '2026-10-17 23:59:57.175 A BoundaryClient[11:21] (TCC) TCCAccessRequest() IPC',
+    front,
+    '2026-10-18 00:00:02.175 A AfterFront[12:22] (TCC) TCCAccessRequest() IPC',
+  ].join('\n') });
+  assert.equal(run.status, 1, run.stderr);
+  assert.ok(argValue(run.ghCalls[0], '--body').includes(`Likely source: TCC requests before it came to front: BoundaryClient\nSource line: ${front}\n`));
+});
+
+test('the newest front transition for the dialog pid anchors the TCC window', () => {
+  const latestFront = tccFront.replace('16:57:14.175', '16:58:00.000');
+  const run = check(asnShape('UserNotificationCenter', undefined, 47183), 0, { logOutput: [
+    ...tccRequests, tccFront,
+    '2026-10-17 16:57:59.000 A NewClient[15:25] (TCC) TCCAccessRequest() IPC',
+    latestFront,
+  ].join('\n') });
+  assert.equal(run.status, 1, run.stderr);
+  assert.ok(argValue(run.ghCalls[0], '--body').includes(`Likely source: TCC requests before it came to front: NewClient\nSource line: ${latestFront}\n`));
+});
+
+test('TCC attribution stays unknown without a readable pid, its SETFRONT, or nearby non-daemon requests', () => {
+  for (const [pid, lines] of [
+    [undefined, [...tccRequests, tccFront]],
+    ['unreadable', [...tccRequests, tccFront]],
+    [47183, tccRequests],
+    [47183, [...tccRequests, tccFront.replace('pid=47183 ', 'pid=471830 ')]],
+    [47183, [tccFront]],
+    [47183, [tccRequests[0].replace('16:57:13.268', '16:57:09.174'), tccFront]],
+    [47183, [tccRequests[0].replace('SkyComputerUseService', 'mds'), tccFront]],
+    [47183, [...tccRequests, tccFront, tccFront.replace('16:57:14.175', '16:58:00.000')]],
+  ]) {
+    const run = check(asnShape('UserNotificationCenter', undefined, pid), 0, { logOutput: lines.join('\n') });
+    assert.equal(run.status, 1, run.stderr);
+    assert.match(run.stderr, /UserNotificationCenter: source unknown/);
+    assert.ok(argValue(run.ghCalls[0], '--body').includes('Likely source: source unknown\nSource line: source unknown\n'));
+  }
+});
+
+test('firewall attribution wins even when TCC requests precede UserNotificationCenter coming to front', () => {
+  const run = check(asnShape('UserNotificationCenter', undefined, 47183), 0, {
+    logOutput: [firewallNew, ...tccRequests, tccFront].join('\n'),
+  });
+  assert.equal(run.status, 1, run.stderr);
+  assert.match(run.stderr, /UserNotificationCenter: firewall prompt for Electron/);
+  assert.ok(argValue(run.ghCalls[0], '--body').includes(`Source line: ${firewallNew}\n`));
 });
 
 test('repeated failing jobs share one alert; a passing job comments, closes, and clears the episode', () => {
