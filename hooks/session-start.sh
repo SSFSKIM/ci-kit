@@ -23,7 +23,7 @@ top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" || exit 0
 
 root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 IFS= read -r -d '' text <<EOF
-ci-kit: this repo's gates (.github/ci-kit.yml) run on GitHub Actions, not on this machine. Verify a commit with \`ci-gate\` from its worktree, or \`ci-gate <sha>\`; \`--gates a,b\` runs only those gates (this plugin's copy: $root/bin/ci-gate). It tests the committed HEAD, never uncommitted changes. It prints one line per gate as it finishes (PASS; FAIL with log=<path>, the failed gate's log saved on disk; SKIP; CANCEL; WAIT and THROTTLE while queued or rate-limited), then GREEN <run-url> (exit 0), RED <failed>/<total> <run-url> (exit 1) or ERROR <message> (exit 2, config or infrastructure). Do not run the gates' commands on this machine to verify a commit; one focused test file while iterating is fine.
+ci-kit: this repo's gates (.github/ci-kit.yml) run on GitHub Actions, not on this machine. Verify a commit with \`ci-gate\` from its worktree, or \`ci-gate <sha>\`; \`--gates a,b\` runs only those gates, and \`ci-gate --help\` has the rest (this plugin's copy: $root/bin/ci-gate). It tests the committed HEAD, never uncommitted changes. It prints one line per gate as it finishes (PASS; FAIL with log=<path>, the failed gate's log saved on disk; SKIP; CANCEL; WAIT and THROTTLE while queued or rate-limited), then GREEN <run-url> (exit 0), RED <failed>/<total> <run-url> (exit 1) or ERROR <message> (exit 2, config or infrastructure). Do not run the gates' commands on this machine to verify a commit; one focused test file while iterating is fine.
 EOF
 text="${text%$'\n'}"
 

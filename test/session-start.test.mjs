@@ -46,6 +46,7 @@ test('in an adopted repo, its subdirectory and its worktree: the ci-gate note, n
     assert.equal(r.status, 0);
     assert.match(r.stdout, /^ci-kit: this repo's gates \(\.github\/ci-kit\.yml\) run on GitHub Actions/);
     assert.match(r.stdout, /`ci-gate`/);
+    assert.match(r.stdout, /`ci-gate --help` has the rest/);
     assert.match(r.stdout, /\/plugin-root\/bin\/ci-gate/);
     assert.match(r.stdout, /GREEN <run-url> \(exit 0\), RED <failed>\/<total> <run-url> \(exit 1\) or ERROR/);
     assert.match(r.stdout, /Do not run the gates' commands on this machine/);
