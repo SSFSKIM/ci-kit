@@ -105,7 +105,7 @@ then the skill and its eval (P4), then review (P5). Merging: the dispatching ses
 
 ## Progress
 
-- [ ] P1 plugin, hook, marketplace entry
+- [x] P1 plugin, hook, marketplace entry
   - 2026-10-17: built on branch `plugin` (plugin.json, `hooks/hooks.json`, `hooks/session-start.sh`); the doperpowers
     entry is SSFSKIM/doperpowers#215. Checked with `--plugin-dir` (headless, haiku): in a cua worktree the transcript
     carries the hook's note (`hook_success`, SessionStart:startup), `ci-gate` resolves on the Bash PATH and
@@ -117,9 +117,13 @@ then the skill and its eval (P4), then review (P5). Merging: the dispatching ses
     cache has `vendor/yaml` and no `node_modules`, and `ci-gate init` runs from it. In a new headless session in a cua
     worktree, the transcript carries the note (SessionStart:startup), naming the cached `bin/ci-gate`. In a new
     session in a repo without `.github/ci-kit.yml`, it carries none.
-  - Update proof (the coordinator's condition on an unversioned plugin): this change to the note's wording lands
-    through a PR. `claude plugin update ci-kit@doperpowers` must then install the new commit, and a fresh session must
-    show the new text.
+  - Update proof (the coordinator's condition on an unversioned plugin): the note's wording changed through ci-kit#39
+    (b12fcdc). `claude plugin update ci-kit@doperpowers` failed with `git@github.com: Permission denied (publickey)`
+    (Surprises). With `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1` for that one command, it updated from `fd0dcd9dd1ba` to
+    `b12fcdc7c63b` with no version bump, and orphaned the old directory. A fresh headless session in the cua worktree
+    then carried the new wording, naming the `b12fcdc7c63b` cache path. doperpowers#217 (235389d) made the entry a
+    `url` source over HTTPS. With no env var, `claude plugin marketplace update doperpowers` and the plugin update then
+    cloned cleanly and answered `ci-kit is already at the latest version (b12fcdc7c63b)`.
 - [x] P2 `ci-gate init` with fixture tests (2026-10-17): `test/init.test.mjs` (14 tests: Node npm and pnpm, Python pip,
   uv and requirements-only, no command, Cargo/Go/Makefile with a taken name, private, macOS-specific, unknown
   visibility, overwrite refusal and `--force`, a kept verbatim caller, the CLI) and `test/session-start.test.mjs`.
@@ -173,6 +177,11 @@ then the skill and its eval (P4), then review (P5). Merging: the dispatching ses
 - GitHub's ubuntu-24.04 runner (probe run 39040606176 on the sandbox, 2026-10-17): `python3 -m pip install` into the
   system Python works despite its `EXTERNALLY-MANAGED` marker; `pipx` installs land in `/opt/pipx_bin`, on PATH for
   later steps; no `uv`, `poetry`, `pnpm` or `bun` is installed; Node 22, Go 1.24, cargo 1.99 and Swift 6.4 are.
+- Claude Code 2.1.300 clones a `github` plugin source over SSH when it updates it, `git@github.com:<repo>.git`, and
+  never falls back to HTTPS: `Pnt()` uses HTTPS only under `CLAUDE_CODE_PLUGIN_PREFER_HTTPS` or `CLAUDE_CODE_REMOTE`.
+  Only the first install probes for an SSH setup and falls back. A machine with no GitHub SSH key, this Mac included,
+  can therefore install such a plugin but never update it, whether or not it has a version. A `url` source with an
+  `https://` URL clones over HTTPS on both paths.
 - Claude Code installs a copied plugin's npm dependencies itself when the plugin root has `package.json` and a
   lockfile (plugin loading reference), which would also have made `yaml` resolvable; it was not relied on (Decision
   Log).
@@ -213,3 +222,7 @@ then the skill and its eval (P4), then review (P5). Merging: the dispatching ses
 - 2026-10-17 (worker, from review): the draft's `setup.node` is `engines.node` as written, a semver range that
   `actions/setup-node` resolves. Alternative rejected: its first number as a major, which drafts a version the
   range can exclude (`<22` gave 22). `.nvmrc` and `.node-version` still win when present.
+- 2026-10-17 (worker): the marketplace entry's source is `{"source": "url", "url": "https://github.com/SSFSKIM/ci-kit.git"}`
+  (doperpowers#217), not `{"source": "github"}`. Alternative rejected: keeping `github` and setting
+  `CLAUDE_CODE_PLUGIN_PREFER_HTTPS` in this Mac's settings. That fixes one machine, and every other machine without a
+  GitHub SSH key would have to set it too; without it, updates fail silently in the background (Surprises).
