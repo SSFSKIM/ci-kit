@@ -41,24 +41,41 @@ exit ${logStatus}
   writeFileSync(gh, `#!/bin/bash
 printf '%s\\0' "$@" >> '${join(dir, 'gh-args.txt')}'
 printf '\\0' >> '${join(dir, 'gh-args.txt')}'
-${ghHang ? 'exec /bin/sleep 60' : ''}
+if [[ $FAKE_GH_HANG == 1 ]]; then
+  trap '' ALRM
+  echo "$$" >> '${join(dir, 'hung-gh-pids.txt')}'
+  exec /bin/sleep 60
+fi
 [[ $FAKE_GH_STATUS == 0 ]] || exit "$FAKE_GH_STATUS"
 if [[ $1 == issue && $2 == create ]]; then echo https://github.com/SSFSKIM/ci-kit-sandbox/issues/42; fi
 `);
   for (const executable of [stub, open, log, gh]) chmodSync(executable, 0o755);
   const text = (name) => existsSync(join(dir, name)) ? readFileSync(join(dir, name), 'utf8') : '';
   const statePath = 'Library/Logs/ci-kit/dialog-alert.state';
-  function run(nextOutput, { ghExit = ghStatus } = {}) {
+  function run(nextOutput, { ghExit = ghStatus, ghStall = ghHang } = {}) {
     writeFileSync(front, nextOutput);
+    writeFileSync(join(dir, 'hung-gh-pids.txt'), '');
     const result = spawnSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', script], {
       encoding: 'utf8',
       timeout: 25_000,
       env: {
         PATH: `${join(dir, 'bin')}:/usr/bin:/bin`, HOME: dir,
-        CI_KIT_LOG_BIN: log, CI_KIT_GH_BIN: gh, FAKE_GH_STATUS: String(ghExit), GITHUB_RUN_ID: '123456', GITHUB_JOB: 'e2e',
+        CI_KIT_LOG_BIN: log, CI_KIT_GH_BIN: gh, FAKE_GH_STATUS: String(ghExit), FAKE_GH_HANG: ghStall ? '1' : '0',
+        GITHUB_RUN_ID: '123456', GITHUB_JOB: 'e2e',
       },
     });
+    const ghSurvivors = [];
+    for (const pid of text('hung-gh-pids.txt').trim().split('\n').filter(Boolean).map(Number)) {
+      try {
+        process.kill(pid, 0);
+        ghSurvivors.push(pid);
+        process.kill(pid, 'SIGKILL'); // Do not leak the stalled fake if the deadline regresses.
+      } catch (error) {
+        if (error.code !== 'ESRCH') throw error;
+      }
+    }
     return {
+      ghSurvivors,
       ...result,
       log: text('Library/Logs/ci-kit/mac-runner-hooks.log'),
       opened: text('opened.txt').trim().split('\n').filter(Boolean),
@@ -304,13 +321,32 @@ test('a hung unified-log read is cut off at the deadline and still alerts and fa
   assert.equal(run.ghCalls.length, 1);
 });
 
-test('a hung gh call is bounded and does not retry the same episode', () => {
+test('a hung gh call that ignores SIGALRM is terminated and reaped without retrying the same episode', () => {
   const started = Date.now();
   const run = check(asnShape('loginwindow'), 0, { ghHang: true });
   assert.equal(run.status, 1, run.stderr);
   assert.ok(Date.now() - started < 15_000, 'the gh deadline is enforced');
-  assert.notEqual(run.state, null);
+  assert.deepEqual(run.ghSurvivors, [], 'the timed-out gh process is terminated and reaped');
+  assert.equal(run.state, '', 'a timed-out create remembers the episode without an issue URL');
+  assert.match(run.log, /dialog alert issue creation failed or timed out/);
   const next = run.again(asnShape('loginwindow'));
   assert.equal(next.status, 1);
   assert.equal(next.ghCalls.length, 1);
+});
+
+test('hung gh cleanup calls that ignore SIGALRM do not block a passing job or retain the episode', () => {
+  const first = check(asnShape('loginwindow'));
+  assert.equal(first.state.trim(), alertURL);
+  const started = Date.now();
+  const passed = first.again(asnShape('Terminal'), { ghStall: true });
+  assert.equal(passed.status, 0, passed.stderr);
+  assert.ok(Date.now() - started < 25_000, 'comment and close each have a 10 s deadline');
+  assert.deepEqual(passed.ghSurvivors, [], 'both timed-out gh processes are terminated and reaped');
+  assert.equal(passed.state, null);
+  assert.deepEqual(passed.ghCalls.map((call) => call[1]), ['create', 'comment', 'close']);
+  assert.match(passed.log, /dialog alert clear comment failed or timed out/);
+  assert.match(passed.log, /dialog alert close failed or timed out/);
+  const next = passed.again(asnShape('Terminal'));
+  assert.equal(next.status, 0, next.stderr);
+  assert.equal(next.ghCalls.length, 3, 'a later passing job does not repeat cleanup');
 });

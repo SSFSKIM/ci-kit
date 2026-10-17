@@ -67,7 +67,20 @@ dialog_source() {
   rm -f "$out" || true
 }
 
-alert_gh() { perl -e 'alarm 10; exec @ARGV' "${CI_KIT_GH_BIN:-gh}" "$@"; }
+alert_gh() {
+  # gh can ignore an inherited SIGALRM. Keep the deadline in a supervisor that kills and reaps it.
+  perl -e '
+    my $pid = fork;
+    defined $pid or exit 125;
+    if (!$pid) { exec @ARGV; exit 127; }
+    $SIG{ALRM} = sub { kill "KILL", $pid; waitpid $pid, 0; exit 124; };
+    alarm 10;
+    waitpid $pid, 0;
+    my $status = $?;
+    alarm 0;
+    exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
+  ' "${CI_KIT_GH_BIN:-gh}" "$@"
+}
 alert_dialog() {
   local out body issue=''
   [[ ! -e $dialog_state ]] || return 0
