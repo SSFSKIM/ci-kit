@@ -159,7 +159,8 @@ esac`);
     hook: (output, options) => run('desktop-check.sh', output, options),
     watch: (output, options) => run('dialog-watch.sh', output, options),
     runner: (state) => writeFileSync(processes, state),
-    // Holds the dialog state's lock, as a hook mid-alert would, until the returned function is called.
+    // Holds the dialog state's lock, as a hook mid-alert would, until the returned function is called; it returns once
+    // the lock is free again.
     holdLock() {
       mkdirSync(file('Library/Logs/ci-kit'), { recursive: true });
       const release = file('release-lock');
@@ -168,7 +169,12 @@ esac`);
         if (fork) { exit 0 } open(STDOUT, ">/dev/null"); open(STDERR, ">/dev/null");
         select(undef, undef, undef, 0.05) until -e $ARGV[0]; unlink $ARGV[0];' '${file('Library/Logs/ci-kit/dialog-alert.lock')}' '${release}'`], { encoding: 'utf8' });
       if (holder.status !== 0) throw new Error(holder.stderr);
-      return () => writeFileSync(release, '');
+      return () => {
+        writeFileSync(release, '');
+        const free = spawnSync('perl', ['-MFcntl=:flock', '-e', 'open(my $fh, ">>", shift) or die; alarm 10; flock($fh, LOCK_EX) or die',
+          file('Library/Logs/ci-kit/dialog-alert.lock')], { encoding: 'utf8' });
+        if (free.status !== 0) throw new Error(`the lock was not released: ${free.stderr}`);
+      };
     },
   };
   return api;

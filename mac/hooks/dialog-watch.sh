@@ -92,8 +92,7 @@ runner_state() {
 # closes, removing the marker lets the wrapper start the runner. The watcher never loads, unloads, enables or disables
 # anything, so a runner disabled by hand or by `install.sh --disabled` stays off. Stopping can still abort a job the
 # listener took a moment before the check; that job fails as any job that loses its runner.
-drain() {
-  local runner
+hold() { # under the episode lock: the hold follows the episode as it stands now
   load_state
   if [[ $st_phase == open ]]; then
     if [[ ! -e $drain_marker ]]; then
@@ -103,35 +102,47 @@ drain() {
       fi
       log "drain: holding the runner while ${st_name:-a system dialog} holds the front (since $st_since)"
     fi
-    runner=$(runner_state) || runner="failed ($?)"
-    case $runner in
-      stopped) ;;
-      idle)
-        if bounded 10 launchctl kill SIGTERM "$domain/$runner_agent" >/dev/null 2>&1; then
-          log "drain: stopped the runner (no job running); it waits for the episode to close"
-        else
-          log "drain: SIGTERM to $runner_agent failed or timed out; retrying at the next read"
-        fi
-        ;;
-      busy*) log "drain: a job is running ($runner); the runner stops once it is idle" ;;
-      *) log "drain: could not tell whether a job is running: ${runner:-no answer}; the runner is left running" ;;
-    esac
+    held=1
   elif [[ -z $st_phase && -e $drain_marker ]]; then
-    if rm -f "$drain_marker"; then log "drain: released the runner: the episode closed"; fi
+    if rm -f "$drain_marker"; then
+      log "drain: released the runner: the episode closed"
+    else
+      log "drain: could not remove $drain_marker; the runner stays held"
+    fi
   fi
 }
+stop_idle() { # outside the lock: only the watcher closes an episode, so the hold outlasts this
+  local runner
+  runner=$(runner_state) || runner="failed ($?)"
+  case $runner in
+    stopped) ;;
+    idle)
+      if bounded 10 launchctl kill SIGTERM "$domain/$runner_agent" >/dev/null 2>&1; then
+        log "drain: stopped the runner (no job running); it waits for the episode to close"
+      else
+        log "drain: SIGTERM to $runner_agent failed or timed out; retrying at the next read"
+      fi
+      ;;
+    busy*) log "drain: a job is running ($runner); the runner stops once it is idle" ;;
+    *) log "drain: could not tell whether a job is running: ${runner:-no answer}; the runner is left running" ;;
+  esac
+}
 
+# One locked step per run: the read's effect on the episode, then the hold that follows from it. The job hook
+# publishes an episode under the same lock, so a release never acts on a phase the hook has since replaced. A run
+# that finds the lock taken changes nothing and tries again a minute later.
+held=
 read_front
 clock
-if [[ -z $name ]]; then
-  log "could not read the frontmost app; nothing changes"
-elif [[ -e $dialog_state ]] || is_dialog; then
+[[ -n $name ]] || log "could not read the frontmost app; nothing changes"
+if [[ -e $dialog_state || -e $drain_marker ]] || is_dialog; then
   if lock_state 0; then
-    watch_read
+    [[ -z $name ]] || watch_read
+    hold
     unlock_state
   else
     log "the job hook holds the dialog state; this read is skipped"
   fi
 fi
-drain
+[[ -z $held ]] || stop_idle
 exit 0

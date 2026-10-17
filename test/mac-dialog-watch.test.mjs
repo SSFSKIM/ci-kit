@@ -311,6 +311,28 @@ test('a hold that could not be released stays until no episode is pending or ope
   assert.equal(released.marker, null);
 });
 
+test('a release happens under the episode lock: an episode a job hook publishes meanwhile keeps its hold', () => {
+  const d = desktop();
+  const logs = join(d.dir, 'Library/Logs/ci-kit');
+  mkdirSync(logs, { recursive: true });
+  writeFileSync(join(logs, 'runner-drained'), 'held at 2026-10-17T05:10:00Z: SecurityAgent since 2026-10-17T05:09:00Z\n');
+  // A job hook holds the lock, about to publish an episode: the state the watcher could read still has none.
+  const release = d.holdLock();
+  try {
+    const raced = d.watch(terminal, { at: 0 });
+    assert.notEqual(raced.marker, null, 'no release while the hook holds the lock');
+    assert.match(raced.log, /the job hook holds the dialog state; this read is skipped/);
+    writeFileSync(join(logs, 'dialog-alert.state'),
+      `phase=open\nname=SecurityAgent\nsince=${iso(T0)}\nat=${T0}\nsource=source unknown\nissue=${alertURL}\nclear=0\nclear_since=\n`);
+  } finally {
+    release();
+  }
+  const next = d.watch(security, { at: 60 });
+  assert.deepEqual([next.state.phase, next.marker === null], ['open', false], "the new episode's hold stands");
+  assert.deepEqual(next.launchctl, [kill]);
+  assert.equal(creates(next).length, 0, "the hook's episode, not a second one");
+});
+
 test('the SIGTERM has a deadline, and a failed one is retried at the next read', () => {
   const d = desktop();
   d.watch(security, { at: 0 });
@@ -368,13 +390,50 @@ test('runner-hold.sh waits while the marker exists, after a reboot as after a st
     child.kill('SIGKILL');
     rmSync(home, { recursive: true, force: true });
   }
-  // Without a marker it starts at once, and says nothing.
+  // Without a marker, or without its directory, it starts at once, and says nothing.
   const free = mkdtempSync(join(tmpdir(), 'ci-kit-hold-'));
   writeFileSync(join(free, 'runsvc.sh'), '#!/bin/bash\necho runsvc\n');
   chmodSync(join(free, 'runsvc.sh'), 0o755);
   const started = spawnSync('/bin/bash', [hold], { cwd: free, env: { HOME: free, PATH: '/usr/bin:/bin' }, encoding: 'utf8', timeout: 10_000 });
   assert.equal(started.stdout, 'runsvc\n');
   rmSync(free, { recursive: true, force: true });
+});
+
+test('runner-hold.sh holds while the marker cannot be looked up, says why, and starts only once the marker is absent', { skip: process.getuid?.() === 0 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), 'ci-kit-hold-'));
+  const logs = join(home, 'Library/Logs/ci-kit');
+  mkdirSync(logs, { recursive: true });
+  const markerFile = join(logs, 'runner-drained');
+  writeFileSync(markerFile, 'held at 2026-10-17T05:13:34Z: SecurityAgent since 2026-10-17T05:12:34Z\n');
+  writeFileSync(join(home, 'runsvc.sh'), `#!/bin/bash\necho runsvc > '${join(home, 'started')}'\n`);
+  chmodSync(join(home, 'runsvc.sh'), 0o755);
+  chmodSync(logs, 0o600); // not searchable: the marker is there, and cannot be looked up
+  const child = spawn('/bin/bash', [hold], { cwd: home, env: { HOME: home, PATH: '/usr/bin:/bin', CI_KIT_HOLD_POLL: '0.1' } });
+  let output = '';
+  child.stdout.on('data', (chunk) => { output += chunk; });
+  const until = async (pattern) => {
+    for (let waited = 0; !pattern.test(output); waited += 50) {
+      assert.ok(waited < 10_000, `waiting for ${pattern}: ${output}`);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  };
+  try {
+    await until(/cannot tell whether the dialog watcher holds it \(.*runner-drained: Permission denied\), so held as if it does; waiting/);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(existsSync(join(home, 'started')), false, 'held: runsvc.sh does not start');
+    chmodSync(logs, 0o700);
+    await until(/runner-hold: held by the dialog watcher \(held at .*\); waiting/);
+    assert.equal(existsSync(join(home, 'started')), false);
+    unlinkSync(markerFile);
+    const [code] = await once(child, 'exit');
+    assert.equal(code, 0);
+    assert.equal(readFileSync(join(home, 'started'), 'utf8'), 'runsvc\n');
+    assert.equal(output.match(/; waiting$/gm).length, 2, 'each reason is logged once');
+  } finally {
+    child.kill('SIGKILL');
+    chmodSync(logs, 0o700);
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('runner-state.py reads the kernel\'s executable paths: decoys never count, and an unreadable worker is busy', macOnly, async () => {

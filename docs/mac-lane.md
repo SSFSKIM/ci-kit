@@ -322,9 +322,11 @@ other machine, or wait. On a single machine, the drain turns refusals into queue
 dismissed and the episode closes.
 
 - **The hold** is the marker `~/Library/Logs/ci-kit/runner-drained`, written when the episode opens. The runner's
-  LaunchAgent runs `runner-hold.sh`, which execs the runner's `runsvc.sh` only while no marker exists, and otherwise
-  waits for it to go, checking every 5 s. KeepAlive, RunAtLoad and a reboot can therefore start only the waiting
-  wrapper, never the runner. The wrapper execs, so launchd's `/bin/bash` stays every job's responsible process.
+  LaunchAgent runs `runner-hold.sh`, which execs the runner's `runsvc.sh` only once the marker is absent, and otherwise
+  waits, checking every 5 s. Absent means the lookup says no such file, a missing directory included. A marker that
+  cannot be looked up, behind a directory that is not searchable for instance, holds the runner too, and the wrapper
+  logs why. KeepAlive, RunAtLoad and a reboot can therefore start only the waiting wrapper, never the runner. The
+  wrapper execs, so launchd's `/bin/bash` stays every job's responsible process.
 - **Stopping.** While the hold is on and the runner is idle, the watcher sends the agent SIGTERM
   (`launchctl kill SIGTERM`). `runsvc.sh` turns that into the listener's graceful stop, and KeepAlive brings back the
   waiting wrapper.
@@ -335,7 +337,9 @@ dismissed and the episode closes.
   names it `Runner.Worker`. A read that fails or times out counts as a job too: the runner is left alone, and the
   watcher asks again next minute.
 - **Releasing.** When the episode closes, the watcher removes the marker, and the wrapper starts the runner within
-  5 s. A marker left while no episode is pending or open goes at the next read.
+  5 s. A marker left while no episode is pending or open goes at the next read. The watcher writes and removes the
+  marker under the episode's lock, in the same step as its read, so it never releases a runner for an episode a job
+  hook has just opened.
 - **An operator's runner stays the operator's.** The watcher never loads, unloads, enables or disables the runner's
   agent. A runner disabled by hand or by `install.sh --disabled` stays off, and one enabled during an episode waits for
   it to close.
