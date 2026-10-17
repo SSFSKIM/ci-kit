@@ -13,10 +13,9 @@ before(() => {
 });
 after(() => rmSync(root, { recursive: true, force: true }));
 
-// Runs the check with stubs first on PATH. `lsappinfo`: `front` prints an ASN, `info` prints the current frontmost
-// output (`output` at the start) and exits `status`. `open`: records its arguments, then, when `afterOpen` is given,
-// makes that the frontmost output, and exits `openStatus`.
-function check(output, status = 0, { afterOpen, openStatus = 0 } = {}) {
+// Each check has an isolated desktop and HOME. `again` runs another job in that same dialog episode.
+// External reads and GitHub writes are faked, including the absolute-path unified log command.
+function check(output, status = 0, { afterOpen, openStatus = 0, logOutput = '', logStatus = 0, ghStatus = 0, logHang = false, ghHang = false } = {}) {
   const dir = join(root, String(Math.random()).slice(2));
   mkdirSync(join(dir, 'bin'), { recursive: true });
   const front = join(dir, 'out.txt');
@@ -30,19 +29,46 @@ function check(output, status = 0, { afterOpen, openStatus = 0 } = {}) {
     `#!/bin/bash\necho "$*" >> '${join(dir, 'opened.txt')}'\n` +
       `[[ -f '${join(dir, 'after.txt')}' ]] && cp '${join(dir, 'after.txt')}' '${front}'\nexit ${openStatus}\n`,
   );
-  chmodSync(stub, 0o755);
-  chmodSync(open, 0o755);
-  const run = spawnSync('bash', [script], {
-    encoding: 'utf8',
-    env: { PATH: `${join(dir, 'bin')}:/usr/bin:/bin`, HOME: dir },
-  });
-  const logFile = join(dir, 'Library/Logs/ci-kit/mac-runner-hooks.log');
-  const openedFile = join(dir, 'opened.txt');
-  return {
-    ...run,
-    log: existsSync(logFile) ? readFileSync(logFile, 'utf8') : '',
-    opened: existsSync(openedFile) ? readFileSync(openedFile, 'utf8').trim().split('\n') : [],
-  };
+  const log = join(dir, 'bin', 'unified-log');
+  writeFileSync(join(dir, 'unified.txt'), logOutput);
+  writeFileSync(log, `#!/bin/bash
+printf '%s\\0' "$@" >> '${join(dir, 'log-args.txt')}'
+${logHang ? 'exec /bin/sleep 60' : ''}
+cat '${join(dir, 'unified.txt')}'
+exit ${logStatus}
+`);
+  const gh = join(dir, 'bin', 'gh');
+  writeFileSync(gh, `#!/bin/bash
+printf '%s\\0' "$@" >> '${join(dir, 'gh-args.txt')}'
+printf '\\0' >> '${join(dir, 'gh-args.txt')}'
+${ghHang ? 'exec /bin/sleep 60' : ''}
+[[ $FAKE_GH_STATUS == 0 ]] || exit "$FAKE_GH_STATUS"
+if [[ $1 == issue && $2 == create ]]; then echo https://github.com/SSFSKIM/ci-kit-sandbox/issues/42; fi
+`);
+  for (const executable of [stub, open, log, gh]) chmodSync(executable, 0o755);
+  const text = (name) => existsSync(join(dir, name)) ? readFileSync(join(dir, name), 'utf8') : '';
+  const statePath = 'Library/Logs/ci-kit/dialog-alert.state';
+  function run(nextOutput, { ghExit = ghStatus } = {}) {
+    writeFileSync(front, nextOutput);
+    const result = spawnSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', script], {
+      encoding: 'utf8',
+      timeout: 25_000,
+      env: {
+        PATH: `${join(dir, 'bin')}:/usr/bin:/bin`, HOME: dir,
+        CI_KIT_LOG_BIN: log, CI_KIT_GH_BIN: gh, FAKE_GH_STATUS: String(ghExit), GITHUB_RUN_ID: '123456', GITHUB_JOB: 'e2e',
+      },
+    });
+    return {
+      ...result,
+      log: text('Library/Logs/ci-kit/mac-runner-hooks.log'),
+      opened: text('opened.txt').trim().split('\n').filter(Boolean),
+      ghCalls: text('gh-args.txt').split('\0\0').filter(Boolean).map((call) => call.split('\0')),
+      logArgs: text('log-args.txt').split('\0').filter(Boolean),
+      state: existsSync(join(dir, statePath)) ? text(statePath) : null,
+      again: run,
+    };
+  }
+  return run(output);
 }
 // The two shapes lsappinfo prints for `info -only name`: macOS 27 over ssh, and the LSDisplayName pair.
 // With a bundle id, each also prints it: `bundleID="<id>"` and `"CFBundleIdentifier"="<id>"` (both checked live).
@@ -54,7 +80,7 @@ for (const name of ['UserNotificationCenter', 'CoreServicesUIAgent', 'SecurityAg
   test(`a system dialog in front (${name}) fails the job at once, saying what to do`, () => {
     const run = check(asnShape(name));
     assert.equal(run.status, 1);
-    assert.match(run.stderr, new RegExp(`^ci-kit: a system dialog \\(${name}\\) holds focus on the mini — dismiss it there and rerun$`, 'm'));
+    assert.match(run.stderr, new RegExp(`^ci-kit: a system dialog \\(${name}: source unknown\\) holds focus on the mini — dismiss it there and rerun$`, 'm'));
     assert.match(run.log, new RegExp(`desktop-check .*${name}`));
   });
 }
@@ -62,7 +88,7 @@ for (const name of ['UserNotificationCenter', 'CoreServicesUIAgent', 'SecurityAg
 test('the LSDisplayName shape is read too', () => {
   const run = check(pairShape('SecurityAgent'));
   assert.equal(run.status, 1);
-  assert.match(run.stderr, /\(SecurityAgent\) holds focus/);
+  assert.match(run.stderr, /\(SecurityAgent: source unknown\) holds focus/);
 });
 
 test('an ordinary app in front passes once Terminal is brought over it', () => {
@@ -173,4 +199,118 @@ test('an app merely named Terminal under another bundle id is brought Terminal o
   assert.equal(run.status, 1);
   assert.deepEqual(run.opened, ['-a Terminal']);
   assert.match(run.stderr, /Terminal did not come to the front on the mini \(Terminal is\)/);
+});
+
+const firewallOld = '2026-10-16 10:00:00.000 Df socketfilterfw[100:200] [com.apple.alf] doask: sending prompt for a filtering decision on: Old App';
+const firewallNew = '2026-10-16 10:01:00.000 Df socketfilterfw[100:200] [com.apple.alf] doask: sending prompt for a filtering decision on: Electron';
+const alertURL = 'https://github.com/SSFSKIM/ci-kit-sandbox/issues/42';
+const argValue = (call, flag) => call[call.indexOf(flag) + 1];
+
+test('the first dialog failure names the newest firewall source and creates one issue with job context', () => {
+  const run = check(asnShape('UserNotificationCenter'), 0, {
+    logOutput: `${firewallOld}\n${firewallNew}\n2026-10-16 10:02:00.000 Df other[1:2] doask: sending prompt for a filtering decision on: Not the Firewall\n`,
+  });
+  assert.equal(run.status, 1, run.stderr);
+  assert.match(run.log, /frontmost is UserNotificationCenter: firewall prompt for Electron/);
+  assert.match(run.stderr, /UserNotificationCenter: firewall prompt for Electron/);
+  assert.equal(run.ghCalls.length, 1);
+  const [create] = run.ghCalls;
+  assert.deepEqual(create.slice(0, 2), ['issue', 'create']);
+  assert.equal(argValue(create, '--repo'), 'SSFSKIM/ci-kit-sandbox');
+  assert.equal(argValue(create, '--label'), 'ci-kit-alert');
+  assert.equal(argValue(create, '--title'), 'ci-kit alert: system dialog on the mini (UserNotificationCenter: firewall prompt for Electron)');
+  const body = argValue(create, '--body');
+  assert.match(body, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/);
+  assert.match(body, /UserNotificationCenter/);
+  assert.ok(body.includes(firewallNew), 'the evidence line is included');
+  assert.match(body, /123456/);
+  assert.equal(run.state.trim(), alertURL);
+  assert.equal(argValue(run.logArgs, '--last'), '15m');
+});
+
+test('repeated failing jobs share one alert; a passing job comments, closes, and clears the episode', () => {
+  const first = check(asnShape('UserNotificationCenter'), 0, { logOutput: firewallNew });
+  const second = first.again(asnShape('UserNotificationCenter'));
+  assert.equal(second.status, 1);
+  assert.equal(second.ghCalls.length, 1, 'no repeat issue for another job in the same episode');
+  const passed = second.again(asnShape('Terminal'));
+  assert.equal(passed.status, 0, passed.stderr);
+  assert.equal(passed.state, null);
+  assert.deepEqual(passed.ghCalls.map((call) => call.slice(0, 2)), [['issue', 'create'], ['issue', 'comment'], ['issue', 'close']]);
+  assert.equal(passed.ghCalls[1][2], alertURL);
+  assert.match(argValue(passed.ghCalls[1], '--body'), /^cleared at \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+  assert.equal(passed.ghCalls[2][2], alertURL);
+  const quiet = passed.again(asnShape('Terminal'));
+  assert.equal(quiet.ghCalls.length, 3, 'a later passing job does nothing');
+  const next = quiet.again(asnShape('loginwindow'));
+  assert.equal(next.status, 1);
+  assert.equal(next.ghCalls.length, 4, 'a new episode alerts again');
+});
+
+test('a non-dialog app that needs Terminal also clears the alert once the check passes', () => {
+  const first = check(asnShape('loginwindow'), 0, { afterOpen: asnShape('Terminal') });
+  const passed = first.again(asnShape('Finder'));
+  assert.equal(passed.status, 0, passed.stderr);
+  assert.equal(passed.state, null);
+  assert.equal(passed.ghCalls.at(-1)[1], 'close');
+});
+
+test('gh failure is logged, remembered without retries, and cannot change a failing or passing job', () => {
+  const first = check(asnShape('SecurityAgent'), 0, { ghStatus: 1 });
+  assert.equal(first.status, 1);
+  assert.notEqual(first.state, null, 'a failed alert still records the episode');
+  assert.match(first.log, /alert.*(failed|timed out)/);
+  const second = first.again(asnShape('SecurityAgent'));
+  assert.equal(second.status, 1);
+  assert.equal(second.ghCalls.length, 1);
+  const passed = second.again(asnShape('Terminal'));
+  assert.equal(passed.status, 0, passed.stderr);
+  assert.equal(passed.state, null);
+  // Also exercise failures of the comment and close calls when an issue was created successfully.
+  const succeeds = check(asnShape('loginwindow'));
+  const clearFails = succeeds.again(asnShape('Terminal'), { ghExit: 1 });
+  assert.equal(clearFails.status, 0, clearFails.stderr);
+  assert.equal(clearFails.state, null);
+  assert.deepEqual(clearFails.ghCalls.map((call) => call[1]), ['create', 'comment', 'close']);
+  assert.match(clearFails.log, /alert.*(failed|timed out)/);
+});
+
+test('SecurityAgent names the latest requesting process before its launch, not a later request', () => {
+  const source = '2026-10-16 10:00:01.000 Df security[101:201] [com.apple.security] SecKeychainCopyMatching: client request';
+  const run = check(asnShape('SecurityAgent'), 0, { logOutput: [
+    '2026-10-16 10:00:00.000 Df codesign[100:200] [com.apple.security] SecKeychainOpen: client request',
+    source,
+    '2026-10-16 10:00:02.000 Df launchd[1:2] spawning SecurityAgent',
+    '2026-10-16 10:00:03.000 Df unrelated[102:202] [com.apple.security] SecKeychainOpen: client request',
+  ].join('\n') });
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /SecurityAgent: security request from security/);
+  assert.ok(argValue(run.ghCalls[0], '--body').includes(source));
+});
+
+test('failed unified-log reads discard partial output and leave the source unknown', () => {
+  const run = check(asnShape('UserNotificationCenter'), 0, { logOutput: firewallNew, logStatus: 1 });
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /UserNotificationCenter: source unknown/);
+  assert.equal(run.ghCalls.length, 1);
+});
+
+test('a hung unified-log read is cut off at the deadline and still alerts and fails the job', () => {
+  const started = Date.now();
+  const run = check(asnShape('UserNotificationCenter'), 0, { logHang: true });
+  assert.equal(run.status, 1, run.stderr);
+  assert.ok(Date.now() - started < 15_000, 'the 10 s read deadline is enforced');
+  assert.match(run.stderr, /UserNotificationCenter: source unknown/);
+  assert.equal(run.ghCalls.length, 1);
+});
+
+test('a hung gh call is bounded and does not retry the same episode', () => {
+  const started = Date.now();
+  const run = check(asnShape('loginwindow'), 0, { ghHang: true });
+  assert.equal(run.status, 1, run.stderr);
+  assert.ok(Date.now() - started < 15_000, 'the gh deadline is enforced');
+  assert.notEqual(run.state, null);
+  const next = run.again(asnShape('loginwindow'));
+  assert.equal(next.status, 1);
+  assert.equal(next.ghCalls.length, 1);
 });
