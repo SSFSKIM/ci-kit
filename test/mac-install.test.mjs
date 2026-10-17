@@ -10,7 +10,9 @@ const repo = fileURLToPath(new URL('../', import.meta.url));
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'ci-kit-install-')));
 after(() => rmSync(root, { recursive: true, force: true }));
 const python = spawnSync('python3', ['-I', '-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).stdout.trim();
-const hookFiles = ['job-started.sh', 'job-completed.sh', 'desktop-check.sh', 'desktop-posture.sh', 'sweep.mjs', 'strays.mjs', 'terminate.mjs'];
+const hookFiles = ['job-started.sh', 'job-completed.sh', 'desktop-check.sh', 'desktop-posture.sh', 'dialog.sh', 'dialog-watch.sh', 'runner-worker.py', 'sweep.mjs', 'strays.mjs', 'terminate.mjs'];
+const watchAgent = 'com.ssfskim.ci-kit.dialog-watch';
+const runnerAgent = 'com.ssfskim.ci-kit.mac-runner';
 const macOnly = { skip: process.platform !== 'darwin' };
 
 // What the runner writes at registration (2.338.0): JSON behind a UTF-8 byte-order mark (the mini's, read 2026-10-17).
@@ -24,7 +26,11 @@ function fixture({ registered = 'ci-kit-mac-mini' } = {}) {
   for (const dir of ['mac', 'host']) cpSync(join(repo, dir), join(kit, dir), { recursive: true });
   const executable = (path, body) => { writeFileSync(path, `#!/bin/bash\n${body}\n`); chmodSync(path, 0o755); };
   const fake = (name, body) => executable(join(bin, name), body);
-  fake('launchctl', 'echo "$*" >> "$HOME/launchctl.calls"\n[[ $1 != print ]]');
+  // A runner bootstrapped reports in its log; FAIL_DISABLE fails `launchctl disable` (a failure after the watcher's unload).
+  fake('launchctl', `echo "$*" >> "$HOME/launchctl.calls"
+[[ $1 == disable && \${FAIL_DISABLE:-0} == 1 ]] && exit 9
+[[ $1 == bootstrap && $3 == *${runnerAgent}.plist ]] && echo 'Listening for Jobs' >> "$HOME/Library/Logs/ci-kit/mac-runner.out.log"
+[[ $1 != print ]]`);
   fake('plutil', 'exit 0');
   fake('pgrep', 'exit 1');
   fake('uname', 'if [[ $1 == -m ]]; then echo arm64; else echo Darwin; fi');
@@ -224,6 +230,11 @@ test('a name that is not the registered one, or missing at registration, is refu
     ['ci-kit-mac-mini', ['--disabled', '--name', 'ci-kit-mac-rental'], '', /registered as ci-kit-mac-mini; to rename it/],
     [null, ['--disabled'], 'registration-token-123\n', /name the runner to register it: --name ci-kit-mac-<machine>/],
     [null, ['--name', 'the rental'], 'registration-token-123\n', /--name takes letters, digits/],
+    // The short name is in every alert title, which MAWS reads with [a-z0-9-]+.
+    [null, ['--disabled', '--name', 'ci-kit-mac-Rental'], 'registration-token-123\n', /short name, 'Rental' in ci-kit-mac-Rental, takes lowercase letters, digits and '-'/],
+    [null, ['--disabled', '--name', 'ci-kit-mac-the_rental'], 'registration-token-123\n', /short name, 'the_rental'/],
+    [null, ['--disabled', '--name', 'ci-kit-mac-mini.2'], 'registration-token-123\n', /short name, 'mini.2'/],
+    ['ci-kit-mac-Mini', ['--disabled'], '', /short name, 'Mini' in ci-kit-mac-Mini/],
   ]) {
     const f = fixture({ registered });
     const before = f.snapshot();
@@ -298,4 +309,62 @@ test('Node resolution reports a missing compatible runtime instead of running th
   });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Node >= 22/);
+});
+
+const calls = (f) => existsSync(join(f.home, 'launchctl.calls')) ? readFileSync(join(f.home, 'launchctl.calls'), 'utf8').trim().split('\n') : [];
+const uidOf = () => String(process.getuid());
+
+test('every mode installs the dialog watcher: unloaded first, its drain marker dropped, loaded last', macOnly, () => {
+  for (const args of [['--disabled'], []]) {
+    const f = fixture();
+    const marker = join(f.home, 'Library/Logs/ci-kit/runner-drained');
+    mkdirSync(join(marker, '..'), { recursive: true });
+    writeFileSync(marker, 'stopped at 2026-10-17T05:13:34Z: SecurityAgent since 2026-10-17T05:12:34Z\n');
+    const result = f.run(undefined, args);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, new RegExp(`dialog watcher ${watchAgent} runs`));
+    assert.equal(existsSync(marker), false, "after an install, whether the runner runs is the install's mode");
+    const domain = `gui/${uidOf()}`;
+    const log = calls(f);
+    const at = (call) => log.indexOf(call);
+    assert.ok(at(`bootout ${domain}/${watchAgent}`) >= 0);
+    assert.ok(at(`bootout ${domain}/${watchAgent}`) < at(`bootout ${domain}/${runnerAgent}`), 'the watcher is out of the way first');
+    const watchPlist = join(f.home, `Library/LaunchAgents/${watchAgent}.plist`);
+    assert.deepEqual(log.slice(-2), [`enable ${domain}/${watchAgent}`, `bootstrap ${domain} ${watchPlist}`]);
+    const plist = readPlist(watchPlist);
+    assert.deepEqual(plist.ProgramArguments, ['/bin/bash', join(f.hooks, 'dialog-watch.sh')]);
+    assert.equal(plist.StartInterval, 60);
+    assert.equal(plist.RunAtLoad, true);
+    assert.equal(plist.LimitLoadToSessionType, 'Aqua');
+    assert.equal(plist.EnvironmentVariables.CI_KIT_MACHINE, 'mini');
+    assert.equal(plist.EnvironmentVariables.PATH, f.env.PATH, "the runner's PATH");
+    assert.ok(!JSON.stringify(plist).includes('__'), 'every placeholder is filled');
+  }
+});
+
+test('a failure after the watcher was unloaded still loads it again', macOnly, () => {
+  const f = fixture();
+  const result = f.run(undefined, ['--disabled'], { FAIL_DISABLE: '1' });
+  assert.notEqual(result.status, 0);
+  const domain = `gui/${uidOf()}`;
+  assert.deepEqual(calls(f).slice(-2), [`enable ${domain}/${watchAgent}`, `bootstrap ${domain} ${join(f.home, `Library/LaunchAgents/${watchAgent}.plist`)}`]);
+});
+
+test('--uninstall unloads and removes both LaunchAgents and the marker, and keeps the registration and hooks', macOnly, () => {
+  const f = fixture();
+  assert.equal(f.run().status, 0);
+  const marker = join(f.home, 'Library/Logs/ci-kit/runner-drained');
+  writeFileSync(marker, 'stopped\n');
+  rmSync(join(f.home, 'launchctl.calls'));
+  const result = f.run(undefined, ['--uninstall']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /uninstalled: .* the registration and .* stay/);
+  const domain = `gui/${uidOf()}`;
+  assert.deepEqual(calls(f).filter((call) => call.startsWith('bootout')), [`bootout ${domain}/${watchAgent}`, `bootout ${domain}/${runnerAgent}`]);
+  assert.ok(!calls(f).some((call) => call.startsWith('bootstrap')));
+  for (const agent of [watchAgent, runnerAgent]) assert.equal(existsSync(join(f.home, `Library/LaunchAgents/${agent}.plist`)), false);
+  assert.equal(existsSync(marker), false);
+  assert.ok(existsSync(join(f.runner, '.runner')));
+  assertNewHooks(f);
+  assert.equal(f.run(undefined, ['--uninstall', '--name', 'ci-kit-mac-mini']).status, 2, '--uninstall takes nothing else');
 });

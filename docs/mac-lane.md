@@ -23,7 +23,9 @@ On every machine:
 | Directory | `~/actions-runner-maws` (work directory `~/actions-runner-maws/_work`) |
 | LaunchAgent | `com.ssfskim.ci-kit.mac-runner` — RunAtLoad, KeepAlive, `ProcessType` Interactive, Aqua session only |
 | Hooks | `~/actions-runner-maws/ci-kit/hooks/job-started.sh` (the desktop check, then the sweep), `job-completed.sh` (copied from `mac/hooks/`) |
-| Logs | `~/Library/Logs/ci-kit/mac-runner-hooks.log` (the hooks), `mac-runner.out.log` / `.err.log` (the runner), `~/actions-runner-maws/_diag/` |
+| Dialog watcher | `com.ssfskim.ci-kit.dialog-watch` — RunAtLoad, every 60 s, `ProcessType` Background, Aqua session only; runs the hooks' `dialog-watch.sh` ([below](#the-dialog-watcher)) |
+| Logs | `~/Library/Logs/ci-kit/mac-runner-hooks.log` (the hooks and the watcher), `mac-runner.out.log` / `.err.log` (the runner), `dialog-watch.err.log`, `~/actions-runner-maws/_diag/` |
+| State | `~/Library/Logs/ci-kit/dialog-alert.state` (the dialog episode), `runner-drained` (the watcher stopped the runner) |
 
 **Why a LaunchAgent.** Electron windows need a WindowServer, which only the user's GUI session has; a LaunchDaemon runs
 outside it. **Why one runner per machine.** Concurrency is one per machine: e2e groups contend for the desktop (focus,
@@ -57,7 +59,7 @@ another machine, use its `ssh` host and runner name.
 ssh mini 'git -C ~/Developer/GitHub/ci-kit pull --ff-only || git clone https://github.com/SSFSKIM/ci-kit ~/Developer/GitHub/ci-kit'
 ssh mini '~/Developer/GitHub/ci-kit/mac/install.sh --check'      # prerequisites only; a gap is reported, never installed
 ssh mini '~/Developer/GitHub/ci-kit/mac/install.sh'              # a registered runner: refresh and reload
-#   expect: ci-kit mac: running: ci-kit-mac-mini listens for jobs of https://github.com/SSFSKIM/MAWS
+#   expect: ci-kit mac: running: ci-kit-mac-mini listens for jobs of https://github.com/SSFSKIM/MAWS; the dialog watcher com.ssfskim.ci-kit.dialog-watch runs
 gh api repos/SSFSKIM/MAWS/actions/runners --jq '.runners[]|[.name,.status,.busy]|@tsv'
 #   expect: ci-kit-mac-mini  online  false
 ```
@@ -75,9 +77,14 @@ gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token
 - **The name** is needed only to register, and has no default: `config.sh --replace` takes over any registration of
   the same name, so a default would let a new Mac take the mini's. A re-run reads the registered name from the runner's
   `.runner` and refuses a different `--name`; renaming is a removal and a new registration. The part after
-  `ci-kit-mac-` is the machine's short name, which the hooks' messages and alert use ("on the mini").
-- **Re-running** (no token, no name) refreshes the hooks, the runner's `.env` and `.path`, and the LaunchAgent, and
-  reloads it. It refuses while a job runs, because reloading the agent kills the job. New hooks and the optional
+  `ci-kit-mac-` is the machine's short name, which the hooks' messages and alert use ("on the mini"). It must be
+  lowercase letters, digits and `-`, because the alert title carries it ([the contract](#the-alert-title)); `install.sh`
+  refuses any other name before anything changes.
+- **Re-running** (no token, no name) refreshes the hooks, the runner's `.env` and `.path`, and both LaunchAgents, and
+  reloads them. It refuses while a job runs, because reloading the agent kills the job. The watcher is unloaded first
+  and loaded last, even when the install fails after unloading it. Its drain marker is dropped, so after an install
+  the runner runs or not as the install's mode says. If a dialog episode is still open, the watcher stops the runner
+  again once it is idle. New hooks and the optional
   compiled cursor helper are staged and checked in a sibling directory. Darwin's atomic `RENAME_SWAP` exchanges
   that directory with `ci-kit/hooks/`, so the fixed hook paths in `.env` never disappear between renames: a job
   starting during publication finds either complete set. Copy or validation failures leave the old set untouched;
@@ -94,21 +101,24 @@ gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token
 
 Disable and enable (the runner stays registered; GitHub shows it offline, and removes a self-hosted runner after 14
 days offline). Disabling boots the agent out, which kills a running job: do it while the runners list shows the
-machine's runner `busy` false.
+machine's runner `busy` false. Disabling also removes the watcher's drain marker. Without that, a runner the watcher
+had stopped would be started again when its dialog episode closes ([the drain](#the-drain)).
 
 ```bash
 host=mini   # the machine's ssh host
-ssh $host 'launchctl bootout gui/$(id -u)/com.ssfskim.ci-kit.mac-runner; launchctl disable gui/$(id -u)/com.ssfskim.ci-kit.mac-runner'
+ssh $host 'launchctl bootout gui/$(id -u)/com.ssfskim.ci-kit.mac-runner; launchctl disable gui/$(id -u)/com.ssfskim.ci-kit.mac-runner; rm -f ~/Library/Logs/ci-kit/runner-drained'
 ssh $host 'launchctl enable gui/$(id -u)/com.ssfskim.ci-kit.mac-runner; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ssfskim.ci-kit.mac-runner.plist'
 ```
 
-`install.sh --disabled` installs or refreshes with the agent left disabled.
+`install.sh --disabled` installs or refreshes with the runner's agent left disabled. The watcher runs in every mode:
+a machine kept off CI still reports a dialog.
 
-Remove, one machine at a time (`config.sh remove` deletes only the registration that machine holds):
+Remove, one machine at a time (`config.sh remove` deletes only the registration that machine holds). `--uninstall`
+unloads and removes both LaunchAgents and the drain marker, and refuses while a job runs:
 
 ```bash
 host=mini   # the machine's ssh host
-ssh $host 'launchctl bootout gui/$(id -u)/com.ssfskim.ci-kit.mac-runner; rm ~/Library/LaunchAgents/com.ssfskim.ci-kit.mac-runner.plist'
+ssh $host '~/Developer/GitHub/ci-kit/mac/install.sh --uninstall'
 gh api -X POST repos/SSFSKIM/MAWS/actions/runners/remove-token --jq .token \
   | ssh $host 'read -r t; cd ~/actions-runner-maws && ACTIONS_RUNNER_INPUT_TOKEN=$t ./config.sh remove'
 ssh $host 'rm -rf ~/actions-runner-maws'
@@ -126,28 +136,29 @@ ssh $host '~/Developer/GitHub/ci-kit/host/install.sh --uninstall; rm -f ~/.confi
 **A system dialog in front fails the job at once.** Before anything else, the job-started hook
 (`mac/hooks/desktop-check.sh`) reads the frontmost app with `lsappinfo`. If it is `UserNotificationCenter`,
 `CoreServicesUIAgent`, `SecurityAgent` or `loginwindow`, a system dialog or the login screen holds key focus, and every
-e2e group would fail on focus and pasteboard (2026-10-16: seven groups red with `UserNotificationCenter` frontmost). The
-job then fails at "Set up runner" with:
+e2e group would fail on focus and pasteboard (2026-10-16: seven groups red with `UserNotificationCenter` frontmost).
+Each is known by its bundle id as well as its name (`mac/hooks/dialog.sh` holds the one list the hook and the watcher
+share), because `lsappinfo`'s names are localized. Messages and titles always carry the canonical name. The job then
+fails at "Set up runner" with:
 
 ```
-ci-kit: a system dialog (<name>: <likely source>) holds focus on the <machine> — dismiss it there and rerun
+ci-kit: a system dialog (<dialog>: <likely source>) holds focus on the <machine> since <first seen> — dismiss it there and rerun
+ci-kit: a system dialog (SecurityAgent: security request from codesign) holds focus on the mini since 2026-10-17T05:12Z — dismiss it there and rerun
 ```
 
-`<machine>` is the runner's `CI_KIT_MACHINE` (`mini` on the mini). Every refusal line starts with `ci-kit: ` and ends
-with `rerun`; MAWS's `scripts/ci-gate.sh` tells a refused job by that shape. Dismissing the dialog is the human's, in
+`<machine>` is the runner's `CI_KIT_MACHINE` (`mini` on the mini). `<first seen>` is the dialog episode's, the same
+time its alert title carries ([below](#the-dialog-watcher)). Every refusal line starts with `ci-kit: ` and ends with
+`rerun`; MAWS's `scripts/ci-gate.sh` tells a refused job by that shape. Dismissing the dialog is the human's, in
 that machine's GUI session (never an agent, never cua). The check uses `lsappinfo` alone: AppleScript or System Events
 would raise TCC prompts. When `lsappinfo` fails or prints nothing, the job is not blocked; the miss is logged. Every
 check logs a `desktop-check` line (the frontmost app) to the job's log and the hooks log.
 
-**The alert.** The first refused job of an episode also opens an issue in `SSFSKIM/ci-kit-sandbox`, labelled
-`ci-kit-alert` and titled `ci-kit alert: system dialog on the <machine> (<name>: <likely source>)`, with the time, the
-source's log line and the run id; later refused jobs of the episode add nothing. The next job that passes the check
-comments on the issue and closes it. The episode is the machine's own: `~/Library/Logs/ci-kit/dialog-alert.state` holds
-the URL of the issue that machine created, and a passing check closes only that URL, so one machine never closes
-another's alert. `gh` runs with the token in `~/.config/ci-kit/alert-token` when that file exists, handed over as
-`GH_TOKEN` in its environment (never an argument, never printed); otherwise, or when the file is empty or unreadable
-(logged), with the account the machine's user is logged into. A failed or timed-out `gh` call is logged and never
-changes the job's result.
+**The alert.** A refused job opens the machine's dialog episode, and its `ci-kit-alert` issue in
+`SSFSKIM/ci-kit-sandbox`, when none is open. The dialog watcher ([below](#the-dialog-watcher)) shares the episode and
+closes it. `gh` runs with the token in `~/.config/ci-kit/alert-token` when that file exists, handed over as `GH_TOKEN`
+in its environment (never an argument, never printed); otherwise, or when the file is empty or unreadable (logged),
+with the account the machine's user is logged into. A failed or timed-out `gh` call is logged and never changes the
+job's result.
 
 **Every job starts with Terminal in front.** Some of MAWS's paste and to-human results depend on the app in front, and
 what is in front depended on what came before: Finder when an e2e app quits, or Chrome after a test leaked an open-URL
@@ -255,6 +266,92 @@ ssh mini 'pgrep -fl actions-runner-maws/_work'   # expect no output after a job
 Without `--dry-run`, a sweep by hand kills what it lists; it refuses while a job runs, since the job's own processes
 would be its strays.
 
+## The dialog watcher
+
+The job hook sees a dialog only when a job starts. On 2026-10-17 securityd crashed, and a SecurityAgent keychain-unlock
+dialog covered the mini for 12 minutes; MAWS was holding its runs, so no job started and nobody was told. The watcher,
+the LaunchAgent `com.ssfskim.ci-kit.dialog-watch`, reads the frontmost app at load and every 60 s, whether or not a job
+runs. It runs `~/actions-runner-maws/ci-kit/hooks/dialog-watch.sh`, which `install.sh` copies with the hooks, in every
+mode (`--disabled` turns off the runner, not the alerts), and removes with `--uninstall`.
+
+**One episode per machine, from either side.** The watcher and the job hook share `mac/hooks/dialog.sh`: the dialog
+list, the read-only `lsappinfo` read, the source attribution and the episode, kept in
+`~/Library/Logs/ci-kit/dialog-alert.state`. They read and rewrite it under a lock, so one episode is one issue
+whichever side sees the dialog first. The state is the machine's own: a machine comments on and closes only the issue
+it opened, never another machine's.
+
+- **Opening.** The watcher opens an episode when a dialog holds the front on two consecutive reads, at most 150 s
+  apart, so a prompt answered within the minute alerts nobody. A refused job opens one at once, since a job was
+  already lost.
+- **First seen** is the first read that saw the dialog: the watcher's single read, if a job comes before its second.
+  The state keeps it, so every later refusal and the title carry the same time.
+- **The source** is attributed once, when the episode opens: the same log queries as before, at most three of 10 s
+  each. A refusal during the episode reuses it.
+- **Closing.** The watcher closes the episode after three consecutive reads with no dialog, about three minutes: it
+  comments `cleared at …` on the issue and closes it. On 2026-10-17 a dismissed prompt came back within a minute,
+  twice. A dialog read from either side restarts the count.
+- **A job's clear read** ends a single pending read, but does not count towards closing: jobs come at job cadence, not
+  on the watcher's clock.
+
+### The alert title
+
+The title is a contract: MAWS reads open alerts with `^ci-kit alert: ([a-z0-9-]+): (\S+) since (\S+)`, and the
+format is pinned in `test/mac-dialog-watch.test.mjs`.
+
+```
+ci-kit alert: <machine>: <dialog> since <YYYY-MM-DDTHH:MMZ>[ (<source>)]
+ci-kit alert: mini: SecurityAgent since 2026-10-17T05:12Z (security request from codesign)
+ci-kit alert: rental: loginwindow since 2026-10-17T05:12Z
+```
+
+- `<machine>` is `CI_KIT_MACHINE`, which `install.sh` keeps to `[a-z0-9-]`.
+- `<dialog>` is the canonical name from the dialog list, whatever the display language.
+- `<YYYY-MM-DDTHH:MMZ>` is the first-seen minute, in UTC.
+- ` (<source>)` follows only when attribution found one.
+
+The kit's other alerts (`ci-kit alert: pool hours on …`, `pool server …`, `bake builder …`, `GCE VM …`) and the
+dialog alerts opened before this format never match it. The body adds the time, the frontmost app, the first-seen
+second, who opened it (the watcher, or a refused job and its run id), the source and its log line.
+
+### The drain
+
+With two runners on the same labels, a machine whose hook refuses every job in seconds draws most of the queue and fails
+it, while the healthy machine is busy with one job (2026-10-17, the mini alone: 14 jobs refused in three minutes). So
+while an episode is open, the watcher stops the runner's LaunchAgent whenever the runner has no job. Queued jobs then go to the
+other machine, or wait. On a single machine, the drain turns refusals into queued jobs, which run once the dialog is
+dismissed and the episode closes.
+
+- **No job running** means no process whose executable is exactly `~/actions-runner-maws/bin/Runner.Worker`, the
+  path the kernel reports (`proc_pidpath`, read by `runner-worker.py`). A command line or `argv[0]` naming that path
+  does not count. A read that fails or times out counts as a job: the runner is left alone, and the watcher asks again
+  next minute.
+- **Stopping** writes the marker `~/Library/Logs/ci-kit/runner-drained`, then disables and boots out the agent. The
+  disabled state is launchd's, kept across a reboot, so the agent's RunAtLoad cannot bring the runner back at login
+  while the episode is open. If someone starts it during the episode, the watcher stops it again once it is idle.
+- **Starting** happens only after the episode closes, and only while the marker exists: the watcher enables and
+  bootstraps the agent, then removes the marker. A failed start keeps the marker and is retried next minute.
+- **An operator's runner stays the operator's.** The watcher never stops a runner that is already disabled when it
+  has no marker. The disable command above removes the marker, and so does any `install.sh` run. A runner disabled by
+  hand or by `install.sh --disabled` stays off.
+- **Known window.** The listener can take a job between the check and the stop. That job is killed with the runner
+  and fails like any job that loses its runner; MAWS relaunches it as usual.
+- Every stop, start and job left alone is a `dialog-watch … drain:` line in the hooks log.
+
+**Cheap and bounded.** A read with no dialog and no episode costs two `lsappinfo` calls, 5 s deadline each, and writes
+nothing. Every other external call has its own supervised deadline, which kills and reaps it even when it ignores
+SIGALRM: 10 s for each `log`, `gh` and `launchctl` call and for the process-table read. The watcher never clicks,
+types, dismisses or focuses anything, and uses no AppleScript and no new permission.
+
+Check by hand:
+
+```bash
+ssh mini 'launchctl print gui/$(id -u)/com.ssfskim.ci-kit.dialog-watch | grep -E "state =|runs =|last exit code"'
+#   expect: runs = <n>, last exit code = 0 (state = not running between reads)
+ssh mini 'cat ~/Library/Logs/ci-kit/dialog-alert.state ~/Library/Logs/ci-kit/runner-drained 2>/dev/null; grep dialog-watch ~/Library/Logs/ci-kit/mac-runner-hooks.log | tail -5'
+#   expect, with no dialog: no output from the state files
+gh issue list -R SSFSKIM/ci-kit-sandbox -l ci-kit-alert
+```
+
 ## Running a MAWS gate on it
 
 From any MAWS checkout (MAWS's own script; it pushes a temporary `ci/` ref and deletes it):
@@ -346,7 +443,9 @@ ssh $host 'GH_TOKEN=$(cat ~/.config/ci-kit/alert-token) /opt/homebrew/bin/gh iss
 - Claude Code's native installer puts `claude` in `~/.local/bin`. Only MAWS's live groups launch the engine; class 1
   does not.
 - `--disabled` registers the runner and installs the hooks with the agent left off, so no MAWS job lands before step 3;
-  step 4 turns it on.
+  step 4 turns it on. It also starts the [dialog watcher](#the-dialog-watcher), so from here a prompt left up for more
+  than a minute, step 3's included, opens an alert that names the machine. It closes about three minutes after the
+  prompt is answered.
 - The host janitor runs as on the mini ([host.md](host.md)), from the clone that stays.
 - The alert token is the owner's to make, once for every rented Mac: a fine-grained personal access token with resource
   owner SSFSKIM, repository access to `SSFSKIM/ci-kit-sandbox` alone, and Issues read and write. The owner stores it on
@@ -377,15 +476,18 @@ so `/bin/bash` is the responsible process of every job. On the mini, `/bin/bash`
 2026-07-18, granted for something else. Full Disk Access also opens other apps' data (Mail, Messages, Safari) to
 everything `/bin/bash` is responsible for on that machine. The mini holds no Accessibility or Screen Recording grant for
 bash, the runner or Electron, so the new Mac gets none either: the goal is parity. A prompt for anything not granted
-still refuses that machine's jobs through the desktop check, and its alert names the machine.
+still refuses that machine's jobs through the desktop check, and its alert names the machine. While the alert is
+open, the watcher keeps that machine's runner stopped, so the mini takes its jobs.
 
 **4. Turn it on.**
 
 ```bash
 ssh $host '~/Developer/GitHub/ci-kit/mac/install.sh'
-#   expect: ci-kit mac: running: ci-kit-mac-<name> listens for jobs of https://github.com/SSFSKIM/MAWS
+#   expect: ci-kit mac: running: ci-kit-mac-<name> listens for jobs of https://github.com/SSFSKIM/MAWS; the dialog watcher com.ssfskim.ci-kit.dialog-watch runs
 gh api repos/SSFSKIM/MAWS/actions/runners --jq '.runners[]|[.name,.status,.busy]|@tsv'
 #   expect: ci-kit-mac-<name>  online  false, beside the mini's
+ssh $host 'launchctl print gui/$(id -u)/com.ssfskim.ci-kit.dialog-watch | grep -E "runs =|last exit code"'
+#   expect: runs = <n> (one a minute), last exit code = 0
 ```
 
 **5. Acceptance.** The first job's posture line, in its log and in the machine's hooks log:

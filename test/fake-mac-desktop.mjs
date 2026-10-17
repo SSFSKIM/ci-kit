@@ -1,0 +1,215 @@
+// One Mac's desktop for the dialog hooks' tests: its own HOME, with the job hook (desktop-check.sh) and the dialog
+// watcher (dialog-watch.sh) run against it. Every boundary is faked: the frontmost app (lsappinfo), Terminal (open), the
+// unified log, gh, the clock (date), launchd (launchctl, stateful) and the runner's process table (python3, standing in
+// for runner-worker.py, whose own test reads real processes).
+import { spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const hooks = fileURLToPath(new URL('../mac/hooks/', import.meta.url));
+const root = mkdtempSync(join(tmpdir(), 'ci-kit-desktop-'));
+process.on('exit', () => rmSync(root, { recursive: true, force: true }));
+
+export const runnerAgent = 'com.ssfskim.ci-kit.mac-runner';
+// The clock every desktop starts at, in seconds; runs move it forward a minute each unless told `at`.
+export const T0 = Date.parse('2026-10-17T05:12:34Z') / 1000;
+export const iso = (seconds) => new Date(seconds * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+export const minute = (seconds) => iso(seconds).replace(/:\d\dZ$/, 'Z');
+
+// The two shapes lsappinfo prints for `info -only name`: macOS 27 over ssh, and the LSDisplayName pair.
+// With a bundle id, each also prints it: `bundleID="<id>"` and `"CFBundleIdentifier"="<id>"` (both checked live).
+export const asnShape = (name, bundle, pid) =>
+  `"${name}" ASN:0x0-0x48b78b3: (in front) \n    bundleID=${bundle ? `"${bundle}"` : '[ NULL ]'} \n    bundle path=[ NULL ] \n${pid === undefined ? '' : `    pid = ${pid} (0xb84f)\n`}`;
+export const pairShape = (name, bundle, pid) => `"LSDisplayName"="${name}"\n${bundle ? `"CFBundleIdentifier"="${bundle}"\n` : ''}${pid === undefined ? '' : `"pid"=${pid}\n`}`;
+export const terminal = asnShape('터미널', 'com.apple.Terminal');
+
+const executable = (path, body) => { writeFileSync(path, `#!/bin/bash\n${body}\n`); chmodSync(path, 0o755); };
+// A fake that hangs ignoring SIGALRM, recording its pid so a run can tell whether the deadline killed it.
+const hangs = (dir) => `trap '' ALRM\necho "$$" >> '${join(dir, 'hung-pids.txt')}'\nexec /bin/sleep 60`;
+
+// runner: the runner's LaunchAgent as launchd holds it. 'running' is loaded and enabled; 'off' is unloaded and enabled;
+// 'disabled' is what `install.sh --disabled` or the doc's disable leaves; 'loaded-disabled' is loaded after a bare
+// `launchctl disable`. workers: what the process table shows (idle, busy, fail, garbage, hang).
+export function desktop({ status = 0, afterOpen, openStatus = 0, logOutput = '', logStatus = 0, logResponses = {}, now, ghStatus = 0, logHang = false, ghHang = false, env = {}, alertToken, runner = 'running', workers = 'idle' } = {}) {
+  const dir = join(root, String(Math.random()).slice(2));
+  const bin = join(dir, 'bin');
+  mkdirSync(bin, { recursive: true });
+  const file = (name) => join(dir, name);
+  const text = (name) => existsSync(file(name)) ? readFileSync(file(name), 'utf8') : '';
+  if (alertToken !== undefined) {
+    mkdirSync(file('.config/ci-kit'), { recursive: true });
+    writeFileSync(file('.config/ci-kit/alert-token'), alertToken);
+  }
+  const front = file('out.txt');
+  if (afterOpen !== undefined) writeFileSync(file('after.txt'), afterOpen);
+  executable(join(bin, 'lsappinfo'), `[[ \${FAKE_FRONT_HANG:-0} == 1 ]] && { ${hangs(dir).replace(/\n/g, '; ')}; }
+if [[ $1 == front ]]; then echo 'ASN:0x0-0x48b78b3:'; exit 0; fi
+cat '${front}'
+exit ${status}`);
+  executable(join(bin, 'open'), `echo "$*" >> '${file('opened.txt')}'
+[[ -f '${file('after.txt')}' ]] && cp '${file('after.txt')}' '${front}'
+exit ${openStatus}`);
+  const log = join(bin, 'unified-log');
+  for (const kind of ['firewall', 'front', 'requests', 'other']) {
+    const { output = logOutput, status = logStatus, hang = logHang } = logResponses[kind] ?? {};
+    writeFileSync(file(`${kind}.txt`), output);
+    writeFileSync(file(`${kind}.sh`), `${hang ? 'exec /bin/sleep 60' : ''}\ncat '${file(`${kind}.txt`)}'\nexit ${status}\n`);
+  }
+  executable(log, `printf '%s\\0' "$@" >> '${file('log-args.txt')}'
+printf '\\0' >> '${file('log-args.txt')}'
+case "$*" in
+  *'process == "socketfilterfw"'*) kind=firewall ;;
+  *'TCCAccessRequest'*) kind=requests ;;
+  *'process == "launchservicesd"'*) kind=front ;;
+  *) kind=other ;;
+esac
+source '${dir}/'"$kind".sh`);
+  // The clock: `date -u +%s` and every other +format read one file of epoch seconds.
+  const clock = file('clock');
+  writeFileSync(clock, String(now ? Date.parse(now) / 1000 : T0));
+  executable(join(bin, 'date'), `t=$(cat '${clock}')
+for a; do
+  case $a in
+    +%s) echo "$t"; exit 0 ;;
+    +*) exec perl -MPOSIX=strftime -e 'print strftime(substr($ARGV[0], 1), gmtime $ARGV[1]), "\\n"' "$a" "$t" ;;
+  esac
+done
+exec /bin/date "$@"`);
+  const gh = join(bin, 'gh');
+  executable(gh, `printf '%s\\0' "$@" >> '${file('gh-args.txt')}'
+printf '\\0' >> '${file('gh-args.txt')}'
+printf '%s\\n' "\${GH_TOKEN-<unset>}" >> '${file('gh-tokens.txt')}'
+if [[ $FAKE_GH_HANG == 1 ]]; then
+  ${hangs(dir).replace(/\n/g, '\n  ')}
+fi
+[[ $FAKE_GH_STATUS == 0 ]] || exit "$FAKE_GH_STATUS"
+if [[ $1 == issue && $2 == create ]]; then echo https://github.com/SSFSKIM/ci-kit-sandbox/issues/42; fi`);
+  // launchd, one file per label and fact: <label>.loaded, <label>.disabled or <label>.enabled.
+  const launchd = file('launchd');
+  mkdirSync(launchd);
+  executable(join(bin, 'launchctl'), `printf '%s\\n' "$*" >> '${file('launchctl.calls')}'
+[[ $1 == "\${FAKE_LAUNCHCTL_HANG:-}" ]] && { ${hangs(dir).replace(/\n/g, '; ')}; }
+d='${launchd}'
+label=\${2##*/}
+case $1 in
+  print) [[ -e $d/$label.loaded ]] ;;
+  print-disabled)
+    [[ \${FAKE_LISTING_FAIL:-0} == 0 ]] || exit 1
+    echo "disabled services = {"
+    for f in "$d"/*.disabled "$d"/*.enabled; do [[ -e $f ]] || continue; b=\${f##*/}; printf '\\t\\t"%s" => %s\\n' "\${b%.*}" "\${b##*.}"; done
+    echo "}" ;;
+  disable) rm -f "$d/$label.enabled"; : >"$d/$label.disabled" ;;
+  enable) rm -f "$d/$label.disabled"; : >"$d/$label.enabled" ;;
+  bootout) [[ -e $d/$label.loaded ]] || exit 3; rm -f "$d/$label.loaded" ;;
+  bootstrap)
+    label=$(basename "$3" .plist)
+    [[ \${FAKE_BOOTSTRAP_FAIL:-0} == 0 && -f $3 && ! -e $d/$label.disabled && ! -e $d/$label.loaded ]] || exit 5
+    : >"$d/$label.loaded" ;;
+  *) exit 64 ;;
+esac`);
+  const fact = (name) => join(launchd, `${runnerAgent}.${name}`);
+  if (runner !== 'absent') {
+    mkdirSync(file('Library/LaunchAgents'), { recursive: true });
+    writeFileSync(file(`Library/LaunchAgents/${runnerAgent}.plist`), '<plist/>\n');
+    if (runner === 'running' || runner === 'loaded-disabled') writeFileSync(fact('loaded'), '');
+    writeFileSync(fact(runner === 'disabled' || runner === 'loaded-disabled' ? 'disabled' : 'enabled'), '');
+  }
+  const processTable = file('workers');
+  writeFileSync(processTable, workers);
+  executable(join(bin, 'python3'), `printf '%s\\n' "$*" >> '${file('python.calls')}'
+case $(cat '${processTable}') in
+  idle) echo idle ;;
+  busy) echo 'busy 4242' ;;
+  fail) exit 2 ;;
+  garbage) echo 'Traceback (most recent call last):'; exit 1 ;;
+  hang) ${hangs(dir).replace(/\n/g, '; ')} ;;
+esac`);
+
+  let last = null;
+  function run(script, output, { at, ghExit = ghStatus, ghStall = ghHang, args = [], extraEnv = {} } = {}) {
+    last = at === undefined ? (last === null ? 0 : last + 60) : at;
+    writeFileSync(clock, String((now ? Date.parse(now) / 1000 : T0) + last));
+    writeFileSync(front, output);
+    writeFileSync(file('hung-pids.txt'), '');
+    const job = script === 'desktop-check.sh' ? { GITHUB_RUN_ID: '123456', GITHUB_JOB: 'e2e' } : {};
+    const started = Date.now();
+    const result = spawnSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', join(hooks, script), ...args], {
+      encoding: 'utf8',
+      timeout: 60_000,
+      env: {
+        PATH: `${bin}:/usr/bin:/bin`, HOME: dir,
+        CI_KIT_LOG_BIN: log, CI_KIT_GH_BIN: gh, FAKE_GH_STATUS: String(ghExit), FAKE_GH_HANG: ghStall ? '1' : '0',
+        ...job, ...env, ...extraEnv,
+      },
+    });
+    const elapsed = Date.now() - started;
+    const survivors = [];
+    for (const pid of text('hung-pids.txt').trim().split('\n').filter(Boolean).map(Number)) {
+      try {
+        process.kill(pid, 0);
+        survivors.push(pid);
+        process.kill(pid, 'SIGKILL'); // Do not leak a stalled fake if a deadline regresses.
+      } catch (error) {
+        if (error.code !== 'ESRCH') throw error;
+      }
+    }
+    const stateText = existsSync(file('Library/Logs/ci-kit/dialog-alert.state')) ? text('Library/Logs/ci-kit/dialog-alert.state') : null;
+    const marker = existsSync(file('Library/Logs/ci-kit/runner-drained')) ? text('Library/Logs/ci-kit/runner-drained') : null;
+    return {
+      ...result,
+      elapsed,
+      ghSurvivors: survivors,
+      log: text('Library/Logs/ci-kit/mac-runner-hooks.log'),
+      opened: text('opened.txt').trim().split('\n').filter(Boolean),
+      ghCalls: text('gh-args.txt').split('\0\0').filter(Boolean).map((call) => call.split('\0')),
+      ghTokens: text('gh-tokens.txt').split('\n').filter(Boolean),
+      logArgs: text('log-args.txt').split('\0').filter(Boolean),
+      logCalls: text('log-args.txt').split('\0\0').filter(Boolean).map((call) => call.split('\0')),
+      stateText,
+      state: stateText === null ? null : Object.fromEntries(stateText.trim().split('\n').map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)])),
+      marker,
+      launchctl: text('launchctl.calls').trim().split('\n').filter(Boolean),
+      runner: { loaded: existsSync(fact('loaded')), disabled: existsSync(fact('disabled')) },
+      python: text('python.calls').trim().split('\n').filter(Boolean),
+      again: (next, options) => run('desktop-check.sh', next, options),
+      watch: (next, options) => run('dialog-watch.sh', next, options),
+      desktop: api,
+    };
+  }
+  const api = {
+    dir,
+    hook: (output, options) => run('desktop-check.sh', output, options),
+    watch: (output, options) => run('dialog-watch.sh', output, options),
+    workers: (state) => writeFileSync(processTable, state),
+    // launchd at the next login: RunAtLoad loads the runner's agent unless it is disabled.
+    reboot() {
+      rmSync(fact('loaded'), { force: true });
+      if (!existsSync(fact('disabled'))) writeFileSync(fact('loaded'), '');
+    },
+    // The doc's enable: launchctl enable, then bootstrap.
+    startByHand() {
+      rmSync(fact('disabled'), { force: true });
+      writeFileSync(fact('enabled'), '');
+      writeFileSync(fact('loaded'), '');
+    },
+    // Holds the dialog state's lock, as a hook mid-alert would, until the returned function is called.
+    holdLock() {
+      mkdirSync(file('Library/Logs/ci-kit'), { recursive: true });
+      const release = file('release-lock');
+      const holder = spawnSync('bash', ['-c', `perl -MFcntl=:flock -e '
+        open(my $fh, ">>", shift) or die; flock($fh, LOCK_EX) or die;
+        if (fork) { exit 0 } open(STDOUT, ">/dev/null"); open(STDERR, ">/dev/null");
+        select(undef, undef, undef, 0.05) until -e $ARGV[0]; unlink $ARGV[0];' '${file('Library/Logs/ci-kit/dialog-alert.lock')}' '${release}'`], { encoding: 'utf8' });
+      if (holder.status !== 0) throw new Error(holder.stderr);
+      return () => writeFileSync(release, '');
+    },
+  };
+  return api;
+}
+
+// The job hook's tests start a desktop with its first job.
+export function check(output, status = 0, { readOnly = false, ...options } = {}) {
+  return desktop({ status, ...options }).hook(output, readOnly ? { args: ['--frontmost'] } : {});
+}

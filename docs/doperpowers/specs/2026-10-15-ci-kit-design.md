@@ -2155,6 +2155,11 @@ euros, jobs, and the projected month at the current rate.
 - Labels `self-hosted, macOS, ARM64, ci-kit-mac`.
 - Hooks `mac/hooks/job-started.sh` and `mac/hooks/job-completed.sh`, logging to
   `~/Library/Logs/ci-kit/mac-runner-hooks.log`.
+- LaunchAgent `com.ssfskim.ci-kit.dialog-watch` (RunAtLoad, every 60 s): the dialog watcher, which shares the job
+  hook's dialog episode and stops the runner while an episode is open and no job runs (docs/mac-lane.md).
+- A dialog alert's title is `ci-kit alert: <machine>: <dialog> since <YYYY-MM-DDTHH:MMZ>`, plus ` (<source>)` when
+  attribution found one. MAWS reads open alerts with `^ci-kit alert: ([a-z0-9-]+): (\S+) since (\S+)`. A refusal line
+  carries the same `since` time, and still starts with `ci-kit: ` and ends with `rerun`.
 
 **I11 — The janitor.**
 
