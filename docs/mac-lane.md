@@ -185,13 +185,14 @@ ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none c
   incoming TCP **local** port 5900 in `ESTABLISHED`, or UDP local ports 5900–5902 with a concrete foreign peer (not a
   wildcard listener), including loopback tunnels. UDP covers [High Performance Screen Sharing's ports](https://support.apple.com/guide/remote-desktop/use-high-performance-screen-sharing-apdf8e09f5a9/mac).
   Failed, timed-out or unrecognized reads give `unknown` unless another signal already establishes a remote connection.
-- `computeruse`: the distinct names of running computer-use processes, comma-separated in byte order (a list too long for the line ends in `+N more`), or `none`. A name
-  counts when it is `SkyComputerUseService` (Codex and ChatGPT computer use; cua drives the desktop through it too),
-  contains `CUAService`, or starts with `cua` (`cua-driver`, `cua-sandbox-golden`). The read is non-root
-  `ps -axco pid=,comm=`, which prints each executable's name in full and never its path; `pgrep` and `ps -o ucomm` see
-  the kernel's 16-character name, where `SkyComputerUseService` is `SkyComputerUseSe`. A cua runtime's `node` and
-  `node_repl`, which every session with the cua plugin loaded keeps, and ci-kit's own `cursor-park` are not counted. A
-  failed, timed-out, empty or unrecognized read gives `unknown` unless it already found a computer-use name.
+- `computeruse`: the distinct names of running computer-use processes, comma-separated in byte order (a list too long
+  for the line ends in `+N more`), or `none`. A name counts when it is `SkyComputerUseService` (Codex and ChatGPT
+  computer use; cua drives the desktop through it too), contains `CUAService`, or starts with `cua` (`cua-driver`,
+  `cua-sandbox-golden`). The read is non-root `ps -axco pid=,comm=`, which prints each executable's name in full and
+  never its path; `pgrep` and `ps -o ucomm` see the kernel's 16-character name, where `SkyComputerUseService` is
+  `SkyComputerUseSe`. A cua runtime's `node` and `node_repl`, which every session with the cua plugin loaded keeps, and
+  ci-kit's own `cursor-park` are not counted. A failed, timed-out, empty or unrecognized read gives `unknown` unless it
+  already found a computer-use name.
 
 Computer use is a **presence snapshot at the job's two edges**. It is the evidence for MAWS's rule (its gate-offload
 Decision Log 58) that a computer-use session drives the shared desktop only between jobs: a name at `start` was running

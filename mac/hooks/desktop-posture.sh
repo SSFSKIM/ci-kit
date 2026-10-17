@@ -57,7 +57,7 @@ if [[ ${1:-} == --computeruse ]]; then
         for (name in found) { i=++n; while (i > 1 && names[i-1] > name) { names[i]=names[i-1]; i-- }; names[i]=name }
         # The reader keeps 512 bytes: whole names while the list fits in 490, then ",+N more" for the rest.
         for (i=1; i<=n; i++) { next_out=out (i > 1 ? "," : "") names[i]; if (length(next_out) > 490) break; out=next_out; kept=i }
-        if (kept < n) out=out ",+" (n - kept) " more"
+        if (kept < n) out=out (kept ? "," : "") "+" (n - kept) " more"
         print n ? out : (rows && !bad ? "none" : "unknown")
       }
     ' <<<"$table"
