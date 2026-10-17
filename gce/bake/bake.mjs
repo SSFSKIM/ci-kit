@@ -22,8 +22,9 @@ import {
 const BAKE_FILTER = 'labels.ci-kit=gce-builder';
 const IMAGE_FILTER = 'labels.ci-kit=gce-image';
 const POLL_MS = 15_000;
-// A runner whose VM was deleted mid-job stays busy until GitHub lets go of the job; its unregister is retried that long.
-const RUNNER_RETRIES = 6;
+// A runner whose VM was deleted mid-job stays busy until GitHub force-completes the job, which a run's cancellation
+// does after up to 5 min; its unregister is retried 6 min, so the registration cannot outlive the bake.
+const RUNNER_RETRIES = 13;
 const RUNNER_RETRY_MS = 30_000;
 const zoneOf = (instance) => instance.zone.split('/').pop();
 
@@ -91,9 +92,10 @@ async function deleteIfOwned(gce, vm, runId, log) {
 
 // Bake step 5: one real Actions job on a VM booted from the image. The bake registers the check runner, dispatches
 // bake-check.yml to its label, and boots the check VM with the runner's JIT config, as the launcher boots a job VM.
-// `check` records what exists (the runner's id, the run's id) for the cleanup. Returns the run's URL on a pass.
+// `check` records what exists (the runner's name and id, the run's id) for the cleanup. Returns the run's URL on a pass.
 async function realJob(gce, gh, { cfg, names, runId, image, subnetwork, machines, check, sleep, now, log }) {
   if ((await gh.getRepo(CHECK.repo)).private !== true) throw new Error(`ci-kit: ${CHECK.repo} is not private, and no runner is registered on a public repo`);
+  check.name = names.runner; // set before the call: a registration whose response is lost has no id, but the cleanup finds it by name
   const jit = await gh.jitConfig(CHECK.repo, checkJitRequest(names));
   check.runner = jit.runner.id;
   log(`runner ${names.runner} registered in ${CHECK.repo}`);
@@ -130,7 +132,7 @@ export async function runBake(gce, { cfg, sha, runId, token, gh, script, sleep, 
   const names = bakeNames(runId, sha);
   const subnetwork = `regions/${cfg.region}/subnetworks/${cfg.subnetwork}`;
   const wait = { runId, sleep, now, log };
-  const check = { runner: null, run: null };
+  const check = { name: null, runner: null, run: null };
   let image = null;
   let ready = false;
   for (const stale of staleBakeInstances(await gce.instances(BAKE_FILTER), now())) {
@@ -208,12 +210,14 @@ async function cleanUp(gce, { cfg, runId, image, gh, check, sleep, now, log }) {
       log(`cleanup: ${i.name} deleted`);
     }
   });
-  if (check.runner) {
+  if (check.name) {
     await step('check runner', async () => {
+      const id = check.runner ?? (await gh.runners(CHECK.repo)).find((r) => r.name === check.name)?.id;
+      if (!id) return;
       for (let attempt = 1; ; attempt += 1) {
         try {
-          await gh.deleteRunner(CHECK.repo, check.runner);
-          log(`cleanup: check runner ${check.runner} unregistered`);
+          await gh.deleteRunner(CHECK.repo, id);
+          log(`cleanup: check runner ${id} unregistered`);
           return;
         } catch (err) {
           if (err.status === 404) return; // a JIT runner leaves on its own once its job is done

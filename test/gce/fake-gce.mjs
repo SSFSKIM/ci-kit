@@ -131,9 +131,10 @@ export function fakeGce({ instances = [], images = [], insertErrors = [], script
 // bake dispatches follows `run`: each getRun() takes the next state ({status, conclusion, took, ranOn}) and the last
 // one sticks. `took` makes the check runner busy; a completed state with `ranOn` (true: the bake's runner; a string:
 // that runner) is the job having run there, and a JIT runner leaves once its job is done. `busyDeletes` refusals
-// (422) answer unregistering a busy runner before GitHub lets go of it. `runners` are registrations already there.
+// (422) answer unregistering a busy runner before GitHub lets go of it. `jitLost`: GitHub registers the runner, but
+// the response is lost and jitConfig throws. `runners` are registrations already there.
 const httpError = (status, message) => Object.assign(new Error(message), { status });
-export function fakeSandbox({ run = [{ status: 'queued' }], runners = [], isPrivate = true, runDetails = true, busyDeletes = 0 } = {}) {
+export function fakeSandbox({ run = [{ status: 'queued' }], runners = [], isPrivate = true, runDetails = true, busyDeletes = 0, jitLost = false } = {}) {
   const state = { runners: runners.map((r) => ({ busy: false, ...r })), run: null, jobs: [] };
   const calls = [];
   let nextId = 900;
@@ -162,6 +163,7 @@ export function fakeSandbox({ run = [{ status: 'queued' }], runners = [], isPriv
       mine = spec.name;
       const r = { id: nextId++, name: spec.name, busy: false, labels: spec.labels.map((name) => ({ name })) };
       state.runners.push(r);
+      if (jitLost) throw httpError(504, 'Gateway Timeout');
       return { runner: { id: r.id, name: r.name }, encoded_jit_config: `jit-for-${spec.name}` };
     },
     dispatchWorkflow: async (repo, file, { ref, inputs }) => {

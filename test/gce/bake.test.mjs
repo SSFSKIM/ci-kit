@@ -410,6 +410,33 @@ test('a runner still held by its job when its VM goes is unregistered once GitHu
   assert.deepEqual(gh.state.runners, []);
 });
 
+test('GitHub holding a runner for a run\'s whole 5 min cancellation timeout still ends with the runner unregistered', async () => {
+  const gce = fakeGce({ scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: [{ status: 'RUNNING' }] } });
+  const gh = fakeSandbox({ run: [{ status: 'queued' }, { status: 'in_progress', took: true }], busyDeletes: 10 }); // 10 refusals, 30 s apart: 5 min
+  await assert.rejects(bake(gce, clock(), gh), /timeout/);
+  assert.equal(gh.calls.filter((c) => c === `unregister ${RUNNER}`).length, 11);
+  assert.deepEqual(gh.state.runners, []);
+});
+
+test('a runner still busy past the 6 min retry window is logged, not thrown over the bake\'s own outcome', async () => {
+  const gce = fakeGce({ scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: [{ status: 'RUNNING' }] } });
+  const gh = fakeSandbox({ run: [{ status: 'queued' }, { status: 'in_progress', took: true }], busyDeletes: 100 });
+  const logs = [];
+  await assert.rejects(runBake(gce, { cfg: CFG, sha: SHA, runId: RUN, token: 'ghs_x', gh, script: '#!/bin/bash\n', ...clock(), log: (m) => logs.push(m) }), /timeout/);
+  assert.ok(logs.some((m) => /cleanup: check runner failed: .*sweep unregisters it/.test(m)));
+  assert.equal(gh.calls.filter((c) => c === `unregister ${RUNNER}`).length, 13); // 13 attempts, 30 s apart: 6 min
+  assert.deepEqual(gh.state.runners.map((r) => r.name), [RUNNER]);
+});
+
+test('a JIT registration whose response was lost is found by its name and unregistered', async () => {
+  const gce = fakeGce({ scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
+  const gh = fakeSandbox({ run: OK_RUN, jitLost: true });
+  await assert.rejects(bake(gce, clock(), gh), /Gateway Timeout/);
+  assert.deepEqual(gh.calls.slice(1), [`unregister ${RUNNER}`]);
+  assert.deepEqual(gh.state.runners, []);
+  assert.ok(!gce.inserted.some((b) => b.name === CHECK_VM));
+});
+
 test('a public sandbox gets no runner: the bake fails before registering one', async () => {
   const gce = fakeGce({ scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
   const gh = fakeSandbox({ run: OK_RUN, isPrivate: false });
