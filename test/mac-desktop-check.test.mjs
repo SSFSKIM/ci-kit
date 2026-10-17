@@ -15,7 +15,7 @@ after(() => rmSync(root, { recursive: true, force: true }));
 
 // Each check has an isolated desktop and HOME. `again` runs another job in that same dialog episode.
 // External reads and GitHub writes are faked, including the absolute-path unified log command.
-function check(output, status = 0, { afterOpen, openStatus = 0, logOutput = '', logStatus = 0, ghStatus = 0, logHang = false, ghHang = false } = {}) {
+function check(output, status = 0, { afterOpen, openStatus = 0, logOutput = '', logStatus = 0, ghStatus = 0, logHang = false, ghHang = false, readOnly = false } = {}) {
   const dir = join(root, String(Math.random()).slice(2));
   mkdirSync(join(dir, 'bin'), { recursive: true });
   const front = join(dir, 'out.txt');
@@ -55,7 +55,7 @@ if [[ $1 == issue && $2 == create ]]; then echo https://github.com/SSFSKIM/ci-ki
   function run(nextOutput, { ghExit = ghStatus, ghStall = ghHang } = {}) {
     writeFileSync(front, nextOutput);
     writeFileSync(join(dir, 'hung-gh-pids.txt'), '');
-    const result = spawnSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', script], {
+    const result = spawnSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', script, ...(readOnly ? ['--frontmost'] : [])], {
       encoding: 'utf8',
       timeout: 25_000,
       env: {
@@ -101,6 +101,19 @@ for (const name of ['UserNotificationCenter', 'CoreServicesUIAgent', 'SecurityAg
     assert.match(run.log, new RegExp(`desktop-check .*${name}`));
   });
 }
+
+test('the posture read-only entry point reports even a dialog without focus changes, alerts or log writes', () => {
+  for (const output of [asnShape('SecurityAgent'), pairShape('SecurityAgent')]) {
+    const run = check(output, 0, { readOnly: true });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.stdout, 'SecurityAgent\n');
+    assert.deepEqual(run.opened, []);
+    assert.deepEqual(run.ghCalls, []);
+    assert.equal(run.log, '');
+    assert.equal(run.state, null);
+  }
+  assert.equal(check('', 3, { readOnly: true }).stdout, 'unknown\n');
+});
 
 test('the LSDisplayName shape is read too', () => {
   const run = check(pairShape('SecurityAgent'));

@@ -113,6 +113,11 @@ clear_dialog_alert() {
 }
 
 read_front
+# Read-only entry point for the start/end posture reporter; no focus changes, dialog alerts or logging.
+if [[ ${1:-} == --frontmost ]]; then
+  printf '%s\n' "${name:-unknown}"
+  exit 0
+fi
 if [[ -z $name ]]; then
   log "could not read the frontmost app; not blocking the job"
   exit 0
