@@ -15,9 +15,13 @@ after(() => rmSync(root, { recursive: true, force: true }));
 
 // Each check has an isolated desktop and HOME. `again` runs another job in that same dialog episode.
 // External reads and GitHub writes are faked, including the absolute-path unified log command.
-function check(output, status = 0, { afterOpen, openStatus = 0, logOutput = '', logStatus = 0, logResponses = {}, now, ghStatus = 0, logHang = false, ghHang = false, readOnly = false } = {}) {
+function check(output, status = 0, { afterOpen, openStatus = 0, logOutput = '', logStatus = 0, logResponses = {}, now, ghStatus = 0, logHang = false, ghHang = false, readOnly = false, env = {}, alertToken } = {}) {
   const dir = join(root, String(Math.random()).slice(2));
   mkdirSync(join(dir, 'bin'), { recursive: true });
+  if (alertToken !== undefined) {
+    mkdirSync(join(dir, '.config/ci-kit'), { recursive: true });
+    writeFileSync(join(dir, '.config/ci-kit/alert-token'), alertToken);
+  }
   const front = join(dir, 'out.txt');
   writeFileSync(front, output);
   if (afterOpen !== undefined) writeFileSync(join(dir, 'after.txt'), afterOpen);
@@ -55,6 +59,7 @@ source '${dir}/'"$kind".sh
   writeFileSync(gh, `#!/bin/bash
 printf '%s\\0' "$@" >> '${join(dir, 'gh-args.txt')}'
 printf '\\0' >> '${join(dir, 'gh-args.txt')}'
+printf '%s\\n' "\${GH_TOKEN-<unset>}" >> '${join(dir, 'gh-tokens.txt')}'
 if [[ $FAKE_GH_HANG == 1 ]]; then
   trap '' ALRM
   echo "$$" >> '${join(dir, 'hung-gh-pids.txt')}'
@@ -75,7 +80,7 @@ if [[ $1 == issue && $2 == create ]]; then echo https://github.com/SSFSKIM/ci-ki
       env: {
         PATH: `${join(dir, 'bin')}:/usr/bin:/bin`, HOME: dir,
         CI_KIT_LOG_BIN: log, CI_KIT_GH_BIN: gh, FAKE_GH_STATUS: String(ghExit), FAKE_GH_HANG: ghStall ? '1' : '0',
-        GITHUB_RUN_ID: '123456', GITHUB_JOB: 'e2e',
+        GITHUB_RUN_ID: '123456', GITHUB_JOB: 'e2e', ...env,
       },
     });
     const ghSurvivors = [];
@@ -94,6 +99,7 @@ if [[ $1 == issue && $2 == create ]]; then echo https://github.com/SSFSKIM/ci-ki
       log: text('Library/Logs/ci-kit/mac-runner-hooks.log'),
       opened: text('opened.txt').trim().split('\n').filter(Boolean),
       ghCalls: text('gh-args.txt').split('\0\0').filter(Boolean).map((call) => call.split('\0')),
+      ghTokens: text('gh-tokens.txt').split('\n').filter(Boolean),
       logArgs: text('log-args.txt').split('\0').filter(Boolean),
       logCalls: text('log-args.txt').split('\0\0').filter(Boolean).map((call) => call.split('\0')),
       state: existsSync(join(dir, statePath)) ? text(statePath) : null,
@@ -589,4 +595,43 @@ test('hung gh cleanup calls that ignore SIGALRM do not block a passing job or re
   const next = passed.again(asnShape('Terminal'));
   assert.equal(next.status, 0, next.stderr);
   assert.equal(next.ghCalls.length, 3, 'a later passing job does not repeat cleanup');
+});
+
+test('another machine is named in every refusal line and the alert title, and the lines keep their ci-kit: … rerun shape', () => {
+  const env = { CI_KIT_MACHINE: 'rental' };
+  for (const [run, line] of [
+    [check(asnShape('loginwindow'), 0, { env }), 'ci-kit: a system dialog (loginwindow: source unknown) holds focus on the rental — dismiss it there and rerun'],
+    [check(asnShape('Finder'), 0, { env, openStatus: 1 }), 'ci-kit: could not open Terminal on the rental (Finder is in front) — check its desktop and rerun'],
+    [check(asnShape('Finder'), 0, { env }), 'ci-kit: Terminal did not come to the front on the rental (Finder is) — check its desktop and rerun'],
+  ]) {
+    assert.equal(run.status, 1);
+    // MAWS's ci-gate.sh tells a refused job by this shape: the line starts with `ci-kit: ` and ends with `rerun`.
+    assert.deepEqual(run.stderr.split('\n').filter(Boolean), [line]);
+    assert.match(line, /^ci-kit: .*rerun$/);
+  }
+  const alerted = check(asnShape('loginwindow'), 0, { env });
+  assert.equal(argValue(alerted.ghCalls[0], '--title'), 'ci-kit alert: system dialog on the rental (loginwindow: source unknown)');
+});
+
+test('with a token file, every gh call gets the token in its environment, never in an argument or any output', () => {
+  const secret = 'github_pat_11FAKE0secret0value';
+  const failed = check(asnShape('loginwindow'), 0, { alertToken: `${secret}\n` });
+  const passed = failed.again(asnShape('Terminal'));
+  assert.equal(passed.status, 0, passed.stderr);
+  assert.deepEqual(passed.ghCalls.map((call) => call[1]), ['create', 'comment', 'close']);
+  assert.deepEqual(passed.ghTokens, [secret, secret, secret]);
+  for (const run of [failed, passed]) {
+    assert.ok(!run.ghCalls.flat().some((arg) => arg.includes(secret)), 'not an argument');
+    for (const output of [run.stdout, run.stderr, run.log]) assert.ok(!output.includes(secret), 'not printed or logged');
+  }
+});
+
+test('without a token file gh keeps its own login; an empty one is logged and changes nothing', () => {
+  const plain = check(asnShape('loginwindow'));
+  assert.deepEqual(plain.ghTokens, ['<unset>']);
+  const empty = check(asnShape('loginwindow'), 0, { alertToken: '' });
+  assert.equal(empty.status, 1);
+  assert.deepEqual(empty.ghTokens, ['<unset>']);
+  assert.match(empty.log, /alert-token is empty or unreadable; gh uses its own login/);
+  assert.equal(empty.state.trim(), alertURL, 'the alert is still created');
 });

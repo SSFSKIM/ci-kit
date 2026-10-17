@@ -13,7 +13,10 @@ const python = spawnSync('python3', ['-I', '-c', 'import sys; print(sys.executab
 const hookFiles = ['job-started.sh', 'job-completed.sh', 'desktop-check.sh', 'desktop-posture.sh', 'sweep.mjs', 'strays.mjs', 'terminate.mjs'];
 const macOnly = { skip: process.platform !== 'darwin' };
 
-function fixture() {
+// What the runner writes at registration (2.338.0): JSON behind a UTF-8 byte-order mark (the mini's, read 2026-10-17).
+const dotRunner = (name) => `\uFEFF${JSON.stringify({ agentId: 21, agentName: name, poolId: 1, gitHubUrl: 'https://github.com/SSFSKIM/MAWS', workFolder: '_work' }, null, 2)}`;
+
+function fixture({ registered = 'ci-kit-mac-mini' } = {}) {
   const home = mkdtempSync(join(root, 'home-'));
   const kit = join(home, 'kit');
   const bin = join(home, 'bin');
@@ -27,7 +30,7 @@ function fixture() {
   fake('uname', 'if [[ $1 == -m ]]; then echo arm64; else echo Darwin; fi');
   for (const name of ['node', 'corepack', 'git', 'soffice']) fake(name, 'echo fixture-tool');
   // Never download/register a runner or invoke any real compiler or desktop tool.
-  fake('curl', 'exit 90');
+  fake('curl', 'echo "$*" >> "$HOME/curl.calls"\nexit 90');
   fake('xcrun', `if [[ $1 == clang ]]; then echo fixture-clang; exit 0; fi
 [[ $1 == swiftc && $2 == -O && $3 == -o ]] || exit 91
 printf '#!/bin/bash\\necho cursor-park\\n' > "$4"
@@ -49,16 +52,20 @@ exec /bin/cp "$@"`);
     .replace('test -x /Applications/LibreOffice.app/Contents/MacOS/soffice', 'true'));
   const runner = join(home, 'actions-runner-maws');
   mkdirSync(join(runner, 'bin'), { recursive: true });
-  executable(join(runner, 'config.sh'), 'exit 92');
+  // A registration records its arguments and whether the token came through the environment, then writes .runner.
+  executable(join(runner, 'config.sh'), `printf '%s\\n' "$@" > "$HOME/config.args"
+printf '%s' "\${ACTIONS_RUNNER_INPUT_TOKEN-}" > "$HOME/config.token"
+while (($# > 0)); do [[ $1 == --name ]] && name=$2; shift; done
+printf '\\xef\\xbb\\xbf{"agentName": "%s"}' "$name" > .runner`);
   executable(join(runner, 'bin/runsvc.sh'), 'echo fixture-runner');
-  writeFileSync(join(runner, '.runner'), '{}');
+  if (registered) writeFileSync(join(runner, '.runner'), dotRunner(registered));
   const hooks = join(runner, 'ci-kit/hooks');
   mkdirSync(hooks, { recursive: true });
   for (const file of [...hookFiles, 'cursor-park', 'obsolete']) writeFileSync(join(hooks, file), `old ${file}\n`);
   writeFileSync(join(runner, '.env'), 'old environment\n');
   const snapshot = () => Object.fromEntries(readdirSync(hooks).sort().map((name) => [name, readFileSync(join(hooks, name), 'utf8')]));
-  const run = (script = 'mac/install.sh', args = ['--disabled'], extra = {}) => spawnSync('/bin/bash', [join(kit, script), ...args], {
-    encoding: 'utf8', timeout: 15_000, env: { ...env, ...extra },
+  const run = (script = 'mac/install.sh', args = ['--disabled'], extra = {}, input = '') => spawnSync('/bin/bash', [join(kit, script), ...args], {
+    encoding: 'utf8', timeout: 15_000, env: { ...env, ...extra }, input,
   });
   return { home, kit, bin, env, runner, hooks, executable, run, snapshot };
 }
@@ -168,6 +175,79 @@ print(reads)
   assert.equal(await closed, 0, errors);
   assert.ok(Number(output.trim().split('\n').at(-1)) > 0, output);
   assertNewHooks(f);
+});
+
+const envFile = (f, machine) => [
+  'LANG=en_US.UTF-8',
+  `ACTIONS_RUNNER_HOOK_JOB_STARTED=${f.hooks}/job-started.sh`,
+  `ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${f.hooks}/job-completed.sh`,
+  `CI_KIT_MACHINE=${machine}`,
+  '',
+].join('\n');
+
+test('a re-run on the mini with no argument keeps its registration, and its .env names it the mini', macOnly, () => {
+  const f = fixture();
+  const result = f.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(join(f.home, 'config.args')), false, 'not registered again');
+  assert.equal(readFileSync(join(f.runner, '.env'), 'utf8'), envFile(f, 'mini'));
+});
+
+test('a re-run keeps another machine its registered name; a matching --name is accepted', macOnly, () => {
+  const f = fixture({ registered: 'ci-kit-mac-rental' });
+  for (const args of [['--disabled'], ['--disabled', '--name', 'ci-kit-mac-rental']]) {
+    const result = f.run(undefined, args);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(join(f.runner, '.env'), 'utf8'), envFile(f, 'rental'));
+  }
+});
+
+test('registration takes --name, hands the token over in the environment only, and a re-run keeps the name', macOnly, () => {
+  const f = fixture({ registered: null });
+  const result = f.run(undefined, ['--disabled', '--name', 'ci-kit-mac-rental'], {}, 'registration-token-123\n');
+  assert.equal(result.status, 0, result.stderr);
+  const args = readFileSync(join(f.home, 'config.args'), 'utf8').trim().split('\n');
+  assert.equal(args[args.indexOf('--name') + 1], 'ci-kit-mac-rental');
+  assert.equal(args[args.indexOf('--labels') + 1], 'ci-kit-mac');
+  assert.ok(!args.some((arg) => arg.includes('registration-token-123')), 'the token is not an argument');
+  assert.equal(readFileSync(join(f.home, 'config.token'), 'utf8'), 'registration-token-123');
+  assert.equal(readFileSync(join(f.runner, '.env'), 'utf8'), envFile(f, 'rental'));
+  rmSync(join(f.home, 'config.args'));
+  const rerun = f.run();
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.equal(existsSync(join(f.home, 'config.args')), false, 'not registered again');
+  assert.equal(readFileSync(join(f.runner, '.env'), 'utf8'), envFile(f, 'rental'));
+});
+
+test('a name that is not the registered one, or missing at registration, is refused before anything changes', macOnly, () => {
+  for (const [registered, args, input, refusal] of [
+    ['ci-kit-mac-mini', ['--disabled', '--name', 'ci-kit-mac-rental'], '', /registered as ci-kit-mac-mini; to rename it/],
+    [null, ['--disabled'], 'registration-token-123\n', /name the runner to register it: --name ci-kit-mac-<machine>/],
+    [null, ['--name', 'the rental'], 'registration-token-123\n', /--name takes letters, digits/],
+  ]) {
+    const f = fixture({ registered });
+    const before = f.snapshot();
+    const result = f.run(undefined, args, {}, input);
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, refusal);
+    assert.equal(existsSync(join(f.home, 'config.args')), false, 'nothing registered');
+    assert.deepEqual(f.snapshot(), before);
+    assert.equal(readFileSync(join(f.runner, '.env'), 'utf8'), 'old environment\n');
+    assert.equal(existsSync(join(f.home, 'launchctl.calls')), false);
+  }
+  assert.equal(fixture().run(undefined, ['--name']).status, 2, '--name without a value prints the usage');
+});
+
+test('a missing name at registration is refused before the runner is downloaded', macOnly, () => {
+  const f = fixture({ registered: null });
+  rmSync(join(f.runner, 'config.sh'));
+  const before = f.snapshot();
+  const result = f.run(undefined, ['--disabled'], {}, 'registration-token-123\n');
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /name the runner to register it/);
+  assert.equal(existsSync(join(f.home, 'curl.calls')), false, 'nothing downloaded');
+  assert.deepEqual(f.snapshot(), before);
+  assert.equal(readFileSync(join(f.runner, '.env'), 'utf8'), 'old environment\n');
 });
 
 function readPlist(path) {
