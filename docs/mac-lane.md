@@ -185,7 +185,7 @@ ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none c
   incoming TCP **local** port 5900 in `ESTABLISHED`, or UDP local ports 5900–5902 with a concrete foreign peer (not a
   wildcard listener), including loopback tunnels. UDP covers [High Performance Screen Sharing's ports](https://support.apple.com/guide/remote-desktop/use-high-performance-screen-sharing-apdf8e09f5a9/mac).
   Failed, timed-out or unrecognized reads give `unknown` unless another signal already establishes a remote connection.
-- `computeruse`: the distinct names of running computer-use processes, comma-separated in byte order, or `none`. A name
+- `computeruse`: the distinct names of running computer-use processes, comma-separated in byte order (a list too long for the line ends in `+N more`), or `none`. A name
   counts when it is `SkyComputerUseService` (Codex and ChatGPT computer use; cua drives the desktop through it too),
   contains `CUAService`, or starts with `cua` (`cua-driver`, `cua-sandbox-golden`). The read is non-root
   `ps -axco pid=,comm=`, which prints each executable's name in full and never its path; `pgrep` and `ps -o ucomm` see

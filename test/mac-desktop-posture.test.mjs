@@ -270,6 +270,16 @@ test('computer-use processes are named once each, in byte order, by executable n
   assert.match(run.stdout, /sweep .*job-completed/);
 });
 
+test('a computer-use list too long for the posture read keeps whole names and ends in +N more', () => {
+  const names = Array.from({ length: 40 }, (_, i) => `cua-sandbox-${String(i).padStart(3, '0')}`);
+  const processes = `${idle}${names.map((name, i) => `  ${900 + i} ${name}\n`).join('')}`;
+  const run = fixture({ processes }).run('end');
+  assert.equal(run.status, 0, run.stderr);
+  const list = `${names.slice(0, 30).join(',')},+10 more`;
+  assert.equal(names.slice(0, 30).join(',').length, 479);
+  assert.deepEqual(posture(run.stdout), [`ci-kit desktop (end): frontmost=Terminal display=2560x1440@2x remote=none computeruse=${list}`]);
+});
+
 test('failed, hanging, empty or unrecognized process reads are unknown without blocking the other fields', () => {
   for (const options of [{ psStatus: 1 }, { processes: '' }, { processes: 'unrecognized output\n' }, { psHang: true }, { psHang: true, ignoreAlarm: true }]) {
     const run = fixture(options).run('end');
