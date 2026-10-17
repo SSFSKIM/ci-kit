@@ -11,19 +11,19 @@ let root;
 before(() => { root = mkdtempSync(join(tmpdir(), 'ci-kit-posture-')); });
 after(() => rmSync(root, { recursive: true, force: true }));
 
-// CI_KIT_PROBE_DEADLINE (whole seconds) is the supervisors' per-probe deadline; production defaults to 1 s, which is far too
-// tight for positive fakes when suites run concurrently. Fixtures get a generous one; each hung probe then costs that long.
-// Real supervisors always run. The spawn timeout only has to outlast the longest hung run, and well under the fakes' 60 s sleep.
-const generous = 5;
-const productionDeadline = 1;
+// Production's supervisors always arm a real 1 s alarm per probe, far too tight for positive fakes when suites run
+// concurrently. Fixtures load a fixture-local Perl module (PERL5OPT/PERL5LIB) that scales every alarm, so each hung probe
+// costs `scaled` seconds; the real fork, group kill and reap still run. The spawn timeout only has to outlast the longest
+// hung run, and well under the fakes' 60 s sleep.
+const scaled = 5;
 const hookTimeout = 30_000;
-const withinHangs = (run, hangs, deadline = generous) => {
+const withinHangs = (run, hangs, deadline = scaled) => {
   const limit = (hangs * deadline + 15) * 1000;
   assert.ok(run.elapsed < limit, `posture took ${run.elapsed} ms (limit ${limit} ms)`);
 };
 
 // Real hook wrappers and desktop reads; only the desktop, cursor and process-sweeping boundaries are faked.
-function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, missing = false, parsec, parsecHang = false, logFailure = false, frontStatus = 0, frontHang = false, connections = 'Proto Recv-Q Send-Q Local Address Foreign Address (state)\n', netStatus = 0, netHang = false, netDelay = 0, ignoreAlarm = false, deadline = generous } = {}) {
+function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, missing = false, parsec, parsecHang = false, logFailure = false, frontStatus = 0, frontHang = false, connections = 'Proto Recv-Q Send-Q Local Address Foreign Address (state)\n', netStatus = 0, netHang = false, ignoreAlarm = false, clock = scaled, forkDelay = 0 } = {}) {
   const dir = mkdtempSync(join(root, 'job-'));
   const bin = join(dir, 'bin');
   const installed = join(dir, 'hooks');
@@ -40,7 +40,7 @@ function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, mi
   executable(join(bin, 'open'), 'exit 91'); // Already in Terminal; no real LaunchServices calls.
   writeFileSync(join(dir, 'connections'), connections);
   // Builtin read/printf replay the connections: no extra process for a loaded machine to schedule late.
-  executable(join(bin, 'netstat'), `[[ $* == -an ]] || exit 92\n${netHang ? hangingRead('net') : ''}\n${netDelay ? `/bin/sleep ${netDelay}` : ''}\nIFS= read -r -d '' replay < '${join(dir, 'connections')}'; printf '%s' "$replay"; exit ${netStatus}`);
+  executable(join(bin, 'netstat'), `[[ $* == -an ]] || exit 92\n${netHang ? hangingRead('net') : ''}\nIFS= read -r -d '' replay < '${join(dir, 'connections')}'; printf '%s' "$replay"; exit ${netStatus}`);
   if (parsecHang) executable(join(bin, 'awk'), `if [[ \${!#} == '${join(dir, '.parsec/log.txt')}' ]]; then\n${hangingRead('parsec')}\nfi\nexec /usr/bin/awk "$@"`);
   executable(join(bin, 'node'), 'echo "sweep $*"');
   if (!missing) executable(join(installed, 'cursor-park'), `
@@ -50,6 +50,20 @@ ${hang ? `trap '' ALRM\necho $$ > '${join(dir, 'helper-pid')}'\nexec /bin/sleep 
     mkdirSync(join(dir, '.parsec'));
     writeFileSync(join(dir, '.parsec/log.txt'), parsec ?? '');
   }
+  // Fixture-only Perl overrides, loaded into every perl the hooks start. `clock` (null: production's real clock) scales
+  // each alarm. `forkDelay` holds a forked child that long before fork returns, so before a supervisor's child can take
+  // its own process group; the parent records its own and the child's exact PIDs for cleanup.
+  const perlLib = join(dir, 'perl');
+  mkdirSync(perlLib);
+  const modules = [];
+  const perlModule = (name, body) => { writeFileSync(join(perlLib, `${name}.pm`), `package ${name};\n${body}\n1;\n`); modules.push(`-M${name}`); };
+  if (clock) perlModule('FixtureClock', `*CORE::GLOBAL::alarm = sub (_) { CORE::alarm($_[0] > 0 ? $_[0] * ${clock} : $_[0]) };`);
+  if (forkDelay) perlModule('FixtureForkDelay', `*CORE::GLOBAL::fork = sub () {
+  my $pid = CORE::fork;
+  if (defined $pid && !$pid) { sleep ${forkDelay}; return 0 }
+  if ($pid && open(my $fh, '>>', '${join(dir, 'fork-pids')}')) { print $fh "$$ $pid\\n"; close $fh }
+  return $pid;
+};`);
   const log = join(dir, 'Library/Logs/ci-kit/mac-runner-hooks.log');
   if (logFailure) {
     mkdirSync(join(dir, 'Library/Logs/ci-kit'), { recursive: true });
@@ -61,15 +75,19 @@ ${hang ? `trap '' ALRM\necho $$ > '${join(dir, 'helper-pid')}'\nexec /bin/sleep 
     const script = postureOnly ? 'desktop-posture.sh' : phase === 'start' ? 'job-started.sh' : 'job-completed.sh';
     const result = spawnSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', join(installed, script), ...(postureOnly ? [phase] : [])], {
       encoding: 'utf8', timeout: hookTimeout,
-      env: { HOME: dir, PATH: `${bin}:/usr/bin:/bin`, GITHUB_RUN_ID: '123456', GITHUB_JOB: 'e2e', ...(deadline === null ? {} : { CI_KIT_PROBE_DEADLINE: String(deadline) }) },
+      env: { HOME: dir, PATH: `${bin}:/usr/bin:/bin`, GITHUB_RUN_ID: '123456', GITHUB_JOB: 'e2e', ...(modules.length ? { PERL5LIB: perlLib, PERL5OPT: modules.join(' ') } : {}) },
     });
     const survivors = [];
     const observed = [];
+    const recorded = [];
     for (const source of ['helper', 'front', 'parsec', 'net']) {
       const pidFile = join(dir, `${source}-pid`);
       if (!existsSync(pidFile)) continue;
       observed.push(source);
-      const pid = Number(readFileSync(pidFile, 'utf8').trim());
+      recorded.push(readFileSync(pidFile, 'utf8'));
+    }
+    if (existsSync(join(dir, 'fork-pids'))) recorded.push(readFileSync(join(dir, 'fork-pids'), 'utf8'));
+    for (const pid of recorded.join(' ').split(/\s+/).filter(Boolean).map(Number)) {
       try { process.kill(pid, 0); survivors.push(pid); process.kill(pid, 'SIGKILL'); }
       catch (error) { if (error.code !== 'ESRCH') throw error; }
     }
@@ -165,11 +183,21 @@ for (const ignoreAlarm of [false, true]) {
 }
 
 test('all four hanging reads stay bounded and optional under bash -e -o pipefail', () => {
-  // Production's own 1 s default (no override), so this costs four seconds; marker files are not asserted, because under load
-  // a fake may be abandoned before it writes one.
-  const run = fixture({ frontHang: true, hang: true, parsecHang: true, netHang: true, ignoreAlarm: true, deadline: null }).runPosture();
+  // Production's real 1 s clock, so this costs four seconds; marker files are not asserted, because under load a fake may be
+  // abandoned before it writes one.
+  const run = fixture({ frontHang: true, hang: true, parsecHang: true, netHang: true, ignoreAlarm: true, clock: null }).runPosture();
   assert.equal(run.status, 0, run.stderr);
-  withinHangs(run, 4, productionDeadline);
+  withinHangs(run, 4, 1);
+  assert.deepEqual(run.survivors, []);
+  assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=unknown display=unknown remote=unknown']);
+});
+
+test('a probe child held before it has its own process group is still killed at the deadline', () => {
+  // Production's real 1 s clock. Each supervisor's child is held 6 s inside fork, so every alarm finds no process group to
+  // kill; a supervisor that waited for the child instead took at least 24 s over the four probes.
+  const run = fixture({ clock: null, forkDelay: 6 }).runPosture();
+  assert.equal(run.status, 0, run.stderr);
+  withinHangs(run, 4, 1);
   assert.deepEqual(run.survivors, []);
   assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=unknown display=unknown remote=unknown']);
 });
@@ -187,27 +215,6 @@ test('Screen Sharing means an established incoming 5900 transport, not a listene
   }
   const both = fixture({ connections: tcp('127.0.0.1.5900', '127.0.0.1.53100', 'ESTABLISHED'), parsec: connected }).run('end');
   assert.match(both.stdout, /remote=parsec,screensharing$/m);
-});
-
-test('a positive source slower than the 1 s default deadline succeeds under a generous override', () => {
-  const slow = { connections: tcp('192.168.1.2.5900', '192.168.1.3.53100', 'ESTABLISHED'), netDelay: 1.5 };
-  const kept = fixture(slow).run('end');
-  assert.equal(kept.status, 0, kept.stderr);
-  assert.deepEqual(posture(kept.stdout), ['ci-kit desktop (end): frontmost=Terminal display=2560x1440@2x remote=screensharing']);
-  // Control: with no override the production default still abandons this deterministically slower source. The other
-  // fields race that same 1 s deadline under load, so only remote is pinned.
-  const abandoned = fixture({ ...slow, deadline: null }).run('end');
-  assert.equal(abandoned.status, 0, abandoned.stderr);
-  assert.match(abandoned.stdout, /remote=unknown$/m);
-});
-
-test('a zero or malformed deadline override keeps a bounded supervisor at the 1 s default', () => {
-  // A 2 s source must still be abandoned: the override may lengthen the deadline, never disable it.
-  for (const deadline of ['0', 'invalid']) {
-    const run = fixture({ connections: tcp('192.168.1.2.5900', '192.168.1.3.53100', 'ESTABLISHED'), netDelay: 2, deadline }).run('end');
-    assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stdout, /remote=unknown$/m, `override ${deadline}`);
-  }
 });
 
 test('high-performance Screen Sharing uses peer-associated UDP 5900–5902, not wildcard listeners', () => {

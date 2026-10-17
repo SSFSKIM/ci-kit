@@ -141,15 +141,16 @@ prove viewer liveness. `none` means no observed default-port transport, not cove
 paths or other remote-control products. The MacBook's macOS 26 socket layout and absent-session case were checked
 read-only; active TCP/UDP cases are covered by fixtures, not a live sharing session.
 
-The four posture reads — frontmost, display, Parsec and Screen Sharing — each default to an independent 1 s
-Perl-supervisor deadline, which kills and reaps a hanging probe even if it ignores SIGALRM. Results are combined only
-afterward, so a positive Parsec read survives a hanging Screen Sharing read and vice versa. All four timing out takes
-about 4 s plus process overhead. `CI_KIT_PROBE_DEADLINE` can override the per-probe seconds (1–9; unset or invalid uses
-1). Local positive fixtures use a generous deadline so scheduling load does not look like a failed read; hanging
-fakes sleep far beyond it. Fixtures cover interleaved Parsec clients, both positive/hanging directions with and
-without SIGALRM ignored, and all four reads hanging at the default deadline under `bash -e -o pipefail`. They only
-read state: no GUI actions, AppleScript, new permissions or remote-session changes. Posture and hooks-log failures
-never affect the sweep's or the job's outcome.
+The four posture reads — frontmost, display, Parsec and Screen Sharing — each have an independent, unconditional
+1 s Perl-supervisor deadline, which kills and reaps a hanging probe even if it ignores SIGALRM. Supervision covers
+the direct child before it has established its process group, as well as the group's descendants. Results are
+combined only afterward, so a positive Parsec read survives a hanging Screen Sharing read and vice versa. All four
+timing out takes about 4 s plus process overhead. Local positive fixtures scale the supervisor's clock only inside
+their test processes so scheduling load does not look like a failed read; hanging fakes sleep far beyond it. The
+all-four-hung and delayed-process-group regressions use the real, unscaled clock. Fixtures also cover interleaved
+Parsec clients and both positive/hanging directions with and without SIGALRM ignored, including strict-shell runs.
+The probes only read state: no GUI actions, AppleScript, new permissions or remote-session changes. Posture and
+hooks-log failures never affect the sweep's or the job's outcome.
 
 Before each job and after it, the hooks kill every process of the runner's user that a job left behind:
 

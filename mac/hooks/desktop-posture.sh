@@ -1,6 +1,6 @@
 #!/bin/bash
 # Read-only desktop snapshot for the job log, after start's Terminal/cursor work and before end's cleanup.
-# Probes default to a 1 s supervisor deadline; failures are unknown, never a reason to fail the job.
+# Every probe has a 1 s supervisor deadline; failures are unknown, never a reason to fail the job.
 set -uo pipefail
 here=$(dirname "$0")
 
@@ -46,17 +46,17 @@ if [[ ${1:-} == --screensharing ]]; then
 fi
 
 # Like desktop-check's gh deadline, the alarm belongs to a supervisor, not the exec-ed helper (which may ignore it).
-# Give each probe its own process group so a hanging shell and its children are killed together. Output goes to a
-# file: an abandoned descendant cannot keep command substitution waiting for its stdout to close.
+# Give each probe its own process group so a hanging shell and its children are killed together; the child itself is
+# killed first, since one scheduled late may not have its group yet when the alarm fires. Output goes to a file: an
+# abandoned descendant cannot keep command substitution waiting for its stdout to close.
 probe() {
   [[ -n $out ]] || return 1
   if perl -e '
     my $pid = fork;
     defined $pid or exit 125;
     if (!$pid) { setpgrp 0, 0 or exit 125; exec @ARGV; exit 127; }
-    $SIG{ALRM} = sub { kill "KILL", -$pid; waitpid $pid, 0; exit 124; };
-    my $deadline = $ENV{CI_KIT_PROBE_DEADLINE} // "";
-    alarm($deadline =~ /\A[1-9]\z/ ? $deadline : 1);
+    $SIG{ALRM} = sub { kill "KILL", $pid, -$pid; waitpid $pid, 0; exit 124; };
+    alarm 1;
     waitpid $pid, 0;
     my $status = $?;
     alarm 0;
