@@ -22,8 +22,12 @@ const withinHangs = (run, hangs, deadline = scaled) => {
   assert.ok(run.elapsed < limit, `posture took ${run.elapsed} ms (limit ${limit} ms)`);
 };
 
-// Real hook wrappers and desktop reads; only the desktop, cursor and process-sweeping boundaries are faked.
-function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, missing = false, parsec, parsecHang = false, logFailure = false, frontStatus = 0, frontHang = false, connections = 'Proto Recv-Q Send-Q Local Address Foreign Address (state)\n', netStatus = 0, netHang = false, ignoreAlarm = false, clock = scaled, forkDelay = 0 } = {}) {
+// The process table `ps -axco pid=,comm=` prints: each executable name in full, never its path, so a cua runtime's node is
+// `node`. None of these is a computer-use process.
+const idle = '    1 launchd\n  410 Terminal\n  512 cursor-park\n  520 node\n  521 node_repl\n  733 Google Chrome Helper (Renderer)\n';
+
+// Real hook wrappers and desktop reads; only the desktop, cursor, process-table and process-sweeping boundaries are faked.
+function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, missing = false, parsec, parsecHang = false, logFailure = false, frontStatus = 0, frontHang = false, connections = 'Proto Recv-Q Send-Q Local Address Foreign Address (state)\n', netStatus = 0, netHang = false, processes = idle, psStatus = 0, psHang = false, ignoreAlarm = false, clock = scaled, forkDelay = 0 } = {}) {
   const dir = mkdtempSync(join(root, 'job-'));
   const bin = join(dir, 'bin');
   const installed = join(dir, 'hooks');
@@ -41,6 +45,8 @@ function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, mi
   writeFileSync(join(dir, 'connections'), connections);
   // Builtin read/printf replay the connections: no extra process for a loaded machine to schedule late.
   executable(join(bin, 'netstat'), `[[ $* == -an ]] || exit 92\n${netHang ? hangingRead('net') : ''}\nIFS= read -r -d '' replay < '${join(dir, 'connections')}'; printf '%s' "$replay"; exit ${netStatus}`);
+  writeFileSync(join(dir, 'processes'), processes);
+  executable(join(bin, 'ps'), `[[ $* == '-axco pid=,comm=' ]] || exit 93\n${psHang ? hangingRead('ps') : ''}\nIFS= read -r -d '' replay < '${join(dir, 'processes')}'; printf '%s' "$replay"; exit ${psStatus}`);
   if (parsecHang) executable(join(bin, 'awk'), `if [[ \${!#} == '${join(dir, '.parsec/log.txt')}' ]]; then\n${hangingRead('parsec')}\nfi\nexec /usr/bin/awk "$@"`);
   executable(join(bin, 'node'), 'echo "sweep $*"');
   if (!missing) executable(join(installed, 'cursor-park'), `
@@ -80,7 +86,7 @@ ${hang ? `trap '' ALRM\necho $$ > '${join(dir, 'helper-pid')}'\nexec /bin/sleep 
     const survivors = [];
     const observed = [];
     const recorded = [];
-    for (const source of ['helper', 'front', 'parsec', 'net']) {
+    for (const source of ['helper', 'front', 'parsec', 'net', 'ps']) {
       const pidFile = join(dir, `${source}-pid`);
       if (!existsSync(pidFile)) continue;
       observed.push(source);
@@ -102,14 +108,14 @@ test('start reports the desktop after the cursor work; end observes drift withou
   const job = fixture();
   const start = job.run();
   assert.equal(start.status, 0, start.stderr);
-  assert.deepEqual(posture(start.stdout), ['ci-kit desktop (start): frontmost=Terminal display=2560x1440@2x remote=none']);
+  assert.deepEqual(posture(start.stdout), ['ci-kit desktop (start): frontmost=Terminal display=2560x1440@2x remote=none computeruse=none']);
   assert.ok(start.stdout.indexOf('cursor-parked') < start.stdout.indexOf('ci-kit desktop (start)'));
   assert.ok(start.stdout.indexOf('ci-kit desktop (start)') < start.stdout.indexOf('sweep '));
-  assert.match(start.log, /run=123456 job=e2e ci-kit desktop \(start\): frontmost=Terminal display=2560x1440@2x remote=none/);
+  assert.match(start.log, /run=123456 job=e2e ci-kit desktop \(start\): frontmost=Terminal display=2560x1440@2x remote=none computeruse=none/);
   writeFileSync(job.front, 'Google Chrome');
   const end = job.run('end');
   assert.equal(end.status, 0, end.stderr);
-  assert.deepEqual(posture(end.stdout), ['ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@2x remote=none']);
+  assert.deepEqual(posture(end.stdout), ['ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@2x remote=none computeruse=none']);
   assert.match(end.log, /ci-kit desktop \(end\): frontmost=Google Chrome/);
 });
 
@@ -117,7 +123,7 @@ test('missing, failing and malformed display helpers leave display unknown and l
   for (const options of [{ missing: true }, { displayStatus: 2 }, { display: 'not a display' }]) {
     const run = fixture(options).run();
     assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stdout, /ci-kit desktop \(start\): frontmost=Terminal display=unknown remote=none/);
+    assert.match(run.stdout, /ci-kit desktop \(start\): frontmost=Terminal display=unknown remote=none computeruse=none/);
     assert.match(run.stdout, /sweep .*job-started/);
   }
 });
@@ -127,7 +133,7 @@ test('a display helper ignoring SIGALRM is killed and reaped at the probe deadli
   assert.equal(run.status, 0, run.stderr);
   withinHangs(run, 1);
   assert.deepEqual(run.survivors, []);
-  assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=Terminal display=unknown remote=none']);
+  assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=Terminal display=unknown remote=none computeruse=none']);
 });
 
 const connected = '[I 2026-10-17 10:30:04] user#123 connected.';
@@ -142,7 +148,7 @@ test('Parsec uses each client’s newest host connection event, ignoring unrelat
   ]) {
     const run = fixture({ parsec }).run();
     assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stdout, new RegExp(`remote=${remote}$`, 'm'));
+    assert.match(run.stdout, new RegExp(`remote=${remote} computeruse=none$`, 'm'));
   }
 });
 
@@ -159,7 +165,7 @@ test('one Parsec client disconnecting does not hide another client still connect
   ]) {
     const run = fixture({ parsec }).run('end');
     assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stdout, new RegExp(`remote=${remote}$`, 'm'));
+    assert.match(run.stdout, new RegExp(`remote=${remote} computeruse=none$`, 'm'));
   }
 });
 
@@ -176,30 +182,30 @@ for (const ignoreAlarm of [false, true]) {
       withinHangs(run, 1);
       assert.deepEqual(run.observed, [hangingSource]);
       assert.deepEqual(run.survivors, []);
-      assert.match(run.stdout, new RegExp(`remote=${remote}$`, 'm'));
+      assert.match(run.stdout, new RegExp(`remote=${remote} computeruse=none$`, 'm'));
       assert.match(run.stdout, /sweep .*job-completed/);
     });
   }
 }
 
-test('all four hanging reads stay bounded and optional under bash -e -o pipefail', () => {
-  // Production's real 1 s clock, so this costs four seconds; marker files are not asserted, because under load a fake may be
+test('all five hanging reads stay bounded and optional under bash -e -o pipefail', () => {
+  // Production's real 1 s clock, so this costs five seconds; marker files are not asserted, because under load a fake may be
   // abandoned before it writes one.
-  const run = fixture({ frontHang: true, hang: true, parsecHang: true, netHang: true, ignoreAlarm: true, clock: null }).runPosture();
+  const run = fixture({ frontHang: true, hang: true, parsecHang: true, netHang: true, psHang: true, ignoreAlarm: true, clock: null }).runPosture();
   assert.equal(run.status, 0, run.stderr);
-  withinHangs(run, 4, 1);
+  withinHangs(run, 5, 1);
   assert.deepEqual(run.survivors, []);
-  assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=unknown display=unknown remote=unknown']);
+  assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=unknown display=unknown remote=unknown computeruse=unknown']);
 });
 
 test('a probe child held before it has its own process group is still killed at the deadline', () => {
   // Production's real 1 s clock. Each supervisor's child is held 6 s inside fork, so every alarm finds no process group to
-  // kill; a supervisor that waited for the child instead took at least 24 s over the four probes.
+  // kill; a supervisor that waited for the child instead took at least 30 s over the five probes.
   const run = fixture({ clock: null, forkDelay: 6 }).runPosture();
   assert.equal(run.status, 0, run.stderr);
-  withinHangs(run, 4, 1);
+  withinHangs(run, 5, 1);
   assert.deepEqual(run.survivors, []);
-  assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=unknown display=unknown remote=unknown']);
+  assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=unknown display=unknown remote=unknown computeruse=unknown']);
 });
 
 test('Screen Sharing means an established incoming 5900 transport, not a listener or an outgoing viewer', () => {
@@ -211,10 +217,10 @@ test('Screen Sharing means an established incoming 5900 transport, not a listene
   ]) {
     const run = fixture({ connections }).run('end');
     assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stdout, new RegExp(`remote=${remote}$`, 'm'));
+    assert.match(run.stdout, new RegExp(`remote=${remote} computeruse=none$`, 'm'));
   }
   const both = fixture({ connections: tcp('127.0.0.1.5900', '127.0.0.1.53100', 'ESTABLISHED'), parsec: connected }).run('end');
-  assert.match(both.stdout, /remote=parsec,screensharing$/m);
+  assert.match(both.stdout, /remote=parsec,screensharing computeruse=none$/m);
 });
 
 test('high-performance Screen Sharing uses peer-associated UDP 5900–5902, not wildcard listeners', () => {
@@ -223,7 +229,7 @@ test('high-performance Screen Sharing uses peer-associated UDP 5900–5902, not 
       const connections = `Proto Recv-Q Send-Q Local Address Foreign Address (state)\nudp4 0 0 192.168.1.2.${port} ${foreign}\n`;
       const run = fixture({ connections }).run('end');
       assert.equal(run.status, 0, run.stderr);
-      assert.match(run.stdout, new RegExp(`remote=${remote}$`, 'm'));
+      assert.match(run.stdout, new RegExp(`remote=${remote} computeruse=none$`, 'm'));
     }
   }
 });
@@ -232,7 +238,7 @@ test('failed or unrecognized remote reads are unknown rather than a clean deskto
   for (const options of [{ netStatus: 1 }, { connections: 'unrecognized output' }]) {
     const run = fixture(options).run('end');
     assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stdout, /remote=unknown$/m);
+    assert.match(run.stdout, /remote=unknown computeruse=none$/m);
   }
 });
 
@@ -241,7 +247,7 @@ test('failed or hanging frontmost reads are unknown without blocking the other f
     const run = fixture(options).run('end');
     assert.equal(run.status, 0, run.stderr);
     withinHangs(run, options.frontHang ? 1 : 0);
-    assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=unknown display=2560x1440@2x remote=none']);
+    assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=unknown display=2560x1440@2x remote=none computeruse=none']);
   }
 });
 
@@ -252,4 +258,36 @@ test('posture logging failures do not hide stdout or mask the sweep outcome', ()
   const start = fixture().run('start', 23);
   assert.equal(start.status, 23, start.stderr);
   assert.equal(posture(start.stdout).length, 1);
+});
+
+test('computer-use processes are named once each, in byte order, by executable name alone', () => {
+  const processes = `${idle}  612 SkyComputerUseService\n  700 cua-sandbox-golden\n  701 cua-sandbox-golden\n  702 cua-driver\n  800 com.openai.sky.CUAService\n`;
+  const run = fixture({ processes }).run('end');
+  assert.equal(run.status, 0, run.stderr);
+  const line = 'ci-kit desktop (end): frontmost=Terminal display=2560x1440@2x remote=none computeruse=SkyComputerUseService,com.openai.sky.CUAService,cua-driver,cua-sandbox-golden';
+  assert.deepEqual(posture(run.stdout), [line]);
+  assert.ok(run.log.includes(line));
+  assert.match(run.stdout, /sweep .*job-completed/);
+});
+
+test('failed, hanging, empty or unrecognized process reads are unknown without blocking the other fields', () => {
+  for (const options of [{ psStatus: 1 }, { processes: '' }, { processes: 'unrecognized output\n' }, { psHang: true }, { psHang: true, ignoreAlarm: true }]) {
+    const run = fixture(options).run('end');
+    assert.equal(run.status, 0, run.stderr);
+    withinHangs(run, options.psHang ? 1 : 0);
+    assert.deepEqual(run.survivors, []);
+    assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=Terminal display=2560x1440@2x remote=none computeruse=unknown']);
+    assert.match(run.stdout, /sweep .*job-completed/);
+  }
+});
+
+test('a computer-use name survives an unrecognized row and another read hanging', () => {
+  const service = '  612 SkyComputerUseService\n';
+  for (const [options, remote] of [[{ processes: `${service}unrecognized\n` }, 'none'], [{ processes: service, netHang: true }, 'unknown']]) {
+    const run = fixture(options).run('end');
+    assert.equal(run.status, 0, run.stderr);
+    withinHangs(run, options.netHang ? 1 : 0);
+    assert.deepEqual(run.survivors, []);
+    assert.match(run.stdout, new RegExp(`remote=${remote} computeruse=SkyComputerUseService$`, 'm'));
+  }
 });
