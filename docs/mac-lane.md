@@ -169,8 +169,8 @@ whoever is using the machine's desktop when a job starts.
 cleanup can hide a leaked app, `desktop-posture.sh` prints one line to stdout and the hooks log:
 
 ```text
-ci-kit desktop (start): frontmost=Terminal display=2560x1440@2x remote=parsec
-ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none
+ci-kit desktop (start): frontmost=Terminal display=2560x1440@2x remote=parsec computeruse=none
+ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none computeruse=SkyComputerUseService,cua-sandbox-golden
 ```
 
 - `frontmost`: the same localized `lsappinfo` name the desktop check reads, through its read-only `--frontmost` mode.
@@ -185,6 +185,22 @@ ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none
   incoming TCP **local** port 5900 in `ESTABLISHED`, or UDP local ports 5900–5902 with a concrete foreign peer (not a
   wildcard listener), including loopback tunnels. UDP covers [High Performance Screen Sharing's ports](https://support.apple.com/guide/remote-desktop/use-high-performance-screen-sharing-apdf8e09f5a9/mac).
   Failed, timed-out or unrecognized reads give `unknown` unless another signal already establishes a remote connection.
+- `computeruse`: the distinct names of running computer-use processes, comma-separated in byte order (a list too long
+  for the line ends in `+N more`), or `none`. A name counts when it is `SkyComputerUseService` (Codex and ChatGPT
+  computer use; cua drives the desktop through it too), contains `CUAService`, or starts with `cua` (`cua-driver`,
+  `cua-sandbox-golden`). The read is non-root `ps -axco pid=,comm=`, which prints each executable's name in full and
+  never its path; `pgrep` and `ps -o ucomm` see the kernel's 16-character name, where `SkyComputerUseService` is
+  `SkyComputerUseSe`. A cua runtime's `node` and `node_repl`, which every session with the cua plugin loaded keeps, and
+  ci-kit's own `cursor-park` are not counted. A failed, timed-out, empty or unrecognized read gives `unknown` unless it
+  already found a computer-use name.
+
+Computer use is a **presence snapshot at the job's two edges**. It is the evidence for MAWS's rule (its gate-offload
+Decision Log 58) that a computer-use session drives the shared desktop only between jobs: a name at `start` was running
+as the job began, a name at `end` was still running when it finished. A session that started and stopped inside the job
+leaves nothing here, and a running service is not proof that it drove the desktop; for the stretch between, the unified
+log is still the record (`/usr/bin/log show --predicate 'process == "SkyComputerUseService" OR process BEGINSWITH "cua"'`,
+the full path because zsh has a `log` builtin). The names were checked on the MacBook (macOS 26) against running
+processes carrying them, and the mini's (macOS 27) `ps -c` output read-only.
 
 Screen Sharing is a **transport signal, not authentication proof**: TCP can be established at the login prompt
 ([ScreenSharingMonitor documents this](https://github.com/mm2270/ScreenSharingMonitor)); a peered UDP socket does not
@@ -192,16 +208,16 @@ prove viewer liveness. `none` means no observed default-port transport, not cove
 paths or other remote-control products. The MacBook's macOS 26 socket layout and absent-session case were checked
 read-only; active TCP/UDP cases are covered by fixtures, not a live sharing session.
 
-The four posture reads — frontmost, display, Parsec and Screen Sharing — each have an independent, unconditional
-1 s Perl-supervisor deadline, which kills and reaps a hanging probe even if it ignores SIGALRM. Supervision covers
-the direct child before it has established its process group, as well as the group's descendants. Results are
-combined only afterward, so a positive Parsec read survives a hanging Screen Sharing read and vice versa. All four
-timing out takes about 4 s plus process overhead. Local positive fixtures scale the supervisor's clock only inside
-their test processes so scheduling load does not look like a failed read; hanging fakes sleep far beyond it. The
-all-four-hung and delayed-process-group regressions use the real, unscaled clock. Fixtures also cover interleaved
+The five posture reads — frontmost, display, Parsec, Screen Sharing and computer use — each have an independent,
+unconditional 1 s Perl-supervisor deadline, which kills and reaps a hanging probe even if it ignores SIGALRM.
+Supervision covers the direct child before it has established its process group, as well as the group's descendants.
+Results are combined only afterward, so a positive Parsec read survives a hanging Screen Sharing read and vice versa.
+All five timing out takes about 5 s plus process overhead. Local positive fixtures scale the supervisor's clock only
+inside their test processes so scheduling load does not look like a failed read; hanging fakes sleep far beyond it. The
+all-five-hung and delayed-process-group regressions use the real, unscaled clock. Fixtures also cover interleaved
 Parsec clients and both positive/hanging directions with and without SIGALRM ignored, including strict-shell runs.
-The probes only read state: no GUI actions, AppleScript, new permissions or remote-session changes. Posture and
-hooks-log failures never affect the sweep's or the job's outcome.
+The probes only read state: no GUI actions, AppleScript, new permissions or remote-session changes, and no signal to
+any process the computer-use read finds. Posture and hooks-log failures never affect the sweep's or the job's outcome.
 
 Before each job and after it, the hooks kill every process of the runner's user that a job left behind:
 
@@ -376,7 +392,7 @@ gh api repos/SSFSKIM/MAWS/actions/runners --jq '.runners[]|[.name,.status,.busy]
 
 ```bash
 ssh $host "grep -m1 'ci-kit desktop (start)' ~/Library/Logs/ci-kit/mac-runner-hooks.log"
-#   expect: … ci-kit desktop (start): frontmost=Terminal display=2560x1440@2x remote=…
+#   expect: … ci-kit desktop (start): frontmost=Terminal display=2560x1440@2x remote=… computeruse=…
 ```
 
 (`remote=screensharing` while the owner's VNC session is connected. The mini, whose locale is Korean, shows Terminal as

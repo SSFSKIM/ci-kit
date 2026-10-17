@@ -45,6 +45,28 @@ if [[ ${1:-} == --screensharing ]]; then
   exit
 fi
 
+if [[ ${1:-} == --computeruse ]]; then
+  # Computer-use processes by executable name. `ps -c` prints each name in full; pgrep and ps's ucomm see the kernel's
+  # 16-character name, where SkyComputerUseService is SkyComputerUseSe. Names only: a cua runtime's node and node_repl
+  # run in every session with the plugin loaded, and ci-kit's own cursor-park starts with neither prefix.
+  if table=$(LC_ALL=C ps -axco pid=,comm= 2>/dev/null); then
+    LC_ALL=C awk '
+      { name=$0; if (!sub(/^ *[0-9]+ +/, "", name)) { bad=1; next }; rows++ }
+      name == "SkyComputerUseService" || index(name, "CUAService") || substr(name, 1, 3) == "cua" { found[name]=1 }
+      END {
+        for (name in found) { i=++n; while (i > 1 && names[i-1] > name) { names[i]=names[i-1]; i-- }; names[i]=name }
+        # The reader keeps 512 bytes: whole names while the list fits in 490, then ",+N more" for the rest.
+        for (i=1; i<=n; i++) { next_out=out (i > 1 ? "," : "") names[i]; if (length(next_out) > 490) break; out=next_out; kept=i }
+        if (kept < n) out=out (kept ? "," : "") "+" (n - kept) " more"
+        print n ? out : (rows && !bad ? "none" : "unknown")
+      }
+    ' <<<"$table"
+  else
+    echo unknown
+  fi
+  exit
+fi
+
 # Like desktop-check's gh deadline, the alarm belongs to a supervisor, not the exec-ed helper (which may ignore it).
 # Give each probe its own process group so a hanging shell and its children are killed together; the child itself is
 # killed first, since one scheduled late may not have its group yet when the alarm fires. Output goes to a file: an
@@ -89,7 +111,8 @@ elif [[ $parsec == unknown || $sharing == unknown ]]; then
 else
   remote=none
 fi
-line="ci-kit desktop (${1:-unknown}): frontmost=${front:-unknown} display=$display remote=$remote"
+computeruse=$(probe /bin/bash "$0" --computeruse) || computeruse=unknown
+line="ci-kit desktop (${1:-unknown}): frontmost=${front:-unknown} display=$display remote=$remote computeruse=${computeruse:-unknown}"
 printf '%s\n' "$line"
 {
   mkdir -p "$HOME/Library/Logs/ci-kit" &&
