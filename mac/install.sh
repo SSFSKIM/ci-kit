@@ -26,6 +26,13 @@ PLIST=$HOME/Library/LaunchAgents/$AGENT.plist
 RUNNER_PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 here=$(cd "$(dirname "$0")" && pwd)
 domain=gui/$(id -u)
+tmp=
+staged_hooks=
+cleanup() {
+  if [[ -n $staged_hooks ]]; then rm -rf "$staged_hooks"; fi
+  if [[ -n $tmp ]]; then rm -rf "$tmp"; fi
+}
+trap cleanup EXIT
 
 say() { echo "ci-kit mac: $*"; }
 die() { echo "ci-kit mac: $*" >&2; exit 1; }
@@ -68,7 +75,6 @@ if pgrep -qf "$RUNNER_DIR/bin/Runner.Worker"; then die 'a job is running on this
 # 2. The runner's files, at a pinned version (it updates itself from there).
 if [[ ! -x $RUNNER_DIR/config.sh ]]; then
   tmp=$(mktemp -d)
-  trap 'rm -rf "$tmp"' EXIT
   tarball=actions-runner-osx-arm64-$RUNNER_VERSION.tar.gz
   say "downloading runner $RUNNER_VERSION"
   curl -fsSL -o "$tmp/$tarball" "https://github.com/actions/runner/releases/download/v$RUNNER_VERSION/$tarball"
@@ -90,15 +96,49 @@ fi
 
 # 4. The hooks, copied into the runner so it never depends on where the kit is checked out, and the environment the
 # runner gives every job and hook. English messages: the jobs parse tool output, and this Mac's locale is Korean.
-mkdir -p "$RUNNER_DIR/ci-kit/hooks" "$LOG_DIR" "$(dirname "$PLIST")"
-rm -f "$RUNNER_DIR/ci-kit/hooks/"*
-cp "$here/hooks/job-started.sh" "$here/hooks/job-completed.sh" "$here/hooks/desktop-check.sh" "$here/hooks/desktop-posture.sh" "$here/hooks/sweep.mjs" \
-  "$here/hooks/strays.mjs" "$here/hooks/terminate.mjs" "$RUNNER_DIR/ci-kit/hooks/"
-chmod +x "$RUNNER_DIR/ci-kit/hooks/"*.sh
-# The cursor park is compiled here; without it the hook skips the step, so a failed compile is reported, not fatal.
-if ! xcrun swiftc -O -o "$RUNNER_DIR/ci-kit/hooks/cursor-park" "$here/hooks/cursor-park.swift" 2>"$LOG_DIR/cursor-park-build.log"; then
+mkdir -p "$RUNNER_DIR/ci-kit" "$LOG_DIR" "$(dirname "$PLIST")"
+# A sibling keeps staging on the same volume. Nothing touches the live set until every required file is ready.
+staged_hooks=$(mktemp -d "$RUNNER_DIR/ci-kit/.hooks.XXXXXX")
+hook_files=(job-started.sh job-completed.sh desktop-check.sh desktop-posture.sh sweep.mjs strays.mjs terminate.mjs)
+for file in "${hook_files[@]}"; do cp "$here/hooks/$file" "$staged_hooks/"; done
+chmod +x "$staged_hooks/"*.sh
+# The cursor park is optional. A failed compiler may leave output, which must not be published as a working helper.
+if ! xcrun swiftc -O -o "$staged_hooks/cursor-park" "$here/hooks/cursor-park.swift" 2>"$LOG_DIR/cursor-park-build.log"; then
+  rm -f "$staged_hooks/cursor-park"
   say "warning: cursor-park did not compile (see $LOG_DIR/cursor-park-build.log); jobs start without the cursor park"
 fi
+for file in "${hook_files[@]}"; do
+  [[ -f $staged_hooks/$file && -r $staged_hooks/$file ]] || die "staged hook missing or unreadable: $file"
+  if [[ $file == *.sh ]]; then
+    [[ -x $staged_hooks/$file ]] || die "staged hook not executable: $file"
+    bash -n "$staged_hooks/$file"
+  fi
+done
+if [[ -f $staged_hooks/cursor-park ]]; then
+  [[ -x $staged_hooks/cursor-park ]] || die 'staged cursor-park not executable'
+fi
+# Two renames (old -> backup, staged -> hooks) leave a gap at the fixed paths in .env. Darwin's RENAME_SWAP
+# exchanges both directories in one operation, so a job starting now still finds a complete set at hooks/.
+python3 -I - "$staged_hooks" "$RUNNER_DIR/ci-kit/hooks" <<'PY'
+import ctypes
+import os
+import sys
+
+staged, live = sys.argv[1:]
+if os.path.lexists(live):
+    libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+    swap = libc.renamex_np
+    swap.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    swap.restype = ctypes.c_int
+    if swap(os.fsencode(staged), os.fsencode(live), 0x00000002):  # RENAME_SWAP (stdio.h)
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), live)
+else:
+    os.rename(staged, live)  # First install: no old directory to exchange.
+PY
+# After an exchange staging holds the old set; after a first install it no longer exists.
+rm -rf "$staged_hooks"
+staged_hooks=
 cat >"$RUNNER_DIR/.env" <<EOF
 LANG=en_US.UTF-8
 ACTIONS_RUNNER_HOOK_JOB_STARTED=$RUNNER_DIR/ci-kit/hooks/job-started.sh

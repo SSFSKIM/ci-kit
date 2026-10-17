@@ -112,8 +112,10 @@ ssh mini '~/Developer/GitHub/ci-kit/host/install.sh'   # the same on the mini
 ```
 
 The agent runs the janitor from the checkout `install.sh` sits in, so install from the clone that stays on `main`.
-`install.sh` pins the `node` it finds on `PATH` by absolute path: re-run it after removing that Node version.
-Switching modes is a re-run.
+At each run, `host/run-node.sh` finds a working Node ≥ 22 on the agent's stable PATH (`~/.local/bin`, Homebrew,
+then system directories), then among `~/.nvm/versions/node/*/bin/node`. It needs no shell profile or nvm function,
+and no versioned Node path is saved in the plist. Removing an nvm version does not require reinstalling the agent
+as long as another compatible Node remains. Switching modes is a re-run.
 
 The agent reads `host/janitor.json` on every run, so a pattern change takes effect at the next run without a
 reinstall. Check a change first:

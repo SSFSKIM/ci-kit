@@ -35,17 +35,15 @@ case ${1:-} in
   *) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
 
-# launchd starts the agent with no shell profile, so the node it runs is pinned here, by absolute path.
-node=$(command -v node) || die "node not found on PATH; the janitor needs Node >= 22"
-major=$("$node" -p 'process.versions.node.split(".")[0]')
-((major >= 22)) || die "node $("$node" --version) at $node is too old; the janitor needs Node >= 22"
-# The janitor calls ps, git, tart (for the VM report, where installed) and osascript.
-agent_path="$(dirname "$node"):$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# Use the same profile-free lookup at install and at every run. No versioned nvm directory is persisted in the plist.
+# The janitor also calls ps, git, tart (for the VM report, where installed) and osascript.
+agent_path="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+PATH=$agent_path /bin/bash "$here/run-node.sh" --version || die 'the janitor needs Node >= 22'
 dry_run_arg=''
 [[ $mode == dry-run ]] && dry_run_arg='<string>--dry-run</string>'
 
 mkdir -p "$LOG_DIR" "$(dirname "$PLIST")"
-sed -e "s|__NODE__|$node|" -e "s|__JANITOR__|$here/janitor.mjs|" -e "s|__DRY_RUN__|$dry_run_arg|" \
+sed -e "s|__RUN_NODE__|$here/run-node.sh|" -e "s|__JANITOR__|$here/janitor.mjs|" -e "s|__DRY_RUN__|$dry_run_arg|" \
   -e "s|__PATH__|$agent_path|" -e "s|__LOG_DIR__|$LOG_DIR|" "$here/$AGENT.plist" >"$PLIST.tmp"
 plutil -lint -s "$PLIST.tmp"
 mv "$PLIST.tmp" "$PLIST"
