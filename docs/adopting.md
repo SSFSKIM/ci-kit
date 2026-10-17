@@ -82,7 +82,7 @@ gates:                      # required; non-empty
 | `hosted` | GitHub's `ubuntu-latest` | any repo |
 | `hosted-macos` | GitHub's `macos-latest` (free on public repos) | any repo |
 | `pool` | a GCE spot VM per job for repos in `pool/config/gce.json` (the frozen Hetzner pool for `pool.json`), `[self-hosted, ci-kit-pool, cpus-<N>]` | private repos only |
-| `mac` | the Mac mini's runner, `[self-hosted, macOS, ARM64, ci-kit-mac]` | private repos only |
+| `mac` | the mac lane's runners (the Mac mini and a second Mac), `[self-hosted, macOS, ARM64, ci-kit-mac]` | private repos only |
 
 A public repo whose config puts any gate on `pool` or `mac` fails its plan with
 `ci-kit: lane "pool" is for private repos only (gate "<name>")`: a stranger's fork PR must never reach a self-hosted

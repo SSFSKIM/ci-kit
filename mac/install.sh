@@ -1,11 +1,18 @@
 #!/bin/bash
-# Installs the mac lane (I10, docs/mac-lane.md) on this Mac, the mini: a GitHub Actions runner for SSFSKIM/MAWS in
+# Installs the mac lane (I10, docs/mac-lane.md) on this Mac: a GitHub Actions runner for SSFSKIM/MAWS in
 # ~/actions-runner-maws, labelled self-hosted, macOS, ARM64, ci-kit-mac, with the job hooks that kill what a job left
 # under its work directory, run by the LaunchAgent com.ssfskim.ci-kit.mac-runner in the logged-in GUI session.
 #
-#   gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token | ssh mini <kit>/mac/install.sh
-#   ssh mini <kit>/mac/install.sh --check       the prerequisites only
-#   ssh mini <kit>/mac/install.sh --disabled    install, but leave the LaunchAgent unloaded and disabled
+#   gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token |
+#     ssh <mac> <kit>/mac/install.sh --name ci-kit-mac-<machine>    register, then install
+#   ssh <mac> <kit>/mac/install.sh               re-run on a registered runner: refresh and reload
+#   ssh <mac> <kit>/mac/install.sh --check       the prerequisites only
+#   ssh <mac> <kit>/mac/install.sh --disabled    install, but leave the LaunchAgent unloaded and disabled
+#
+# --name is needed only to register (the mini is ci-kit-mac-mini). There is no default: the runner's config replaces a
+# registration of the same name, so a default would let a new Mac take over the mini's. A re-run keeps the registered
+# name and refuses another. The part after ci-kit-mac- is the machine's short name ("the mini"), which the runner's .env
+# carries to the hooks as CI_KIT_MACHINE for their messages and alerts.
 #
 # The registration token is read from stdin, only when the runner is not registered yet, and handed to the runner's
 # config through its environment, never its arguments or a file. Re-running refreshes the hooks, the runner's
@@ -14,7 +21,7 @@
 set -euo pipefail
 
 REPO_URL=https://github.com/SSFSKIM/MAWS
-RUNNER_NAME=ci-kit-mac-mini
+RUNNER_PREFIX=ci-kit-mac-
 RUNNER_LABELS=ci-kit-mac # the runner adds self-hosted, macOS and ARM64 itself
 RUNNER_VERSION=2.338.0
 RUNNER_SHA256=df4cebda25c86a886ed204e49fee63f5c2e7cec5f447b5c98440a826bbdf9df2
@@ -37,13 +44,20 @@ trap cleanup EXIT
 say() { echo "ci-kit mac: $*"; }
 die() { echo "ci-kit mac: $*" >&2; exit 1; }
 
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 mode=enabled
-case ${1:-} in
-  '') ;;
-  --check) mode=check ;;
-  --disabled) mode=disabled ;;
-  *) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
-esac
+name=
+while (($# > 0)); do
+  case $1 in
+    --check) mode=check ;;
+    --disabled) mode=disabled ;;
+    --name) (($# > 1)) || usage; name=$2; shift ;;
+    *) usage ;;
+  esac
+  shift
+done
+# The name lands in .env and the hooks' messages: keep it to what a runner name needs.
+[[ -z $name || $name =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "--name takes letters, digits, '.', '_' and '-' (got '$name')"
 
 # 1. Prerequisites (MAWS's gate-offload plan §3.6): Node >= 22.12 on the PATH jobs get (MAWS's engines; its plan job and
 # the hooks run node from PATH), pnpm through corepack, a compiler for native modules such as node-pty, and LibreOffice
@@ -84,8 +98,16 @@ if [[ ! -x $RUNNER_DIR/config.sh ]]; then
 fi
 
 # 3. Registration, once. Repository level: a personal account cannot register a runner any higher. Not ephemeral: the
-# hooks clean between jobs.
-if [[ ! -f $RUNNER_DIR/.runner ]]; then
+# hooks clean between jobs. A registered runner keeps its name: .runner (JSON behind a byte-order mark) has it.
+if [[ -f $RUNNER_DIR/.runner ]]; then
+  RUNNER_NAME=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig"))["agentName"])' \
+    "$RUNNER_DIR/.runner" 2>/dev/null) || RUNNER_NAME=
+  [[ -n $RUNNER_NAME ]] || die "cannot read the runner's name from $RUNNER_DIR/.runner"
+  [[ -z $name || $name == "$RUNNER_NAME" ]] ||
+    die "this runner is registered as $RUNNER_NAME; to rename it, remove it (docs/mac-lane.md) and register again with --name $name"
+else
+  [[ -n $name ]] || die "name the runner to register it: --name ${RUNNER_PREFIX}<machine> (the mini is ${RUNNER_PREFIX}mini)"
+  RUNNER_NAME=$name
   [[ -t 0 ]] && die 'pipe a registration token on stdin (gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token)'
   IFS= read -r token || true
   [[ -n $token ]] || die 'no registration token on stdin'
@@ -93,9 +115,11 @@ if [[ ! -f $RUNNER_DIR/.runner ]]; then
     --name "$RUNNER_NAME" --labels "$RUNNER_LABELS" --work _work --replace)
   unset token
 fi
+machine=${RUNNER_NAME#"$RUNNER_PREFIX"}
+[[ -n $machine ]] || machine=$RUNNER_NAME
 
 # 4. The hooks, copied into the runner so it never depends on where the kit is checked out, and the environment the
-# runner gives every job and hook. English messages: the jobs parse tool output, and this Mac's locale is Korean.
+# runner gives every job and hook. English messages: the jobs parse tool output, and the mini's locale is Korean.
 mkdir -p "$RUNNER_DIR/ci-kit" "$LOG_DIR" "$(dirname "$PLIST")"
 # A sibling keeps staging on the same volume. Nothing touches the live set until every required file is ready.
 staged_hooks=$(mktemp -d "$RUNNER_DIR/ci-kit/.hooks.XXXXXX")
@@ -143,6 +167,7 @@ cat >"$RUNNER_DIR/.env" <<EOF
 LANG=en_US.UTF-8
 ACTIONS_RUNNER_HOOK_JOB_STARTED=$RUNNER_DIR/ci-kit/hooks/job-started.sh
 ACTIONS_RUNNER_HOOK_JOB_COMPLETED=$RUNNER_DIR/ci-kit/hooks/job-completed.sh
+CI_KIT_MACHINE=$machine
 EOF
 echo "$RUNNER_PATH" >"$RUNNER_DIR/.path"
 cp "$RUNNER_DIR/bin/runsvc.sh" "$RUNNER_DIR/runsvc.sh"

@@ -1,6 +1,6 @@
 # ci-kit
 
-CI for SSFSKIM's repos without the MacBook: a per-repo config (`.github/ci-kit.yml`) and reusable workflow, an agent CLI (`ci-gate`), a runner pool for private repos (one GCE spot VM per job; the Hetzner pool is a frozen fallback), a Mac mini lane, and a host janitor.
+CI for SSFSKIM's repos without the MacBook: a per-repo config (`.github/ci-kit.yml`) and reusable workflow, an agent CLI (`ci-gate`), a runner pool for private repos (one GCE spot VM per job; the Hetzner pool is a frozen fallback), a Mac lane (the Mac mini and a second Mac), and a host janitor.
 
 Status: being built. The living spec: [docs/doperpowers/specs/2026-10-15-ci-kit-design.md](docs/doperpowers/specs/2026-10-15-ci-kit-design.md).
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Part of the mac runner's job-started hook: make the mini's desktop the same before every job.
+# Part of the mac runner's job-started hook: make this Mac's desktop the same before every job.
 #
 # - A system dialog in front refuses the job at once. An e2e job under a modal alert fails group after group on focus
 #   and pasteboard (2026-10-16: seven groups red, UserNotificationCenter frontmost). Dialogs are the human's to dismiss;
@@ -10,9 +10,13 @@
 #   the job fails fast if Terminal is not in front within about 5 s. It acts only before the job, so MAWS's own
 #   MAWS_E2E_FOREGROUND=1 is never fought.
 #
-# The frontmost app is read with lsappinfo alone: AppleScript or System Events would raise TCC prompts on the mini.
+# The frontmost app is read with lsappinfo alone: AppleScript or System Events would raise TCC prompts.
 # When it cannot be read, the job is not blocked; the miss is logged.
+#
+# Messages and the alert name the machine by CI_KIT_MACHINE, which mac/install.sh writes into the runner's .env. A
+# runner installed before it existed is the mini's.
 set -uo pipefail
+machine=${CI_KIT_MACHINE:-mini}
 
 log() {
   mkdir -p "$HOME/Library/Logs/ci-kit"
@@ -36,7 +40,17 @@ is_app() { # <bundle id> <name>: whether the frontmost app read last is that app
 }
 
 # These optional steps never decide the job's result. Overrides let hook tests use local fakes, not the real log/gh.
+# The state is this Mac's own: it holds the URL of the issue this Mac created, and only that issue is ever closed.
 dialog_state="$HOME/Library/Logs/ci-kit/dialog-alert.state"
+# On a Mac the owner does not sit at, the alert writes with a token limited to the sandbox's issues instead of the
+# account the machine's user is logged into (docs/mac-lane.md). gh gets it through its environment alone.
+alert_token="$HOME/.config/ci-kit/alert-token"
+alert_gh_token=
+read_alert_token() { # before the gh calls, outside their redirected output
+  [[ -f $alert_token ]] || return 0
+  read -r alert_gh_token 2>/dev/null <"$alert_token" || true
+  [[ -n $alert_gh_token ]] || log "$alert_token is empty or unreadable; gh uses its own login"
+}
 dialog_log() { # <output file> <log show arguments...>
   local out=$1
   shift
@@ -134,7 +148,8 @@ dialog_source() {
   rm -f "$out" || true
 }
 
-alert_gh() {
+alert_gh() ( # a subshell, so GH_TOKEN reaches this gh call and nothing else
+  [[ -z $alert_gh_token ]] || export GH_TOKEN=$alert_gh_token
   # gh can ignore an inherited SIGALRM. Keep the deadline in a supervisor that kills and reaps it.
   perl -e '
     my $pid = fork;
@@ -147,7 +162,7 @@ alert_gh() {
     alarm 0;
     exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
   ' "${CI_KIT_GH_BIN:-gh}" "$@"
-}
+)
 alert_dialog() {
   local out body issue=''
   [[ ! -e $dialog_state ]] || return 0
@@ -155,10 +170,11 @@ alert_dialog() {
   # Remember even a failed/timed-out create, so every subsequent job does not alert again.
   : >"$dialog_state" || return 0
   out=$(mktemp) || return 0
+  read_alert_token
   printf -v body 'Time: %s\nFrontmost app: %s\nLikely source: %s\nSource line: %s\nRun id: %s\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$name" "$source" "${source_line:-source unknown}" "${GITHUB_RUN_ID:--}"
   if alert_gh issue create --repo SSFSKIM/ci-kit-sandbox --label ci-kit-alert \
-    --title "ci-kit alert: system dialog on the mini ($name: $source)" --body "$body" >"$out" 2>/dev/null; then
+    --title "ci-kit alert: system dialog on the $machine ($name: $source)" --body "$body" >"$out" 2>/dev/null; then
     IFS= read -r issue <"$out" || true
     printf '%s\n' "$issue" >"$dialog_state" || true
   else
@@ -172,6 +188,7 @@ clear_dialog_alert() {
   [[ -f $dialog_state ]] || return 0
   IFS= read -r issue <"$dialog_state" || true
   if [[ -n $issue ]]; then
+    read_alert_token
     alert_gh issue comment "$issue" --repo SSFSKIM/ci-kit-sandbox \
       --body "cleared at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1 || log "dialog alert clear comment failed or timed out" || true
     alert_gh issue close "$issue" --repo SSFSKIM/ci-kit-sandbox >/dev/null 2>&1 || log "dialog alert close failed or timed out" || true
@@ -195,7 +212,7 @@ case $name in
     source='source unknown' source_line=''
     dialog_source || true
     log "frontmost is $name: $source; a system dialog holds focus; failing the job"
-    echo "ci-kit: a system dialog ($name: $source) holds focus on the mini — dismiss it there and rerun" >&2
+    echo "ci-kit: a system dialog ($name: $source) holds focus on the $machine — dismiss it there and rerun" >&2
     alert_dialog || true
     exit 1
     ;;
@@ -210,7 +227,7 @@ fi
 before=$name
 if ! open -a Terminal; then
   log "frontmost before=$before; open -a Terminal failed; failing the job"
-  echo "ci-kit: could not open Terminal on the mini ($before is in front) — check its desktop and rerun" >&2
+  echo "ci-kit: could not open Terminal on the $machine ($before is in front) — check its desktop and rerun" >&2
   exit 1
 fi
 for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -222,7 +239,7 @@ log "frontmost before=$before after=${name:-unreadable}"
 if [[ -z $name ]]; then
   log "could not read the frontmost app after opening Terminal; not blocking the job"
 elif ! is_app com.apple.Terminal Terminal; then
-  echo "ci-kit: Terminal did not come to the front on the mini ($name is) — check its desktop and rerun" >&2
+  echo "ci-kit: Terminal did not come to the front on the $machine ($name is) — check its desktop and rerun" >&2
   exit 1
 else
   clear_dialog_alert || true
