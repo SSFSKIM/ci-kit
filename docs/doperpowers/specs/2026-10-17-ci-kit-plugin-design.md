@@ -139,13 +139,17 @@ then the skill and its eval (P4), then review (P5). Merging: the dispatching ses
     matters where `ci-gate` is not already lying around, which these runs could not test.
   - No skill line was contradicted. The timing-test and `fetch_depth` lines were not exercised: the eval repos have
     no such tests.
-- [ ] P5 tests and review
+- [x] P5 tests and review
   - 2026-10-17: `npm test` green as #37's `ci / test` (run 39042053205). `doperpowers:reviewer-medium` over the branch
     and doperpowers#215 returned five findings in `ci-gate init`, all real, fixed in one wave (17b4ec3): `--force=false`
     enabled force; a lockfile-less `packageManager` reached the gate's shell command unchecked; uv and poetry drafts
     skipped a pytest declared in an optional extra; `engines.node` was cut to its first number (`<22` drafted 22); the
     pip path looked for pytest in every extra rather than the one it installs. It confirmed `vendor/yaml` matches the
     published package byte for byte, with every `require` resolving, and found nothing in the marketplace entry.
+  - 2026-10-17: a `doperpowers:reviewer-low` pass over the fix commit found two more edge cases. A multi-line
+    `engines.node` makes init exit 2 and write nothing. A TOML `"""` string inside an extras array folds the next
+    extra into it. Both are real but need inputs no real repo is likely to have, and both fail visibly, so they are
+    logged in ci-kit#38 rather than fixed. The review has converged. `npm test` is green on 213f07a (run 39042843346).
 
 ## Surprises & Discoveries
 
