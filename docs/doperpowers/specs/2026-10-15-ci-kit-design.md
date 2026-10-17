@@ -144,9 +144,12 @@ How to see it working: §Acceptance. The shortest proofs are:
   Merged as d75be8f. Launcher revision 00009 was deployed from main d75be8f at 05:14Z, and its ticks
   answer 200. Sandbox round trip 39005750498 was green on GCE VMs whose launch rows the new store wrote.
   At deploy, #1 had 187 comments, so it stays the current ledger issue until 2,000.
-- [ ] (2026-10-17 10:20Z) ci-kit#24: no image is marked ready until one real Actions job has run on a
-  VM booted from it (§3a Image step 5, I12, Decision Log). PR #35 is open, and not merged or
-  deployed.
+- [x] (2026-10-17 10:42Z) ci-kit#24: no image is marked ready until one real Actions job has run on a
+  VM booted from it (§3a Image step 5, I12, Decision Log). PR #35 merged as dbd8850; the bake job
+  was deployed from that main (task timeout 5400 s). Its first Cloud Run execution, ci-kit-bake-gbngq,
+  passed: real job sandbox run 39025736272 green 134 s after the dispatch; image
+  `ci-kit-runner-20261017-102843-n8tx-dbd88509` ready; check runner 212 unregistered; no bake VM
+  left. The launcher served MAWS job 117377663680 from that image at 10:48Z, green.
   - The sandbox's dispatch-only `bake-check.yml` is merged as ci-kit-sandbox#9 (d565be5).
   - One medium review: two cleanup gaps were fixed in b87a599. The unregister retry now outlasts
     GitHub's 5-min cancellation timeout, and a registration whose response was lost is found by
@@ -160,7 +163,22 @@ How to see it working: §Acceptance. The shortest proofs are:
       retention dropped `…-110845-zxbj-b15da26f`.
   - Afterwards no bake VM or bake runner was left. The launcher's four ticks over the window
     launched, deleted and unregistered nothing, including the tick while the job was queued.
-  - Left to do: merge, then `gce/deploy.sh bake` (the new orchestrator, task timeout 90 min).
+- [x] (2026-10-17 12:53Z) The mac lane after finish (CI-opt), each merged and installed on the mini:
+  - #29: before each job the cursor is parked at the screen's top edge (1280,2), so a resting cursor
+    cannot hover the windows MAWS's tests open.
+  - #30: a system dialog in front refuses the job, and one `ci-kit-alert` issue in ci-kit-sandbox
+    is opened per episode and closed when the desktop clears.
+  - #31: every job log gets a `ci-kit desktop (start|end)` posture line.
+  - #33: the installer stages the hooks and swaps them in with `RENAME_SWAP` (#27). The host
+    janitor finds a Node ≥ 22 at each run rather than pinning an nvm path (#26).
+  - #34 and #36: a UserNotificationCenter alert names the processes that requested TCC just before
+    the dialog came to the front, found by a narrow 3 h SETFRONT query followed by a 5 s window.
+    sandboxd's prompting approvals read as "data from other apps". On the real 10:27:45Z dialog of
+    10-17, it read "sandboxd (data from other apps)" in 4.8 s.
+  - Both 10-17 blocks came from outside CI. The first, 07:57–08:32Z, was cua #115's helper running
+    from a new on-disk copy, which triggers a per-copy screen-capture confirmation. The second,
+    10:27–10:59Z, was a "data from other apps" prompt during an XProtect scan burst. The owner
+    answered both; nothing automated clicks a prompt.
 
 ## Context: what was measured (2026-10-15)
 
