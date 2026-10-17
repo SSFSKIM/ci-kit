@@ -362,9 +362,9 @@ test('a job found by its executable path refuses a re-run and an uninstall', mac
   const f = fixture();
   const worker = join(f.runner, 'bin/Runner.Worker');
   copyFileSync(process.execPath, worker, constants.COPYFILE_FICLONE);
-  const job = spawn(worker, ['-e', 'setTimeout(() => {}, 30_000)'], { stdio: 'ignore' });
+  const job = spawn(worker, ['-e', "console.log('running'); setTimeout(() => {}, 30_000)"], { stdio: ['ignore', 'pipe', 'ignore'] });
   try {
-    await once(job, 'spawn');
+    await once(job.stdout, 'data'); // it has exec'd: the check cannot see its parent's image
     for (const args of [[], ['--disabled'], ['--uninstall']]) {
       const result = f.run(undefined, args);
       assert.equal(result.status, 1, `${args}: ${result.stderr}`);

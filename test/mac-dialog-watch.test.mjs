@@ -394,6 +394,12 @@ test('runner-state.py reads the kernel\'s executable paths: decoys never count, 
     await once(child, 'spawn');
     return child;
   };
+  // A process that says it runs has exec'd: a read cannot see its parent's image instead.
+  const running = async (file) => {
+    const child = await start(file, ['-e', "console.log('running'); setTimeout(() => {}, 30_000)"]);
+    await once(child.stdout, 'data');
+    return child;
+  };
   const read = (path = runner) => spawnSync('python3', ['-I', join(hooks, 'runner-state.py'), path], { encoding: 'utf8' });
   try {
     // A command line, argv[0] or working directory naming the worker is not the worker.
@@ -401,9 +407,9 @@ test('runner-state.py reads the kernel\'s executable paths: decoys never count, 
     await start(process.execPath, sleeping, { argv0: worker });
     await start(process.execPath, sleeping, { cwd: bin });
     assert.deepEqual([read().stdout, read().status], ['stopped\n', 0]);
-    await start(listener);
+    await running(listener);
     assert.equal(read().stdout, 'idle\n');
-    const job = await start(worker);
+    const job = await running(worker);
     assert.equal(read().stdout, `busy ${job.pid}\n`);
     job.kill('SIGKILL');
     await once(job, 'exit');
@@ -413,12 +419,12 @@ test('runner-state.py reads the kernel\'s executable paths: decoys never count, 
     const versioned = join(updated, 'bin.2.339.0');
     copy(join(versioned, 'Runner.Worker'));
     symlinkSync(versioned, join(updated, 'bin'));
-    const updatedJob = await start(join(updated, 'bin', 'Runner.Worker'));
+    const updatedJob = await running(join(updated, 'bin', 'Runner.Worker'));
     assert.equal(read(updated).stdout, `busy ${updatedJob.pid}\n`);
     // A worker whose file is gone (its path unreadable) still counts, by the name the kernel keeps; another such
     // process does not.
-    const gone = await start(copy(join(dir, 'elsewhere/Runner.Worker')));
-    const other = await start(copy(join(dir, 'elsewhere/other-tool')));
+    const gone = await running(copy(join(dir, 'elsewhere/Runner.Worker')));
+    const other = await running(copy(join(dir, 'elsewhere/other-tool')));
     unlinkSync(join(dir, 'elsewhere/Runner.Worker'));
     unlinkSync(join(dir, 'elsewhere/other-tool'));
     assert.equal(read().stdout, `busy ${gone.pid}\n`, `${other.pid} is not a worker`);
