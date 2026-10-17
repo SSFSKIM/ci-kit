@@ -7,7 +7,8 @@
   <string>com.ssfskim.ci-kit.janitor</string>
   <key>ProgramArguments</key>
   <array>
-    <string>__NODE__</string>
+    <string>/bin/bash</string>
+    <string>__RUN_NODE__</string>
     <string>__JANITOR__</string>__DRY_RUN__
   </array>
   <key>StartInterval</key>

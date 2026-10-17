@@ -52,7 +52,11 @@ gh api repos/SSFSKIM/MAWS/actions/runners --jq '.runners[]|[.name,.status,.busy]
   through its environment (`ACTIONS_RUNNER_INPUT_TOKEN`), so it never lands in a file, an argument list or `ps`. It
   expires after an hour.
 - **Re-running** (no token needed) refreshes the hooks, the runner's `.env` and `.path`, and the LaunchAgent, and
-  reloads it. It refuses while a job runs, because reloading the agent kills the job.
+  reloads it. It refuses while a job runs, because reloading the agent kills the job. New hooks and the optional
+  compiled cursor helper are staged and checked in a sibling directory. Darwin's atomic `RENAME_SWAP` exchanges
+  that directory with `ci-kit/hooks/`, so the fixed hook paths in `.env` never disappear between renames: a job
+  starting during publication finds either complete set. Copy or validation failures leave the old set untouched;
+  a Swift compile failure still warns and installs without the optional helper.
 - **Prerequisites** checked on the PATH jobs get: Node ≥ 22.12 (MAWS's `engines`), corepack, the Xcode command line
   tools' `clang` (native modules such as `node-pty`), `python3` (node-gyp), git, and LibreOffice's `soffice` (the
   document groups), found but not launched. MAWS's setup action installs its own Node 22 and pnpm per job into the
