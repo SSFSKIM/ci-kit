@@ -7,9 +7,21 @@
 import CoreGraphics
 
 let bounds = CGDisplayBounds(CGMainDisplayID())
-let before = CGEvent(source: nil)?.location
-let target = CGPoint(x: bounds.midX, y: bounds.minY + 2)
-let result = CGWarpMouseCursorPosition(target)
-let after = CGEvent(source: nil)?.location
-func show(_ p: CGPoint?) -> String { p.map { "\(Int($0.x)),\(Int($0.y))" } ?? "unknown" }
-print("cursor before=\(show(before)) after=\(show(after)) target=\(show(target))\(result == .success ? "" : " warp-error=\(result.rawValue)")")
+if CommandLine.arguments.dropFirst().first == "--describe" {
+    // The mode's pixel width is the backing framebuffer, not the panel's physical pixels (scaled HiDPI included).
+    // CGDisplayBounds is in points. This branch only reads; it never creates an event or moves the cursor.
+    if let mode = CGDisplayCopyDisplayMode(CGMainDisplayID()), mode.width > 0, bounds.width > 0, bounds.height > 0 {
+        let scale = Double(mode.pixelWidth) / Double(mode.width)
+        let scaleText = scale == scale.rounded() ? "\(Int(scale))" : "\(scale)"
+        print("\(Int(bounds.width))x\(Int(bounds.height))@\(scaleText)x")
+    } else {
+        print("unknown")
+    }
+} else {
+    let before = CGEvent(source: nil)?.location
+    let target = CGPoint(x: bounds.midX, y: bounds.minY + 2)
+    let result = CGWarpMouseCursorPosition(target)
+    let after = CGEvent(source: nil)?.location
+    func show(_ p: CGPoint?) -> String { p.map { "\(Int($0.x)),\(Int($0.y))" } ?? "unknown" }
+    print("cursor before=\(show(before)) after=\(show(after)) target=\(show(target))\(result == .success ? "" : " warp-error=\(result.rawValue)")")
+}

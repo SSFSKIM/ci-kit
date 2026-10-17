@@ -114,6 +114,44 @@ Terminal as `터미널`. System dialogs are never touched, and an unreadable fro
 acts only before the job, so it never fights MAWS's own `MAWS_E2E_FOREGROUND=1`, and it does take the front from
 whoever is using the mini's desktop when a job starts.
 
+**Desktop posture is visible in the job log.** After start's Terminal/cursor work, and at job completion before
+cleanup can hide a leaked app, `desktop-posture.sh` prints one line to stdout and the hooks log:
+
+```text
+ci-kit desktop (start): frontmost=Terminal display=2560x1440@2x remote=parsec
+ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none
+```
+
+- `frontmost`: the same localized `lsappinfo` name the desktop check reads, through its read-only `--frontmost` mode.
+- `display`: the main display's size in points and backing-framebuffer scale. `cursor-park --describe` reads
+  `CGDisplayBounds` and the current mode's pixel/point width ratio; it does not move the cursor. A missing, failing or
+  timed-out helper gives `unknown`, so a HiDPI-to-1x switch is visible without running `system_profiler`.
+- `remote`: `parsec`, `screensharing`, both comma-separated, or `none` when neither signal is present. Parsec tracks the
+  newest `user#id connected.` / `disconnected.` event **per client** in `~/.parsec/log.txt` and reports `parsec` while
+  any observed client remains connected: Alice connecting, Bob connecting, then Bob disconnecting still leaves Alice.
+  An absent log means no Parsec signal, while an unreadable log or one with no connection history is unknown.
+  Screen Sharing uses non-root `netstat -an`:
+  incoming TCP **local** port 5900 in `ESTABLISHED`, or UDP local ports 5900–5902 with a concrete foreign peer (not a
+  wildcard listener), including loopback tunnels. UDP covers [High Performance Screen Sharing's ports](https://support.apple.com/guide/remote-desktop/use-high-performance-screen-sharing-apdf8e09f5a9/mac).
+  Failed, timed-out or unrecognized reads give `unknown` unless another signal already establishes a remote connection.
+
+Screen Sharing is a **transport signal, not authentication proof**: TCP can be established at the login prompt
+([ScreenSharingMonitor documents this](https://github.com/mm2270/ScreenSharingMonitor)); a peered UDP socket does not
+prove viewer liveness. `none` means no observed default-port transport, not coverage of remapped ports, Apple-ID relay
+paths or other remote-control products. The MacBook's macOS 26 socket layout and absent-session case were checked
+read-only; active TCP/UDP cases are covered by fixtures, not a live sharing session.
+
+The four posture reads — frontmost, display, Parsec and Screen Sharing — each have an independent, unconditional
+1 s Perl-supervisor deadline, which kills and reaps a hanging probe even if it ignores SIGALRM. Supervision covers
+the direct child before it has established its process group, as well as the group's descendants. Results are
+combined only afterward, so a positive Parsec read survives a hanging Screen Sharing read and vice versa. All four
+timing out takes about 4 s plus process overhead. Local positive fixtures scale the supervisor's clock only inside
+their test processes so scheduling load does not look like a failed read; hanging fakes sleep far beyond it. The
+all-four-hung and delayed-process-group regressions use the real, unscaled clock. Fixtures also cover interleaved
+Parsec clients and both positive/hanging directions with and without SIGALRM ignored, including strict-shell runs.
+The probes only read state: no GUI actions, AppleScript, new permissions or remote-session changes. Posture and
+hooks-log failures never affect the sweep's or the job's outcome.
+
 Before each job and after it, the hooks kill every process of the runner's user that a job left behind:
 
 - a process that **runs from** the work directory: a path under `~/actions-runner-maws/_work/` in its command line
