@@ -20,7 +20,12 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
     foreign: [{ name: 'devbox', status: 'RUNNING', zone: ZONE_URL('us-central1-a'), labels: {}, creationTimestamp: '2026-09-01T00:00:00Z', machineType: 'x/e2-small' }],
     insertErrors: [], // [{match: (zone, body) => bool, error: () => Error, accepted?: true}] consumed in order
   };
-  const gh = { runners: new Map(), runs: [], jobs: [], comments: [], repos };
+  const gh = {
+    runners: new Map(), runs: [], jobs: [], comments: [], repos,
+    issues: [{ number: 1, title: 'pool ledger', state: 'open', created_at: '2026-10-15T23:18:00Z', older: 0 }],
+  };
+  let nextIssue = 100;
+  const commentCount = (n) => (gh.issues.find((i) => i.number === n)?.older ?? 0) + gh.comments.filter((c) => (c.issue ?? 1) === n).length;
   const log = []; // every mutation, in order
   const counts = new Map(); // successful (non-404) deletes and unregisters per resource
   const count = (key) => counts.set(key, (counts.get(key) ?? 0) + 1);
@@ -125,11 +130,24 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
       count(`runner ${r.name}`);
       gh.runners.set(repo, list.filter((x) => x !== r));
     },
-    openIssues: async () => [{ number: 1, title: 'pool ledger' }],
-    createIssue: async () => ({ number: 2 }),
-    issueComments: async (_repo, _n, { since } = {}) => gh.comments.filter((c) => !since || c.updated_at >= since).map((c) => ({ ...c })),
-    createComment: async (_repo, _n, body) => {
-      const c = { id: nextId++, body, updated_at: new Date(clock).toISOString() };
+    // Issues: a comment without `issue` is on #1, and an issue's `older` stands for comments made before the test.
+    // GitHub's cap: no new comment on an issue that already has 2,500. Edits are allowed on any issue, closed or not.
+    openIssues: async () => gh.issues.filter((i) => i.state === 'open').map((i) => ({ ...i, comments: commentCount(i.number) })),
+    createIssue: async (_repo, issue) => {
+      const made = { number: nextIssue++, ...issue, state: 'open', created_at: new Date(clock).toISOString(), older: 0 };
+      gh.issues.push(made);
+      log.push(`issue #${made.number} ${issue.title}`);
+      return { ...made, comments: 0 };
+    },
+    closeIssue: async (_repo, n) => {
+      gh.issues.find((i) => i.number === n).state = 'closed';
+      log.push(`close #${n}`);
+    },
+    issueComments: async (_repo, n, { since } = {}) =>
+      gh.comments.filter((c) => (c.issue ?? 1) === n && (!since || c.updated_at >= since)).map((c) => ({ ...c })),
+    createComment: async (_repo, n, body) => {
+      if (commentCount(n) >= 2500) throw httpError(403, 'Commenting is disabled on issues with more than 2500 comments');
+      const c = { id: nextId++, issue: n, body, updated_at: new Date(clock).toISOString() };
       gh.comments.push(c);
       return { ...c };
     },

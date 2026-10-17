@@ -236,7 +236,7 @@ and GitHub. A tick:
 1. reads `gce.json` and `pool.json` from the kit's main (the newest commit that changed each; on a failed read it
    keeps the last good copy, and at a cold start without main, the copy in its own build);
 2. refuses public repos and any repo in both files;
-3. reads the ledger's last 26 h, then lists the `ci-kit=gce` instances and disks;
+3. reads the ledger's last 26 h on every open ledger issue (below), then lists the `ci-kit=gce` instances and disks;
 4. lists each repo's `ci-kit-gce-*` runners, and its queued and in-progress runs and their jobs;
 5. cleans up (below), finalizes rows whose VM is gone, and records on each running row the job its runner holds;
 6. launches one VM per queued pool job not covered by an unclaimed VM (a runner registered, not busy, younger than
@@ -292,6 +292,13 @@ Nothing depends on it never happening: deletes and unregisters treat 404 as done
 only move forward, two comments for one allocation converge on the most final, and an over-launch leaves idle runners
 that the idle rule removes within `idle_runner_minutes` (about $0.012 for a c3d-8). The project's vCPU quota is the
 hard cap.
+
+**The ledger rotates** before GitHub's cap of 2,500 comments per issue (ci-kit#25). The GCE ledger is every open
+issue in `SSFSKIM/ci-kit-sandbox` titled "pool ledger" or "pool ledger from <YYYY-MM-DD>"; the highest-numbered is
+current and takes new rows. At 2,000 comments the launcher opens the next one (its body names the one it continues),
+and it closes an older one once nothing on it changed in the last 26 h and its successor is 26 h old. A row stays on
+the issue it was written on and is finalized there. For history, search the sandbox's issues, closed ones included,
+for "pool ledger".
 
 **Preemption** is recorded, not re-run. GCE deletes a preempted spot VM (its termination action), GitHub fails the
 job ("runner lost"), and the launcher finalizes the row `preempted` with the job the runner held, which it wrote on

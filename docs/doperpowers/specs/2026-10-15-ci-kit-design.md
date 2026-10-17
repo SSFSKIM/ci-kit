@@ -139,6 +139,9 @@ How to see it working: §Acceptance. The shortest proofs are:
       idle-deleted at 18:37:51Z.
     - maws-fe set `GATE_RUNNER=pool` again at 18:39:24Z.
     - The first GCE gate, 38949019226, is green.
+- [ ] (2026-10-17) ci-kit#25: the GCE ledger rotates before GitHub's 2,500-comment cap (§3a, I12,
+  Decision Log). PR #32, after one high-rung review (one finding, fixed); the owner merges and
+  deploys.
 
 ## Context: what was measured (2026-10-15)
 
@@ -302,7 +305,8 @@ Each item is a behavior someone can check. The commands are in Concrete Steps un
   stranded jobs, deletes a box with a dead agent, and records cost.
 - **Bake.** The workflow that builds the pool's Hetzner snapshot (its disk image).
 - **Ledger.** An issue titled "pool ledger" in the private `SSFSKIM/ci-kit-sandbox`, with one row
-  per pool server session.
+  per pool server session. The GCE ledger continues on issues titled "pool ledger from <day>" as
+  each one fills (§3a, I12).
 - **maws-fe, cua_repl, doperpowers-74.** The peer sessions that own, respectively:
   - MAWS's gates;
   - cua's development;
@@ -804,6 +808,22 @@ public ingress. Cloud Scheduler invokes it every minute with an OIDC token.
     but it adds a store, expiry and lease-loss handling to prevent an outcome that is already
     bounded and self-healing.
   - All state lives in GCE labels, the ledger and GitHub. Every reconciliation can act as the first.
+- **The ledger rotates before GitHub's comment cap.** GitHub accepts no new comment on an issue
+  that already has 2,500, and a launch writes its row first, so a full ledger issue would stop
+  every launch (ci-kit#25).
+  - The GCE ledger is every open issue titled `issue_title` or `issue_title from <day>`. The one
+    with the highest number is current and takes new rows and daily lines.
+  - A read that finds the current issue at 2,000 comments opens the next one, whose body names the
+    issue it continues. At about 250 comments a day the 500 left under the cap last about two
+    days, and an issue left behind never reaches the cap.
+  - Every open ledger issue is read over the 26 h window, so a row stays in view wherever its
+    comment lives, and is updated there in place by its comment id. The daily line's
+    once-a-day check sees every open ledger issue.
+  - Two reconciliations that both rotate open two issues. Every reader takes the newer as current,
+    and both stay open and are read, so neither one's rows are lost. The extra issue retires like
+    any other.
+  - An older issue is closed once nothing on it was updated inside the window and the issue after
+    it is a window old. Closed issues keep their history and their title.
 - **Demand.** Demand is keyed by (repo, label set).
   - Count the queued jobs carrying `ci-kit-pool` in each served repo, using the Hetzner agent's
     listing, ETag-conditional.
@@ -2144,7 +2164,15 @@ euros, jobs, and the projected month at the current rate.
   | alloc | instance | repo | job (actual) | created (UTC) | deleted (UTC) | machine@zone | spot/standard | seconds | $ | end |
   ```
 
-  - A row is written `launching` before the JIT mint, and finalized in place.
+  - A row is written `launching` before the JIT mint, and finalized in place, on whichever ledger
+    issue holds it.
+  - **Rotation.** New rows and daily lines go on the current ledger issue: the open issue with
+    the highest number titled `issue_title` (`"pool ledger"`, ci-kit-sandbox#1) or
+    `issue_title from <YYYY-MM-DD>`. At 2,000 comments the launcher opens the next one, titled
+    with the UTC day it opened, and its body names the issue it continues. Every open ledger issue
+    is read over the 26 h window. An older one is closed (`state_reason: completed`) once nothing
+    on it was updated inside the window and its successor is a window old. The Hetzner store
+    matches the title exactly, so it never sees a rotated issue.
   - `end` is one of `done`, `cancelled-idle`, `preempted`, `max-run`, `abandoned` or `orphan`.
   - A daily line totals the VMs, seconds and dollars, and projects the month.
 
@@ -2536,6 +2564,16 @@ euros, jobs, and the projected month at the current rate.
       15,374 tests.
   - **Totals.** The gate took 8 m 17 s and cost $0.0172.
   - **gate.yml unchanged.** MAWS's `gate.yml` blob is 51749aff before and after.
+
+- **Observation (2026-10-17, ci-kit#25):** GitHub caps an issue at 2,500 comments. The cap is not
+  documented, and is known from others' error reports: HTTP 403, "Commenting is disabled on issues
+  with more than 2500 comments". Measured in ci-kit-sandbox:
+  - a comment on a closed issue can be edited, and a new comment on it is accepted;
+  - a new issue appeared in the open-issues listing only after 3.9 s and 4.6 s;
+  - the listing's `comments` field carries the issue's count.
+
+  What happens to an edit at the cap was not measured, since reaching it takes 2,500 comments. The
+  rotation threshold keeps every ledger issue below it (Decision Log, ci-kit#25).
 
 ## Decision Log
 
@@ -3200,6 +3238,47 @@ euros, jobs, and the projected month at the current rate.
     - A row left unresolved after a launcher outage longer than 26 h, with its stopped VM waiting
       for the launcher. The failed-tick alert fires long before that.
   - **Date/Author:** 2026-10-16, plan-executor.
+
+- **Decision (ci-kit#25): the GCE ledger rotates to a new issue at 2,000 comments.**
+  - **Why.** GitHub refuses new comments on an issue that already has 2,500 (HTTP 403,
+    "Commenting is disabled on issues with more than 2500 comments"). The launcher writes a row
+    before every launch and launches nothing without it. At 04:50Z on 10-17 ci-kit-sandbox#1 had
+    179 comments and gained about 245 a day, so every pool launch would have stopped around 10-26.
+  - **The threshold.** At 2,000 there are 500 comments of headroom, about two days at MAWS's rate.
+    That covers a rotation that keeps failing (it is retried every tick), a comment count GitHub
+    reports late, and the comments a tick already under way adds. An issue left behind therefore
+    never reaches the cap, and in-place edits never touch an issue at it. Whether GitHub allows
+    edits there was not verified.
+  - **Identity is the title, and the current issue is the highest number.** It needs no stored
+    pointer and no lock. Two ticks that both rotate converge on the newer issue, and the reads span
+    every open ledger issue, so no row is lost on the way. This is the 2026-10-16 overlap standard:
+    nothing rests on a single writer, and an overlap costs at most one spare issue that retires
+    within a day. A title, not a label, so #1 needs no change and the frozen Hetzner store, which
+    matches "pool ledger" exactly, keeps its issue.
+  - **Retirement** waits for both an empty window and a successor a window old. The empty window
+    keeps every row a reader could still need in view. The successor's age covers a tick that
+    listed before the new issue existed and is still writing to the old one.
+  - **Listing lag.** GitHub's issue listing showed a new issue only about 4 s after it was
+    created. The store keeps reading an issue it opened until a listing shows it (the review's one
+    finding: dropping it hid the store's own rows and let it post a second daily line). A tick on
+    another instance that lists inside those seconds can still miss the new issue for that one
+    tick. That is the race the overlap decision already accepts for a row written just after a
+    read, with the same outcomes. The rows it misses are seconds old, and no cleanup rule acts on a
+    VM without a visible row that soon. The daily line can be posted twice, as two overlapping
+    ticks already could on one issue.
+  - **Hetzner if revived.** Its store matches the exact title, so it keeps using #1 while #1 is
+    open. Once the GCE launcher closes #1 it would open a new "pool ledger", which the GCE ledger
+    would then share as its current issue. It still reads the whole issue on every write, so a
+    revival needs the same window reads and rotation.
+  - **Rejected: moving the ledger off GitHub issues**, to a GCS object, Firestore, or a
+    BigQuery table written by the launcher. It is the stronger store, with real compare-and-swap
+    and no cap. But the ledger is the owner's audit surface, read on GitHub beside the alerts
+    and the gates, and a new store brings its own IAM, schema, and a reader to build, to
+    fix an outage that rotation removes in one file. If the per-allocation rows ever need queries
+    or exact-once accounting, that is the move to make.
+  - **Also rejected:** a calendar rotation (an issue per week or month). It does not bound the
+    count on a busy week, which is the failure, and still needs the same cross-issue reads.
+  - **Date/Author:** 2026-10-17, ci-kit#25 executor for CI-opt.
 
 - **Decision (M10 step 3, the executor's calls, accepted):**
   - **Allocation ids** are the launch minute plus 5 random base36 characters. The runners API
