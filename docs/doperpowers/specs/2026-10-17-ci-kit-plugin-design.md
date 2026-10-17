@@ -110,7 +110,16 @@ then the skill and its eval (P4), then review (P5). Merging: the dispatching ses
     entry is SSFSKIM/doperpowers#215. Checked with `--plugin-dir` (headless, haiku): in a cua worktree the transcript
     carries the hook's note (`hook_success`, SessionStart:startup), `ci-gate` resolves on the Bash PATH and
     `ci-kit:adopt` is listed; in a fresh repo without `.github/ci-kit.yml`, no note. Five hook runs in a cua checkout
-    took 0.39 s in all at load 180. The check from the marketplace install is open.
+    took 0.39 s in all at load 180.
+  - 2026-10-17, from the marketplace: once ci-kit#37 (fd0dcd9) and doperpowers#215 merged,
+    `claude plugin marketplace update doperpowers` and `claude plugin install ci-kit@doperpowers` installed version
+    `fd0dcd9dd1ba` (the commit; no `version` in the manifest) at `~/.claude/plugins/cache/doperpowers/ci-kit/`. The
+    cache has `vendor/yaml` and no `node_modules`, and `ci-gate init` runs from it. In a new headless session in a cua
+    worktree, the transcript carries the note (SessionStart:startup), naming the cached `bin/ci-gate`. In a new
+    session in a repo without `.github/ci-kit.yml`, it carries none.
+  - Update proof (the coordinator's condition on an unversioned plugin): this change to the note's wording lands
+    through a PR. `claude plugin update ci-kit@doperpowers` must then install the new commit, and a fresh session must
+    show the new text.
 - [x] P2 `ci-gate init` with fixture tests (2026-10-17): `test/init.test.mjs` (14 tests: Node npm and pnpm, Python pip,
   uv and requirements-only, no command, Cargo/Go/Makefile with a taken name, private, macOS-specific, unknown
   visibility, overwrite refusal and `--force`, a kept verbatim caller, the CLI) and `test/session-start.test.mjs`.
