@@ -151,8 +151,8 @@ How to see it working: §Acceptance. The shortest proofs are:
   - One medium review: two cleanup gaps were fixed in b87a599. The unregister retry now outlasts
     GitHub's 5-min cancellation timeout, and a registration whose response was lost is found by
     name. One finding was dismissed (Decision Log).
-  - Real bake `20261017-100752-nkgl`, run from the branch with `CI_KIT_COMMIT` set to main
-    12f6d6e:
+  - Real bake `20261017-100752-nkgl`, run from the branch at b167e36 with `CI_KIT_COMMIT` set to
+    main 12f6d6e (the review's fixes came later and change only the cleanup):
     - builder 341 s, smoke 81 s;
     - the real job, sandbox run 39024292940, green on runner `ci-kit-bake-20261017-100752-nkgl`;
       the job took 11 s, and the check passed 165 s after the dispatch;
