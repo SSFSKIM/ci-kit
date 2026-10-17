@@ -144,6 +144,23 @@ How to see it working: §Acceptance. The shortest proofs are:
   Merged as d75be8f. Launcher revision 00009 was deployed from main d75be8f at 05:14Z, and its ticks
   answer 200. Sandbox round trip 39005750498 was green on GCE VMs whose launch rows the new store wrote.
   At deploy, #1 had 187 comments, so it stays the current ledger issue until 2,000.
+- [ ] (2026-10-17 10:20Z) ci-kit#24: no image is marked ready until one real Actions job has run on a
+  VM booted from it (§3a Image step 5, I12, Decision Log). PR #35 is open, and not merged or
+  deployed.
+  - The sandbox's dispatch-only `bake-check.yml` is merged as ci-kit-sandbox#9 (d565be5).
+  - One medium review: two cleanup gaps were fixed in b87a599. The unregister retry now outlasts
+    GitHub's 5-min cancellation timeout, and a registration whose response was lost is found by
+    name. One finding was dismissed (Decision Log).
+  - Real bake `20261017-100752-nkgl`, run from the branch with `CI_KIT_COMMIT` set to main
+    12f6d6e:
+    - builder 341 s, smoke 81 s;
+    - the real job, sandbox run 39024292940, green on runner `ci-kit-bake-20261017-100752-nkgl`;
+      the job took 11 s, and the check passed 165 s after the dispatch;
+    - image `ci-kit-runner-20261017-100752-nkgl-12f6d6ec` labelled `ci-kit-ready=true`, and
+      retention dropped `…-110845-zxbj-b15da26f`.
+  - Afterwards no bake VM or bake runner was left. The launcher's four ticks over the window
+    launched, deleted and unregistered nothing, including the tick while the job was queued.
+  - Left to do: merge, then `gce/deploy.sh bake` (the new orchestrator, task timeout 90 min).
 
 ## Context: what was measured (2026-10-15)
 
@@ -900,7 +917,8 @@ The bake job:
    - It boots the check VM from the new image with the runner's JIT config in `ci-kit-jit`, the
      job mode a launcher VM boots in.
    - The job passes only if the run concludes `success` with its job on that runner, and the VM
-     reports `ci-kit/job=exit:0` and powers off, all within 10 min of the dispatch.
+     reports `ci-kit/job=exit:0` and powers off. The bake stops waiting for either 10 min after
+     the dispatch.
    - The launcher never touches any of it. It never serves the job, which carries no
      `ci-kit-pool`, and never sweeps the runner, which is not `ci-kit-gce-*`. Nor does it sweep
      the VM, which is labelled `ci-kit=gce-builder`, until that VM is 2 h old.
@@ -908,7 +926,8 @@ The bake job:
 7. On every exit, the bake cleans up after itself.
    - It cancels the real job's run if that run is still going.
    - It deletes this bake's VMs.
-   - It unregisters this bake's runner, retrying while GitHub still holds it busy.
+   - It unregisters this bake's runner. It looks the runner up by name if the registration's
+     response was lost, and it retries for up to 6 min while GitHub still holds the runner busy.
    - A failed bake deletes its own image and leaves the previous ready images in place.
    - Each bake also deletes builders and unregisters check runners that earlier bakes left more
      than 2 h ago.
@@ -3323,7 +3342,10 @@ euros, jobs, and the projected month at the current rate.
     - **The candidate's own job mode.** The check VM boots from the candidate with the JIT config
       in `ci-kit-jit`, so the check runs the image's existing job mode, unchanged.
     - **The pass.** The run must conclude `success` with its job on that runner, and the VM must
-      report `ci-kit/job=exit:0` and power off, all within 10 min of the dispatch.
+      report `ci-kit/job=exit:0` and power off. The bake stops waiting 10 min after the dispatch.
+      A success first seen on the poll that ends the wait still counts: the bound limits the wait,
+      and a job that passed is no less a pass for being seen 15 s late (a review finding,
+      dismissed).
     - **Run details from the dispatch.** The dispatch sends `return_run_details` (GitHub,
       2026-02-19), so the bake gets its run's id without searching for it.
   - **Keeping the two paths apart.** One label is shared by exactly one runner and one job.
@@ -3339,7 +3361,10 @@ euros, jobs, and the projected month at the current rate.
     check VM with its other VMs, and unregisters the runner.
     - A 404 means the runner is already gone: a JIT runner leaves with its job.
     - While GitHub still holds a runner whose VM went mid-job, the unregister is retried for
-      3 min.
+      6 min. A cancelled run's job is force-completed after up to 5 min (GitHub's cancellation
+      timeout), so the registration does not outlive the bake.
+    - If the registration's response is lost, the runner exists with no id the bake knows. The
+      cleanup then finds it by its name, which is unique to the bake.
     - A bake killed mid-check leaves a registration behind. The next bake unregisters it once it
       is 2 h old, reading the age from the time in its name, as it already deletes stale builders.
     - The Cloud Run task timeout rises from 60 to 90 min. The bake's own bounds (builder 30, smoke
