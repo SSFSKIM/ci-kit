@@ -63,6 +63,15 @@ exec /bin/cp "$@"`);
   return { home, kit, bin, env, runner, hooks, executable, run, snapshot };
 }
 
+// run-node.sh needs only bash builtins, so its PATH can be one empty directory: unlike /usr/bin:/bin, it cannot
+// discover a real host Node (a compatible /usr/bin/node on Linux would preempt the fake nvm candidates or make a
+// "no runtime" premise false), and unlike the fixture's bin it holds no fake node either.
+function isolatedPath(f) {
+  const empty = join(f.home, 'empty-path');
+  mkdirSync(empty);
+  return empty;
+}
+
 function assertNewHooks(f, { cursor = true } = {}) {
   assert.deepEqual(readdirSync(f.hooks).sort(), [...hookFiles, ...(cursor ? ['cursor-park'] : [])].sort());
   for (const file of hookFiles) {
@@ -196,7 +205,7 @@ test('Node resolution works with only nvm installs and no shell profile, skippin
   }
   writeFileSync(join(f.home, '.bash_profile'), 'exit 99\n');
   const result = spawnSync('/bin/bash', [join(f.kit, 'host/run-node.sh'), 'script with spaces.mjs', '--dry-run'], {
-    encoding: 'utf8', env: { HOME: f.home, PATH: '/usr/bin:/bin' },
+    encoding: 'utf8', env: { HOME: f.home, PATH: isolatedPath(f) },
   });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(result.stdout.trim().split('\n'), ['script with spaces.mjs', '--dry-run']);
@@ -205,7 +214,7 @@ test('Node resolution works with only nvm installs and no shell profile, skippin
 test('Node resolution reports a missing compatible runtime instead of running the janitor', () => {
   const f = fixture();
   const result = spawnSync('/bin/bash', [join(f.kit, 'host/run-node.sh'), 'must-not-run.mjs'], {
-    encoding: 'utf8', env: { HOME: f.home, PATH: '/usr/bin:/bin' },
+    encoding: 'utf8', env: { HOME: f.home, PATH: isolatedPath(f) },
   });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Node >= 22/);
