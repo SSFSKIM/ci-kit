@@ -67,7 +67,9 @@ At SessionStart, if the working directory is inside a git worktree whose top lev
 additional context of a few lines: verify a commit with `ci-gate` (and how to reach it), what its output means (one line
 per gate, a final GREEN or RED, failed logs on disk), and that the gates are not to be run on this Mac. Nothing else:
 which gates exist is in the config, which the agent can read. Otherwise it prints nothing. Mirror the payload shape of
-doperpowers' `hooks/kairos.sh`, which injects context at SessionStart and after compaction.
+doperpowers' `hooks/kairos.sh`, which injects context at SessionStart and after compaction. The same script runs at
+SubagentStart, where only JSON `additionalContext` reaches the model, so a subagent in an adopted repo gets the same
+note (Decision Log).
 
 ### `ci-gate init`
 
@@ -90,8 +92,10 @@ the agent. Write it under doperpowers' authoring guidance (the essentialist prin
 
 ### Versioning
 
-Every change that alters what the plugin ships bumps `.claude-plugin/plugin.json`'s version in the same commit: the
-marketplace updates by version, so a change under a number the cache already holds never installs.
+`.claude-plugin/plugin.json` carries no `version`, so Claude Code versions the plugin by the commit of ci-kit's `main`
+(12 characters) and every merged change reaches the installs on their next update (Decision Log, 2026-10-17). The
+manifest's `version` would pin the installs to that string: if one is ever added, every change that alters what the
+plugin ships must bump it in the same commit, or the change never installs.
 
 ## Execution
 
@@ -102,10 +106,67 @@ then the skill and its eval (P4), then review (P5). Merging: the dispatching ses
 ## Progress
 
 - [ ] P1 plugin, hook, marketplace entry
-- [ ] P2 `ci-gate init` with fixture tests
-- [ ] P3 live adoption on the sandbox
-- [ ] P4 behaviour eval
-- [ ] P5 tests and review
+  - 2026-10-17: built on branch `plugin` (plugin.json, `hooks/hooks.json`, `hooks/session-start.sh`); the doperpowers
+    entry is SSFSKIM/doperpowers#215. Checked with `--plugin-dir` (headless, haiku): in a cua worktree the transcript
+    carries the hook's note (`hook_success`, SessionStart:startup), `ci-gate` resolves on the Bash PATH and
+    `ci-kit:adopt` is listed; in a fresh repo without `.github/ci-kit.yml`, no note. Five hook runs in a cua checkout
+    took 0.39 s in all at load 180. The check from the marketplace install is open.
+- [x] P2 `ci-gate init` with fixture tests (2026-10-17): `test/init.test.mjs` (14 tests: Node npm and pnpm, Python pip,
+  uv and requirements-only, no command, Cargo/Go/Makefile with a taken name, private, macOS-specific, unknown
+  visibility, overwrite refusal and `--force`, a kept verbatim caller, the CLI) and `test/session-start.test.mjs`.
+- [x] P3 live adoption on the sandbox (2026-10-17): branch `plugin-p3` of SSFSKIM/ci-kit-sandbox has main's ci-kit files
+  removed, then a minimal Node project (`node --test`; the sandbox has no code of its own, so a draft from it alone is
+  the failing placeholder), then `ci-gate init`'s two files committed unedited. `ci-gate`: `PASS test 0m10s`,
+  `GREEN` run 39041455811 on hosted. The draft named Node 22 from `engines.node` and `npm ci` from the lockfile.
+- [x] P4 behaviour eval (2026-10-17): headless `claude -p`, default model, `--plugin-dir` on this branch, in scratch
+  worktrees of the sandbox (`eval-<scenario>-<n>`); the eval PRs were closed and their branches deleted.
+  - **S1, "Set up CI for this repo."** The repo: sandbox main without its ci-kit files, plus `textstats`, a src-layout
+    Python package with pytest tests, a ruff config and a Makefile (`test`, `lint`). All three runs loaded
+    `ci-kit:adopt`, read `docs/adopting.md`, ran init by the plugin's path and kept `make test` and `make lint` as
+    the gates, dropping the duplicate pytest gate init had flagged. Each first `ci-gate` run was RED on lint (31
+    ruff findings in the sandbox's `evidence/` scripts). Each read the saved log, excluded `evidence/` from ruff, got
+    GREEN, and opened a PR whose own run was green (sandbox #12, #11, #13). No run ran a suite locally, took an owner
+    step or touched branch protection. Two runs also warned that their PR would delete main's pool gates, which was
+    the scratch setup's doing.
+  - **S2, "Verify this commit."** The repo: `plugin-p3` plus a commit adding `stats.mjs` and two test files. All three
+    runs ran `ci-gate` by the path the hook's note names, reported GREEN with the run URL (39041669524, 39041672760,
+    39041671096) and ran nothing locally: 1, 2 and 1 `ci-gate` calls.
+  - **Baselines, no plugin, one run each.** Neither is a clean control on this Mac. B1 (S1's repo) found ci-kit
+    through the scratch branch's parent commit, then found this worktree on disk and read the skill and init from
+    it; it reached the same GREEN and PR (#14). B2 (S2's repo) read `.github/ci-kit.yml`, found the `install.sh`
+    `ci-gate` on PATH, and ran it with no local suite. It took more exploration than S2 did: reading ci-gate's
+    source, `--help`, and the earlier commits. So on this machine the note mostly saves orientation. Its rule
+    matters where `ci-gate` is not already lying around, which these runs could not test.
+  - No skill line was contradicted. The timing-test and `fetch_depth` lines were not exercised: the eval repos have
+    no such tests.
+- [x] P5 tests and review
+  - 2026-10-17: `npm test` green as #37's `ci / test` (run 39042053205). `doperpowers:reviewer-medium` over the branch
+    and doperpowers#215 returned five findings in `ci-gate init`, all real, fixed in one wave (17b4ec3): `--force=false`
+    enabled force; a lockfile-less `packageManager` reached the gate's shell command unchecked; uv and poetry drafts
+    skipped a pytest declared in an optional extra; `engines.node` was cut to its first number (`<22` drafted 22); the
+    pip path looked for pytest in every extra rather than the one it installs. It confirmed `vendor/yaml` matches the
+    published package byte for byte, with every `require` resolving, and found nothing in the marketplace entry.
+  - 2026-10-17: a `doperpowers:reviewer-low` pass over the fix commit found two more edge cases. A multi-line
+    `engines.node` makes init exit 2 and write nothing. A TOML `"""` string inside an extras array folds the next
+    extra into it. Both are real but need inputs no real repo is likely to have, and both fail visibly, so they are
+    logged in ci-kit#38 rather than fixed. The review has converged. `npm test` is green on 213f07a (run 39042843346).
+
+## Surprises & Discoveries
+
+- Claude Code appends plugin `bin/` directories to the end of the Bash PATH (observed in this session's PATH and in a
+  headless session's `whence -a ci-gate`), so `~/.local/bin/ci-gate` from `install.sh`, which points at the main
+  checkout, is the `ci-gate` a session runs on this Mac. Verifying works with either copy; `init` exists only in a
+  checkout at or after this work, so the skill calls it by `${CLAUDE_PLUGIN_ROOT}/bin/ci-gate`.
+- A SubagentStart hook's plain stdout never reaches the model (only SessionStart, UserPromptSubmit and
+  UserPromptExpansion stdout does, per the 2.1.300 engine notes); its context must be JSON `additionalContext`.
+- macOS's `/bin/bash` is 3.2, where a heredoc inside `$( )` whose text holds an apostrophe or a parenthesis is cut
+  short; the hook reads its text with `read -d ''` instead.
+- GitHub's ubuntu-24.04 runner (probe run 39040606176 on the sandbox, 2026-10-17): `python3 -m pip install` into the
+  system Python works despite its `EXTERNALLY-MANAGED` marker; `pipx` installs land in `/opt/pipx_bin`, on PATH for
+  later steps; no `uv`, `poetry`, `pnpm` or `bun` is installed; Node 22, Go 1.24, cargo 1.99 and Swift 6.4 are.
+- Claude Code installs a copied plugin's npm dependencies itself when the plugin root has `package.json` and a
+  lockfile (plugin loading reference), which would also have made `yaml` resolvable; it was not relied on (Decision
+  Log).
 
 ## Decision Log
 
@@ -115,3 +176,31 @@ then the skill and its eval (P4), then review (P5). Merging: the dispatching ses
   one-line "this repo could adopt ci-kit" nudge in every repo, which would push CI setup into sessions that did not ask.
 - 2026-10-17 (CI-opt): the live proof uses `ci-kit-sandbox` (private, costs a few hosted minutes). Alternative rejected:
   creating a new public repo, an outward-facing step the owner did not ask for.
+- 2026-10-17 (worker): `yaml` is vendored (`vendor/yaml/`: yaml 2.9.1's `dist/*.js`, `package.json` and `LICENSE`),
+  the planner and the bake's `warm.mjs` import it from there, and the npm dependency is dropped, so the repo has one
+  copy and no dependencies. Alternatives rejected: Claude Code's automatic install of a plugin's locked npm
+  dependencies, which needs npm and the network at install time and does nothing for `--plugin-dir` or a plain
+  clone; and vendoring beside the npm dependency, two copies that can drift.
+- 2026-10-17 (worker): `plugin.json` has no `version`, so installs track `main` by commit. Alternative rejected: the
+  pinned version this spec first named, bumped by every change that alters what ships. The plugin root is the repo
+  root, so nearly every ci-kit commit alters what ships; parallel PRs would collide on the version line, and one
+  missed bump leaves `ci-gate` stale in every install. The Versioning section now says this.
+- 2026-10-17 (worker): the hook also runs at SubagentStart. Alternative rejected: SessionStart only. Subagents do much
+  of the verifying (executors, task workers), and the CLAUDE.md line this replaces reached them; a SessionStart-only
+  hook would regress that.
+- 2026-10-17 (worker): the hook names `ci-gate` bare plus the plugin's own path, and the skill calls
+  `${CLAUDE_PLUGIN_ROOT}/bin/ci-gate init`. Alternative rejected: bare `ci-gate` everywhere, which on this Mac runs
+  `install.sh`'s link to the main checkout (Surprises), possibly without `init`.
+- 2026-10-17 (worker): `ci-gate init` writes no `paths`. Alternative rejected: per-ecosystem globs. A repo's root
+  manifests never make the mapping obvious, and a wrong pattern silently leaves a change untested; the skill leaves
+  `paths` to the agent with that reason.
+- 2026-10-17 (worker): with no command detected, the draft holds one placeholder gate, `check`, which fails until its
+  run is replaced. Alternatives rejected: writing nothing, which leaves the agent without the caller or a valid
+  skeleton; and a gate that passes, which would make the first `ci-gate` GREEN over no check at all.
+- 2026-10-17 (worker): a repo whose visibility cannot be read (no GitHub remote, gh logged out) is drafted as public:
+  hosted lanes only, and init says so. The draft's lanes are hosted either way; only the pool comment differs.
+- 2026-10-17 (worker): `ci-gate init` keeps a `.github/workflows/ci.yml` that is already the verbatim caller instead
+  of refusing it, so a repo with only its ci-kit.yml removed can be drafted again without `--force`.
+- 2026-10-17 (worker, from review): the draft's `setup.node` is `engines.node` as written, a semver range that
+  `actions/setup-node` resolves. Alternative rejected: its first number as a major, which drafts a version the
+  range can exclude (`<22` gave 22). `.nvmrc` and `.node-version` still win when present.

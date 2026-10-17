@@ -1,0 +1,11 @@
+{
+  "name": "ci-kit",
+  "description": "Gates off the MacBook: ci-gate on the Bash PATH, a note to verify with it in every session (and subagent) whose repo has .github/ci-kit.yml, and the adopt skill that sets a repo up",
+  "author": {
+    "name": "SSFSKIM",
+    "email": "supremekim17@gmail.com"
+  },
+  "homepage": "https://github.com/SSFSKIM/ci-kit",
+  "repository": "https://github.com/SSFSKIM/ci-kit",
+  "keywords": ["ci", "github-actions", "ci-gate"]
+}

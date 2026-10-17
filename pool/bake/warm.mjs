@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parse } from 'yaml';
+import { parse } from '../../vendor/yaml/dist/index.js';
 import { createGitHub } from '../../lib/github.mjs';
 import { CACHE, CACHE_ENV } from '../agent/docker.mjs';
 
