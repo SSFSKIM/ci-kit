@@ -77,7 +77,8 @@ test('the daily line totals the day\'s final rows (by deletion time), projects t
 // The store, against fake ledger issues. A comment without `issue` is on #7; an issue's `older` stands for comments
 // made before the test. GitHub's cap is modelled: no new comment on an issue that already has 2,500.
 const iso = (ms) => new Date(ms).toISOString();
-function fakeIssue({ comments = [], issues = [{ number: 7, title: 'pool ledger', created_at: '2026-10-15T00:00:00Z' }], clock = { t: T0 } } = {}) {
+// `listLag` (ms): how long a new issue stays out of the open-issues listing (GitHub's measured about 4 s).
+function fakeIssue({ comments = [], issues = [{ number: 7, title: 'pool ledger', created_at: '2026-10-15T00:00:00Z' }], clock = { t: T0 }, listLag = 0 } = {}) {
   let id = 100;
   let nextIssue = 20;
   const calls = [];
@@ -89,7 +90,8 @@ function fakeIssue({ comments = [], issues = [{ number: 7, title: 'pool ledger',
   const gh = {
     openIssues: async () => {
       calls.push('list');
-      return state.issues.filter((i) => i.state === 'open').map(({ older, ...i }) => ({ ...i, comments: count(i.number) }));
+      return state.issues.filter((i) => i.state === 'open' && Date.parse(i.created_at) + listLag <= clock.t)
+        .map(({ older, ...i }) => ({ ...i, comments: count(i.number) }));
     },
     createIssue: async (_r, issue) => {
       calls.push(`open ${issue.title}`);
@@ -344,4 +346,24 @@ test('rotation: Hetzner\'s ledger store still finds the original "pool ledger" i
   const hetzner = createLedgerStore(f.gh, LEDGER);
   await hetzner.comments();
   assert.ok(f.calls.includes('read #7 since undefined'));
+});
+
+test('rotation: the store keeps reading the issue it opened while GitHub\'s listing has not caught up', async () => {
+  const f = fakeIssue({ issues: [{ number: 7, title: 'pool ledger', created_at: '2026-10-01T00:00:00Z', older: ROTATE_AT }], listLag: 4_000 });
+  const store = createGceLedger(f.gh, LEDGER, { now: () => f.clock.t });
+  await store.read();
+  const fresh = f.state.issues[1].number;
+  await store.upsert(row('tb0abc0001'));
+  const line = dailyLine([], '2026-10-15', 'abcdef01');
+  await store.postDaily(line);
+  f.clock.t += 1_000; // the new issue is not listed yet
+  await store.read();
+  assert.deepEqual((await store.rows()).map((r) => r.alloc), ['tb0abc0001']);
+  assert.equal(await store.postDaily(line), false);
+  assert.equal(f.state.issues.length, 2, 'no second rotation');
+  await store.upsert(row('tb0abc0002'));
+  assert.deepEqual(rowIssue(f, 'tb0abc0002'), [fresh]);
+  f.clock.t += 60_000; // listed now
+  await store.read();
+  assert.deepEqual((await store.rows()).map((r) => r.alloc).sort(), ['tb0abc0001', 'tb0abc0002']);
 });

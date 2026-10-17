@@ -14,7 +14,8 @@
 // and every one of them is read over the window, so a row stays in view wherever its comment lives and is updated
 // there by its id. A read that finds the current issue at ROTATE_AT comments opens the next one. Two ticks that
 // both do so open two; every reader then takes the newer as current, and the rows either wrote stay in view because
-// both issues are read. An older issue is closed once nothing on it was updated inside the window and the issue
+// both issues are read. An issue this store opened stays in its reads until GitHub's listing shows it. An older
+// issue is closed once nothing on it was updated inside the window and the issue
 // after it is a window old (a tick that listed before that one existed may still be writing to it).
 import { renderRow, parseRow, rowComments, rowsOf, moreFinal, renderDaily, dailyDays } from './ledger.mjs';
 
@@ -30,6 +31,8 @@ const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 export function createGceLedger(gh, { repo, issue_title: title }, { now = Date.now, log = () => {} } = {}) {
   const ledgerTitle = new RegExp(`^${escape(title)}( from \\d{4}-\\d{2}-\\d{2})?$`);
   let issues = []; // the open ledger issues, oldest first: the last is current
+  // Issues this store opened that no listing has shown yet: GitHub lists a new issue only seconds after creating it.
+  let opened = [];
   let comments = [];
 
   async function open(previous) {
@@ -39,7 +42,9 @@ export function createGceLedger(gh, { repo, issue_title: title }, { now = Date.n
         `${previous ? `, continuing #${previous}` : ''}. The launcher starts the next issue at ${ROTATE_AT} comments, ` +
         'below GitHub\'s cap of 2,500, and closes this one once nothing on it is inside its 26 h window.',
     });
-    return { number: made.number, comments: 0, created_at: made.created_at ?? new Date(now()).toISOString() };
+    const issue = { number: made.number, comments: 0, created_at: made.created_at ?? new Date(now()).toISOString() };
+    opened.push(issue);
+    return issue;
   }
 
   async function readComments() {
@@ -50,9 +55,9 @@ export function createGceLedger(gh, { repo, issue_title: title }, { now = Date.n
   }
 
   async function read() {
-    issues = (await gh.openIssues(repo))
-      .filter((i) => !i.pull_request && ledgerTitle.test(i.title))
-      .sort((a, b) => a.number - b.number);
+    const listed = (await gh.openIssues(repo)).filter((i) => !i.pull_request && ledgerTitle.test(i.title));
+    opened = opened.filter((o) => !listed.some((i) => i.number === o.number));
+    issues = [...listed, ...opened].sort((a, b) => a.number - b.number);
     const current = issues.at(-1);
     if (!current) {
       issues.push(await open(null));

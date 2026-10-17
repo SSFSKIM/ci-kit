@@ -140,7 +140,8 @@ How to see it working: §Acceptance. The shortest proofs are:
     - maws-fe set `GATE_RUNNER=pool` again at 18:39:24Z.
     - The first GCE gate, 38949019226, is green.
 - [ ] (2026-10-17) ci-kit#25: the GCE ledger rotates before GitHub's 2,500-comment cap (§3a, I12,
-  Decision Log). Built and reviewed on branch `gce-ledger-rotate`; the owner merges and deploys.
+  Decision Log). PR #32, after one high-rung review (one finding, fixed); the owner merges and
+  deploys.
 
 ## Context: what was measured (2026-10-15)
 
@@ -3256,10 +3257,15 @@ euros, jobs, and the projected month at the current rate.
     matches "pool ledger" exactly, keeps its issue.
   - **Retirement** waits for both an empty window and a successor a window old. The empty window
     keeps every row a reader could still need in view. The successor's age covers a tick that
-    listed before the new issue existed and is still writing to the old one. GitHub's issue
-    listing showed a new issue only about 4 s after it was created, so an overlapping tick can
-    miss a fresh issue for one tick. The rows it misses are seconds old, and no cleanup rule acts
-    on a VM without a visible row that soon.
+    listed before the new issue existed and is still writing to the old one.
+  - **Listing lag.** GitHub's issue listing showed a new issue only about 4 s after it was
+    created. The store keeps reading an issue it opened until a listing shows it (the review's one
+    finding: dropping it hid the store's own rows and let it post a second daily line). A tick on
+    another instance that lists inside those seconds can still miss the new issue for that one
+    tick. That is the race the overlap decision already accepts for a row written just after a
+    read, with the same outcomes. The rows it misses are seconds old, and no cleanup rule acts on a
+    VM without a visible row that soon. The daily line can be posted twice, as two overlapping
+    ticks already could on one issue.
   - **Hetzner if revived.** Its store matches the exact title, so it keeps using #1 while #1 is
     open. Once the GCE launcher closes #1 it would open a new "pool ledger", which the GCE ledger
     would then share as its current issue. It still reads the whole issue on every write, so a
