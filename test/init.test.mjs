@@ -53,10 +53,24 @@ test('a Node repo: a gate per declared script, with the package manager its lock
   assert.equal(readFileSync(join(dir, CALLER_PATH), 'utf8'), CALLER);
   const config = configOf(dir);
   assert.deepEqual(gatesOf(config), [['test', 'npm test'], ['lint', 'npm run lint'], ['build', 'npm run build']]);
-  assert.deepEqual(config.setup, { node: '22', pnpm: false, install: 'npm ci', fetch_depth: 1 });
+  assert.deepEqual(config.setup, { node: '>=22.12', pnpm: false, install: 'npm ci', fetch_depth: 1 });
   assert.ok(config.gates.every((g) => g.lane === 'hosted' && g.paths.length === 0));
   assert.match(result.lines.join('\n'), /3 gates \(test, lint, build\) from package\.json \(npm, package-lock\.json\)/);
   assert.match(result.lines.at(-1), /^next: .*ci-gate/);
+});
+
+test('engines.node passes through as a range, so "<22" does not become 22', () => {
+  const dir = repo({ 'package.json': { scripts: { test: 'node --test' }, engines: { node: ' <22 ' } }, 'package-lock.json': '{}' });
+  initRepo({ dir, visibility: PUBLIC });
+  assert.equal(configOf(dir).setup.node, '<22');
+});
+
+test('an unknown packageManager never reaches the gate\'s shell: npm is drafted', () => {
+  const dir = repo({ 'package.json': { packageManager: ':; printf injected #@1', scripts: { test: 'node --test' } } });
+  initRepo({ dir, visibility: PUBLIC });
+  const config = configOf(dir);
+  assert.deepEqual(gatesOf(config), [['test', 'npm test']]);
+  assert.equal(config.setup.install, 'npm install');
 });
 
 test('a pnpm repo enables corepack; npm init\'s placeholder test script is not a gate', () => {
@@ -99,6 +113,30 @@ test('a Python repo with uv, and one with only requirements files', () => {
   assert.deepEqual(gatesOf(configOf(bare)), [['test', 'python3 -m pytest']]);
   assert.equal(configOf(bare).setup.install, 'python3 -m pip install pytest');
   assert.match(result.lines[1], /from pytest\.ini \(pip\)/);
+});
+
+test('uv and poetry install the chosen test extra; the pip path picks the extra that declares pytest', () => {
+  const toml = '[project]\nname = "x"\n\n[project.optional-dependencies]\ntest = ["pytest"]\n';
+  const uv = repo({ 'pyproject.toml': toml, 'uv.lock': '' });
+  initRepo({ dir: uv, visibility: PUBLIC });
+  assert.equal(configOf(uv).setup.install, 'pipx install uv && uv sync --locked --extra test');
+  const poetry = repo({ 'pyproject.toml': toml, 'poetry.lock': '' });
+  initRepo({ dir: poetry, visibility: PUBLIC });
+  assert.equal(configOf(poetry).setup.install, 'pipx install poetry && poetry install --extras test');
+
+  const split = repo({ 'pyproject.toml': '[project]\nname = "x"\n\n[project.optional-dependencies]\ntest = ["coverage"]\ndev = ["pytest"]\n' });
+  initRepo({ dir: split, visibility: PUBLIC });
+  assert.equal(configOf(split).setup.install, "python3 -m pip install -e '.[dev]'");
+
+  const none = repo({ 'pyproject.toml': '[project]\nname = "x"\n\n[project.optional-dependencies]\ntest = ["coverage"]\n', 'conftest.py': '' });
+  initRepo({ dir: none, visibility: PUBLIC });
+  assert.equal(configOf(none).setup.install, "python3 -m pip install -e '.[test]' pytest");
+
+  const multi = repo({
+    'pyproject.toml': '[project]\nname = "x"\n\n[project.optional-dependencies]\ntest = [\n  "coverage",  # [x]\n  "pytest[extra]>=8",\n]\ndocs = ["sphinx"]\n',
+  });
+  initRepo({ dir: multi, visibility: PUBLIC });
+  assert.equal(configOf(multi).setup.install, "python3 -m pip install -e '.[test]'");
 });
 
 test('a repo with no detectable command: one placeholder gate that fails, said plainly', () => {
@@ -206,4 +244,5 @@ test('parseInitArgs', () => {
   assert.throws(() => parseInitArgs(['--gates', 'a']), UsageError);
   assert.throws(() => parseInitArgs(['a', 'b']), UsageError);
   assert.throws(() => parseInitArgs(['--repo', 'nope']), UsageError);
+  assert.throws(() => parseInitArgs(['--force=false']), UsageError);
 });

@@ -66,7 +66,8 @@ const readJson = (dir, file) => {
 
 function packageManager(dir, pkg) {
   const declared = typeof pkg.packageManager === 'string' ? pkg.packageManager : '';
-  const declaredName = declared.split('@')[0];
+  // Only a known manager's name reaches the gate's shell commands.
+  const declaredName = ['npm', 'pnpm', 'yarn', 'bun'].find((m) => m === declared.split('@')[0]);
   const lock = ['pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb', 'package-lock.json', 'npm-shrinkwrap.json'].find((f) => has(dir, f));
   const name = { 'pnpm-lock.yaml': 'pnpm', 'yarn.lock': 'yarn', 'bun.lock': 'bun', 'bun.lockb': 'bun' }[lock] ?? (lock ? 'npm' : declaredName || 'npm');
   const notes = [];
@@ -100,8 +101,9 @@ function nodeVersion(dir, pkg) {
     const text = read(dir, file)?.trim().split('\n')[0].trim().replace(/^v(?=\d)/, '');
     if (text) return { node: text, from: file };
   }
-  const major = String(pkg.engines?.node ?? '').match(/\d+/)?.[0];
-  if (major) return { node: major, from: 'engines.node' };
+  // actions/setup-node takes a semver range as it stands (>=22.12, ^20 || ^22).
+  const range = typeof pkg.engines?.node === 'string' ? pkg.engines.node.trim() : '';
+  if (range) return { node: range, from: 'engines.node' };
   return { node: DEFAULT_NODE, from: null };
 }
 
@@ -146,6 +148,46 @@ function tomlSection(text, header) {
   return (end === -1 ? rest : rest.slice(0, end)).join('\n');
 }
 
+// [project.optional-dependencies] as Map(extra name -> its dependency text). A value runs to its closing `]`, which may
+// be several lines on; quotes and comments are skipped when matching brackets.
+function optionalExtras(pyproject) {
+  const extras = new Map();
+  let open = null;
+  let depth = 0;
+  for (const line of (tomlSection(pyproject, 'project.optional-dependencies') ?? '').split('\n')) {
+    let rest = line;
+    if (!open) {
+      const m = line.match(/^\s*([\w.-]+)\s*=(.*)$/);
+      if (!m) continue;
+      open = m[1];
+      depth = 0;
+      extras.set(open, '');
+      rest = m[2];
+    }
+    let quote = null;
+    let kept = '';
+    for (const ch of rest) {
+      if (quote) {
+        if (ch === quote) quote = null;
+      } else if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === '#') break;
+      else if (ch === '[') depth += 1;
+      else if (ch === ']') depth -= 1;
+      kept += ch;
+    }
+    extras.set(open, `${extras.get(open)}${kept}\n`);
+    if (depth <= 0) open = null;
+  }
+  return extras;
+}
+
+// The extra the test gate installs: the first of the usual names that mentions pytest, else the first that exists.
+function testExtra(extras) {
+  const names = ['test', 'tests', 'testing', 'dev'];
+  const name = names.find((k) => extras.has(k) && /\bpytest\b/.test(extras.get(k))) ?? names.find((k) => extras.has(k));
+  return name ? { name, pytest: /\bpytest\b/.test(extras.get(name)) } : null;
+}
+
 function usesPytest(dir, texts) {
   if (has(dir, 'pytest.ini') || has(dir, 'conftest.py') || has(dir, 'tests/conftest.py')) return true;
   if ((read(dir, 'setup.cfg') ?? '').includes('[tool:pytest]') || (read(dir, 'tox.ini') ?? '').includes('[pytest]')) return true;
@@ -168,21 +210,20 @@ function detectPython(dir) {
   if (!usesPytest(dir, declared)) {
     return { source: 'pyproject.toml / requirements', gates: [], notes: ['a Python project with no sign of pytest: no Python test gate drafted'] };
   }
+  const extra = testExtra(optionalExtras(pyproject ?? ''));
   if (has(dir, 'uv.lock')) {
-    return { source: 'pyproject.toml (uv, uv.lock)', gates: [{ name: 'test', run: 'uv run pytest' }], install: 'pipx install uv && uv sync --locked', notes: [] };
+    return { source: 'pyproject.toml (uv, uv.lock)', gates: [{ name: 'test', run: 'uv run pytest' }], install: `pipx install uv && uv sync --locked${extra ? ` --extra ${extra.name}` : ''}`, notes: [] };
   }
   if (has(dir, 'poetry.lock')) {
-    return { source: 'pyproject.toml (poetry, poetry.lock)', gates: [{ name: 'test', run: 'poetry run pytest' }], install: 'pipx install poetry && poetry install', notes: [] };
+    return { source: 'pyproject.toml (poetry, poetry.lock)', gates: [{ name: 'test', run: 'poetry run pytest' }], install: `pipx install poetry && poetry install${extra ? ` --extras ${extra.name}` : ''}`, notes: [] };
   }
   // pip, into the runner's python3 (GitHub's runners allow it, 2026-10-17 probe).
   const parts = [];
   let pytestDeclared = reqs.some((f) => /\bpytest\b/.test(read(dir, f) ?? ''));
   const isPackage = setupPy || /^\s*\[(project|build-system)\]/m.test(pyproject ?? '');
   if (isPackage) {
-    const extras = tomlSection(pyproject ?? '', 'project.optional-dependencies') ?? '';
-    const extra = ['test', 'tests', 'testing', 'dev'].find((k) => new RegExp(`^\\s*${k}\\s*=`, 'm').test(extras));
-    parts.push(extra ? `-e '.[${extra}]'` : '-e .');
-    if (extra && /\bpytest\b/.test(extras)) pytestDeclared = true;
+    parts.push(extra ? `-e '.[${extra.name}]'` : '-e .');
+    if (extra?.pytest) pytestDeclared = true;
   }
   for (const f of reqs) parts.push(`-r ${f}`);
   if (!pytestDeclared) parts.push('pytest');

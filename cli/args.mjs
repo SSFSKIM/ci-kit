@@ -83,6 +83,7 @@ export function parseInitArgs(argv) {
       if (!/^[\w.-]+\/[\w.-]+$/.test(value)) throw new UsageError(`--repo is OWNER/NAME, not ${value}`);
       opts.repo = value;
     } else if (arg === '--force') {
+      if (value !== undefined) throw new UsageError('--force takes no value');
       opts.force = true;
     } else if (arg.startsWith('-')) {
       throw new UsageError(`unknown option ${arg} for init`);
