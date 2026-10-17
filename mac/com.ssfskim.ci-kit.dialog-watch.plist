@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The mac lane's dialog watcher (docs/mac-lane.md): every 60 s, in the logged-in user's GUI session where lsappinfo
+  reads the frontmost app, it runs the dialog-watch.sh that mac/install.sh copies into the runner's hooks. install.sh
+  fills in __HOOKS_DIR__, __LOG_DIR__, __PATH__ and __MACHINE__ and installs it as
+  ~/Library/LaunchAgents/com.ssfskim.ci-kit.dialog-watch.plist.
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.ssfskim.ci-kit.dialog-watch</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/bash</string>
+      <string>__HOOKS_DIR__/dialog-watch.sh</string>
+    </array>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <!-- A read a minute: background CPU and I/O priority. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>PATH</key>
+      <string>__PATH__</string>
+      <key>LANG</key>
+      <string>en_US.UTF-8</string>
+      <key>CI_KIT_MACHINE</key>
+      <string>__MACHINE__</string>
+    </dict>
+    <!-- What it does goes to the hooks log; stderr is for crashes. -->
+    <key>StandardOutPath</key>
+    <string>/dev/null</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/dialog-watch.err.log</string>
+  </dict>
+</plist>

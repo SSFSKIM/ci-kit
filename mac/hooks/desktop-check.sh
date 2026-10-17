@@ -3,197 +3,61 @@
 #
 # - A system dialog in front refuses the job at once. An e2e job under a modal alert fails group after group on focus
 #   and pasteboard (2026-10-16: seven groups red, UserNotificationCenter frontmost). Dialogs are the human's to dismiss;
-#   this never tries to clear one.
+#   this never tries to clear one. The refusal opens the machine's dialog episode and its alert issue unless the dialog
+#   watcher already did (dialog.sh, dialog-watch.sh): they share it.
 # - Any other app in front is replaced by Terminal: some of MAWS's paste and to-human results depend on the app in
 #   front (Finder where focus falls when an e2e app quits; Chrome after a test leaked a URL into it), so every job
 #   starts from the same one. `open -a Terminal` goes through LaunchServices (no Apple Events, no Automation consent);
 #   the job fails fast if Terminal is not in front within about 5 s. It acts only before the job, so MAWS's own
 #   MAWS_E2E_FOREGROUND=1 is never fought.
 #
-# The frontmost app is read with lsappinfo alone: AppleScript or System Events would raise TCC prompts.
-# When it cannot be read, the job is not blocked; the miss is logged.
-#
-# Messages and the alert name the machine by CI_KIT_MACHINE, which mac/install.sh writes into the runner's .env. A
-# runner installed before it existed is the mini's.
+# When the frontmost app cannot be read, the job is not blocked; the miss is logged.
 set -uo pipefail
-machine=${CI_KIT_MACHINE:-mini}
+log_tag='desktop-check'
+# shellcheck source=dialog.sh
+source "$(dirname "$0")/dialog.sh"
 
-log() {
-  mkdir -p "$HOME/Library/Logs/ci-kit"
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) desktop-check run=${GITHUB_RUN_ID:--} job=${GITHUB_JOB:--} $*" |
-    tee -a "$HOME/Library/Logs/ci-kit/mac-runner-hooks.log"
-}
-
-# `lsappinfo info -only name -only bundleid` prints `"LSDisplayName"="<name>"` and `"CFBundleIdentifier"="<id>"`, or,
-# on macOS 27, `"<name>" ASN:0x…: …` and `bundleID="<id>"`. The name is localized (Terminal is `터미널` on the mini), so
-# Terminal is told by bundle id, and by name only where no bundle id is printed. `-only pid` adds `pid = <number> …`
-# or `"pid"=<number>`.
-read_front() {
-  local info
-  info=$(lsappinfo info -only name -only bundleid -only pid "$(lsappinfo front 2>/dev/null)" 2>/dev/null) || info=''
-  name=$(sed -n -E 's/^"LSDisplayName"="(.*)"$/\1/p; s/^"([^"]*)" ASN:.*/\1/p' <<<"$info" | head -1)
-  bundle=$(sed -n -E 's/^"CFBundleIdentifier"="(.*)"$/\1/p; s/^[[:space:]]*bundleID="([^"]*)".*/\1/p' <<<"$info" | head -1)
-  front_pid=$(sed -n -E 's/^[[:space:]]*"?pid"?[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' <<<"$info" | head -1)
-}
-is_app() { # <bundle id> <name>: whether the frontmost app read last is that app
-  [[ $bundle == "$1" || (-z $bundle && $name == "$2") ]]
-}
-
-# These optional steps never decide the job's result. Overrides let hook tests use local fakes, not the real log/gh.
-# The state is this Mac's own: it holds the URL of the issue this Mac created, and only that issue is ever closed.
-dialog_state="$HOME/Library/Logs/ci-kit/dialog-alert.state"
-# On a Mac the owner does not sit at, the alert writes with a token limited to the sandbox's issues instead of the
-# account the machine's user is logged into (docs/mac-lane.md). gh gets it through its environment alone.
-alert_token="$HOME/.config/ci-kit/alert-token"
-alert_gh_token=
-read_alert_token() { # before the gh calls, outside their redirected output
-  [[ -f $alert_token ]] || return 0
-  read -r alert_gh_token 2>/dev/null <"$alert_token" || true
-  [[ -n $alert_gh_token ]] || log "$alert_token is empty or unreadable; gh uses its own login"
-}
-dialog_log() { # <output file> <log show arguments...>
-  local out=$1
-  shift
-  # Use a file, not a pipe: an abandoned descendant cannot keep command substitution waiting on its stdout.
-  perl -e 'alarm 10; exec @ARGV' "${CI_KIT_LOG_BIN:-/usr/bin/log}" show --style compact --info --timezone UTC \
-    "$@" >"$out" 2>/dev/null
-}
-
-dialog_tcc_source() { # <scratch file>; called only after firewall attribution missed
-  local out=$1 predicate front_line window start end front_time tcc
-  [[ -n $front_pid ]] || return 0
-  # A quiet runner may not check a dialog for hours. Keep this long query narrow and pid-exact.
-  predicate="process == \"launchservicesd\" AND eventMessage CONTAINS \"SETFRONT: pid=$front_pid \""
-  dialog_log "$out" --last 3h --predicate "$predicate" || return 0
-  front_line=$(awk -v pid="$front_pid" '
-    /launchservicesd\[/ && index($0, "SETFRONT: pid=" pid " ") { line=$0 }
-    END { print line }
-  ' "$out") || return 0
-  [[ -n $front_line ]] || return 0
-  window=$(perl -MTime::Local=timegm -MPOSIX=strftime -e '
-    shift =~ /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)(\.\d+)?\s/ or exit;
-    my $seconds = timegm($6, $5, $4, $3, $2 - 1, $1);
-    # log accepts whole-second dates; round outward, then filter to the exact five seconds below.
-    print strftime("%Y-%m-%d %H:%M:%S+0000", gmtime($seconds - 5)), "\t",
-          strftime("%Y-%m-%d %H:%M:%S+0000", gmtime($seconds + 1)), "\t", $seconds + ($7 || 0);
-  ' "$front_line") || return 0
-  [[ -n $window ]] || return 0
-  IFS=$'\t' read -r start end front_time <<<"$window"
-  # Include the transition itself to retain log order for requests sharing its millisecond.
-  predicate="(eventMessage CONTAINS \"TCCAccessRequest\") OR ($predicate) OR (process == \"sandboxd\" AND (eventMessage == \"request approval\" OR eventMessage CONTAINS \"user interaction not allowed\"))"
-  dialog_log "$out" --start "$start" --end "$end" --debug --predicate "$predicate" || return 0
-  tcc=$(perl -MTime::Local=timegm -e '
-    my ($front, $front_line) = (shift, shift);
-    my (@requests, %pending, %seen);
-    while (<>) {
-      chomp;
-      last if $_ eq $front_line;
-      next unless /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)(\.\d+)?\s+\S+\s+(.+?)\[(\d+:[^\]]+)\]/;
-      my ($client, $thread) = ($8, $9);
-      my $time = timegm($6, $5, $4, $3, $2 - 1, $1) + ($7 || 0);
-      next unless $time >= $front - 5 && $time <= $front;
-      if ($client eq "sandboxd") {
-        if (/\brequest approval\s*$/) {
-          my $request = ["sandboxd (data from other apps)", 1];
-          push @requests, $request;
-          $pending{$thread} = $request;
-        } elsif (/user interaction not allowed/ && $pending{$thread}) {
-          # Only the most recent approval on this pid/thread was rejected, not another thread or burst.
-          $pending{$thread}->[1] = 0;
-          delete $pending{$thread};
-        }
-      } elsif (/TCCAccessRequest/ && $client !~ /^(mds|coreaudiod|WindowServer)$/) {
-        push @requests, [$client, 1];
-      }
-    }
-    print join(", ", map { $_->[0] } grep { $_->[1] && !$seen{$_->[0]}++ } reverse @requests);
-  ' "$front_time" "$front_line" "$out") || tcc=''
-  if [[ -n $tcc ]]; then
-    source="TCC requests before it came to front: $tcc"
-    source_line=$front_line
-  fi
-}
-
-dialog_source() {
-  local predicate out process
-  case $name in
-    UserNotificationCenter) predicate='process == "socketfilterfw" AND eventMessage CONTAINS "doask: sending prompt for a filtering decision on:"' ;;
-    SecurityAgent) predicate='process == "security" OR eventMessage CONTAINS "SecKeychain" OR (eventMessage CONTAINS "SecurityAgent" AND (eventMessage CONTAINS[c] "spawn" OR eventMessage CONTAINS[c] "launch"))' ;;
-    *) return 0 ;;
-  esac
-  out=$(mktemp) || return 0
-  if dialog_log "$out" --last 15m --predicate "$predicate"; then
-    case $name in
-      UserNotificationCenter)
-        source_line=$(awk '/socketfilterfw\[/ && /doask: sending prompt for a filtering decision on: / { line=$0 } END { print line }' "$out") || source_line=''
-        if [[ -n $source_line ]]; then
-          source="firewall prompt for ${source_line##*doask: sending prompt for a filtering decision on: }"
-        else
-          dialog_tcc_source "$out"
-        fi
-        ;;
-      SecurityAgent)
-        # Compact log output is chronological, with process[pid:thread] in column four. Prefer the last client
-        # before SecurityAgent launched; without a launch record, use the latest security/SecKeychain client.
-        source_line=$(awk '
-          /SecurityAgent/ && tolower($0) ~ /(spawn|launch)/ { picked=last; launched=1; next }
-          ($4 ~ /^security\[/ || /SecKeychain/) && $4 !~ /^(securityd|SecurityAgent)\[/ { last=$0 }
-          END { print launched ? picked : last }
-        ' "$out") || source_line=''
-        process=$(awk '{ sub(/\[.*/, "", $4); print $4 }' <<<"$source_line") || process=''
-        [[ -z $process ]] || source="security request from $process"
-        ;;
-    esac
-  fi
-  rm -f "$out" || true
-}
-
-alert_gh() ( # a subshell, so GH_TOKEN reaches this gh call and nothing else
-  [[ -z $alert_gh_token ]] || export GH_TOKEN=$alert_gh_token
-  # gh can ignore an inherited SIGALRM. Keep the deadline in a supervisor that kills and reaps it.
-  perl -e '
-    my $pid = fork;
-    defined $pid or exit 125;
-    if (!$pid) { exec @ARGV; exit 127; }
-    $SIG{ALRM} = sub { kill "KILL", $pid; waitpid $pid, 0; exit 124; };
-    alarm 10;
-    waitpid $pid, 0;
-    my $status = $?;
-    alarm 0;
-    exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
-  ' "${CI_KIT_GH_BIN:-gh}" "$@"
-)
-alert_dialog() {
-  local out body issue=''
-  [[ ! -e $dialog_state ]] || return 0
-  mkdir -p "${dialog_state%/*}" || return 0
-  # Remember even a failed/timed-out create, so every subsequent job does not alert again.
-  : >"$dialog_state" || return 0
-  out=$(mktemp) || return 0
-  read_alert_token
-  printf -v body 'Time: %s\nFrontmost app: %s\nLikely source: %s\nSource line: %s\nRun id: %s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$name" "$source" "${source_line:-source unknown}" "${GITHUB_RUN_ID:--}"
-  if alert_gh issue create --repo SSFSKIM/ci-kit-sandbox --label ci-kit-alert \
-    --title "ci-kit alert: system dialog on the $machine ($name: $source)" --body "$body" >"$out" 2>/dev/null; then
-    IFS= read -r issue <"$out" || true
-    printf '%s\n' "$issue" >"$dialog_state" || true
+# A refused job opens the episode at once when none is open; a pending first read by the watcher lends it its time. In
+# an open episode it names the episode's time, and the episode's source when the same dialog is in front: the source
+# is read once per episode, when it opens. Its read restarts the watcher's count of clear reads. The lock wait
+# outlasts the watcher's longest hold (attribution, then gh).
+refuse_dialog() {
+  local since=$now opened=''
+  source='source unknown' source_line=''
+  if lock_state 45; then
+    load_state
+    if [[ $st_phase == open ]]; then
+      since=$st_since
+      [[ $st_name != "$dialog" ]] || source=$st_source
+      [[ -n $st_name ]] || st_name=$dialog
+      st_clear=0 st_clear_since=''
+      save_state || true
+    else
+      if [[ $st_phase == pending && $st_name == "$dialog" ]] && consecutive; then since=$st_since; fi
+      if start_episode "$since"; then opened=1; fi
+    fi
   else
-    log "dialog alert issue creation failed or timed out; episode remembered" || true
+    log "the dialog state stayed locked; refusing without touching the episode"
+    load_state
+    if [[ $st_phase == open ]]; then
+      since=$st_since
+      [[ $st_name != "$dialog" ]] || source=$st_source
+    fi
   fi
-  rm -f "$out" || true
+  log "frontmost is $name: $source; a system dialog holds focus since $since; failing the job"
+  echo "ci-kit: a system dialog ($dialog: $source) holds focus on the $machine since $(minute "$since") — dismiss it there and rerun" >&2
+  [[ -z $opened ]] || alert_episode "a refused job (run ${GITHUB_RUN_ID:--})" || true
+  unlock_state
 }
 
-clear_dialog_alert() {
-  local issue=''
-  [[ -f $dialog_state ]] || return 0
-  IFS= read -r issue <"$dialog_state" || true
-  if [[ -n $issue ]]; then
-    read_alert_token
-    alert_gh issue comment "$issue" --repo SSFSKIM/ci-kit-sandbox \
-      --body "cleared at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1 || log "dialog alert clear comment failed or timed out" || true
-    alert_gh issue close "$issue" --repo SSFSKIM/ci-kit-sandbox >/dev/null 2>&1 || log "dialog alert close failed or timed out" || true
-  fi
-  rm -f "$dialog_state" || true
+# A read that sees no dialog ends the watcher's pending first read. An open episode is the watcher's to close, after
+# three clear reads about a minute apart: a job's read comes at job cadence, not on that clock.
+passed_dialog() {
+  [[ -e $dialog_state ]] || return 0
+  lock_state 45 || return 0
+  load_state
+  [[ $st_phase == open ]] || drop_state || true
+  unlock_state
 }
 
 read_front
@@ -207,20 +71,15 @@ if [[ -z $name ]]; then
   exit 0
 fi
 
-case $name in
-  UserNotificationCenter | CoreServicesUIAgent | SecurityAgent | loginwindow)
-    source='source unknown' source_line=''
-    dialog_source || true
-    log "frontmost is $name: $source; a system dialog holds focus; failing the job"
-    echo "ci-kit: a system dialog ($name: $source) holds focus on the $machine — dismiss it there and rerun" >&2
-    alert_dialog || true
-    exit 1
-    ;;
-esac
+if is_dialog; then
+  clock
+  refuse_dialog
+  exit 1
+fi
+passed_dialog || true
 
 if is_app com.apple.Terminal Terminal; then
   log "frontmost is $name"
-  clear_dialog_alert || true
   exit 0
 fi
 
@@ -241,6 +100,4 @@ if [[ -z $name ]]; then
 elif ! is_app com.apple.Terminal Terminal; then
   echo "ci-kit: Terminal did not come to the front on the $machine ($name is) — check its desktop and rerun" >&2
   exit 1
-else
-  clear_dialog_alert || true
 fi
