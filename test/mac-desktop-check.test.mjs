@@ -15,7 +15,7 @@ after(() => rmSync(root, { recursive: true, force: true }));
 
 // Each check has an isolated desktop and HOME. `again` runs another job in that same dialog episode.
 // External reads and GitHub writes are faked, including the absolute-path unified log command.
-function check(output, status = 0, { afterOpen, openStatus = 0, logOutput = '', logStatus = 0, ghStatus = 0, logHang = false, ghHang = false, readOnly = false } = {}) {
+function check(output, status = 0, { afterOpen, openStatus = 0, logOutput = '', logStatus = 0, logResponses = {}, now, ghStatus = 0, logHang = false, ghHang = false, readOnly = false } = {}) {
   const dir = join(root, String(Math.random()).slice(2));
   mkdirSync(join(dir, 'bin'), { recursive: true });
   const front = join(dir, 'out.txt');
@@ -30,13 +30,27 @@ function check(output, status = 0, { afterOpen, openStatus = 0, logOutput = '', 
       `[[ -f '${join(dir, 'after.txt')}' ]] && cp '${join(dir, 'after.txt')}' '${front}'\nexit ${openStatus}\n`,
   );
   const log = join(dir, 'bin', 'unified-log');
-  writeFileSync(join(dir, 'unified.txt'), logOutput);
+  for (const kind of ['firewall', 'front', 'requests', 'other']) {
+    const { output = logOutput, status = logStatus, hang = logHang } = logResponses[kind] ?? {};
+    writeFileSync(join(dir, `${kind}.txt`), output);
+    writeFileSync(join(dir, `${kind}.sh`), `${hang ? 'exec /bin/sleep 60' : ''}\ncat '${join(dir, `${kind}.txt`)}'\nexit ${status}\n`);
+  }
   writeFileSync(log, `#!/bin/bash
 printf '%s\\0' "$@" >> '${join(dir, 'log-args.txt')}'
-${logHang ? 'exec /bin/sleep 60' : ''}
-cat '${join(dir, 'unified.txt')}'
-exit ${logStatus}
+printf '\\0' >> '${join(dir, 'log-args.txt')}'
+case "$*" in
+  *'process == "socketfilterfw"'*) kind=firewall ;;
+  *'TCCAccessRequest'*) kind=requests ;;
+  *'process == "launchservicesd"'*) kind=front ;;
+  *) kind=other ;;
+esac
+source '${dir}/'"$kind".sh
 `);
+  if (now) {
+    const date = join(dir, 'bin', 'date');
+    writeFileSync(date, `#!/bin/bash\nprintf '%s\\n' '${now}'\n`);
+    chmodSync(date, 0o755);
+  }
   const gh = join(dir, 'bin', 'gh');
   writeFileSync(gh, `#!/bin/bash
 printf '%s\\0' "$@" >> '${join(dir, 'gh-args.txt')}'
@@ -81,6 +95,7 @@ if [[ $1 == issue && $2 == create ]]; then echo https://github.com/SSFSKIM/ci-ki
       opened: text('opened.txt').trim().split('\n').filter(Boolean),
       ghCalls: text('gh-args.txt').split('\0\0').filter(Boolean).map((call) => call.split('\0')),
       logArgs: text('log-args.txt').split('\0').filter(Boolean),
+      logCalls: text('log-args.txt').split('\0\0').filter(Boolean).map((call) => call.split('\0')),
       state: existsSync(join(dir, statePath)) ? text(statePath) : null,
       again: run,
     };
@@ -295,10 +310,97 @@ test('UserNotificationCenter names deduplicated TCC callers just before its own 
   assert.ok(body.includes(`Likely source: ${source}\nSource line: ${tccFront}\n`));
   assert.equal(argValue(run.logArgs, '--style'), 'compact');
   assert.ok(run.logArgs.includes('--info'));
-  const predicate = argValue(run.logArgs, '--predicate');
-  assert.ok(predicate.includes('process == "socketfilterfw"'));
-  assert.ok(predicate.includes('eventMessage CONTAINS "TCCAccessRequest"'));
-  assert.ok(predicate.includes('process == "launchservicesd" AND eventMessage CONTAINS "SETFRONT"'));
+  const predicates = run.logCalls.map((call) => argValue(call, '--predicate'));
+  assert.equal(predicates.length, 3);
+  assert.equal(predicates[0], 'process == "socketfilterfw" AND eventMessage CONTAINS "doask: sending prompt for a filtering decision on:"');
+  assert.equal(predicates[1], 'process == "launchservicesd" AND eventMessage CONTAINS "SETFRONT: pid=47183 "');
+  assert.ok(predicates[2].includes('eventMessage CONTAINS "TCCAccessRequest"'));
+  assert.ok(!predicates[1].includes('TCCAccessRequest'), 'the long query stays narrow');
+});
+
+test('a dialog first checked 20 minutes later uses a long, pid-only lookup then a five-second request window', () => {
+  const front = tccFront.replace('16:57:14.175', '10:27:45.504');
+  const request = '2026-10-17 10:27:45.381 A Electron Helper[22936:62f0aba] (TCC) TCCAccessRequest() IPC';
+  const run = check(asnShape('UserNotificationCenter', undefined, 47183), 0, {
+    now: '2026-10-17T10:47:37Z',
+    logResponses: { firewall: { output: '' }, front: { output: front }, requests: { output: request } },
+  });
+  assert.equal(run.status, 1, run.stderr);
+  assert.ok(argValue(run.ghCalls[0], '--body').includes(`Likely source: TCC requests before it came to front: Electron Helper\nSource line: ${front}\n`));
+  assert.match(run.log, /^2026-10-17T10:47:37Z /);
+  assert.equal(run.logCalls.length, 3);
+  const [, lookup, requests] = run.logCalls;
+  assert.equal(argValue(lookup, '--last'), '3h');
+  assert.equal(argValue(lookup, '--predicate'), 'process == "launchservicesd" AND eventMessage CONTAINS "SETFRONT: pid=47183 "');
+  assert.ok(!requests.includes('--last'), 'frequent requests are never read over the long lookback');
+  assert.equal(argValue(requests, '--start'), '2026-10-17 10:27:40+0000');
+  assert.equal(argValue(requests, '--end'), '2026-10-17 10:27:46+0000');
+  for (const call of run.logCalls) assert.equal(argValue(call, '--timezone'), 'UTC');
+});
+
+const sandboxFront = tccFront.replace('16:57:14.175', '19:27:45.504').replace('60ee7ba', '62ed779');
+const sandboxRequests = [
+  '2026-10-17 19:27:45.360 A  sandboxd[22936:62f0ac4] request approval',
+  '2026-10-17 19:27:45.360 A  sandboxd[22936:62f0ac4] (TCC) tcc_send_request_authorization() IPC',
+  '2026-10-17 19:27:45.381 A  sandboxd[22936:62f0aba] request approval',
+  '2026-10-17 19:27:45.381 A  sandboxd[22936:62f0aba] (TCC) tcc_send_request_authorization() IPC',
+];
+const sandboxDenial = '2026-10-17 19:27:45.401 Df sandboxd[22936:62f0ac4] [com.apple.sandbox:sandcastle] checking kTCCServiceSystemPolicyAppDataDetailed on path "<private>", user interaction not allowed';
+
+test('the captured sandboxd approval burst identifies data-from-other-apps prompts, ranked with other requesters', () => {
+  const run = check(asnShape('UserNotificationCenter', undefined, 47183), 0, { logResponses: {
+    front: { output: sandboxFront },
+    requests: { output: [
+      ...sandboxRequests.slice(0, 2),
+      '2026-10-17 19:27:45.370 A Electron Helper[10:20] (TCC) TCCAccessRequest() IPC',
+      ...sandboxRequests.slice(2),
+      // Rejection on one thread cannot invalidate the other thread's approval.
+      sandboxDenial,
+      '2026-10-17 19:27:45.450 A Finder[11:21] (TCC) TCCAccessRequest() IPC',
+    ].join('\n') },
+  } });
+  assert.equal(run.status, 1, run.stderr);
+  assert.ok(argValue(run.ghCalls[0], '--body').includes(`Likely source: TCC requests before it came to front: Finder, sandboxd (data from other apps), Electron Helper\nSource line: ${sandboxFront}\n`));
+  const requests = run.logCalls[2];
+  assert.ok(argValue(requests, '--predicate').includes('process == "sandboxd"'));
+  assert.ok(argValue(requests, '--predicate').includes('user interaction not allowed'));
+  assert.ok(requests.includes('--debug'), 'include the sandbox rejection diagnostics');
+});
+
+test('non-interactive sandbox checks and rejected approvals do not become dialog sources', () => {
+  for (const lines of [
+    [sandboxDenial],
+    [...sandboxRequests.slice(0, 2), sandboxDenial],
+    [...sandboxRequests.slice(0, 2), sandboxDenial.replace('22936:', '99999:'), sandboxDenial],
+  ]) {
+    const run = check(asnShape('UserNotificationCenter', undefined, 47183), 0, { logResponses: {
+      front: { output: sandboxFront }, requests: { output: lines.join('\n') },
+    } });
+    assert.equal(run.status, 1, run.stderr);
+    assert.match(run.stderr, /UserNotificationCenter: source unknown/);
+  }
+});
+
+test('sandbox approval rejection is correlated by both pid and thread, not by process name alone', () => {
+  for (const denial of [sandboxDenial.replace('22936:', '99999:'), sandboxDenial.replace(':62f0ac4]', ':different]')]) {
+    const run = check(asnShape('UserNotificationCenter', undefined, 47183), 0, { logResponses: {
+      front: { output: sandboxFront }, requests: { output: [...sandboxRequests.slice(0, 2), denial].join('\n') },
+    } });
+    assert.equal(run.status, 1, run.stderr);
+    assert.match(run.stderr, /TCC requests before it came to front: sandboxd \(data from other apps\)\)/);
+  }
+});
+
+test('a later rejected sandbox approval does not erase an earlier prompting one on the same thread', () => {
+  const run = check(asnShape('UserNotificationCenter', undefined, 47183), 0, { logResponses: {
+    front: { output: sandboxFront }, requests: { output: [
+      ...sandboxRequests.slice(0, 2),
+      '2026-10-17 19:27:45.370 A Finder[10:20] (TCC) TCCAccessRequest() IPC',
+      sandboxRequests[0].replace('.360', '.400'), sandboxDenial,
+    ].join('\n') },
+  } });
+  assert.equal(run.status, 1, run.stderr);
+  assert.match(run.stderr, /TCC requests before it came to front: Finder, sandboxd \(data from other apps\)\)/);
 });
 
 test('the LSDisplayName shape with a quoted pid also supports TCC attribution', () => {
@@ -433,6 +535,30 @@ test('a hung unified-log read is cut off at the deadline and still alerts and fa
   assert.ok(Date.now() - started < 15_000, 'the 10 s read deadline is enforced');
   assert.match(run.stderr, /UserNotificationCenter: source unknown/);
   assert.equal(run.ghCalls.length, 1);
+});
+
+test('failed front-transition or bounded-request reads discard partial output and still fail and alert', () => {
+  for (const kind of ['front', 'requests']) {
+    const logResponses = { front: { output: tccFront }, requests: { output: tccRequests.join('\n') } };
+    logResponses[kind].status = 1;
+    const run = check(asnShape('UserNotificationCenter', undefined, 47183), 0, { logResponses });
+    assert.equal(run.status, 1, run.stderr);
+    assert.match(run.stderr, /UserNotificationCenter: source unknown/);
+    assert.equal(run.ghCalls.length, 1);
+  }
+});
+
+test('each new unified-log query has its own 10-second alarm', () => {
+  for (const kind of ['front', 'requests']) {
+    const logResponses = { front: { output: tccFront }, requests: { output: tccRequests.join('\n') } };
+    logResponses[kind].hang = true;
+    const started = Date.now();
+    const run = check(asnShape('UserNotificationCenter', undefined, 47183), 0, { logResponses });
+    assert.equal(run.status, 1, run.stderr);
+    assert.ok(Date.now() - started < 15_000, `${kind} read deadline is enforced`);
+    assert.match(run.stderr, /UserNotificationCenter: source unknown/);
+    assert.equal(run.ghCalls.length, 1);
+  }
 });
 
 test('a hung gh call that ignores SIGALRM is terminated and reaped without retrying the same episode', () => {

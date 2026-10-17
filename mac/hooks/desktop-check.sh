@@ -37,50 +37,85 @@ is_app() { # <bundle id> <name>: whether the frontmost app read last is that app
 
 # These optional steps never decide the job's result. Overrides let hook tests use local fakes, not the real log/gh.
 dialog_state="$HOME/Library/Logs/ci-kit/dialog-alert.state"
+dialog_log() { # <output file> <log show arguments...>
+  local out=$1
+  shift
+  # Use a file, not a pipe: an abandoned descendant cannot keep command substitution waiting on its stdout.
+  perl -e 'alarm 10; exec @ARGV' "${CI_KIT_LOG_BIN:-/usr/bin/log}" show --style compact --info --timezone UTC \
+    "$@" >"$out" 2>/dev/null
+}
+
+dialog_tcc_source() { # <scratch file>; called only after firewall attribution missed
+  local out=$1 predicate front_line window start end front_time tcc
+  [[ -n $front_pid ]] || return 0
+  # A quiet runner may not check a dialog for hours. Keep this long query narrow and pid-exact.
+  predicate="process == \"launchservicesd\" AND eventMessage CONTAINS \"SETFRONT: pid=$front_pid \""
+  dialog_log "$out" --last 3h --predicate "$predicate" || return 0
+  front_line=$(awk -v pid="$front_pid" '
+    /launchservicesd\[/ && index($0, "SETFRONT: pid=" pid " ") { line=$0 }
+    END { print line }
+  ' "$out") || return 0
+  [[ -n $front_line ]] || return 0
+  window=$(perl -MTime::Local=timegm -MPOSIX=strftime -e '
+    shift =~ /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)(\.\d+)?\s/ or exit;
+    my $seconds = timegm($6, $5, $4, $3, $2 - 1, $1);
+    # log accepts whole-second dates; round outward, then filter to the exact five seconds below.
+    print strftime("%Y-%m-%d %H:%M:%S+0000", gmtime($seconds - 5)), "\t",
+          strftime("%Y-%m-%d %H:%M:%S+0000", gmtime($seconds + 1)), "\t", $seconds + ($7 || 0);
+  ' "$front_line") || return 0
+  [[ -n $window ]] || return 0
+  IFS=$'\t' read -r start end front_time <<<"$window"
+  # Include the transition itself to retain log order for requests sharing its millisecond.
+  predicate="(eventMessage CONTAINS \"TCCAccessRequest\") OR ($predicate) OR (process == \"sandboxd\" AND (eventMessage == \"request approval\" OR eventMessage CONTAINS \"user interaction not allowed\"))"
+  dialog_log "$out" --start "$start" --end "$end" --debug --predicate "$predicate" || return 0
+  tcc=$(perl -MTime::Local=timegm -e '
+    my ($front, $front_line) = (shift, shift);
+    my (@requests, %pending, %seen);
+    while (<>) {
+      chomp;
+      last if $_ eq $front_line;
+      next unless /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)(\.\d+)?\s+\S+\s+(.+?)\[(\d+:[^\]]+)\]/;
+      my ($client, $thread) = ($8, $9);
+      my $time = timegm($6, $5, $4, $3, $2 - 1, $1) + ($7 || 0);
+      next unless $time >= $front - 5 && $time <= $front;
+      if ($client eq "sandboxd") {
+        if (/\brequest approval\s*$/) {
+          my $request = ["sandboxd (data from other apps)", 1];
+          push @requests, $request;
+          $pending{$thread} = $request;
+        } elsif (/user interaction not allowed/ && $pending{$thread}) {
+          # Only the most recent approval on this pid/thread was rejected, not another thread or burst.
+          $pending{$thread}->[1] = 0;
+          delete $pending{$thread};
+        }
+      } elsif (/TCCAccessRequest/ && $client !~ /^(mds|coreaudiod|WindowServer)$/) {
+        push @requests, [$client, 1];
+      }
+    }
+    print join(", ", map { $_->[0] } grep { $_->[1] && !$seen{$_->[0]}++ } reverse @requests);
+  ' "$front_time" "$front_line" "$out") || tcc=''
+  if [[ -n $tcc ]]; then
+    source="TCC requests before it came to front: $tcc"
+    source_line=$front_line
+  fi
+}
+
 dialog_source() {
-  local predicate out process tcc
+  local predicate out process
   case $name in
-    UserNotificationCenter) predicate='(process == "socketfilterfw" AND eventMessage CONTAINS "doask: sending prompt for a filtering decision on:") OR (eventMessage CONTAINS "TCCAccessRequest") OR (process == "launchservicesd" AND eventMessage CONTAINS "SETFRONT")' ;;
+    UserNotificationCenter) predicate='process == "socketfilterfw" AND eventMessage CONTAINS "doask: sending prompt for a filtering decision on:"' ;;
     SecurityAgent) predicate='process == "security" OR eventMessage CONTAINS "SecKeychain" OR (eventMessage CONTAINS "SecurityAgent" AND (eventMessage CONTAINS[c] "spawn" OR eventMessage CONTAINS[c] "launch"))' ;;
     *) return 0 ;;
   esac
   out=$(mktemp) || return 0
-  # Use a file, not a pipe: an abandoned descendant cannot keep command substitution waiting on its stdout.
-  if perl -e 'alarm 10; exec @ARGV' "${CI_KIT_LOG_BIN:-/usr/bin/log}" show --last 15m --style compact --info \
-    --predicate "$predicate" >"$out" 2>/dev/null; then
+  if dialog_log "$out" --last 15m --predicate "$predicate"; then
     case $name in
       UserNotificationCenter)
         source_line=$(awk '/socketfilterfw\[/ && /doask: sending prompt for a filtering decision on: / { line=$0 } END { print line }' "$out") || source_line=''
         if [[ -n $source_line ]]; then
           source="firewall prompt for ${source_line##*doask: sending prompt for a filtering decision on: }"
-        elif [[ -n $front_pid ]]; then
-          # Anchor to this pid's latest SETFRONT, not to the job: the dialog may have held focus for minutes.
-          # Five seconds catches the initiating burst; rank names by their latest request and omit noisy daemons.
-          tcc=$(perl -MTime::Local=timegm -e '
-            my $pid = shift;
-            my (@requests, @names, $front_line);
-            while (<>) {
-              next unless /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)(\.\d+)?\s+\S+\s+(.+?)\[\d+:[^\]]+\]/;
-              my $client = $8;
-              my $time = timegm($6, $5, $4, $3, $2 - 1, $1) + ($7 || 0);
-              if ($client eq "launchservicesd" && /\bSETFRONT:\s+pid=\Q$pid\E(?:\s|$)/) {
-                my %seen;
-                @names = ();
-                for my $request (reverse @requests) {
-                  next unless $request->[0] >= $time - 5 && $request->[0] <= $time;
-                  push @names, $request->[1] unless $seen{$request->[1]}++;
-                }
-                $front_line = $_;
-              } elsif (/TCCAccessRequest/ && $client !~ /^(mds|coreaudiod|WindowServer)$/) {
-                push @requests, [$time, $client];
-              }
-            }
-            print join(", ", @names), "\n", $front_line if @names;
-          ' "$front_pid" "$out") || tcc=''
-          if [[ -n $tcc ]]; then
-            source="TCC requests before it came to front: ${tcc%%$'\n'*}"
-            source_line=${tcc#*$'\n'}
-          fi
+        else
+          dialog_tcc_source "$out"
         fi
         ;;
       SecurityAgent)
