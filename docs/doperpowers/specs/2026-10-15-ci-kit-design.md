@@ -139,9 +139,11 @@ How to see it working: §Acceptance. The shortest proofs are:
       idle-deleted at 18:37:51Z.
     - maws-fe set `GATE_RUNNER=pool` again at 18:39:24Z.
     - The first GCE gate, 38949019226, is green.
-- [ ] (2026-10-17) ci-kit#25: the GCE ledger rotates before GitHub's 2,500-comment cap (§3a, I12,
-  Decision Log). PR #32, after one high-rung review (one finding, fixed); the owner merges and
-  deploys.
+- [x] (2026-10-17 05:22Z) ci-kit#25: the GCE ledger rotates before GitHub's 2,500-comment cap (§3a,
+  I12, Decision Log). PR #32 went through one high-rung review, which found one problem; it was fixed.
+  Merged as d75be8f. Launcher revision 00009 was deployed from main d75be8f at 05:14Z, and its ticks
+  answer 200. Sandbox round trip 39005750498 was green on GCE VMs whose launch rows the new store wrote.
+  At deploy, #1 had 187 comments, so it stays the current ledger issue until 2,000.
 
 ## Context: what was measured (2026-10-15)
 
