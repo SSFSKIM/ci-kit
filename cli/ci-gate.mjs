@@ -64,6 +64,11 @@ function planErrorReader(gh, repo) {
 }
 
 async function main(argv) {
+  // `ci-gate init`: loaded only when asked for, so the gate path never reads the planner or its YAML parser.
+  if (argv[0] === 'init') {
+    const { runInit } = await import('./init.mjs');
+    return runInit(argv.slice(1), { out });
+  }
   if (argv.includes('-h') || argv.includes('--help')) {
     process.stdout.write(USAGE + '\n');
     return 0;

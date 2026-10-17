@@ -3,6 +3,13 @@
 A repo adopts ci-kit with two files. After that, its pull requests get one check per selected gate plus `ci / verdict`,
 and an agent in any of its worktrees verifies a commit with `ci-gate`.
 
+`ci-gate init` writes both: the caller below, verbatim, and a draft `.github/ci-kit.yml` with a gate per command the
+repo declares (`package.json` scripts with the package manager its lockfile implies, pytest, Cargo, Go, Swift,
+Makefile targets), checked by the planner before it is written. Every gate it drafts is on a hosted lane (a private
+repo gets a comment on `pool` and `mac` and the owner's steps they need), and it refuses to overwrite either file
+without `--force`. The draft is a starting point: `ci-gate` is the
+proof. In a Claude Code session with the ci-kit plugin, asking to set up CI does all of it (the `ci-kit:adopt` skill).
+
 ## The two files
 
 ### 1. `.github/workflows/ci.yml`
@@ -176,8 +183,30 @@ the limit), every 15 s for the first 2 minutes and every 30 s after that, and fe
 the remaining budget drops below 500, while looking for the run or watching it, it prints `THROTTLE` and polls
 every 60 s until the budget recovers; lines can then arrive up to a minute late. With `CI_GATE_DEBUG=1` it prints each API request and a final count on stderr.
 
-`ci-gate` uses the `gh` CLI's login and needs no other credential. Install it with `install.sh` from a ci-kit checkout
-that stays put (it symlinks `~/.local/bin/ci-gate`).
+`ci-gate` uses the `gh` CLI's login and needs no other credential. The ci-kit Claude Code plugin puts it on the Bash
+tool's PATH in every session (below). Outside Claude Code, install it with `install.sh` from a ci-kit checkout that
+stays put (it symlinks `~/.local/bin/ci-gate`). Claude Code appends plugin `bin/` directories after the shell's own
+PATH, so that symlink, where it exists, is the `ci-gate` a session runs.
+
+## The Claude Code plugin
+
+The repo root is a Claude Code plugin, listed in the doperpowers marketplace:
+
+```bash
+claude plugin marketplace add SSFSKIM/doperpowers   # once per machine, if not added yet
+claude plugin install ci-kit@doperpowers
+```
+
+- **`ci-gate`** is on the Bash PATH (the plugin's `bin/`). It has no npm dependencies; `ci-gate init` reads the
+  planner, whose YAML parser is vendored under `vendor/yaml/`, so nothing is installed.
+- **A note at session start.** In a worktree whose repo has `.github/ci-kit.yml`, the session (and every subagent) is
+  told to verify commits with `ci-gate` rather than running the gates on the machine, and what its output means. In any
+  other repo the hook prints nothing. A repo needs no CLAUDE.md line for this.
+- **`ci-kit:adopt`**, the skill a session uses when asked to set up CI: `ci-gate init`, judging the draft, a GREEN
+  `ci-gate`, the PR, and for a private repo the steps only the owner can take.
+
+The plugin has no `version`: Claude Code versions it by the commit of `main`, so every merged change reaches the
+installs on their next update.
 
 ## Versioning
 
