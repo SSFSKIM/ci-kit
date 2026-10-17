@@ -526,3 +526,38 @@ test('review (PR #20): a report beside a registered runner never deletes the VM 
   const row = [...rows(w).values()].flat().find((r) => r.instance === name);
   assert.equal(row.state, 'running', 'no deleting row: its job is running');
 });
+
+// ci-kit#25: the ledger issue rotates before GitHub's 2,500-comment cap, and a job in flight across the rotation keeps
+// its one row on the old issue, finalized there.
+test('ledger rotation: a launch near the cap lands on a new issue, and a job in flight keeps its row on the old one', async () => {
+  const { w, launcher } = setup();
+  w.gh.issues[0].older = 1990;
+  const first = w.sim.queue(SBX, L(4));
+  await launcher.tick();
+  const [a] = vms(w);
+  assert.deepEqual(w.gh.comments.map((c) => c.issue), [1]);
+  w.gh.issues[0].older = 2499; // the next comment on #1 would be its 2,500th, then nothing more is accepted
+  w.sim.boot(SBX, a);
+  w.sim.take(SBX, a, first);
+  w.advance(MIN);
+  const second = w.sim.queue(SBX, L(4));
+  assert.equal((await launcher.tick()).launched.length, 1, 'the launch is not stopped by the old issue');
+  const fresh = w.gh.issues.find((i) => i.number !== 1);
+  assert.equal(fresh.title, 'pool ledger from 2026-10-16');
+  const b = vms(w).find((n) => n !== a);
+  const issueOf = (name) => w.gh.comments.filter((c) => parseRow(c.body)?.instance === name).map((c) => c.issue);
+  assert.deepEqual(issueOf(b), [fresh.number]);
+  w.advance(MIN);
+  w.sim.finish(SBX, a, first);
+  w.sim.boot(SBX, b);
+  w.sim.take(SBX, b, second);
+  await launcher.tick();
+  w.advance(MIN);
+  await launcher.tick();
+  const byAlloc = rows(w);
+  assert.equal(byAlloc.size, 2);
+  for (const list of byAlloc.values()) assert.equal(list.length, 1, 'one comment per allocation');
+  assert.deepEqual(issueOf(a), [1], 'the row stayed where it was written');
+  assert.equal(parseRow(w.gh.comments.find((c) => c.issue === 1).body).state, 'final');
+  assert.equal(parseRow(w.gh.comments.find((c) => c.issue === fresh.number).body).state, 'running');
+});

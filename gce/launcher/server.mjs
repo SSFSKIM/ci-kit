@@ -42,7 +42,7 @@ async function tick() {
   }));
   const { cfg, config, poolRepos } = await d.source();
   const key = `${cfg.ledger.repo}#${cfg.ledger.issue_title}`;
-  if (!d.ledgers.has(key)) d.ledgers.set(key, createGceLedger(d.gh, cfg.ledger));
+  if (!d.ledgers.has(key)) d.ledgers.set(key, createGceLedger(d.gh, cfg.ledger, { log }));
   const launcher = new Launcher({ gce: d.gce, gh: d.gh, ledger: d.ledgers.get(key), cfg, config, poolRepos, log });
   return { config: config.slice(0, 8), repos: cfg.repos.map((r) => r.repo), ...(await launcher.tick()), github: d.gh.stats() };
 }

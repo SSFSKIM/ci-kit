@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 import {
   launchRow, runningRow, finalRow, renderRow, parseRow, rowsOf, moreFinal, dollars, dailyLine, renderDaily, dailyDays,
 } from '../../gce/launcher/ledger.mjs';
-import { createGceLedger } from '../../gce/launcher/ledger-store.mjs';
+import { createGceLedger, ROTATE_AT, WINDOW_MS } from '../../gce/launcher/ledger-store.mjs';
+import { createLedgerStore } from '../../pool/lib/ledger-store.mjs';
 import { parseRow as parseHetznerRow } from '../../pool/lib/ledger.mjs';
 
 const SBX = 'SSFSKIM/ci-kit-sandbox';
@@ -73,29 +74,54 @@ test('the daily line totals the day\'s final rows (by deletion time), projects t
   assert.deepEqual([...dailyDays([{ body: text }, { body: 'x' }])], [day]);
 });
 
-// The store, against a fake issue.
-function fakeIssue({ comments = [] } = {}) {
+// The store, against fake ledger issues. A comment without `issue` is on #7; an issue's `older` stands for comments
+// made before the test. GitHub's cap is modelled: no new comment on an issue that already has 2,500.
+const iso = (ms) => new Date(ms).toISOString();
+function fakeIssue({ comments = [], issues = [{ number: 7, title: 'pool ledger', created_at: '2026-10-15T00:00:00Z' }], clock = { t: T0 } } = {}) {
   let id = 100;
+  let nextIssue = 20;
   const calls = [];
-  const state = { comments: comments.map((c) => ({ updated_at: new Date(T0).toISOString(), ...c })) };
+  const state = {
+    issues: issues.map((i) => ({ state: 'open', older: 0, ...i })),
+    comments: comments.map((c) => ({ issue: 7, updated_at: iso(clock.t), ...c })),
+  };
+  const count = (n) => (state.issues.find((i) => i.number === n)?.older ?? 0) + state.comments.filter((c) => c.issue === n).length;
   const gh = {
-    openIssues: async () => [{ number: 7, title: 'pool ledger' }],
-    createIssue: async () => ({ number: 8 }),
-    issueComments: async (_repo, _n, { since } = {}) => {
-      calls.push(`read since ${since}`);
-      return state.comments.filter((c) => !since || c.updated_at >= since).map((c) => ({ ...c }));
+    openIssues: async () => {
+      calls.push('list');
+      return state.issues.filter((i) => i.state === 'open').map(({ older, ...i }) => ({ ...i, comments: count(i.number) }));
     },
-    createComment: async (_r, _n, body) => { calls.push('create'); state.comments.push({ id: id++, body, updated_at: new Date(T0).toISOString() }); },
+    createIssue: async (_r, issue) => {
+      calls.push(`open ${issue.title}`);
+      const made = { number: nextIssue++, ...issue, state: 'open', created_at: iso(clock.t), older: 0 };
+      state.issues.push(made);
+      return { ...made, comments: 0 };
+    },
+    closeIssue: async (_r, n) => { calls.push(`close #${n}`); state.issues.find((i) => i.number === n).state = 'closed'; },
+    issueComments: async (_repo, n, { since } = {}) => {
+      calls.push(`read #${n} since ${since}`);
+      return state.comments.filter((c) => c.issue === n && (!since || c.updated_at >= since)).map((c) => ({ ...c }));
+    },
+    createComment: async (_r, n, body) => {
+      if (count(n) >= 2500) throw Object.assign(new Error('Commenting is disabled on issues with more than 2500 comments'), { status: 403 });
+      calls.push(`create #${n}`);
+      const c = { id: id++, issue: n, body, updated_at: iso(clock.t) };
+      state.comments.push(c);
+      return { ...c };
+    },
     getComment: async (_r, cid) => {
       calls.push(`get ${cid}`);
       const c = state.comments.find((x) => x.id === cid);
       if (!c) throw Object.assign(new Error('Not Found'), { status: 404 });
       return { ...c };
     },
-    updateComment: async (_r, cid, body) => { calls.push(`update ${cid}`); state.comments.find((c) => c.id === cid).body = body; },
+    updateComment: async (_r, cid, body) => {
+      calls.push(`update ${cid}`);
+      Object.assign(state.comments.find((c) => c.id === cid), { body, updated_at: iso(clock.t) });
+    },
     deleteComment: async (_r, cid) => { calls.push(`delete ${cid}`); state.comments = state.comments.filter((c) => c.id !== cid); },
   };
-  return { gh, calls, state };
+  return { gh, calls, state, clock, count };
 }
 const LEDGER = { repo: SBX, issue_title: 'pool ledger' };
 
@@ -104,14 +130,14 @@ test('the store reads only the recent window, creates a launch row, and finalize
   const store = createGceLedger(f.gh, LEDGER, { now: () => T0 });
   const launching = launchRow({ alloc: 'tb0abc0001', repo: SBX, cpus: 4, at: T0, config: 'x' });
   await store.read();
-  assert.deepEqual(f.calls, ['read since 2026-10-15T10:00:00.000Z']);
+  assert.deepEqual(f.calls, ['list', 'read #7 since 2026-10-15T10:00:00.000Z']);
   await store.upsert(launching);
   await store.read();
   const running = runningRow((await store.rows())[0], INST);
   await store.upsert(running);
   await store.upsert(running); // unchanged: no write
   await store.upsert(launching); // older: never written over the running row
-  assert.deepEqual(f.calls.filter((c) => !c.startsWith('read')), ['create', 'get 100', 'update 100']);
+  assert.deepEqual(f.calls.filter((c) => !c.startsWith('read') && c !== 'list'), ['create #7', 'get 100', 'update 100']);
   assert.equal(parseRow(f.state.comments.find((c) => c.id === 100).body).state, 'running');
 });
 
@@ -156,4 +182,166 @@ test('review 2: a stale writer never moves a row back: the comment is re-read be
   // Another final over a final is refused too: the first final stands.
   await b.upsert(finalRow(running, { end: 'orphan', deleted: T0 + 90_000, diskGb: 50 }));
   assert.equal(parseRow(f.state.comments[0].body).end, 'done');
+});
+
+// Rotation (ci-kit#25): GitHub refuses new comments on an issue that has 2,500, so the ledger moves to a fresh issue
+// at ROTATE_AT, reads every open ledger issue over the window, and closes an old one once nothing in it is inside it.
+const H = 3600_000;
+const row = (alloc, state = 'launching') => {
+  const l = launchRow({ alloc, repo: SBX, cpus: 4, at: T0, config: 'x' });
+  if (state === 'launching') return l;
+  const r = runningRow(l, INST);
+  return state === 'running' ? r : finalRow(r, { end: 'done', deleted: T0 + 60_000, diskGb: 50 });
+};
+const rowIssue = (f, alloc) => f.state.comments.filter((c) => parseRow(c.body)?.alloc === alloc).map((c) => c.issue);
+
+test('rotation: below ROTATE_AT rows stay on the issue; at it, a dated ledger issue continuing the old one takes new rows', async () => {
+  assert.ok(ROTATE_AT <= 2000, 'the threshold leaves real headroom under the 2,500 cap');
+  const f = fakeIssue({ issues: [{ number: 7, title: 'pool ledger', created_at: '2026-10-15T00:00:00Z', older: ROTATE_AT - 2 }] });
+  const store = createGceLedger(f.gh, LEDGER, { now: () => f.clock.t });
+  await store.read();
+  await store.upsert(row('tb0abc0001'));
+  assert.equal(f.state.issues.length, 1);
+  await store.read();
+  await store.upsert(row('tb0abc0002')); // the issue now has ROTATE_AT comments; the next read rotates
+  await store.read();
+  assert.equal(f.state.issues.length, 2);
+  const fresh = f.state.issues[1];
+  assert.equal(fresh.title, 'pool ledger from 2026-10-16');
+  assert.match(fresh.body, /#7\b/, 'the new issue names the one it continues');
+  await store.upsert(row('tb0abc0003'));
+  await store.postDaily(dailyLine([], '2026-10-15', 'abcdef01'));
+  assert.deepEqual(rowIssue(f, 'tb0abc0003'), [fresh.number]);
+  assert.equal(f.state.comments.at(-1).issue, fresh.number, 'the daily line goes on the current issue too');
+  assert.equal(f.count(7), ROTATE_AT, 'nothing new on the old issue');
+  await store.read();
+  assert.equal(f.state.issues.length, 2, 'one rotation, not one per read');
+});
+
+test('rotation: a read sees every row updated in the window on every open ledger issue, and only those', async () => {
+  const f = fakeIssue({
+    issues: [{ number: 7, title: 'pool ledger', created_at: '2026-10-01T00:00:00Z' }, { number: 9, title: 'pool ledger from 2026-10-16', created_at: iso(T0 - H) }, { number: 8, title: 'ci-kit alert: x' }],
+    comments: [
+      { id: 1, issue: 7, body: renderRow(row('tb0abc0001', 'running')), updated_at: iso(T0 - 20 * H) },
+      { id: 2, issue: 7, body: renderRow(row('tb0abc0002', 'final')), updated_at: iso(T0 - 27 * H) },
+      { id: 3, issue: 9, body: renderRow(row('tb0abc0003')), updated_at: iso(T0 - 60_000) },
+      { id: 4, issue: 8, body: renderRow(row('tb0abc0004')), updated_at: iso(T0) },
+    ],
+  });
+  const store = createGceLedger(f.gh, LEDGER, { now: () => T0 });
+  await store.read();
+  assert.deepEqual((await store.rows()).map((r) => r.alloc).sort(), ['tb0abc0001', 'tb0abc0003']);
+  assert.deepEqual(f.calls.filter((c) => c.startsWith('read')).map((c) => c.split(' ')[1]), ['#7', '#9']);
+});
+
+test('rotation: a row on the old issue is updated in place there, and its allocation gets no second comment', async () => {
+  const f = fakeIssue({
+    issues: [{ number: 7, title: 'pool ledger', created_at: '2026-10-01T00:00:00Z', older: ROTATE_AT }],
+    comments: [{ id: 1, issue: 7, body: renderRow(row('tb0abc0001', 'running')), updated_at: iso(T0 - H) }],
+  });
+  const store = createGceLedger(f.gh, LEDGER, { now: () => T0 });
+  await store.read();
+  assert.equal(f.state.issues.length, 2);
+  await store.upsert(row('tb0abc0001', 'final'), { dedupe: true });
+  assert.deepEqual(rowIssue(f, 'tb0abc0001'), [7]);
+  assert.equal(parseRow(f.state.comments.find((c) => c.id === 1).body).state, 'final');
+});
+
+test('rotation: the daily line is not posted again when yesterday\'s already sits on the old issue', async () => {
+  const line = dailyLine([], '2026-10-15', 'abcdef01');
+  const f = fakeIssue({
+    issues: [{ number: 7, title: 'pool ledger', created_at: '2026-10-01T00:00:00Z' }, { number: 9, title: 'pool ledger from 2026-10-16', created_at: iso(T0 - H) }],
+    comments: [{ id: 1, issue: 7, body: renderDaily(line), updated_at: iso(T0 - 10 * H) }],
+  });
+  const store = createGceLedger(f.gh, LEDGER, { now: () => T0 });
+  await store.read();
+  assert.equal(await store.postDaily(line), false);
+  assert.equal(f.state.comments.length, 1);
+});
+
+test('rotation: two ticks that both rotate converge on the newest issue, and no row either wrote is lost', async () => {
+  const f = fakeIssue({
+    issues: [{ number: 7, title: 'pool ledger', created_at: '2026-10-01T00:00:00Z', older: ROTATE_AT }],
+    comments: [{ id: 1, issue: 7, body: renderRow(row('tb0abc0001', 'running')), updated_at: iso(T0 - H) }],
+  });
+  const a = createGceLedger(f.gh, LEDGER, { now: () => f.clock.t });
+  const b = createGceLedger(f.gh, LEDGER, { now: () => f.clock.t });
+  await Promise.all([a.read(), b.read()]); // both list before either creates
+  assert.equal(f.state.issues.length, 3, 'both rotated');
+  const [first, second] = f.state.issues.slice(1).map((i) => i.number);
+  await a.upsert(row('tb0abc0002'));
+  await b.upsert(row('tb0abc0003'));
+  assert.notDeepEqual(rowIssue(f, 'tb0abc0002'), rowIssue(f, 'tb0abc0003'), 'each wrote to the issue it made');
+  // Every reader now agrees: the newest open ledger issue is current, and every open one is read.
+  f.clock.t += 60_000;
+  const c = createGceLedger(f.gh, LEDGER, { now: () => f.clock.t });
+  for (const s of [a, b, c]) {
+    await s.read();
+    assert.deepEqual((await s.rows()).map((r) => r.alloc).sort(), ['tb0abc0001', 'tb0abc0002', 'tb0abc0003']);
+  }
+  assert.equal(f.state.issues.length, 3, 'nobody rotates again');
+  await a.upsert(row('tb0abc0004'));
+  await b.upsert(row('tb0abc0005'));
+  await c.postDaily(dailyLine([], '2026-10-15', 'abcdef01'));
+  assert.deepEqual([...rowIssue(f, 'tb0abc0004'), ...rowIssue(f, 'tb0abc0005'), f.state.comments.at(-1).issue], [second, second, second]);
+  assert.ok(first < second);
+});
+
+test('rotation: an old issue is closed once nothing on it is in the window and its successor is a window old; the current one never', async () => {
+  const f = fakeIssue({
+    issues: [{ number: 7, title: 'pool ledger', created_at: '2026-10-01T00:00:00Z', older: ROTATE_AT }],
+    comments: [{ id: 1, issue: 7, body: renderRow(row('tb0abc0001', 'running')), updated_at: iso(T0 - H) }],
+  });
+  const store = createGceLedger(f.gh, LEDGER, { now: () => f.clock.t });
+  await store.read(); // rotates
+  const current = f.state.issues[1].number;
+  await store.upsert(row('tb0abc0001', 'final')); // touches #7's row: it stays in the window 26 h more
+  f.clock.t += WINDOW_MS - 60_000;
+  await store.read();
+  assert.equal(f.state.issues[0].state, 'open', 'its row is still inside the window');
+  f.clock.t += 2 * 60_000;
+  await store.read();
+  assert.equal(f.state.issues[0].state, 'closed');
+  assert.equal(f.state.issues[1].state, 'open');
+  assert.ok(f.calls.includes('close #7'));
+  assert.equal(f.state.comments.filter((c) => c.issue === 7).length, 1, 'its history is kept');
+  assert.match(f.state.issues[0].title, /^pool ledger/, 'and it stays findable by title');
+  // The current issue is never closed, however long it sits idle; and a closed one is no longer read.
+  f.clock.t += 3 * WINDOW_MS;
+  f.calls.length = 0;
+  await store.read();
+  assert.equal(f.state.issues.find((i) => i.number === current).state, 'open');
+  assert.deepEqual(f.calls.filter((c) => c.startsWith('read')).map((c) => c.split(' ')[1]), [`#${current}`]);
+});
+
+test('rotation: an old issue whose successor is younger than the window is kept open even with nothing in the window', async () => {
+  const f = fakeIssue({ issues: [{ number: 7, title: 'pool ledger', created_at: '2026-10-01T00:00:00Z' }, { number: 9, title: 'pool ledger from 2026-10-16', created_at: iso(T0 - H) }] });
+  const store = createGceLedger(f.gh, LEDGER, { now: () => T0 });
+  await store.read();
+  assert.equal(f.state.issues[0].state, 'open');
+});
+
+test('rotation: when the new issue cannot be made, rows keep going to the current one and the next read tries again', async () => {
+  const f = fakeIssue({ issues: [{ number: 7, title: 'pool ledger', created_at: '2026-10-01T00:00:00Z', older: ROTATE_AT }] });
+  const logs = [];
+  const create = f.gh.createIssue;
+  f.gh.createIssue = async () => { throw Object.assign(new Error('HTTP 502'), { status: 502 }); };
+  const store = createGceLedger(f.gh, LEDGER, { now: () => T0, log: (m) => logs.push(m) });
+  await store.read();
+  await store.upsert(row('tb0abc0001'));
+  assert.deepEqual(rowIssue(f, 'tb0abc0001'), [7]);
+  assert.match(logs.join('\n'), /#7/);
+  f.gh.createIssue = create;
+  await store.read();
+  assert.equal(f.state.issues.length, 2);
+});
+
+test('rotation: Hetzner\'s ledger store still finds the original "pool ledger" issue, never a rotated GCE one', async () => {
+  const f = fakeIssue({ issues: [{ number: 7, title: 'pool ledger', created_at: '2026-10-01T00:00:00Z', older: ROTATE_AT }] });
+  await createGceLedger(f.gh, LEDGER, { now: () => T0 }).read();
+  assert.equal(f.state.issues.length, 2);
+  f.state.issues.reverse(); // GitHub lists the newest first
+  const hetzner = createLedgerStore(f.gh, LEDGER);
+  await hetzner.comments();
+  assert.ok(f.calls.includes('read #7 since undefined'));
 });
