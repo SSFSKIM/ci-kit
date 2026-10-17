@@ -140,6 +140,12 @@ then the skill and its eval (P4), then review (P5). Merging: the dispatching ses
   - No skill line was contradicted. The timing-test and `fetch_depth` lines were not exercised: the eval repos have
     no such tests.
 - [ ] P5 tests and review
+  - 2026-10-17: `npm test` green as #37's `ci / test` (run 39042053205). `doperpowers:reviewer-medium` over the branch
+    and doperpowers#215 returned five findings in `ci-gate init`, all real, fixed in one wave (17b4ec3): `--force=false`
+    enabled force; a lockfile-less `packageManager` reached the gate's shell command unchecked; uv and poetry drafts
+    skipped a pytest declared in an optional extra; `engines.node` was cut to its first number (`<22` drafted 22); the
+    pip path looked for pytest in every extra rather than the one it installs. It confirmed `vendor/yaml` matches the
+    published package byte for byte, with every `require` resolving, and found nothing in the marketplace entry.
 
 ## Surprises & Discoveries
 
@@ -191,3 +197,6 @@ then the skill and its eval (P4), then review (P5). Merging: the dispatching ses
   hosted lanes only, and init says so. The draft's lanes are hosted either way; only the pool comment differs.
 - 2026-10-17 (worker): `ci-gate init` keeps a `.github/workflows/ci.yml` that is already the verbatim caller instead
   of refusing it, so a repo with only its ci-kit.yml removed can be drafted again without `--force`.
+- 2026-10-17 (worker, from review): the draft's `setup.node` is `engines.node` as written, a semver range that
+  `actions/setup-node` resolves. Alternative rejected: its first number as a major, which drafts a version the
+  range can exclude (`<22` gave 22). `.nvmrc` and `.node-version` still win when present.
