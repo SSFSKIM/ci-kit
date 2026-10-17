@@ -22,12 +22,14 @@ log() {
 
 # `lsappinfo info -only name -only bundleid` prints `"LSDisplayName"="<name>"` and `"CFBundleIdentifier"="<id>"`, or,
 # on macOS 27, `"<name>" ASN:0x…: …` and `bundleID="<id>"`. The name is localized (Terminal is `터미널` on the mini), so
-# Terminal is told by bundle id, and by name only where no bundle id is printed.
+# Terminal is told by bundle id, and by name only where no bundle id is printed. `-only pid` adds `pid = <number> …`
+# or `"pid"=<number>`.
 read_front() {
   local info
-  info=$(lsappinfo info -only name -only bundleid "$(lsappinfo front 2>/dev/null)" 2>/dev/null) || info=''
+  info=$(lsappinfo info -only name -only bundleid -only pid "$(lsappinfo front 2>/dev/null)" 2>/dev/null) || info=''
   name=$(sed -n -E 's/^"LSDisplayName"="(.*)"$/\1/p; s/^"([^"]*)" ASN:.*/\1/p' <<<"$info" | head -1)
   bundle=$(sed -n -E 's/^"CFBundleIdentifier"="(.*)"$/\1/p; s/^[[:space:]]*bundleID="([^"]*)".*/\1/p' <<<"$info" | head -1)
+  front_pid=$(sed -n -E 's/^[[:space:]]*"?pid"?[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' <<<"$info" | head -1)
 }
 is_app() { # <bundle id> <name>: whether the frontmost app read last is that app
   [[ $bundle == "$1" || (-z $bundle && $name == "$2") ]]
@@ -36,9 +38,9 @@ is_app() { # <bundle id> <name>: whether the frontmost app read last is that app
 # These optional steps never decide the job's result. Overrides let hook tests use local fakes, not the real log/gh.
 dialog_state="$HOME/Library/Logs/ci-kit/dialog-alert.state"
 dialog_source() {
-  local predicate out process
+  local predicate out process tcc
   case $name in
-    UserNotificationCenter) predicate='process == "socketfilterfw" AND eventMessage CONTAINS "doask: sending prompt for a filtering decision on:"' ;;
+    UserNotificationCenter) predicate='(process == "socketfilterfw" AND eventMessage CONTAINS "doask: sending prompt for a filtering decision on:") OR (eventMessage CONTAINS "TCCAccessRequest") OR (process == "launchservicesd" AND eventMessage CONTAINS "SETFRONT")' ;;
     SecurityAgent) predicate='process == "security" OR eventMessage CONTAINS "SecKeychain" OR (eventMessage CONTAINS "SecurityAgent" AND (eventMessage CONTAINS[c] "spawn" OR eventMessage CONTAINS[c] "launch"))' ;;
     *) return 0 ;;
   esac
@@ -49,7 +51,37 @@ dialog_source() {
     case $name in
       UserNotificationCenter)
         source_line=$(awk '/socketfilterfw\[/ && /doask: sending prompt for a filtering decision on: / { line=$0 } END { print line }' "$out") || source_line=''
-        [[ -z $source_line ]] || source="firewall prompt for ${source_line##*doask: sending prompt for a filtering decision on: }"
+        if [[ -n $source_line ]]; then
+          source="firewall prompt for ${source_line##*doask: sending prompt for a filtering decision on: }"
+        elif [[ -n $front_pid ]]; then
+          # Anchor to this pid's latest SETFRONT, not to the job: the dialog may have held focus for minutes.
+          # Five seconds catches the initiating burst; rank names by their latest request and omit noisy daemons.
+          tcc=$(perl -MTime::Local=timegm -e '
+            my $pid = shift;
+            my (@requests, @names, $front_line);
+            while (<>) {
+              next unless /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)(\.\d+)?\s+\S+\s+(.+?)\[\d+:[^\]]+\]/;
+              my $client = $8;
+              my $time = timegm($6, $5, $4, $3, $2 - 1, $1) + ($7 || 0);
+              if ($client eq "launchservicesd" && /\bSETFRONT:\s+pid=\Q$pid\E(?:\s|$)/) {
+                my %seen;
+                @names = ();
+                for my $request (reverse @requests) {
+                  next unless $request->[0] >= $time - 5 && $request->[0] <= $time;
+                  push @names, $request->[1] unless $seen{$request->[1]}++;
+                }
+                $front_line = $_;
+              } elsif (/TCCAccessRequest/ && $client !~ /^(mds|coreaudiod|WindowServer)$/) {
+                push @requests, [$time, $client];
+              }
+            }
+            print join(", ", @names), "\n", $front_line if @names;
+          ' "$front_pid" "$out") || tcc=''
+          if [[ -n $tcc ]]; then
+            source="TCC requests before it came to front: ${tcc%%$'\n'*}"
+            source_line=${tcc#*$'\n'}
+          fi
+        fi
         ;;
       SecurityAgent)
         # Compact log output is chronological, with process[pid:thread] in column four. Prefer the last client
