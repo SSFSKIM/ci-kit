@@ -11,8 +11,19 @@ let root;
 before(() => { root = mkdtempSync(join(tmpdir(), 'ci-kit-posture-')); });
 after(() => rmSync(root, { recursive: true, force: true }));
 
+// CI_KIT_PROBE_DEADLINE (whole seconds) is the supervisors' per-probe deadline; production defaults to 1 s, which is far too
+// tight for positive fakes when suites run concurrently. Fixtures get a generous one; each hung probe then costs that long.
+// Real supervisors always run. The spawn timeout only has to outlast the longest hung run, and well under the fakes' 60 s sleep.
+const generous = 5;
+const productionDeadline = 1;
+const hookTimeout = 30_000;
+const withinHangs = (run, hangs, deadline = generous) => {
+  const limit = (hangs * deadline + 15) * 1000;
+  assert.ok(run.elapsed < limit, `posture took ${run.elapsed} ms (limit ${limit} ms)`);
+};
+
 // Real hook wrappers and desktop reads; only the desktop, cursor and process-sweeping boundaries are faked.
-function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, missing = false, parsec, logFailure = false, frontStatus = 0, frontHang = false, connections = 'Proto Recv-Q Send-Q Local Address Foreign Address (state)\n', netStatus = 0 } = {}) {
+function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, missing = false, parsec, parsecHang = false, logFailure = false, frontStatus = 0, frontHang = false, connections = 'Proto Recv-Q Send-Q Local Address Foreign Address (state)\n', netStatus = 0, netHang = false, netDelay = 0, ignoreAlarm = false, deadline = generous } = {}) {
   const dir = mkdtempSync(join(root, 'job-'));
   const bin = join(dir, 'bin');
   const installed = join(dir, 'hooks');
@@ -24,39 +35,47 @@ function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, mi
   const executable = (path, text) => { writeFileSync(path, `#!/bin/bash\n${text}\n`); chmodSync(path, 0o755); };
   const front = join(dir, 'front');
   writeFileSync(front, 'Terminal');
-  executable(join(bin, 'lsappinfo'), `${frontHang ? 'exec /bin/sleep 60' : ''}\nif [[ $1 == front ]]; then echo ASN:0x0-1:; else printf '"LSDisplayName"="%s"\\n' "$(cat '${front}')"; fi\nexit ${frontStatus}`);
+  const hangingRead = (source) => `${ignoreAlarm ? "trap '' ALRM" : ''}\necho $$ > '${join(dir, `${source}-pid`)}'\nexec /bin/sleep 60`;
+  executable(join(bin, 'lsappinfo'), `${frontHang ? hangingRead('front') : ''}\nif [[ $1 == front ]]; then echo ASN:0x0-1:; else printf '"LSDisplayName"="%s"\\n' "$(cat '${front}')"; fi\nexit ${frontStatus}`);
   executable(join(bin, 'open'), 'exit 91'); // Already in Terminal; no real LaunchServices calls.
   writeFileSync(join(dir, 'connections'), connections);
-  executable(join(bin, 'netstat'), `[[ $* == -an ]] || exit 92; cat '${join(dir, 'connections')}'; exit ${netStatus}`);
+  // Builtin read/printf replay the connections: no extra process for a loaded machine to schedule late.
+  executable(join(bin, 'netstat'), `[[ $* == -an ]] || exit 92\n${netHang ? hangingRead('net') : ''}\n${netDelay ? `/bin/sleep ${netDelay}` : ''}\nIFS= read -r -d '' replay < '${join(dir, 'connections')}'; printf '%s' "$replay"; exit ${netStatus}`);
+  if (parsecHang) executable(join(bin, 'awk'), `if [[ \${!#} == '${join(dir, '.parsec/log.txt')}' ]]; then\n${hangingRead('parsec')}\nfi\nexec /usr/bin/awk "$@"`);
   executable(join(bin, 'node'), 'echo "sweep $*"');
   if (!missing) executable(join(installed, 'cursor-park'), `
 if [[ \${1:-} != --describe ]]; then echo cursor-parked; exit 0; fi
 ${hang ? `trap '' ALRM\necho $$ > '${join(dir, 'helper-pid')}'\nexec /bin/sleep 60` : `echo '${display}'; exit ${displayStatus}`}`);
-  if (parsec !== undefined) {
+  if (parsec !== undefined || parsecHang) {
     mkdirSync(join(dir, '.parsec'));
-    writeFileSync(join(dir, '.parsec/log.txt'), parsec);
+    writeFileSync(join(dir, '.parsec/log.txt'), parsec ?? '');
   }
   const log = join(dir, 'Library/Logs/ci-kit/mac-runner-hooks.log');
   if (logFailure) {
     mkdirSync(join(dir, 'Library/Logs/ci-kit'), { recursive: true });
     mkdirSync(log); // Even a failed hooks-log append cannot fail the hook or hide its stdout line.
   }
-  function run(phase = 'start', sweepStatus = 0) {
+  function run(phase = 'start', sweepStatus = 0, postureOnly = false) {
     executable(join(bin, 'node'), `echo "sweep $*"; exit ${sweepStatus}`);
     const started = Date.now();
-    const result = spawnSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', join(installed, phase === 'start' ? 'job-started.sh' : 'job-completed.sh')], {
-      encoding: 'utf8', timeout: 8_000,
-      env: { HOME: dir, PATH: `${bin}:/usr/bin:/bin`, GITHUB_RUN_ID: '123456', GITHUB_JOB: 'e2e' },
+    const script = postureOnly ? 'desktop-posture.sh' : phase === 'start' ? 'job-started.sh' : 'job-completed.sh';
+    const result = spawnSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', join(installed, script), ...(postureOnly ? [phase] : [])], {
+      encoding: 'utf8', timeout: hookTimeout,
+      env: { HOME: dir, PATH: `${bin}:/usr/bin:/bin`, GITHUB_RUN_ID: '123456', GITHUB_JOB: 'e2e', ...(deadline === null ? {} : { CI_KIT_PROBE_DEADLINE: String(deadline) }) },
     });
     const survivors = [];
-    if (existsSync(join(dir, 'helper-pid'))) {
-      const pid = Number(readFileSync(join(dir, 'helper-pid'), 'utf8').trim());
+    const observed = [];
+    for (const source of ['helper', 'front', 'parsec', 'net']) {
+      const pidFile = join(dir, `${source}-pid`);
+      if (!existsSync(pidFile)) continue;
+      observed.push(source);
+      const pid = Number(readFileSync(pidFile, 'utf8').trim());
       try { process.kill(pid, 0); survivors.push(pid); process.kill(pid, 'SIGKILL'); }
       catch (error) { if (error.code !== 'ESRCH') throw error; }
     }
-    return { ...result, elapsed: Date.now() - started, survivors, log: !logFailure && existsSync(log) ? readFileSync(log, 'utf8') : '' };
+    return { ...result, elapsed: Date.now() - started, survivors, observed, log: !logFailure && existsSync(log) ? readFileSync(log, 'utf8') : '' };
   }
-  return { run, front };
+  return { run, runPosture: (phase = 'end') => run(phase, 0, true), front };
 }
 
 const posture = (stdout) => stdout.split('\n').filter((line) => line.startsWith('ci-kit desktop ('));
@@ -85,17 +104,17 @@ test('missing, failing and malformed display helpers leave display unknown and l
   }
 });
 
-test('a display helper ignoring SIGALRM is killed and reaped within a few seconds', () => {
+test('a display helper ignoring SIGALRM is killed and reaped at the probe deadline', () => {
   const run = fixture({ hang: true }).run('end');
   assert.equal(run.status, 0, run.stderr);
-  assert.ok(run.elapsed < 5_000, `posture took ${run.elapsed} ms`);
+  withinHangs(run, 1);
   assert.deepEqual(run.survivors, []);
   assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=Terminal display=unknown remote=none']);
 });
 
 const connected = '[I 2026-10-17 10:30:04] user#123 connected.';
 const disconnected = '[I 2026-10-17 10:34:04] user#123 disconnected.';
-test('Parsec uses the newest host connection event, ignoring unrelated lines and older sessions', () => {
+test('Parsec uses each client’s newest host connection event, ignoring unrelated lines and older sessions', () => {
   for (const [parsec, remote] of [
     [`${connected}\n`, 'parsec'],
     [`${connected}\n${disconnected}\n[I 2026-10-17 10:35:00] unrelated event\n`, 'none'],
@@ -109,7 +128,52 @@ test('Parsec uses the newest host connection event, ignoring unrelated lines and
   }
 });
 
+test('one Parsec client disconnecting does not hide another client still connected', () => {
+  const aliceConnected = '[I 2026-10-17 10:30:04] Alice Smith#123 connected.';
+  const bobConnected = '[I 2026-10-17 10:31:04] Bob#456 connected.';
+  const bobDisconnected = '[I 2026-10-17 10:32:04] Bob#456 disconnected.';
+  const aliceDisconnected = '[I 2026-10-17 10:33:04] Alice Smith#123 disconnected.';
+  const interleaved = `${aliceConnected}\n${bobConnected}\n${bobDisconnected}\n`;
+  for (const [parsec, remote] of [
+    [interleaved, 'parsec'],
+    [`${interleaved}${aliceDisconnected}\n`, 'none'],
+    [`${interleaved}${aliceDisconnected}\n${bobConnected}\n`, 'parsec'],
+  ]) {
+    const run = fixture({ parsec }).run('end');
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, new RegExp(`remote=${remote}$`, 'm'));
+  }
+});
+
 const tcp = (local, foreign, state) => `Proto Recv-Q Send-Q Local Address Foreign Address (state)\ntcp4 0 0 ${local} ${foreign} ${state}\n`;
+
+for (const ignoreAlarm of [false, true]) {
+  for (const [options, remote, hangingSource] of [
+    [{ parsec: connected, netHang: true }, 'parsec', 'net'],
+    [{ parsecHang: true, connections: tcp('127.0.0.1.5900', '127.0.0.1.53100', 'ESTABLISHED') }, 'screensharing', 'parsec'],
+  ]) {
+    test(`${remote} remains positive when the other source hangs${ignoreAlarm ? ' and ignores SIGALRM' : ''}`, () => {
+      const run = fixture({ ...options, ignoreAlarm }).run('end');
+      assert.equal(run.status, 0, run.stderr);
+      withinHangs(run, 1);
+      assert.deepEqual(run.observed, [hangingSource]);
+      assert.deepEqual(run.survivors, []);
+      assert.match(run.stdout, new RegExp(`remote=${remote}$`, 'm'));
+      assert.match(run.stdout, /sweep .*job-completed/);
+    });
+  }
+}
+
+test('all four hanging reads stay bounded and optional under bash -e -o pipefail', () => {
+  // Production's own 1 s default (no override), so this costs four seconds; marker files are not asserted, because under load
+  // a fake may be abandoned before it writes one.
+  const run = fixture({ frontHang: true, hang: true, parsecHang: true, netHang: true, ignoreAlarm: true, deadline: null }).runPosture();
+  assert.equal(run.status, 0, run.stderr);
+  withinHangs(run, 4, productionDeadline);
+  assert.deepEqual(run.survivors, []);
+  assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=unknown display=unknown remote=unknown']);
+});
+
 test('Screen Sharing means an established incoming 5900 transport, not a listener or an outgoing viewer', () => {
   for (const [connections, remote] of [
     [tcp('192.168.1.2.5900', '192.168.1.3.53100', 'ESTABLISHED'), 'screensharing'],
@@ -123,6 +187,27 @@ test('Screen Sharing means an established incoming 5900 transport, not a listene
   }
   const both = fixture({ connections: tcp('127.0.0.1.5900', '127.0.0.1.53100', 'ESTABLISHED'), parsec: connected }).run('end');
   assert.match(both.stdout, /remote=parsec,screensharing$/m);
+});
+
+test('a positive source slower than the 1 s default deadline succeeds under a generous override', () => {
+  const slow = { connections: tcp('192.168.1.2.5900', '192.168.1.3.53100', 'ESTABLISHED'), netDelay: 1.5 };
+  const kept = fixture(slow).run('end');
+  assert.equal(kept.status, 0, kept.stderr);
+  assert.deepEqual(posture(kept.stdout), ['ci-kit desktop (end): frontmost=Terminal display=2560x1440@2x remote=screensharing']);
+  // Control: with no override the production default still abandons this deterministically slower source. The other
+  // fields race that same 1 s deadline under load, so only remote is pinned.
+  const abandoned = fixture({ ...slow, deadline: null }).run('end');
+  assert.equal(abandoned.status, 0, abandoned.stderr);
+  assert.match(abandoned.stdout, /remote=unknown$/m);
+});
+
+test('a zero or malformed deadline override keeps a bounded supervisor at the 1 s default', () => {
+  // A 2 s source must still be abandoned: the override may lengthen the deadline, never disable it.
+  for (const deadline of ['0', 'invalid']) {
+    const run = fixture({ connections: tcp('192.168.1.2.5900', '192.168.1.3.53100', 'ESTABLISHED'), netDelay: 2, deadline }).run('end');
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /remote=unknown$/m, `override ${deadline}`);
+  }
 });
 
 test('high-performance Screen Sharing uses peer-associated UDP 5900–5902, not wildcard listeners', () => {
@@ -148,7 +233,7 @@ test('failed or hanging frontmost reads are unknown without blocking the other f
   for (const options of [{ frontStatus: 3 }, { frontHang: true }]) {
     const run = fixture(options).run('end');
     assert.equal(run.status, 0, run.stderr);
-    assert.ok(run.elapsed < 5_000, `posture took ${run.elapsed} ms`);
+    withinHangs(run, options.frontHang ? 1 : 0);
     assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=unknown display=2560x1440@2x remote=none']);
   }
 });

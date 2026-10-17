@@ -126,9 +126,11 @@ ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none
 - `display`: the main display's size in points and backing-framebuffer scale. `cursor-park --describe` reads
   `CGDisplayBounds` and the current mode's pixel/point width ratio; it does not move the cursor. A missing, failing or
   timed-out helper gives `unknown`, so a HiDPI-to-1x switch is visible without running `system_profiler`.
-- `remote`: `parsec`, `screensharing`, both comma-separated, or `none` when neither signal is present. Parsec uses the
-  newest `user#id connected.` / `disconnected.` event in `~/.parsec/log.txt`; an absent log means no Parsec signal,
-  while an unreadable log or one with no connection history is unknown. Screen Sharing uses non-root `netstat -an`:
+- `remote`: `parsec`, `screensharing`, both comma-separated, or `none` when neither signal is present. Parsec tracks the
+  newest `user#id connected.` / `disconnected.` event **per client** in `~/.parsec/log.txt` and reports `parsec` while
+  any observed client remains connected: Alice connecting, Bob connecting, then Bob disconnecting still leaves Alice.
+  An absent log means no Parsec signal, while an unreadable log or one with no connection history is unknown.
+  Screen Sharing uses non-root `netstat -an`:
   incoming TCP **local** port 5900 in `ESTABLISHED`, or UDP local ports 5900–5902 with a concrete foreign peer (not a
   wildcard listener), including loopback tunnels. UDP covers [High Performance Screen Sharing's ports](https://support.apple.com/guide/remote-desktop/use-high-performance-screen-sharing-apdf8e09f5a9/mac).
   Failed, timed-out or unrecognized reads give `unknown` unless another signal already establishes a remote connection.
@@ -139,9 +141,15 @@ prove viewer liveness. `none` means no observed default-port transport, not cove
 paths or other remote-control products. The MacBook's macOS 26 socket layout and absent-session case were checked
 read-only; active TCP/UDP cases are covered by fixtures, not a live sharing session.
 
-Each of the three posture probes has a 1 s Perl-supervisor deadline, which kills and reaps a hanging probe even if
-it ignores SIGALRM. They only read state: no GUI actions, AppleScript, new permissions or remote-session changes.
-Posture and hooks-log failures never affect the sweep's or the job's outcome.
+The four posture reads — frontmost, display, Parsec and Screen Sharing — each default to an independent 1 s
+Perl-supervisor deadline, which kills and reaps a hanging probe even if it ignores SIGALRM. Results are combined only
+afterward, so a positive Parsec read survives a hanging Screen Sharing read and vice versa. All four timing out takes
+about 4 s plus process overhead. `CI_KIT_PROBE_DEADLINE` can override the per-probe seconds (1–9; unset or invalid uses
+1). Local positive fixtures use a generous deadline so scheduling load does not look like a failed read; hanging
+fakes sleep far beyond it. Fixtures cover interleaved Parsec clients, both positive/hanging directions with and
+without SIGALRM ignored, and all four reads hanging at the default deadline under `bash -e -o pipefail`. They only
+read state: no GUI actions, AppleScript, new permissions or remote-session changes. Posture and hooks-log failures
+never affect the sweep's or the job's outcome.
 
 Before each job and after it, the hooks kill every process of the runner's user that a job left behind:
 

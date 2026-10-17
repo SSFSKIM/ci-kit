@@ -1,24 +1,36 @@
 #!/bin/bash
 # Read-only desktop snapshot for the job log, after start's Terminal/cursor work and before end's cleanup.
-# Every probe has a 1 s supervisor deadline; failures are unknown, never a reason to fail the job.
+# Probes default to a 1 s supervisor deadline; failures are unknown, never a reason to fail the job.
 set -uo pipefail
 here=$(dirname "$0")
 
-if [[ ${1:-} == --remote ]]; then
-  parsec=none
+if [[ ${1:-} == --parsec ]]; then
   if [[ -e $HOME/.parsec/log.txt ]]; then
-    parsec=$(awk '
-      /^\[I [^]]+\] .+#[0-9]+ connected\.$/ { state="parsec" }
-      /^\[I [^]]+\] .+#[0-9]+ disconnected\.$/ { state="none" }
-      END { print state ? state : "unknown" }
-    ' "$HOME/.parsec/log.txt" 2>/dev/null) || parsec=unknown
+    awk '
+      /^\[I [^]]+\] .+#[0-9]+ (dis)?connected\.$/ {
+        client=$0
+        sub(/^\[I [^]]+\] /, "", client)
+        sub(/ (dis)?connected[.]$/, "", client)
+        clients[client]=($NF == "connected.")
+        seen=1
+      }
+      END {
+        for (client in clients) if (clients[client]) { print "parsec"; exit }
+        print seen ? "none" : "unknown"
+      }
+    ' "$HOME/.parsec/log.txt" 2>/dev/null
+  else
+    echo none
   fi
+  exit
+fi
+
+if [[ ${1:-} == --screensharing ]]; then
   # Non-root socket visibility works even though screensharingd runs as root. Count incoming connections, not the
   # enabled/listening service or this Mac's outgoing viewer. High-performance sharing can use only peered UDP
   # 5900–5902. This is default-port transport presence, not authentication or UDP liveness proof (see mac-lane.md).
-  sharing=unknown
   if sockets=$(LC_ALL=C netstat -an 2>/dev/null); then
-    sharing=$(awk '
+    awk '
       /^Proto/ && /Local Address/ && /Foreign Address/ { header=1 }
       /^tcp[46]/ { if (NF < 6) bad=1; if ($4 ~ /[.]5900$/ && $6 == "ESTABLISHED") attached=1 }
       /^udp[46]/ {
@@ -26,20 +38,11 @@ if [[ ${1:-} == --remote ]]; then
         if ($4 ~ /[.]590[012]$/ && $5 !~ /\*/ && $5 ~ /[.][0-9]+$/) attached=1
       }
       END { print attached ? "screensharing" : (header && !bad ? "none" : "unknown") }
-    ' <<<"$sockets") || sharing=unknown
-  fi
-  if [[ $parsec == parsec && $sharing == screensharing ]]; then
-    echo parsec,screensharing
-  elif [[ $parsec == parsec ]]; then
-    echo parsec
-  elif [[ $sharing == screensharing ]]; then
-    echo screensharing
-  elif [[ $parsec == unknown || $sharing == unknown ]]; then
-    echo unknown
+    ' <<<"$sockets"
   else
-    echo none
+    echo unknown
   fi
-  exit 0
+  exit
 fi
 
 # Like desktop-check's gh deadline, the alarm belongs to a supervisor, not the exec-ed helper (which may ignore it).
@@ -52,7 +55,8 @@ probe() {
     defined $pid or exit 125;
     if (!$pid) { setpgrp 0, 0 or exit 125; exec @ARGV; exit 127; }
     $SIG{ALRM} = sub { kill "KILL", -$pid; waitpid $pid, 0; exit 124; };
-    alarm 1;
+    my $deadline = $ENV{CI_KIT_PROBE_DEADLINE} // "";
+    alarm($deadline =~ /\A[1-9]\z/ ? $deadline : 1);
     waitpid $pid, 0;
     my $status = $?;
     alarm 0;
@@ -71,7 +75,20 @@ front=${front//$'\n'/ }
 front=${front//$'\r'/ }
 display=$(probe "$here/cursor-park" --describe) || display=unknown
 [[ $display =~ ^[0-9]+x[0-9]+@[0-9]+([.][0-9]+)?x$ ]] || display=unknown
-remote=$(probe /bin/bash "$0" --remote) || remote=unknown
+# Keep the remote reads independent: one stalled source must not erase the other's positive signal.
+parsec=$(probe /bin/bash "$0" --parsec) || parsec=unknown
+sharing=$(probe /bin/bash "$0" --screensharing) || sharing=unknown
+if [[ $parsec == parsec && $sharing == screensharing ]]; then
+  remote=parsec,screensharing
+elif [[ $parsec == parsec ]]; then
+  remote=parsec
+elif [[ $sharing == screensharing ]]; then
+  remote=screensharing
+elif [[ $parsec == unknown || $sharing == unknown ]]; then
+  remote=unknown
+else
+  remote=none
+fi
 line="ci-kit desktop (${1:-unknown}): frontmost=${front:-unknown} display=$display remote=$remote"
 printf '%s\n' "$line"
 {
