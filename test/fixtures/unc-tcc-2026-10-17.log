@@ -1,0 +1,25 @@
+Timestamp               Ty Process[PID:TID]
+2026-10-17 16:57:09.794 A  Electron[36048:60ee4fa] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:09.823 A  WindowServer[179:8f6] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:09.977 A  syspolicyd[273:60ed8ab] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:09.977 A  syspolicyd[273:60eba87] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:10.462 A  Electron Helper[36105:60ee5cf] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:10.463 A  WindowServer[179:8f6] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:11.213 A  WindowServer[179:8f6] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:11.936 A  SkyComputerUseService[36230:60ee7b3] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:11.948 A  WindowServer[179:8f6] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:12.123 A  SkyComputerUseService[36230:60ee7b3] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:12.123 A  mds[137:60dded7] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:12.135 A  SkyComputerUseService[36230:60ee7b3] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:12.159 A  mds[137:60dded7] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:12.167 A  mds[137:60dded7] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:12.218 A  WindowServer[179:8f6] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:12.268 A  SkyComputerUseService[36230:60ee877] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:12.289 A  coreaudiod[448:60ed31a] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:12.306 A  coreaudiod[448:60ed31a] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:13.268 A  SkyComputerUseService[36230:60ee877] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:13.286 A  Finder[417:101d] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:13.396 A  CursorUIViewService[648:1948] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:13.458 A  SkyComputerUseService[36230:60ee91d] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:13.693 A  SkyComputerUseService[36230:60ee7e1] (TCC) TCCAccessRequest() IPC
+2026-10-17 16:57:14.175 Df launchservicesd[151:60ee7ba] [com.apple.processmanager:front-35286506] SETFRONT: pid=47183 asn=0x-0x48b78b3 foreground=0 oldFrontPid=402 oldFrontASN=0x-0x73746

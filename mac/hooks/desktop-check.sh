@@ -55,7 +55,7 @@ dialog_source() {
           source="firewall prompt for ${source_line##*doask: sending prompt for a filtering decision on: }"
         elif [[ -n $front_pid ]]; then
           # Anchor to this pid's latest SETFRONT, not to the job: the dialog may have held focus for minutes.
-          # Five seconds catches the initiating burst; deduplicate in request order and omit the noisy daemons.
+          # Five seconds catches the initiating burst; rank names by their latest request and omit noisy daemons.
           tcc=$(perl -MTime::Local=timegm -e '
             my $pid = shift;
             my (@requests, @names, $front_line);
@@ -66,7 +66,7 @@ dialog_source() {
               if ($client eq "launchservicesd" && /\bSETFRONT:\s+pid=\Q$pid\E(?:\s|$)/) {
                 my %seen;
                 @names = ();
-                for my $request (@requests) {
+                for my $request (reverse @requests) {
                   next unless $request->[0] >= $time - 5 && $request->[0] <= $time;
                   push @names, $request->[1] unless $seen{$request->[1]}++;
                 }

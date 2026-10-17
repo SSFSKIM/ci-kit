@@ -266,6 +266,15 @@ const tccRequests = [
   '2026-10-17 16:57:13.693 A SkyComputerUseService[36230:60ee7e1] (TCC) TCCAccessRequest() IPC',
 ];
 
+test('the 2026-10-17 mini log ranks each TCC caller by its latest request, preserving names with spaces', () => {
+  const logOutput = readFileSync(new URL('./fixtures/unc-tcc-2026-10-17.log', import.meta.url), 'utf8');
+  const run = check(asnShape('UserNotificationCenter', undefined, 47183), 0, { logOutput });
+  assert.equal(run.status, 1, run.stderr);
+  const source = 'TCC requests before it came to front: SkyComputerUseService, CursorUIViewService, Finder, Electron Helper, syspolicyd, Electron';
+  assert.equal(argValue(run.ghCalls[0], '--title'), `ci-kit alert: system dialog on the mini (UserNotificationCenter: ${source})`);
+  assert.ok(argValue(run.ghCalls[0], '--body').includes(`Likely source: ${source}\nSource line: ${tccFront}\n`));
+});
+
 test('UserNotificationCenter names deduplicated TCC callers just before its own front transition, not background noise', () => {
   const run = check(asnShape('UserNotificationCenter', undefined, 47183), 0, { logOutput: [
     '2026-10-17 16:57:09.174 A OldClient[10:20] (TCC) TCCAccessRequest() IPC',
@@ -278,7 +287,7 @@ test('UserNotificationCenter names deduplicated TCC callers just before its own 
     tccFront.replace('16:57:14.175', '16:57:15.000').replace('pid=47183 ', 'pid=471830 '),
   ].join('\n') });
   assert.equal(run.status, 1, run.stderr);
-  const source = 'TCC requests before it came to front: SkyComputerUseService, Finder, CursorUIViewService';
+  const source = 'TCC requests before it came to front: SkyComputerUseService, CursorUIViewService, Finder';
   assert.ok(run.stderr.includes(`UserNotificationCenter: ${source})`));
   assert.ok(run.log.includes(`UserNotificationCenter: ${source};`));
   assert.equal(argValue(run.ghCalls[0], '--title'), `ci-kit alert: system dialog on the mini (UserNotificationCenter: ${source})`);
@@ -297,7 +306,7 @@ test('the LSDisplayName shape with a quoted pid also supports TCC attribution', 
     logOutput: [...tccRequests, tccFront].join('\n'),
   });
   assert.equal(run.status, 1, run.stderr);
-  assert.match(run.stderr, /UserNotificationCenter: TCC requests before it came to front: SkyComputerUseService, Finder, CursorUIViewService\)/);
+  assert.match(run.stderr, /UserNotificationCenter: TCC requests before it came to front: SkyComputerUseService, CursorUIViewService, Finder\)/);
 });
 
 test('the five-second TCC window includes its boundary across midnight but not older or later requests', () => {
