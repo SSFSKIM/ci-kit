@@ -1,6 +1,6 @@
 // `.github/ci-kit.yml`, version 1 (spec I1): parse, validate fully, and fill defaults.
 // Every problem is collected, so one failed plan names them all; each message names the gate and the field.
-import { parse } from 'yaml';
+import { parse } from '../vendor/yaml/dist/index.js';
 import { globProblem } from './glob.mjs';
 
 export class ConfigError extends Error {
