@@ -126,3 +126,67 @@ export function fakeGce({ instances = [], images = [], insertErrors = [], script
     },
   };
 }
+
+// A fake GitHub client (the calls of lib/github.mjs the bake makes) for the real job in ci-kit-sandbox. The run the
+// bake dispatches follows `run`: each getRun() takes the next state ({status, conclusion, took, ranOn}) and the last
+// one sticks. `took` makes the check runner busy; a completed state with `ranOn` (true: the bake's runner; a string:
+// that runner) is the job having run there, and a JIT runner leaves once its job is done. `busyDeletes` refusals
+// (422) answer unregistering a busy runner before GitHub lets go of it. `runners` are registrations already there.
+const httpError = (status, message) => Object.assign(new Error(message), { status });
+export function fakeSandbox({ run = [{ status: 'queued' }], runners = [], isPrivate = true, runDetails = true, busyDeletes = 0 } = {}) {
+  const state = { runners: runners.map((r) => ({ busy: false, ...r })), run: null, jobs: [] };
+  const calls = [];
+  let nextId = 900;
+  let at = 0;
+  let mine = null; // the check runner's name
+  let refusals = busyDeletes;
+  const advance = () => {
+    if (!state.run || state.run.status === 'completed') return;
+    const step = run[Math.min(at, run.length - 1)];
+    at += 1;
+    if (step.took) for (const r of state.runners) if (r.name === mine) r.busy = true;
+    state.run = { ...state.run, status: step.status, conclusion: step.conclusion ?? null };
+    if (step.status === 'completed' && step.ranOn) {
+      const on = step.ranOn === true ? mine : step.ranOn;
+      state.jobs = [{ id: nextId++, run_id: state.run.id, status: 'completed', conclusion: step.conclusion, runner_name: on, labels: [mine] }];
+      state.runners = state.runners.filter((r) => r.name !== on);
+    }
+  };
+  return {
+    calls,
+    state,
+    getRepo: async () => ({ private: isPrivate }),
+    runners: async () => state.runners.map((r) => ({ ...r })),
+    jitConfig: async (repo, spec) => {
+      calls.push(`jit ${repo} ${spec.name} [${spec.labels}] ${spec.work_folder}`);
+      mine = spec.name;
+      const r = { id: nextId++, name: spec.name, busy: false, labels: spec.labels.map((name) => ({ name })) };
+      state.runners.push(r);
+      return { runner: { id: r.id, name: r.name }, encoded_jit_config: `jit-for-${spec.name}` };
+    },
+    dispatchWorkflow: async (repo, file, { ref, inputs }) => {
+      calls.push(`dispatch ${repo} ${file}@${ref} ${JSON.stringify(inputs)}`);
+      state.run = { id: 4242, status: 'queued', conclusion: null };
+      return runDetails ? { workflow_run_id: 4242, run_url: `https://api.github.com/repos/${repo}/actions/runs/4242`, html_url: `https://github.com/${repo}/actions/runs/4242` } : null;
+    },
+    getRun: async () => {
+      advance();
+      return { ...state.run };
+    },
+    listJobs: async () => state.jobs.map((j) => ({ ...j })),
+    cancelRun: async (repo, id) => {
+      calls.push(`cancel ${id}`);
+      state.run = { ...state.run, status: 'completed', conclusion: 'cancelled' };
+    },
+    deleteRunner: async (repo, id) => {
+      const r = state.runners.find((x) => x.id === id);
+      calls.push(`unregister ${r?.name ?? id}`);
+      if (!r) throw httpError(404, 'Not Found');
+      if (r.busy && refusals > 0) {
+        refusals -= 1;
+        throw httpError(422, 'Bad request - Runner is still running a job');
+      }
+      state.runners = state.runners.filter((x) => x !== r);
+    },
+  };
+}

@@ -1,10 +1,13 @@
-// The GCE bake's pure parts (spec §3a Image, I12): when a builder or smoke VM is done, what the bake owns, what
-// retention removes, the order of placements, and the request bodies. Only resources carrying the kit's labels are
-// ever selected.
+// The GCE bake's pure parts (spec §3a Image, I12): when a builder, smoke or check VM is done, when the real job has
+// passed, what the bake owns, what retention removes, the order of placements, and the request bodies. Only resources
+// carrying the kit's labels are ever selected.
 import { randomBytes } from 'node:crypto';
+import { workDir } from '../../pool/agent/docker.mjs';
 
 export const BAKE_TIMEOUT_MS = 30 * 60_000;
 export const SMOKE_TIMEOUT_MS = 15 * 60_000;
+// From the dispatch to the check VM's power-off: a boot of about a minute and a job of about one.
+export const CHECK_TIMEOUT_MS = 10 * 60_000;
 export const STALE_MS = 2 * 3600_000;
 export const KEEP_READY = 2;
 // The builder needs memory for the image build and pnpm's fetch; it is on demand, since a preempted bake is a lost
@@ -13,13 +16,37 @@ export const BUILDER_MACHINES = ['e2-standard-4', 'n2d-standard-4'];
 export const BUILDER_DISK_GB = 30;
 const UBUNTU = 'projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64';
 
-// A builder (attribute ci-kit/bake) or smoke VM (ci-kit/smoke) is done once it reported and powered off. `report` is
-// the last value seen: the attribute may be gone once the guest is off, so the caller remembers it across polls.
-export function reportOutcome({ instance, report, elapsedMs, timeoutMs }) {
-  if (report?.startsWith('failed:')) return { done: true, ok: false, reason: report };
+// The real job (bake step 5) runs in ci-kit-sandbox, the launcher's round-trip repo, through its dispatch-only
+// workflow bake-check.yml. The bake's token for it is scoped to that repo: a JIT runner (administration), and the
+// workflow's dispatch, run and cancel (actions).
+export const CHECK = { repo: 'SSFSKIM/ci-kit-sandbox', workflow: 'bake-check.yml', ref: 'main' };
+export const CHECK_SCOPE = { repositories: ['ci-kit-sandbox'], permissions: { administration: 'write', actions: 'write' } };
+
+// A builder (attribute ci-kit/bake), smoke VM (ci-kit/smoke) or check VM (ci-kit/job) is done once it reported and
+// powered off; it passed only if its report is `ok` (`exit:0` for a check VM). Any other report fails it at once.
+// `report` is the last value seen: the attribute may be gone once the guest is off, so the caller remembers it across
+// polls.
+export function reportOutcome({ instance, report, elapsedMs, timeoutMs, ok = 'ok' }) {
+  if (report && report !== ok) return { done: true, ok: false, reason: report };
   if (!instance) return { done: true, ok: false, reason: 'failed:vanished' };
   if (instance.status === 'TERMINATED') {
-    return report === 'ok' ? { done: true, ok: true } : { done: true, ok: false, reason: 'failed:no-report' };
+    return report === ok ? { done: true, ok: true } : { done: true, ok: false, reason: 'failed:no-report' };
+  }
+  if (elapsedMs > timeoutMs) return { done: true, ok: false, reason: 'timeout' };
+  return { done: false };
+}
+
+// The real job's verdict (bake step 5), from the check VM's outcome (reportOutcome over ci-kit/job), the dispatched
+// run and, once it completed, its jobs. It passes only once the run concluded success with every job on the bake's
+// own runner, and the VM reported its runner's exit 0 and powered off. A run still going when the VM is done waits,
+// within the same bound: GitHub may not have recorded the end yet.
+export function checkOutcome({ vm, run, jobs = [], runner, elapsedMs, timeoutMs }) {
+  if (vm.done && !vm.ok) return vm;
+  if (run?.status === 'completed') {
+    if (run.conclusion !== 'success') return { done: true, ok: false, reason: `run ${run.conclusion}` };
+    const elsewhere = jobs.filter((j) => j.runner_name !== runner).map((j) => j.runner_name ?? 'no runner');
+    if (jobs.length === 0 || elsewhere.length) return { done: true, ok: false, reason: `ran on ${elsewhere.join(', ') || 'no job'}` };
+    if (vm.ok) return { done: true, ok: true };
   }
   if (elapsedMs > timeoutMs) return { done: true, ok: false, reason: 'timeout' };
   return { done: false };
@@ -41,8 +68,17 @@ export const ownsBakeImage = (image, runId) => labelled(image, 'gce-image') && i
 // included) may have, and is checked by label.
 export const refusedOutright = (err) => err?.status >= 400 && err.status < 500 && !err.accepted;
 
-// Builders and smoke VMs of any bake older than 2 h: a bake killed mid-run (its job's timeout) cannot clean up.
+// Builders, smoke and check VMs of any bake older than 2 h: a bake killed mid-run (its job's timeout) cannot clean up.
 export const staleBakeInstances = (instances, now) => instances.filter((i) => labelled(i, 'gce-builder') && now - created(i) > STALE_MS);
+
+// The check runners of earlier bakes (ci-kit-bake-<run id>) that are older than 2 h, by the time in their run id, and
+// not busy: a bake killed mid-check leaves its registration behind. A younger one may be a bake in flight.
+export function staleBakeRunners(runners, now) {
+  return runners.filter((r) => {
+    const m = /^ci-kit-bake-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-[a-z0-9]{4}$/.exec(r.name);
+    return m && !r.busy && now - Date.UTC(m[1], m[2] - 1, m[3], m[4], m[5], m[6]) > STALE_MS;
+  });
+}
 
 // Images of the family beyond the two newest ready ones, and unready ones older than 2 h (a bake that died before it
 // could delete its own). A younger unready image may be a bake in flight, and is left to it.
@@ -68,9 +104,13 @@ export function refusal(err) {
 export const bakeRunId = (date, suffix = () => randomBytes(4).readUInt32BE(0).toString(36).padStart(4, '0').slice(-4)) =>
   `${date.toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-')}-${suffix()}`;
 
+// The check VM is named and labelled as the bake's (ci-kit-gce-builder-*, ci-kit=gce-builder), never as a pool VM.
+// Its runner, ci-kit-bake-<run id>, carries that name as its only label, and is outside the launcher's ci-kit-gce-*.
 export const bakeNames = (runId, sha) => ({
   builder: `ci-kit-gce-builder-${runId}`,
   smoke: `ci-kit-gce-builder-${runId}-smoke`,
+  check: `ci-kit-gce-builder-${runId}-check`,
+  runner: `ci-kit-bake-${runId}`,
   image: `ci-kit-runner-${runId}-${sha.slice(0, 8)}`,
 });
 
@@ -120,6 +160,19 @@ export const smokeInstance = ({ name, zone, machine, runId, image, diskGb, subne
     metadata: { 'ci-kit-smoke': String(machineCpus(machine)) },
     maxRunSeconds: SMOKE_TIMEOUT_MS / 1000 + 5 * 60,
   });
+
+// The check VM boots the new image as a job VM does, with a JIT config in ci-kit-jit: the image's unit runs the
+// runner in a job container, and the real job dispatched to that runner's label runs on it.
+export const checkInstance = ({ name, zone, machine, runId, image, diskGb, subnetwork, jit }) =>
+  vm({
+    name, zone, machine, diskGb, subnetwork, sourceImage: image, labels: bakeLabels(runId, 'check'),
+    metadata: { 'ci-kit-jit': jit },
+    maxRunSeconds: CHECK_TIMEOUT_MS / 1000 + 5 * 60,
+  });
+
+// The check runner: its one label is its name, which only the dispatched job asks for. Its work folder is the one the
+// VM's unit makes for the instance (gce/vm/job.mjs).
+export const checkJitRequest = (names) => ({ name: names.runner, labels: [names.runner], work_folder: workDir(names.check) });
 
 // The image enters the family unready; the launcher uses only images labelled ci-kit-ready=true.
 export const imageBody = ({ name, family, zone, disk, sha, runId }) => ({

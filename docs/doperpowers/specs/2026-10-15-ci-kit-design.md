@@ -890,17 +890,38 @@ The bake job:
 2. Waits for `ci-kit/bake=ok` and power-off, for at most 30 min.
 3. Only on `ok`, creates the image into the family, labelled `ci-kit=gce-image` and
    `ci-kit-commit=<sha>`.
-4. Boots one smoke VM from the new image, which checks the unit, the image and the caches. Only on
-   a pass is the image marked `ci-kit-ready=true`; the launcher uses only ready images.
-5. Deletes the builder in every case. A failed bake deletes its own image and leaves the previous
-   ready images in place.
-6. Keeps the two newest ready images.
+4. Boots one smoke VM from the new image, which checks the unit, the image and the caches.
+5. On a smoke pass, runs one real Actions job on a VM booted from the new image (ci-kit#24).
+   - It registers one JIT runner in `ci-kit-sandbox`, named `ci-kit-bake-<run id>`, whose only
+     label is that name.
+   - It dispatches the sandbox's dispatch-only `bake-check.yml` with the run id. That workflow's
+     one job runs on that label. It does what every gate does first: a checkout, then
+     `setup-node` from the tool cache.
+   - It boots the check VM from the new image with the runner's JIT config in `ci-kit-jit`, the
+     job mode a launcher VM boots in.
+   - The job passes only if the run concludes `success` with its job on that runner, and the VM
+     reports `ci-kit/job=exit:0` and powers off, all within 10 min of the dispatch.
+   - The launcher never touches any of it. It never serves the job, which carries no
+     `ci-kit-pool`, and never sweeps the runner, which is not `ci-kit-gce-*`. Nor does it sweep
+     the VM, which is labelled `ci-kit=gce-builder`, until that VM is 2 h old.
+6. Only if both pass is the image marked `ci-kit-ready=true`. The launcher uses only ready images.
+7. On every exit, the bake cleans up after itself.
+   - It cancels the real job's run if that run is still going.
+   - It deletes this bake's VMs.
+   - It unregisters this bake's runner, retrying while GitHub still holds it busy.
+   - A failed bake deletes its own image and leaves the previous ready images in place.
+   - Each bake also deletes builders and unregisters check runners that earlier bakes left more
+     than 2 h ago.
+8. Keeps the two newest ready images.
 
 **Credentials.**
 - The App's id and key are in Secret Manager in `ssfskim-ci-kit` (`ci-kit-app-id`,
   `ci-kit-app-key`).
 - The launcher and the bake run as `ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com`, which
   holds `roles/compute.instanceAdmin.v1` on the project and secret access to those two secrets only.
+- The bake's real job uses a second installation token. It is scoped to `ci-kit-sandbox`, with
+  administration: write for the JIT runner and actions: write to dispatch, read and cancel the run.
+  It stays in the orchestrator and never reaches a VM.
 - No GCP credential exists in GitHub. `gce/deploy.sh` deploys idempotently from the MacBook with
   gcloud's default account.
 - MAWS holds nothing new. Its `HCLOUD_TOKEN` is removed when the Hetzner pool retires.
@@ -2140,7 +2161,7 @@ euros, jobs, and the projected month at the current rate.
   - Runner labels: `self-hosted`, `ci-kit-pool`, `cpus-<N>`, `ci-kit-gce`.
   - Metadata `ci-kit-jit` holds the JIT config, and `enable-guest-attributes=TRUE` is set. The VM
     unit reports `ci-kit/job=exit:<N>` and works in `/var/lib/ci-kit/cache/work/<instance>`.
-  - **Network.** Every VM (job, builder and smoke) uses the kit's own VPC `ci-kit`, subnet
+  - **Network.** Every VM (job, builder, smoke and check) uses the kit's own VPC `ci-kit`, subnet
     `ci-kit-us-central1` (10.64.0.0/20), with an ephemeral external IP for egress.
     - Never the project's `default` network: it ships rules that open SSH and RDP to 0.0.0.0/0.
     - The `ci-kit` network has no firewall rules, so GCE's implied deny-ingress holds.
@@ -2151,7 +2172,12 @@ euros, jobs, and the projected month at the current rate.
   - Images: family `ci-kit-runner`, labels `ci-kit=gce-image`, `ci-kit-commit=<sha>` and
     `ci-kit-ready=true|false`. The launcher boots the newest image labelled `ci-kit-ready=true`. It
     never uses `getFromFamily`, which returns unready images too.
-  - Builders and smoke VMs: `ci-kit-gce-builder-<n>`, labelled `ci-kit=gce-builder`.
+  - Builders, smoke VMs and check VMs are named `ci-kit-gce-builder-<run id>`, `…-smoke` and
+    `…-check`. Each is labelled `ci-kit=gce-builder`, `ci-kit-run=<run id>` and
+    `ci-kit-role=builder|smoke|check`.
+  - The check runner is `ci-kit-bake-<run id>`, in `ci-kit-sandbox`, and its only label is its
+    name. It runs the one job of `bake-check.yml`, which is dispatch only and takes the input
+    `bake`.
   - The guest attribute `ci-kit/bake` reports `ok` or `failed:<step>`.
 - **Control plane.**
   - Cloud Run service `ci-kit-launcher` (`max-instances=1`, `concurrency=1`, request timeout
@@ -3281,6 +3307,63 @@ euros, jobs, and the projected month at the current rate.
   - **Also rejected:** a calendar rotation (an issue per week or month). It does not bound the
     count on a busy week, which is the failure, and still needs the same cross-issue reads.
   - **Date/Author:** 2026-10-17, ci-kit#25 executor for CI-opt.
+
+- **Decision (ci-kit#24): no image is ready until one real Actions job has run on a VM booted from
+  it.**
+  - **Why.** The smoke check proves the image's parts, but not the path every job takes: a JIT
+    runner registers, takes a job, runs actions and finishes. A candidate that breaks that path
+    would be marked ready, and every Linux job would then fail on it. This has happened once
+    already: the M5 image whose job-started hook the runner refused failed every job in setup, and
+    only a live probe caught it (Surprises, M5 post-merge).
+  - **The design (§3a Image step 5, I12).**
+    - **Runs after the smoke check passes.** The bake registers one JIT runner in
+      `ci-kit-sandbox`, named `ci-kit-bake-<run id>`, whose only label is that name.
+    - **One job, dispatched to that label.** The bake dispatches the sandbox's dispatch-only
+      `bake-check.yml` (ci-kit-sandbox#9). Its one job runs on that label.
+    - **The candidate's own job mode.** The check VM boots from the candidate with the JIT config
+      in `ci-kit-jit`, so the check runs the image's existing job mode, unchanged.
+    - **The pass.** The run must conclude `success` with its job on that runner, and the VM must
+      report `ci-kit/job=exit:0` and power off, all within 10 min of the dispatch.
+    - **Run details from the dispatch.** The dispatch sends `return_run_details` (GitHub,
+      2026-02-19), so the bake gets its run's id without searching for it.
+  - **Keeping the two paths apart.** One label is shared by exactly one runner and one job.
+    - The job carries no `ci-kit-pool`, so neither the launcher nor the Hetzner agent serves it.
+    - The runner carries no `self-hosted`. A JIT runner carries only the labels it is given
+      (checked live), so the runner can take no other job.
+    - The launcher's runner rules match only `ci-kit-gce-*` names, and its instance rules match
+      only `ci-kit=gce`, so it never claims the runner or the VM. It deletes `ci-kit=gce-builder`
+      VMs only once they are 2 h old.
+    - A launcher test pins all of this, and fails if the job carries `ci-kit-pool` or the runner
+      is named `ci-kit-gce-*`.
+  - **Cleanup on every exit.** The bake cancels its run if the run has not completed, deletes the
+    check VM with its other VMs, and unregisters the runner.
+    - A 404 means the runner is already gone: a JIT runner leaves with its job.
+    - While GitHub still holds a runner whose VM went mid-job, the unregister is retried for
+      3 min.
+    - A bake killed mid-check leaves a registration behind. The next bake unregisters it once it
+      is 2 h old, reading the age from the time in its name, as it already deletes stale builders.
+    - The Cloud Run task timeout rises from 60 to 90 min. The bake's own bounds (builder 30, smoke
+      15, the real job 10, plus imaging and cleanup) then end inside it, so the cleanup always runs.
+  - **The token.** The real job uses a second installation token. It is scoped to `ci-kit-sandbox`
+    with administration: write and actions: write, and it stays in the orchestrator.
+    - The App already held both permissions (2026-10-17: actions write, administration write,
+      contents read, issues write), so the owner had nothing to change.
+    - Before the bake would rely on it, a live probe with this token registered and deleted a JIT
+      runner, then dispatched, read and cancelled a run.
+    - The bake checks that the sandbox is private before it registers a runner, as the launcher
+      does for its repos.
+  - **Rejected: the smoke check and the job on one VM**, through a third VM mode that runs the
+    checks and then the runner.
+    - It would save one boot of an e2-highcpu-2 a week, about 2 min.
+    - The cost is a mode in the image's unit that only the bake uses. The job would also run where
+      the checks had already run, unlike a launcher VM, which runs its job on a fresh boot.
+    - The existing job mode is what the launcher's VMs run, so reusing it tests the real path.
+  - **Also rejected:**
+    - **A round trip through `ci.yml`.** Its pool gates carry `ci-kit-pool`, so the launcher would
+      serve them from the current ready image, which proves nothing about the candidate.
+    - **A fixed label shared by every bake.** A run left queued by a killed bake could then be
+      taken by the next bake's runner. That bake's own job would wait, and the bake would fail.
+  - **Date/Author:** 2026-10-17, ci-kit#24 executor for CI-opt.
 
 - **Decision (M10 step 3, the executor's calls, accepted):**
   - **Allocation ids** are the launch minute plus 5 random base36 characters. The runners API

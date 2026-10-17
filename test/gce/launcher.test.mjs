@@ -317,6 +317,30 @@ test('a ci-kit=gce instance with no row is still cleaned, and gets an orphan row
   assert.ok(!w.log.includes('delete devbox'), 'a foreign instance is never touched');
 });
 
+test('the bake\'s real job is not the launcher\'s: its job, its runner and its check VM in the sandbox are never served or swept', async () => {
+  // As the bake leaves them (gce/bake/bake.mjs, spec §3a Image step 5): a job queued for the check runner's one label,
+  // that runner registered and then taking the job, and the check VM labelled as the bake's, all within the bake's
+  // 10 min bound and past the launcher's 5 min orphan and 10 min idle rules.
+  const { w, launcher } = setup();
+  const name = 'ci-kit-bake-20261016-115500-k3x9';
+  const job = w.sim.queue(SBX, [name], { name: 'bake-check / candidate' });
+  w.gh.runners.set(SBX, [{ id: 77, name, status: 'offline', busy: false, labels: [{ name }] }]);
+  w.g.instances.push({
+    name: 'ci-kit-gce-builder-20261016-115500-k3x9-check', status: 'RUNNING', zone: 'https://www.googleapis.com/compute/v1/projects/ssfskim-ci-kit/zones/us-central1-a',
+    labels: { 'ci-kit': 'gce-builder', 'ci-kit-run': '20261016-115500-k3x9', 'ci-kit-role': 'check' }, creationTimestamp: new Date(T0 - MIN).toISOString(),
+    machineType: 'https://www.googleapis.com/compute/v1/projects/ssfskim-ci-kit/zones/us-central1-a/machineTypes/e2-highcpu-2',
+  });
+  for (let i = 0; i < 12; i += 1) {
+    if (i === 6) w.sim.take(SBX, name, job);
+    const out = await launcher.tick();
+    assert.deepEqual([out.launched, out.deleted, out.unregistered], [[], [], []], `tick ${i}`);
+    w.advance(MIN);
+  }
+  assert.equal(w.gh.runners.get(SBX).length, 1);
+  assert.equal(w.g.instances.length, 1);
+  assert.equal(w.gh.comments.length, 0, 'no ledger row for it');
+});
+
 // The move between backends, reversed for gce.json (spec §3a, M10 Tests: "The same checks run in reverse").
 test('a repo removed from gce.json drains: its busy VM (a job over 5 min) finishes, its idle runner goes at once, its queued jobs wait', async () => {
   const { w, launcher, make } = setup();
