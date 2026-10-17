@@ -222,6 +222,16 @@ load_state() {
       clear_since) st_clear_since=$value ;;
     esac
   done <"$dialog_state" 2>/dev/null || true
+  # A state file from before the watcher holds only the URL of the issue its episode opened (empty when the creation
+  # failed). It is adopted as an open episode, first seen when the file was written, so that issue is closed in turn.
+  if [[ -z $st_phase ]]; then
+    IFS= read -r value <"$dialog_state" 2>/dev/null || true
+    if [[ $value != *=* ]]; then
+      st_phase=open st_issue=$value st_source='source unknown'
+      st_since=$(perl -MPOSIX=strftime -e 'print strftime("%Y-%m-%dT%H:%M:%SZ", gmtime((stat shift)[9]))' \
+        "$dialog_state" 2>/dev/null) || st_since=${now:-}
+    fi
+  fi
   [[ $st_at =~ ^[0-9]+$ ]] || st_at=0
   [[ $st_clear =~ ^[0-9]+$ ]] || st_clear=0
   return 0

@@ -21,11 +21,11 @@ On every machine:
 | Registration | `SSFSKIM/MAWS`, at repository level, non-ephemeral |
 | Labels | `self-hosted`, `macOS`, `ARM64` (what MAWS's `gate.yml` targets), `ci-kit-mac` |
 | Directory | `~/actions-runner-maws` (work directory `~/actions-runner-maws/_work`) |
-| LaunchAgent | `com.ssfskim.ci-kit.mac-runner` — RunAtLoad, KeepAlive, `ProcessType` Interactive, Aqua session only |
+| LaunchAgent | `com.ssfskim.ci-kit.mac-runner` — RunAtLoad, KeepAlive, `ProcessType` Interactive, Aqua session only; its program is the hooks' `runner-hold.sh`, which execs the runner's `runsvc.sh` unless the dialog watcher holds the runner |
 | Hooks | `~/actions-runner-maws/ci-kit/hooks/job-started.sh` (the desktop check, then the sweep), `job-completed.sh` (copied from `mac/hooks/`) |
 | Dialog watcher | `com.ssfskim.ci-kit.dialog-watch` — RunAtLoad, every 60 s, `ProcessType` Background, Aqua session only; runs the hooks' `dialog-watch.sh` ([below](#the-dialog-watcher)) |
 | Logs | `~/Library/Logs/ci-kit/mac-runner-hooks.log` (the hooks and the watcher), `mac-runner.out.log` / `.err.log` (the runner), `dialog-watch.err.log`, `~/actions-runner-maws/_diag/` |
-| State | `~/Library/Logs/ci-kit/dialog-alert.state` (the dialog episode), `runner-drained` (the watcher stopped the runner) |
+| State | `~/Library/Logs/ci-kit/dialog-alert.state` (the dialog episode), `runner-drained` (the watcher's hold on the runner) |
 
 **Why a LaunchAgent.** Electron windows need a WindowServer, which only the user's GUI session has; a LaunchDaemon runs
 outside it. **Why one runner per machine.** Concurrency is one per machine: e2e groups contend for the desktop (focus,
@@ -81,10 +81,10 @@ gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token
   lowercase letters, digits and `-`, because the alert title carries it ([the contract](#the-alert-title)); `install.sh`
   refuses any other name before anything changes.
 - **Re-running** (no token, no name) refreshes the hooks, the runner's `.env` and `.path`, and both LaunchAgents, and
-  reloads them. It refuses while a job runs, because reloading the agent kills the job. The watcher is unloaded first
-  and loaded last, even when the install fails after unloading it. Its drain marker is dropped, so after an install
-  the runner runs or not as the install's mode says. If a dialog episode is still open, the watcher stops the runner
-  again once it is idle. New hooks and the optional
+  reloads them, the watcher's first. It refuses while a job runs, because reloading the agent kills the job; a job is
+  a process whose executable is the runner's `Runner.Worker` (`runner-state.py`, below). While the watcher holds the
+  runner, the install loads it held and says so (`loaded, held by the dialog watcher (…)`) instead of waiting for it
+  to listen: it starts when the episode closes. New hooks and the optional
   compiled cursor helper are staged and checked in a sibling directory. Darwin's atomic `RENAME_SWAP` exchanges
   that directory with `ci-kit/hooks/`, so the fixed hook paths in `.env` never disappear between renames: a job
   starting during publication finds either complete set. Copy or validation failures leave the old set untouched;
@@ -101,12 +101,12 @@ gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token
 
 Disable and enable (the runner stays registered; GitHub shows it offline, and removes a self-hosted runner after 14
 days offline). Disabling boots the agent out, which kills a running job: do it while the runners list shows the
-machine's runner `busy` false. Disabling also removes the watcher's drain marker. Without that, a runner the watcher
-had stopped would be started again when its dialog episode closes ([the drain](#the-drain)).
+machine's runner `busy` false. The watcher never loads, unloads, enables or disables the agent, so a disabled runner
+stays off whatever its [drain](#the-drain) does.
 
 ```bash
 host=mini   # the machine's ssh host
-ssh $host 'launchctl bootout gui/$(id -u)/com.ssfskim.ci-kit.mac-runner; launchctl disable gui/$(id -u)/com.ssfskim.ci-kit.mac-runner; rm -f ~/Library/Logs/ci-kit/runner-drained'
+ssh $host 'launchctl bootout gui/$(id -u)/com.ssfskim.ci-kit.mac-runner; launchctl disable gui/$(id -u)/com.ssfskim.ci-kit.mac-runner'
 ssh $host 'launchctl enable gui/$(id -u)/com.ssfskim.ci-kit.mac-runner; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ssfskim.ci-kit.mac-runner.plist'
 ```
 
@@ -114,7 +114,7 @@ ssh $host 'launchctl enable gui/$(id -u)/com.ssfskim.ci-kit.mac-runner; launchct
 a machine kept off CI still reports a dialog.
 
 Remove, one machine at a time (`config.sh remove` deletes only the registration that machine holds). `--uninstall`
-unloads and removes both LaunchAgents and the drain marker, and refuses while a job runs:
+unloads and removes both LaunchAgents and the watcher's hold, and refuses while a job runs:
 
 ```bash
 host=mini   # the machine's ssh host
@@ -317,29 +317,36 @@ second, who opened it (the watcher, or a refused job and its run id), the source
 
 With two runners on the same labels, a machine whose hook refuses every job in seconds draws most of the queue and fails
 it, while the healthy machine is busy with one job (2026-10-17, the mini alone: 14 jobs refused in three minutes). So
-while an episode is open, the watcher stops the runner's LaunchAgent whenever the runner has no job. Queued jobs then go to the
+while an episode is open, the watcher holds the runner, and stops it whenever it has no job. Queued jobs then go to the
 other machine, or wait. On a single machine, the drain turns refusals into queued jobs, which run once the dialog is
 dismissed and the episode closes.
 
-- **No job running** means no process whose executable is exactly `~/actions-runner-maws/bin/Runner.Worker`, the
-  path the kernel reports (`proc_pidpath`, read by `runner-worker.py`). A command line or `argv[0]` naming that path
-  does not count. A read that fails or times out counts as a job: the runner is left alone, and the watcher asks again
-  next minute.
-- **Stopping** writes the marker `~/Library/Logs/ci-kit/runner-drained`, then disables and boots out the agent. The
-  disabled state is launchd's, kept across a reboot, so the agent's RunAtLoad cannot bring the runner back at login
-  while the episode is open. If someone starts it during the episode, the watcher stops it again once it is idle.
-- **Starting** happens only after the episode closes, and only while the marker exists: the watcher enables and
-  bootstraps the agent, then removes the marker. A failed start keeps the marker and is retried next minute.
-- **An operator's runner stays the operator's.** The watcher never stops a runner that is already disabled when it
-  has no marker. The disable command above removes the marker, and so does any `install.sh` run. A runner disabled by
-  hand or by `install.sh --disabled` stays off.
-- **Known window.** The listener can take a job between the check and the stop. That job is killed with the runner
-  and fails like any job that loses its runner; MAWS relaunches it as usual.
-- Every stop, start and job left alone is a `dialog-watch … drain:` line in the hooks log.
+- **The hold** is the marker `~/Library/Logs/ci-kit/runner-drained`, written when the episode opens. The runner's
+  LaunchAgent runs `runner-hold.sh`, which execs the runner's `runsvc.sh` only while no marker exists, and otherwise
+  waits for it to go, checking every 5 s. KeepAlive, RunAtLoad and a reboot can therefore start only the waiting
+  wrapper, never the runner. The wrapper execs, so launchd's `/bin/bash` stays every job's responsible process.
+- **Stopping.** While the hold is on and the runner is idle, the watcher sends the agent SIGTERM
+  (`launchctl kill SIGTERM`). `runsvc.sh` turns that into the listener's graceful stop, and KeepAlive brings back the
+  waiting wrapper.
+- **Idle** is what `runner-state.py` reads from the kernel's executable paths of this user's processes (`proc_pidpath`,
+  `bin` resolved, since a runner that updated itself runs from `bin.<version>`): the listener runs and no process is
+  `~/actions-runner-maws/bin/Runner.Worker`. A command line, `argv[0]` or working directory naming that path does not
+  count. A process whose path cannot be read (its file was deleted or replaced) counts as a job when the kernel still
+  names it `Runner.Worker`. A read that fails or times out counts as a job too: the runner is left alone, and the
+  watcher asks again next minute.
+- **Releasing.** When the episode closes, the watcher removes the marker, and the wrapper starts the runner within
+  5 s. A marker left while no episode is pending or open goes at the next read.
+- **An operator's runner stays the operator's.** The watcher never loads, unloads, enables or disables the runner's
+  agent. A runner disabled by hand or by `install.sh --disabled` stays off, and one enabled during an episode waits for
+  it to close.
+- **Known window.** The listener can take a job between the idle check and the SIGTERM. That job is stopped with the
+  runner and fails like any job that loses its runner; MAWS relaunches it as usual.
+- Every hold, stop, release and job left alone is a `dialog-watch … drain:` line in the hooks log. The wrapper's own
+  `runner-hold:` lines are in `mac-runner.out.log`.
 
 **Cheap and bounded.** A read with no dialog and no episode costs two `lsappinfo` calls, 5 s deadline each, and writes
 nothing. Every other external call has its own supervised deadline, which kills and reaps it even when it ignores
-SIGALRM: 10 s for each `log`, `gh` and `launchctl` call and for the process-table read. The watcher never clicks,
+SIGALRM: 10 s for each `log`, `gh` and `launchctl` call and for the runner-state read. The watcher never clicks,
 types, dismisses or focuses anything, and uses no AppleScript and no new permission.
 
 Check by hand:
@@ -471,13 +478,14 @@ ssh $host '~/actions-runner-maws/ci-kit/hooks/cursor-park --describe'
 ```
 
 **Why `/bin/bash`, and nothing else.** The only grant the mini's jobs hold is Full Disk Access, and they reach it
-by inheritance: launchd starts the runner as `/bin/bash runsvc.sh`, which waits on the runner rather than exec-ing it,
-so `/bin/bash` is the responsible process of every job. On the mini, `/bin/bash` has held Full Disk Access since
+by inheritance: launchd starts the runner's agent as `/bin/bash runner-hold.sh`, which execs `runsvc.sh` (bash again,
+in the same process), which waits on the runner rather than exec-ing it, so `/bin/bash` is the responsible process of
+every job. On the mini, `/bin/bash` has held Full Disk Access since
 2026-07-18, granted for something else. Full Disk Access also opens other apps' data (Mail, Messages, Safari) to
 everything `/bin/bash` is responsible for on that machine. The mini holds no Accessibility or Screen Recording grant for
 bash, the runner or Electron, so the new Mac gets none either: the goal is parity. A prompt for anything not granted
 still refuses that machine's jobs through the desktop check, and its alert names the machine. While the alert is
-open, the watcher keeps that machine's runner stopped, so the mini takes its jobs.
+open, the watcher holds that machine's runner, so the mini takes its jobs.
 
 **4. Turn it on.**
 

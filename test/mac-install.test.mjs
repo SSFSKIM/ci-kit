@@ -1,7 +1,8 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { once } from 'node:events';
+import { chmodSync, constants, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +11,7 @@ const repo = fileURLToPath(new URL('../', import.meta.url));
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'ci-kit-install-')));
 after(() => rmSync(root, { recursive: true, force: true }));
 const python = spawnSync('python3', ['-I', '-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).stdout.trim();
-const hookFiles = ['job-started.sh', 'job-completed.sh', 'desktop-check.sh', 'desktop-posture.sh', 'dialog.sh', 'dialog-watch.sh', 'runner-worker.py', 'sweep.mjs', 'strays.mjs', 'terminate.mjs'];
+const hookFiles = ['job-started.sh', 'job-completed.sh', 'desktop-check.sh', 'desktop-posture.sh', 'dialog.sh', 'dialog-watch.sh', 'runner-hold.sh', 'runner-state.py', 'sweep.mjs', 'strays.mjs', 'terminate.mjs'];
 const watchAgent = 'com.ssfskim.ci-kit.dialog-watch';
 const runnerAgent = 'com.ssfskim.ci-kit.mac-runner';
 const macOnly = { skip: process.platform !== 'darwin' };
@@ -26,9 +27,8 @@ function fixture({ registered = 'ci-kit-mac-mini' } = {}) {
   for (const dir of ['mac', 'host']) cpSync(join(repo, dir), join(kit, dir), { recursive: true });
   const executable = (path, body) => { writeFileSync(path, `#!/bin/bash\n${body}\n`); chmodSync(path, 0o755); };
   const fake = (name, body) => executable(join(bin, name), body);
-  // A runner bootstrapped reports in its log; FAIL_DISABLE fails `launchctl disable` (a failure after the watcher's unload).
+  // A runner bootstrapped reports in its log.
   fake('launchctl', `echo "$*" >> "$HOME/launchctl.calls"
-[[ $1 == disable && \${FAIL_DISABLE:-0} == 1 ]] && exit 9
 [[ $1 == bootstrap && $3 == *${runnerAgent}.plist ]] && echo 'Listening for Jobs' >> "$HOME/Library/Logs/ci-kit/mac-runner.out.log"
 [[ $1 != print ]]`);
   fake('plutil', 'exit 0');
@@ -314,23 +314,19 @@ test('Node resolution reports a missing compatible runtime instead of running th
 const calls = (f) => existsSync(join(f.home, 'launchctl.calls')) ? readFileSync(join(f.home, 'launchctl.calls'), 'utf8').trim().split('\n') : [];
 const uidOf = () => String(process.getuid());
 
-test('every mode installs the dialog watcher: unloaded first, its drain marker dropped, loaded last', macOnly, () => {
+test('every mode reloads the dialog watcher before the runner, and the runner runs through its hold wrapper', macOnly, () => {
   for (const args of [['--disabled'], []]) {
     const f = fixture();
-    const marker = join(f.home, 'Library/Logs/ci-kit/runner-drained');
-    mkdirSync(join(marker, '..'), { recursive: true });
-    writeFileSync(marker, 'stopped at 2026-10-17T05:13:34Z: SecurityAgent since 2026-10-17T05:12:34Z\n');
     const result = f.run(undefined, args);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, new RegExp(`dialog watcher ${watchAgent} runs`));
-    assert.equal(existsSync(marker), false, "after an install, whether the runner runs is the install's mode");
+    assert.match(result.stdout, new RegExp(`the dialog watcher ${watchAgent} runs`));
     const domain = `gui/${uidOf()}`;
     const log = calls(f);
-    const at = (call) => log.indexOf(call);
-    assert.ok(at(`bootout ${domain}/${watchAgent}`) >= 0);
-    assert.ok(at(`bootout ${domain}/${watchAgent}`) < at(`bootout ${domain}/${runnerAgent}`), 'the watcher is out of the way first');
     const watchPlist = join(f.home, `Library/LaunchAgents/${watchAgent}.plist`);
-    assert.deepEqual(log.slice(-2), [`enable ${domain}/${watchAgent}`, `bootstrap ${domain} ${watchPlist}`]);
+    const at = (call) => log.indexOf(call);
+    for (const call of [`bootout ${domain}/${watchAgent}`, `enable ${domain}/${watchAgent}`, `bootstrap ${domain} ${watchPlist}`]) {
+      assert.ok(at(call) >= 0 && at(call) < at(`bootout ${domain}/${runnerAgent}`), call);
+    }
     const plist = readPlist(watchPlist);
     assert.deepEqual(plist.ProgramArguments, ['/bin/bash', join(f.hooks, 'dialog-watch.sh')]);
     assert.equal(plist.StartInterval, 60);
@@ -338,16 +334,46 @@ test('every mode installs the dialog watcher: unloaded first, its drain marker d
     assert.equal(plist.LimitLoadToSessionType, 'Aqua');
     assert.equal(plist.EnvironmentVariables.CI_KIT_MACHINE, 'mini');
     assert.equal(plist.EnvironmentVariables.PATH, f.env.PATH, "the runner's PATH");
-    assert.ok(!JSON.stringify(plist).includes('__'), 'every placeholder is filled');
+    const runner = readPlist(join(f.home, `Library/LaunchAgents/${runnerAgent}.plist`));
+    // The job's responsible process stays /bin/bash: runner-hold.sh execs runsvc.sh in the process launchd started.
+    assert.deepEqual(runner.ProgramArguments, ['/bin/bash', join(f.hooks, 'runner-hold.sh')]);
+    assert.equal(runner.WorkingDirectory, f.runner);
+    for (const p of [plist, runner]) assert.ok(!JSON.stringify(p).includes('__'), 'every placeholder is filled');
   }
 });
 
-test('a failure after the watcher was unloaded still loads it again', macOnly, () => {
+test('an install while the watcher holds the runner loads it held and says so, without waiting for it to listen', macOnly, () => {
   const f = fixture();
-  const result = f.run(undefined, ['--disabled'], { FAIL_DISABLE: '1' });
-  assert.notEqual(result.status, 0);
-  const domain = `gui/${uidOf()}`;
-  assert.deepEqual(calls(f).slice(-2), [`enable ${domain}/${watchAgent}`, `bootstrap ${domain} ${join(f.home, `Library/LaunchAgents/${watchAgent}.plist`)}`]);
+  const marker = join(f.home, 'Library/Logs/ci-kit/runner-drained');
+  mkdirSync(join(marker, '..'), { recursive: true });
+  writeFileSync(marker, 'held at 2026-10-17T05:13:34Z: SecurityAgent since 2026-10-17T05:12:34Z\n');
+  // The fake runner never reports listening here: a wait would fail after 30 s.
+  rmSync(join(f.bin, 'launchctl'));
+  f.executable(join(f.bin, 'launchctl'), 'echo "$*" >> "$HOME/launchctl.calls"\n[[ $1 != print ]]');
+  const started = Date.now();
+  const result = f.run(undefined, []);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /loaded, held by the dialog watcher \(held at .*SecurityAgent.*\): ci-kit-mac-mini starts when the episode closes/);
+  assert.ok(Date.now() - started < 10_000);
+  assert.ok(existsSync(marker), 'the hold is the watcher’s to release');
+});
+
+test('a job found by its executable path refuses a re-run and an uninstall', macOnly, async () => {
+  const f = fixture();
+  const worker = join(f.runner, 'bin/Runner.Worker');
+  copyFileSync(process.execPath, worker, constants.COPYFILE_FICLONE);
+  const job = spawn(worker, ['-e', 'setTimeout(() => {}, 30_000)'], { stdio: 'ignore' });
+  try {
+    await once(job, 'spawn');
+    for (const args of [[], ['--disabled'], ['--uninstall']]) {
+      const result = f.run(undefined, args);
+      assert.equal(result.status, 1, `${args}: ${result.stderr}`);
+      assert.match(result.stderr, /a job is running on this runner; re-run when it is idle/);
+    }
+    assert.equal(existsSync(join(f.home, 'launchctl.calls')), false, 'nothing reloaded');
+  } finally {
+    job.kill('SIGKILL');
+  }
 });
 
 test('--uninstall unloads and removes both LaunchAgents and the marker, and keeps the registration and hooks', macOnly, () => {

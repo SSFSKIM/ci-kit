@@ -18,8 +18,9 @@ log_tag='desktop-check'
 source "$(dirname "$0")/dialog.sh"
 
 # A refused job opens the episode at once when none is open; a pending first read by the watcher lends it its time. In
-# an open episode it names the episode's time, and the episode's source when the same dialog is in front. Its read
-# restarts the watcher's count of clear reads. The lock wait outlasts the watcher's longest hold (attribution, then gh).
+# an open episode it names the episode's time, and the episode's source when the same dialog is in front: the source
+# is read once per episode, when it opens. Its read restarts the watcher's count of clear reads. The lock wait
+# outlasts the watcher's longest hold (attribution, then gh).
 refuse_dialog() {
   local since=$now opened=''
   source='source unknown' source_line=''
@@ -27,11 +28,10 @@ refuse_dialog() {
     load_state
     if [[ $st_phase == open ]]; then
       since=$st_since
-      if [[ $st_name == "$dialog" ]]; then source=$st_source; else dialog_source || true; fi
-      if ((st_clear > 0)); then
-        st_clear=0 st_clear_since=''
-        save_state || true
-      fi
+      [[ $st_name != "$dialog" ]] || source=$st_source
+      [[ -n $st_name ]] || st_name=$dialog
+      st_clear=0 st_clear_since=''
+      save_state || true
     else
       if [[ $st_phase == pending && $st_name == "$dialog" ]] && consecutive; then since=$st_since; fi
       if start_episode "$since"; then opened=1; fi

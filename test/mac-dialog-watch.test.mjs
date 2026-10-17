@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { constants, copyFileSync, mkdirSync, mkdtempSync, rmSync, unlinkSync } from 'node:fs';
+import { chmodSync, constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -112,7 +112,7 @@ test('an unreadable frontmost app changes nothing', () => {
 
 test('the job hook and the watcher share one episode: one issue, one first-seen time, from either side', () => {
   // The watcher's first read, then a job: the job opens the episode at once, at the watcher's time.
-  const d = desktop({ workers: 'busy' });
+  const d = desktop({ runner: 'busy' });
   d.watch(security, { at: 0 });
   const job = d.hook(security, { at: 20 });
   assert.equal(job.status, 1);
@@ -160,6 +160,40 @@ test('the watcher skips its read while the job hook holds the episode', () => {
   } finally {
     release();
   }
+});
+
+test('another dialog during an open episode keeps the episode and reads no second source', () => {
+  const d = desktop({ logOutput: keychainRequest });
+  const first = d.hook(security, { at: 0 });
+  const reads = first.logCalls.length;
+  let run = first;
+  for (let i = 0; i < 3; i++) run = run.again(notification);
+  assert.equal(run.logCalls.length, reads, 'attribution runs once per episode');
+  assert.equal(creates(run).length, 1);
+  assert.ok(run.stderr.includes(`(UserNotificationCenter: source unknown) holds focus on the mini since ${minute(T0)}`), run.stderr);
+  assert.equal(run.again(security).stderr.includes('(SecurityAgent: security request from security)'), true);
+});
+
+test('a state file from before the watcher, the issue URL alone, is adopted as the open episode and closed in turn', () => {
+  const legacy = (d) => {
+    mkdirSync(join(d.dir, 'Library/Logs/ci-kit'), { recursive: true });
+    writeFileSync(join(d.dir, 'Library/Logs/ci-kit/dialog-alert.state'), `${alertURL}\n`);
+    return d;
+  };
+  const d = legacy(desktop());
+  const still = d.watch(security, { at: 0 });
+  assert.equal(creates(still).length, 0, 'no second issue for the same episode');
+  assert.deepEqual([still.state.phase, still.state.issue, still.state.name], ['open', alertURL, 'SecurityAgent']);
+  assert.match(still.state.since, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/, 'first seen when the old hook wrote it');
+  const closed = clearReads(still);
+  assert.equal(closed.stateText, null);
+  assert.deepEqual(closed.ghCalls.map((call) => call.slice(1, 3)), [['comment', alertURL], ['close', alertURL]]);
+  const job = legacy(desktop()).hook(security, { at: 0 });
+  assert.equal(job.status, 1);
+  assert.equal(creates(job).length, 0);
+  assert.match(job.stderr, /since \d{4}-\d\d-\d\dT\d\d:\d\dZ — dismiss it there and rerun$/m);
+  const cleared = legacy(desktop()).watch(terminal, { at: 0 });
+  assert.equal(cleared.state.phase, 'open', 'a clear read counts towards closing it, it does not drop it');
 });
 
 // MAWS's pre-check reads open alerts with this pattern; an older alert of another kind must never match it.
@@ -211,122 +245,82 @@ test('an app that only shares a name or a bundle prefix is not a dialog', () => 
   }
 });
 
-// The drain.
-const disable = `disable gui/${uid}/${runnerAgent}`;
-const bootout = `bootout gui/${uid}/${runnerAgent}`;
-const starts = (run) => run.launchctl.filter((call) => /^(enable|bootstrap) /.test(call));
+// The drain. The marker holds the runner (runner-hold.sh waits on it); SIGTERM stops an idle one.
+const marker = (run) => join(run.desktop.dir, 'Library/Logs/ci-kit/runner-drained');
+const kill = `kill SIGTERM gui/${uid}/${runnerAgent}`;
 
-test('while an episode is open and no job runs, the runner is stopped, disabled, marked, and the stop logged', () => {
+test('while an episode is open the runner is held, an idle runner is stopped, and both are logged', () => {
   const d = desktop();
   const pending = d.watch(security, { at: 0 });
-  assert.deepEqual(pending.runner, { loaded: true, disabled: false }, 'a single read drains nothing');
+  assert.equal(pending.marker, null, 'a single read holds nothing');
   assert.deepEqual(pending.python, []);
   const run = d.watch(security, { at: 60 });
-  assert.deepEqual(run.runner, { loaded: false, disabled: true });
-  assert.deepEqual(run.launchctl.filter((call) => call === disable || call === bootout), [disable, bootout]);
-  assert.equal(run.marker, `stopped at ${iso(T0 + 60)}: SecurityAgent since ${iso(T0)}\n`);
-  assert.deepEqual(run.python, [`-I ${hooks}runner-worker.py ${d.dir}/actions-runner-maws/bin/Runner.Worker`]);
-  assert.match(run.log, new RegExp(`dialog-watch .*drain: stopped ${runnerAgent}: SecurityAgent in front since ${iso(T0)}, no job running`));
+  assert.equal(run.marker, `held at ${iso(T0 + 60)}: SecurityAgent since ${iso(T0)}\n`);
+  assert.deepEqual(run.launchctl, [kill], 'never load, unload, enable or disable');
+  assert.equal(run.runner, 'stopped');
+  assert.deepEqual(run.python, [`-I ${hooks}runner-state.py ${d.dir}/actions-runner-maws`]);
+  assert.match(run.log, new RegExp(`dialog-watch .*drain: holding the runner while SecurityAgent holds the front \\(since ${iso(T0)}\\)`));
+  assert.match(run.log, /drain: stopped the runner \(no job running\); it waits for the episode to close/);
   const later = run.watch(security);
-  assert.equal(later.launchctl.filter((call) => call === bootout).length, 1, 'a stopped runner is not stopped again');
+  assert.deepEqual(later.launchctl, [kill], 'a stopped runner is not signalled again');
 });
 
-test('a running job, or a process table that cannot be read, leaves the runner running', () => {
-  for (const [workers, why] of [['busy', /a job is running \(busy 4242\)/], ['fail', /could not tell whether a job is running: failed \(2\)/], ['garbage', /could not tell whether a job is running: failed \(1\)/], ['hang', /could not tell whether a job is running: failed \(124\)/]]) {
-    const run = opened({ workers });
+test('a running job, or a runner state that cannot be read, is left running', () => {
+  for (const [runner, why] of [['busy', /a job is running \(busy 4242\); the runner stops once it is idle/], ['fail', /could not tell whether a job is running: failed \(2\)/], ['garbage', /could not tell whether a job is running: failed \(1\)/], ['hang', /could not tell whether a job is running: failed \(124\)/]]) {
+    const run = opened({ runner });
     assert.equal(run.status, 0, run.stderr);
-    assert.deepEqual(run.runner, { loaded: true, disabled: false }, workers);
-    assert.equal(run.marker, null);
+    assert.deepEqual(run.launchctl, [], runner);
+    assert.notEqual(run.marker, null, 'still held: the runner waits once it stops');
     assert.match(run.log, why);
-    assert.match(run.log, new RegExp(`${runnerAgent} left running`));
     assert.deepEqual(run.ghSurvivors, []);
-    if (workers === 'hang') assert.ok(run.elapsed < 25_000, `the process-table read has a deadline (${run.elapsed} ms)`);
+    if (runner === 'hang') assert.ok(run.elapsed < 25_000, `the runner-state read has a deadline (${run.elapsed} ms)`);
   }
   // When the job ends, the next read stops the runner.
-  const d = desktop({ workers: 'busy' });
+  const d = desktop({ runner: 'busy' });
   d.watch(security, { at: 0 });
   d.watch(security, { at: 60 });
-  d.workers('idle');
-  assert.deepEqual(d.watch(security, { at: 120 }).runner, { loaded: false, disabled: true });
+  d.runner('idle');
+  const idle = d.watch(security, { at: 120 });
+  assert.deepEqual([idle.launchctl, idle.runner], [[kill], 'stopped']);
 });
 
-test('the runner comes back only after the third clear read, and only because the watcher stopped it', () => {
+test('the hold is released only after the third clear read', () => {
   let run = clearReads(opened(), 2);
-  assert.deepEqual(run.runner, { loaded: false, disabled: true }, 'not started on two clear reads');
-  assert.deepEqual(starts(run), []);
+  assert.notEqual(run.marker, null, 'still held on two clear reads');
   run = run.watch(terminal);
-  assert.deepEqual(run.runner, { loaded: true, disabled: false });
-  assert.deepEqual(starts(run), [`enable gui/${uid}/${runnerAgent}`, `bootstrap gui/${uid} ${run.desktop.dir}/Library/LaunchAgents/${runnerAgent}.plist`]);
+  assert.equal(run.stateText, null);
   assert.equal(run.marker, null);
-  assert.match(run.log, new RegExp(`drain: started ${runnerAgent}: the episode closed`));
-});
-
-test('a runner disabled by an operator is never stopped or started by the watcher', () => {
-  for (const runner of ['disabled', 'loaded-disabled']) {
-    const run = clearReads(opened({ runner }));
-    assert.equal(run.stateText, null, 'the episode opened and closed');
-    assert.deepEqual(run.runner, { loaded: runner === 'loaded-disabled', disabled: true }, runner);
-    assert.deepEqual(run.launchctl.filter((call) => !/^print/.test(call)), [], runner);
-    assert.equal(run.marker, null);
-  }
-  // Disabled while drained: the doc's disable removes the marker, and the runner stays off.
-  const drained = opened();
-  unlinkSync(join(drained.desktop.dir, 'Library/Logs/ci-kit/runner-drained'));
-  const run = clearReads(drained);
-  assert.deepEqual(run.runner, { loaded: false, disabled: true });
-  assert.deepEqual(starts(run), []);
-  // An unreadable disabled list is not taken for "enabled".
-  const unknown = opened({ env: { FAKE_LISTING_FAIL: '1' } });
-  assert.deepEqual(unknown.runner, { loaded: true, disabled: false });
-});
-
-test('a reboot during the episode does not bring the runner back; started by hand, it is stopped again', () => {
-  const run = opened();
-  run.desktop.reboot();
-  let after = run.watch(security);
-  assert.deepEqual(after.runner, { loaded: false, disabled: true }, 'launchd loads no disabled agent at login');
-  assert.notEqual(after.marker, null);
-  run.desktop.startByHand();
-  after = after.watch(security);
-  assert.deepEqual(after.runner, { loaded: false, disabled: true });
-  assert.equal(after.launchctl.filter((call) => call === bootout).length, 2);
-  assert.deepEqual(clearReads(after).runner, { loaded: true, disabled: false });
-});
-
-test('a start that fails keeps the marker and is retried at the next read', () => {
-  const twoClear = clearReads(opened(), 2);
-  const failed = twoClear.watch(terminal, { extraEnv: { FAKE_BOOTSTRAP_FAIL: '1' } });
-  assert.equal(failed.stateText, null);
-  assert.notEqual(failed.marker, null);
-  assert.match(failed.log, /drain: starting .* failed or timed out; retrying at the next read/);
-  const retried = failed.watch(terminal);
-  assert.deepEqual(retried.runner, { loaded: true, disabled: false });
-  assert.equal(retried.marker, null);
-});
-
-test('a single dialog read stops nothing, and holds back a restart that is still due', () => {
-  const pending = clearReads(opened()).watch(security);
+  assert.match(run.log, /drain: released the runner: the episode closed/);
+  assert.deepEqual(run.launchctl, [kill], 'the wrapper starts the runner; the watcher calls nothing');
+  // A single dialog read after that holds nothing.
+  const pending = run.watch(security);
   assert.equal(pending.state.phase, 'pending');
-  assert.deepEqual(pending.runner, { loaded: true, disabled: false }, 'a pending read drains nothing');
-  // A restart that failed when the episode closed waits while a new dialog is pending.
-  const failed = clearReads(opened(), 2).watch(terminal, { extraEnv: { FAKE_BOOTSTRAP_FAIL: '1' } });
-  const held = failed.watch(security);
-  assert.deepEqual([held.state.phase, held.runner.loaded], ['pending', false]);
-  assert.notEqual(held.marker, null);
-  assert.deepEqual(held.watch(terminal).runner, { loaded: true, disabled: false });
+  assert.equal(pending.marker, null);
 });
 
-test('every launchctl call of the drain has a deadline', () => {
+test('a hold that could not be released stays until no episode is pending or open', () => {
+  const d = desktop({ runner: 'stopped' });
+  mkdirSync(join(d.dir, 'Library/Logs/ci-kit'), { recursive: true });
+  // A marker left from before, with a dialog pending: kept; with nothing pending: released.
+  const held = d.watch(security, { at: 0 });
+  writeFileSync(marker(held), 'held at …\n');
+  const kept = d.watch(security, { at: 400 });
+  assert.deepEqual([kept.state.phase, kept.marker === null], ['pending', false], 'kept while a dialog is pending');
+  const released = d.watch(terminal, { at: 460 });
+  assert.equal(released.stateText, null);
+  assert.equal(released.marker, null);
+});
+
+test('the SIGTERM has a deadline, and a failed one is retried at the next read', () => {
   const d = desktop();
   d.watch(security, { at: 0 });
-  const run = d.watch(security, { at: 60, extraEnv: { FAKE_LAUNCHCTL_HANG: 'bootout' } });
+  const run = d.watch(security, { at: 60, extraEnv: { FAKE_LAUNCHCTL_HANG: 'kill' } });
   assert.equal(run.status, 0, run.stderr);
-  assert.ok(run.elapsed < 25_000, `bootout is cut off (${run.elapsed} ms)`);
+  assert.ok(run.elapsed < 25_000, `launchctl kill is cut off (${run.elapsed} ms)`);
   assert.deepEqual(run.ghSurvivors, []);
-  assert.match(run.log, /drain: stopping .* failed or timed out; retrying at the next read/);
-  const print = d.watch(security, { at: 120, extraEnv: { FAKE_LAUNCHCTL_HANG: 'print' } });
-  assert.ok(print.elapsed < 25_000, `print is cut off (${print.elapsed} ms)`);
-  assert.deepEqual(print.ghSurvivors, []);
+  assert.match(run.log, /drain: SIGTERM to .* failed or timed out; retrying at the next read/);
+  const retried = d.watch(security, { at: 120 });
+  assert.equal(retried.runner, 'stopped');
 });
 
 test('a hung frontmost read, log query or gh call is cut off and the run still ends', () => {
@@ -346,30 +340,90 @@ test('a hung frontmost read, log query or gh call is cut off and the run still e
   assert.equal(creates(slow.watch(security)).length, 1, 'a failed creation is not retried');
 });
 
-test('runner-worker.py tells a job by the executable path alone, not a command line, argv[0] or working directory', macOnly, async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'ci-kit-worker-'));
-  const worker = join(dir, 'actions-runner-maws/bin/Runner.Worker');
-  mkdirSync(dirname(worker), { recursive: true });
-  copyFileSync(process.execPath, worker, constants.COPYFILE_FICLONE); // a Node of our own at the worker's path
-  const sleeping = ['-e', 'setTimeout(() => {}, 30_000)'];
-  const processes = [
-    spawn(process.execPath, [...sleeping, worker]),
-    spawn(process.execPath, sleeping, { argv0: worker }),
-    spawn(process.execPath, sleeping, { cwd: dirname(worker) }),
-  ];
-  const read = () => spawnSync('python3', ['-I', join(hooks, 'runner-worker.py'), worker], { encoding: 'utf8' });
+// The runner's program and runner-state.py, against real processes.
+const hold = join(hooks, 'runner-hold.sh');
+
+test('runner-hold.sh waits while the marker exists, after a reboot as after a stop, and starts the runner once it is gone', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'ci-kit-hold-'));
+  const runner = join(home, 'actions-runner-maws');
+  mkdirSync(runner, { recursive: true });
+  mkdirSync(join(home, 'Library/Logs/ci-kit'), { recursive: true });
+  const markerFile = join(home, 'Library/Logs/ci-kit/runner-drained');
+  writeFileSync(markerFile, 'held at 2026-10-17T05:13:34Z: SecurityAgent since 2026-10-17T05:12:34Z\n');
+  writeFileSync(join(runner, 'runsvc.sh'), `#!/bin/bash\necho "runsvc $PWD" > '${join(home, 'started')}'\n`);
+  chmodSync(join(runner, 'runsvc.sh'), 0o755);
+  const child = spawn('/bin/bash', [hold], { cwd: runner, env: { HOME: home, PATH: '/usr/bin:/bin', CI_KIT_HOLD_POLL: '0.2' } });
+  let output = '';
+  child.stdout.on('data', (chunk) => { output += chunk; });
   try {
-    await Promise.all(processes.map((child) => once(child, 'spawn')));
-    assert.deepEqual([read().stdout, read().status], ['idle\n', 0], 'decoys only');
-    const job = spawn(worker, sleeping);
-    processes.push(job);
-    await once(job, 'spawn');
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    assert.equal(existsSync(join(home, 'started')), false, 'held: runsvc.sh does not start');
+    assert.match(output, /runner-hold: held by the dialog watcher \(held at .*SecurityAgent.*\); waiting/);
+    unlinkSync(markerFile);
+    const [code] = await once(child, 'exit');
+    assert.equal(code, 0);
+    assert.equal(readFileSync(join(home, 'started'), 'utf8'), `runsvc ${realpathSync(runner)}\n`);
+    assert.match(output, /runner-hold: released; starting the runner/);
+  } finally {
+    child.kill('SIGKILL');
+    rmSync(home, { recursive: true, force: true });
+  }
+  // Without a marker it starts at once, and says nothing.
+  const free = mkdtempSync(join(tmpdir(), 'ci-kit-hold-'));
+  writeFileSync(join(free, 'runsvc.sh'), '#!/bin/bash\necho runsvc\n');
+  chmodSync(join(free, 'runsvc.sh'), 0o755);
+  const started = spawnSync('/bin/bash', [hold], { cwd: free, env: { HOME: free, PATH: '/usr/bin:/bin' }, encoding: 'utf8', timeout: 10_000 });
+  assert.equal(started.stdout, 'runsvc\n');
+  rmSync(free, { recursive: true, force: true });
+});
+
+test('runner-state.py reads the kernel\'s executable paths: decoys never count, and an unreadable worker is busy', macOnly, async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'ci-kit-runner-')));
+  const runner = join(dir, 'actions-runner-maws');
+  const bin = join(runner, 'bin');
+  mkdirSync(bin, { recursive: true });
+  // Node copies of our own at the worker's and the listener's paths (a clone: instant on APFS).
+  const copy = (path) => { mkdirSync(dirname(path), { recursive: true }); copyFileSync(process.execPath, path, constants.COPYFILE_FICLONE); return path; };
+  const worker = copy(join(bin, 'Runner.Worker'));
+  const listener = copy(join(bin, 'Runner.Listener'));
+  const sleeping = ['-e', 'setTimeout(() => {}, 30_000)'];
+  const children = [];
+  const start = async (file, args = sleeping, options = {}) => {
+    const child = spawn(file, args, options);
+    children.push(child);
+    await once(child, 'spawn');
+    return child;
+  };
+  const read = (path = runner) => spawnSync('python3', ['-I', join(hooks, 'runner-state.py'), path], { encoding: 'utf8' });
+  try {
+    // A command line, argv[0] or working directory naming the worker is not the worker.
+    await start(process.execPath, [...sleeping, worker]);
+    await start(process.execPath, sleeping, { argv0: worker });
+    await start(process.execPath, sleeping, { cwd: bin });
+    assert.deepEqual([read().stdout, read().status], ['stopped\n', 0]);
+    await start(listener);
+    assert.equal(read().stdout, 'idle\n');
+    const job = await start(worker);
     assert.equal(read().stdout, `busy ${job.pid}\n`);
     job.kill('SIGKILL');
     await once(job, 'exit');
     assert.equal(read().stdout, 'idle\n');
+    // A runner that updated itself: bin is a symlink to bin.<version>, and the kernel reports the resolved path.
+    const updated = join(dir, 'updated');
+    const versioned = join(updated, 'bin.2.339.0');
+    copy(join(versioned, 'Runner.Worker'));
+    symlinkSync(versioned, join(updated, 'bin'));
+    const updatedJob = await start(join(updated, 'bin', 'Runner.Worker'));
+    assert.equal(read(updated).stdout, `busy ${updatedJob.pid}\n`);
+    // A worker whose file is gone (its path unreadable) still counts, by the name the kernel keeps; another such
+    // process does not.
+    const gone = await start(copy(join(dir, 'elsewhere/Runner.Worker')));
+    const other = await start(copy(join(dir, 'elsewhere/other-tool')));
+    unlinkSync(join(dir, 'elsewhere/Runner.Worker'));
+    unlinkSync(join(dir, 'elsewhere/other-tool'));
+    assert.equal(read().stdout, `busy ${gone.pid}\n`, `${other.pid} is not a worker`);
   } finally {
-    for (const child of processes) child.kill('SIGKILL');
+    for (const child of children) child.kill('SIGKILL');
     rmSync(dir, { recursive: true, force: true });
   }
 });

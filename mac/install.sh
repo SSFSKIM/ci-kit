@@ -36,7 +36,7 @@ RUNNER_DIR=$HOME/actions-runner-maws
 LOG_DIR=$HOME/Library/Logs/ci-kit
 PLIST=$HOME/Library/LaunchAgents/$AGENT.plist
 WATCH_PLIST=$HOME/Library/LaunchAgents/$WATCH_AGENT.plist
-# The watcher's record that it stopped the runner (dialog-watch.sh); it starts the runner again only while this exists.
+# The watcher's hold on the runner (dialog-watch.sh): while it exists, the runner's agent waits instead of starting it.
 DRAIN_MARKER=$LOG_DIR/runner-drained
 # The PATH jobs and hooks start with: Homebrew's tools, then the system's. Jobs install their own Node and pnpm.
 RUNNER_PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
@@ -44,12 +44,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 domain=gui/$(id -u)
 tmp=
 staged_hooks=
-reload_watch=
 cleanup() {
   if [[ -n $staged_hooks ]]; then rm -rf "$staged_hooks"; fi
   if [[ -n $tmp ]]; then rm -rf "$tmp"; fi
-  # A failure after the watcher was unloaded still leaves it running, on what was installed.
-  if [[ -n $reload_watch ]]; then load_watch || true; fi
 }
 trap cleanup EXIT
 
@@ -61,10 +58,12 @@ unload() { # <label>
   launchctl bootout "$domain/$1" 2>/dev/null || true
   for _ in $(seq 1 60); do launchctl print "$domain/$1" >/dev/null 2>&1 || break; sleep 1; done
 }
-load_watch() {
-  reload_watch=
-  launchctl enable "$domain/$WATCH_AGENT"
-  launchctl bootstrap "$domain" "$WATCH_PLIST"
+# Whether a job runs on this runner, by the kernel's executable paths (hooks/runner-state.py), which a command line
+# need not match: a runner that updated itself runs from bin.<version>. An unreadable answer counts as a job.
+job_running() {
+  local state
+  state=$(python3 -I "$here/hooks/runner-state.py" "$RUNNER_DIR" 2>/dev/null) || return 0
+  [[ $state != idle && $state != stopped ]]
 }
 
 usage() { awk 'NR > 1 && !/^#/ { exit } NR > 1' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
@@ -85,7 +84,7 @@ done
 
 if [[ $mode == uninstall ]]; then
   [[ -z $name ]] || usage
-  if pgrep -qf "$RUNNER_DIR/bin/Runner.Worker"; then die 'a job is running on this runner; re-run when it is idle'; fi
+  if job_running; then die 'a job is running on this runner; re-run when it is idle'; fi
   unload "$WATCH_AGENT"
   unload "$AGENT"
   rm -f "$WATCH_PLIST" "$PLIST" "$DRAIN_MARKER"
@@ -118,7 +117,7 @@ if ((${#gaps[@]} > 0)); then
 fi
 [[ $mode == check ]] && exit 0
 
-if pgrep -qf "$RUNNER_DIR/bin/Runner.Worker"; then die 'a job is running on this runner; re-run when it is idle'; fi
+if job_running; then die 'a job is running on this runner; re-run when it is idle'; fi
 
 # 2. The runner's name, before anything changes, so every refusal over it leaves the Mac as it was. A registered
 # runner keeps its name: .runner (JSON behind a byte-order mark) has it. An unregistered one takes --name.
@@ -165,8 +164,8 @@ fi
 mkdir -p "$RUNNER_DIR/ci-kit" "$LOG_DIR" "$(dirname "$PLIST")"
 # A sibling keeps staging on the same volume. Nothing touches the live set until every required file is ready.
 staged_hooks=$(mktemp -d "$RUNNER_DIR/ci-kit/.hooks.XXXXXX")
-hook_files=(job-started.sh job-completed.sh desktop-check.sh desktop-posture.sh dialog.sh dialog-watch.sh runner-worker.py
-  sweep.mjs strays.mjs terminate.mjs)
+hook_files=(job-started.sh job-completed.sh desktop-check.sh desktop-posture.sh dialog.sh dialog-watch.sh runner-hold.sh
+  runner-state.py sweep.mjs strays.mjs terminate.mjs)
 for file in "${hook_files[@]}"; do cp "$here/hooks/$file" "$staged_hooks/"; done
 chmod +x "$staged_hooks/"*.sh
 # The cursor park is optional. A failed compiler may leave output, which must not be published as a working helper.
@@ -215,34 +214,35 @@ EOF
 echo "$RUNNER_PATH" >"$RUNNER_DIR/.path"
 cp "$RUNNER_DIR/bin/runsvc.sh" "$RUNNER_DIR/runsvc.sh"
 
-# 6. The LaunchAgents, reloaded so a re-run takes effect. The watcher stops and starts the runner's agent while a dialog
-# holds the desktop, so it is unloaded while the runner's is reloaded, and its marker goes: after an install, whether
-# the runner runs is this mode's. If a dialog episode is still open, the watcher stops the runner again once it is
-# idle. The watcher is loaded last, in every mode.
+# 6. The LaunchAgents, reloaded so a re-run takes effect: the watcher's first, so it runs whatever becomes of the
+# runner's. The runner's program, runner-hold.sh, waits while the watcher's marker holds the runner, so an install
+# never starts a runner into an open dialog episode: it starts when the episode closes.
 sed -e "s|__RUNNER_DIR__|$RUNNER_DIR|g" -e "s|__LOG_DIR__|$LOG_DIR|g" "$here/$AGENT.plist" >"$PLIST"
 plutil -lint -s "$PLIST"
 sed -e "s|__HOOKS_DIR__|$RUNNER_DIR/ci-kit/hooks|g" -e "s|__LOG_DIR__|$LOG_DIR|g" -e "s|__PATH__|$RUNNER_PATH|g" \
   -e "s|__MACHINE__|$machine|g" "$here/$WATCH_AGENT.plist" >"$WATCH_PLIST"
 plutil -lint -s "$WATCH_PLIST"
 unload "$WATCH_AGENT"
-reload_watch=1
-rm -f "$DRAIN_MARKER"
+launchctl enable "$domain/$WATCH_AGENT"
+launchctl bootstrap "$domain" "$WATCH_PLIST"
+say "the dialog watcher $WATCH_AGENT runs"
 unload "$AGENT"
 if [[ $mode == disabled ]]; then
   launchctl disable "$domain/$AGENT"
-  load_watch
   say "installed, disabled: $AGENT is not loaded (enable: launchctl enable $domain/$AGENT && launchctl bootstrap $domain $PLIST)"
-  say "the dialog watcher $WATCH_AGENT runs"
   exit 0
 fi
 out_log=$LOG_DIR/mac-runner.out.log
 seen=$(stat -f %z "$out_log" 2>/dev/null || echo 0)
 launchctl enable "$domain/$AGENT"
 launchctl bootstrap "$domain" "$PLIST"
+if [[ -e $DRAIN_MARKER ]]; then
+  say "loaded, held by the dialog watcher ($(head -1 "$DRAIN_MARKER")): $RUNNER_NAME starts when the episode closes"
+  exit 0
+fi
 for _ in $(seq 1 30); do
   if tail -c +$((seen + 1)) "$out_log" 2>/dev/null | grep -q 'Listening for Jobs'; then
-    load_watch
-    say "running: $RUNNER_NAME listens for jobs of $REPO_URL; the dialog watcher $WATCH_AGENT runs"
+    say "running: $RUNNER_NAME listens for jobs of $REPO_URL"
     exit 0
   fi
   sleep 1

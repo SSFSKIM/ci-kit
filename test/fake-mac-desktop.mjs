@@ -1,7 +1,7 @@
 // One Mac's desktop for the dialog hooks' tests: its own HOME, with the job hook (desktop-check.sh) and the dialog
 // watcher (dialog-watch.sh) run against it. Every boundary is faked: the frontmost app (lsappinfo), Terminal (open), the
-// unified log, gh, the clock (date), launchd (launchctl, stateful) and the runner's process table (python3, standing in
-// for runner-worker.py, whose own test reads real processes).
+// unified log, gh, the clock (date), launchd (launchctl) and the runner's processes (python3, standing in for
+// runner-state.py, whose own test reads real processes).
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -29,10 +29,9 @@ const executable = (path, body) => { writeFileSync(path, `#!/bin/bash\n${body}\n
 // A fake that hangs ignoring SIGALRM, recording its pid so a run can tell whether the deadline killed it.
 const hangs = (dir) => `trap '' ALRM\necho "$$" >> '${join(dir, 'hung-pids.txt')}'\nexec /bin/sleep 60`;
 
-// runner: the runner's LaunchAgent as launchd holds it. 'running' is loaded and enabled; 'off' is unloaded and enabled;
-// 'disabled' is what `install.sh --disabled` or the doc's disable leaves; 'loaded-disabled' is loaded after a bare
-// `launchctl disable`. workers: what the process table shows (idle, busy, fail, garbage, hang).
-export function desktop({ status = 0, afterOpen, openStatus = 0, logOutput = '', logStatus = 0, logResponses = {}, now, ghStatus = 0, logHang = false, ghHang = false, env = {}, alertToken, runner = 'running', workers = 'idle' } = {}) {
+// runner: what runner-state.py reports (idle, busy, stopped), or a failure of it (fail, garbage, hang). `launchctl kill
+// SIGTERM` stops an idle runner, as runsvc.sh's trap does: it reads stopped afterwards.
+export function desktop({ status = 0, afterOpen, openStatus = 0, logOutput = '', logStatus = 0, logResponses = {}, now, ghStatus = 0, logHang = false, ghHang = false, env = {}, alertToken, runner = 'idle' } = {}) {
   const dir = join(root, String(Math.random()).slice(2));
   const bin = join(dir, 'bin');
   mkdirSync(bin, { recursive: true });
@@ -86,42 +85,19 @@ if [[ $FAKE_GH_HANG == 1 ]]; then
 fi
 [[ $FAKE_GH_STATUS == 0 ]] || exit "$FAKE_GH_STATUS"
 if [[ $1 == issue && $2 == create ]]; then echo https://github.com/SSFSKIM/ci-kit-sandbox/issues/42; fi`);
-  // launchd, one file per label and fact: <label>.loaded, <label>.disabled or <label>.enabled.
-  const launchd = file('launchd');
-  mkdirSync(launchd);
+  const processes = file('runner');
+  writeFileSync(processes, runner);
   executable(join(bin, 'launchctl'), `printf '%s\\n' "$*" >> '${file('launchctl.calls')}'
 [[ $1 == "\${FAKE_LAUNCHCTL_HANG:-}" ]] && { ${hangs(dir).replace(/\n/g, '; ')}; }
-d='${launchd}'
-label=\${2##*/}
 case $1 in
-  print) [[ -e $d/$label.loaded ]] ;;
-  print-disabled)
-    [[ \${FAKE_LISTING_FAIL:-0} == 0 ]] || exit 1
-    echo "disabled services = {"
-    for f in "$d"/*.disabled "$d"/*.enabled; do [[ -e $f ]] || continue; b=\${f##*/}; printf '\\t\\t"%s" => %s\\n' "\${b%.*}" "\${b##*.}"; done
-    echo "}" ;;
-  disable) rm -f "$d/$label.enabled"; : >"$d/$label.disabled" ;;
-  enable) rm -f "$d/$label.disabled"; : >"$d/$label.enabled" ;;
-  bootout) [[ -e $d/$label.loaded ]] || exit 3; rm -f "$d/$label.loaded" ;;
-  bootstrap)
-    label=$(basename "$3" .plist)
-    [[ \${FAKE_BOOTSTRAP_FAIL:-0} == 0 && -f $3 && ! -e $d/$label.disabled && ! -e $d/$label.loaded ]] || exit 5
-    : >"$d/$label.loaded" ;;
+  kill) [[ $(cat '${processes}') != idle ]] || echo stopped >'${processes}' ;;
   *) exit 64 ;;
 esac`);
-  const fact = (name) => join(launchd, `${runnerAgent}.${name}`);
-  if (runner !== 'absent') {
-    mkdirSync(file('Library/LaunchAgents'), { recursive: true });
-    writeFileSync(file(`Library/LaunchAgents/${runnerAgent}.plist`), '<plist/>\n');
-    if (runner === 'running' || runner === 'loaded-disabled') writeFileSync(fact('loaded'), '');
-    writeFileSync(fact(runner === 'disabled' || runner === 'loaded-disabled' ? 'disabled' : 'enabled'), '');
-  }
-  const processTable = file('workers');
-  writeFileSync(processTable, workers);
   executable(join(bin, 'python3'), `printf '%s\\n' "$*" >> '${file('python.calls')}'
-case $(cat '${processTable}') in
+case $(cat '${processes}') in
   idle) echo idle ;;
   busy) echo 'busy 4242' ;;
+  stopped) echo stopped ;;
   fail) exit 2 ;;
   garbage) echo 'Traceback (most recent call last):'; exit 1 ;;
   hang) ${hangs(dir).replace(/\n/g, '; ')} ;;
@@ -171,7 +147,7 @@ esac`);
       state: stateText === null ? null : Object.fromEntries(stateText.trim().split('\n').map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)])),
       marker,
       launchctl: text('launchctl.calls').trim().split('\n').filter(Boolean),
-      runner: { loaded: existsSync(fact('loaded')), disabled: existsSync(fact('disabled')) },
+      runner: text('runner').trim(),
       python: text('python.calls').trim().split('\n').filter(Boolean),
       again: (next, options) => run('desktop-check.sh', next, options),
       watch: (next, options) => run('dialog-watch.sh', next, options),
@@ -182,18 +158,7 @@ esac`);
     dir,
     hook: (output, options) => run('desktop-check.sh', output, options),
     watch: (output, options) => run('dialog-watch.sh', output, options),
-    workers: (state) => writeFileSync(processTable, state),
-    // launchd at the next login: RunAtLoad loads the runner's agent unless it is disabled.
-    reboot() {
-      rmSync(fact('loaded'), { force: true });
-      if (!existsSync(fact('disabled'))) writeFileSync(fact('loaded'), '');
-    },
-    // The doc's enable: launchctl enable, then bootstrap.
-    startByHand() {
-      rmSync(fact('disabled'), { force: true });
-      writeFileSync(fact('enabled'), '');
-      writeFileSync(fact('loaded'), '');
-    },
+    runner: (state) => writeFileSync(processes, state),
     // Holds the dialog state's lock, as a hook mid-alert would, until the returned function is called.
     holdLock() {
       mkdirSync(file('Library/Logs/ci-kit'), { recursive: true });
