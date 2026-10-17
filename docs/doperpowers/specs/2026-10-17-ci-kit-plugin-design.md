@@ -114,8 +114,31 @@ then the skill and its eval (P4), then review (P5). Merging: the dispatching ses
 - [x] P2 `ci-gate init` with fixture tests (2026-10-17): `test/init.test.mjs` (14 tests: Node npm and pnpm, Python pip,
   uv and requirements-only, no command, Cargo/Go/Makefile with a taken name, private, macOS-specific, unknown
   visibility, overwrite refusal and `--force`, a kept verbatim caller, the CLI) and `test/session-start.test.mjs`.
-- [ ] P3 live adoption on the sandbox
-- [ ] P4 behaviour eval
+- [x] P3 live adoption on the sandbox (2026-10-17): branch `plugin-p3` of SSFSKIM/ci-kit-sandbox has main's ci-kit files
+  removed, then a minimal Node project (`node --test`; the sandbox has no code of its own, so a draft from it alone is
+  the failing placeholder), then `ci-gate init`'s two files committed unedited. `ci-gate`: `PASS test 0m10s`,
+  `GREEN` run 39041455811 on hosted. The draft named Node 22 from `engines.node` and `npm ci` from the lockfile.
+- [x] P4 behaviour eval (2026-10-17): headless `claude -p`, default model, `--plugin-dir` on this branch, in scratch
+  worktrees of the sandbox (`eval-<scenario>-<n>`); the eval PRs were closed and their branches deleted.
+  - **S1, "Set up CI for this repo."** The repo: sandbox main without its ci-kit files, plus `textstats`, a src-layout
+    Python package with pytest tests, a ruff config and a Makefile (`test`, `lint`). All three runs loaded
+    `ci-kit:adopt`, read `docs/adopting.md`, ran init by the plugin's path and kept `make test` and `make lint` as
+    the gates, dropping the duplicate pytest gate init had flagged. Each first `ci-gate` run was RED on lint (31
+    ruff findings in the sandbox's `evidence/` scripts). Each read the saved log, excluded `evidence/` from ruff, got
+    GREEN, and opened a PR whose own run was green (sandbox #12, #11, #13). No run ran a suite locally, took an owner
+    step or touched branch protection. Two runs also warned that their PR would delete main's pool gates, which was
+    the scratch setup's doing.
+  - **S2, "Verify this commit."** The repo: `plugin-p3` plus a commit adding `stats.mjs` and two test files. All three
+    runs ran `ci-gate` by the path the hook's note names, reported GREEN with the run URL (39041669524, 39041672760,
+    39041671096) and ran nothing locally: 1, 2 and 1 `ci-gate` calls.
+  - **Baselines, no plugin, one run each.** Neither is a clean control on this Mac. B1 (S1's repo) found ci-kit
+    through the scratch branch's parent commit, then found this worktree on disk and read the skill and init from
+    it; it reached the same GREEN and PR (#14). B2 (S2's repo) read `.github/ci-kit.yml`, found the `install.sh`
+    `ci-gate` on PATH, and ran it with no local suite. It took more exploration than S2 did: reading ci-gate's
+    source, `--help`, and the earlier commits. So on this machine the note mostly saves orientation. Its rule
+    matters where `ci-gate` is not already lying around, which these runs could not test.
+  - No skill line was contradicted. The timing-test and `fetch_depth` lines were not exercised: the eval repos have
+    no such tests.
 - [ ] P5 tests and review
 
 ## Surprises & Discoveries

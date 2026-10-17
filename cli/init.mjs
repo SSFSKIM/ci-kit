@@ -162,7 +162,8 @@ function detectPython(dir) {
   const pyproject = read(dir, 'pyproject.toml');
   const reqs = REQUIREMENTS.filter((f) => has(dir, f));
   const setupPy = has(dir, 'setup.py');
-  if (pyproject === null && reqs.length === 0 && !setupPy) return null;
+  const pytestOnly = has(dir, 'pytest.ini') || has(dir, 'conftest.py');
+  if (pyproject === null && reqs.length === 0 && !setupPy && !pytestOnly) return null;
   const declared = [pyproject ?? '', ...reqs.map((f) => read(dir, f) ?? '')];
   if (!usesPytest(dir, declared)) {
     return { source: 'pyproject.toml / requirements', gates: [], notes: ['a Python project with no sign of pytest: no Python test gate drafted'] };
@@ -185,8 +186,9 @@ function detectPython(dir) {
   }
   for (const f of reqs) parts.push(`-r ${f}`);
   if (!pytestDeclared) parts.push('pytest');
+  const manifest = isPackage ? (pyproject !== null ? 'pyproject.toml' : 'setup.py') : reqs.join(', ') || (has(dir, 'pytest.ini') ? 'pytest.ini' : 'conftest.py');
   return {
-    source: `${isPackage ? (pyproject !== null ? 'pyproject.toml' : 'setup.py') : reqs.join(', ')} (pip)`,
+    source: `${manifest} (pip)`,
     gates: [{ name: 'test', run: 'python3 -m pytest' }],
     install: `python3 -m pip install ${parts.join(' ')}`,
     notes: [],
@@ -395,12 +397,14 @@ export function initRepo({ dir, force = false, visibility }) {
 
 // The repo's visibility through gh's login, or unknown with the reason.
 async function readVisibility(dir, repoOpt) {
-  let repo;
-  try {
-    repo = resolveRemote(dir, repoOpt).repo;
-  } catch (e) {
-    if (e instanceof TargetError) return { isPrivate: null, reason: e.message };
-    throw e;
+  let repo = repoOpt;
+  if (!repo) {
+    try {
+      repo = resolveRemote(dir, null).repo;
+    } catch (e) {
+      if (e instanceof TargetError) return { isPrivate: null, reason: e.message };
+      throw e;
+    }
   }
   const token = ghToken();
   if (!token) return { isPrivate: null, reason: 'gh is not authenticated' };

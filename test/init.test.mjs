@@ -93,6 +93,12 @@ test('a Python repo with uv, and one with only requirements files', () => {
   const reqs = repo({ 'requirements.txt': 'requests\n', 'conftest.py': '' });
   initRepo({ dir: reqs, visibility: PUBLIC });
   assert.equal(configOf(reqs).setup.install, 'python3 -m pip install -r requirements.txt pytest');
+
+  const bare = repo({ 'pytest.ini': '[pytest]\n', 'test_x.py': 'def test_x():\n    pass\n' });
+  const result = initRepo({ dir: bare, visibility: PUBLIC });
+  assert.deepEqual(gatesOf(configOf(bare)), [['test', 'python3 -m pytest']]);
+  assert.equal(configOf(bare).setup.install, 'python3 -m pip install pytest');
+  assert.match(result.lines[1], /from pytest\.ini \(pip\)/);
 });
 
 test('a repo with no detectable command: one placeholder gate that fails, said plainly', () => {
