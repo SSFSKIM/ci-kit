@@ -20,7 +20,8 @@ const FILES = ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', '.npmrc'
 const env = { ...process.env, ...CACHE_ENV, COREPACK_ENABLE_DOWNLOAD_PROMPT: '0', CI: 'true' };
 const results = {};
 
-// What the warming token needs, and all a bake should ask the App for.
+// What the warming token needs, and all a builder's token is given. (The GCE bake's real job has a token of its own,
+// scoped to ci-kit-sandbox, which never reaches a VM: gce/bake/plan.mjs CHECK_SCOPE.)
 export const WARM_SCOPE = { repositories: ['MAWS'], permissions: { contents: 'read' } };
 
 // The version a lockfile resolved for a root dependency (pnpm lockfile v9: importers['.']), without peer suffixes.
