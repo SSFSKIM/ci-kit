@@ -8,9 +8,11 @@
 # - A dialog on two consecutive reads opens the machine's episode: the source is attributed once, and the alert issue
 #   is opened, unless the job hook opened it first. Three consecutive reads with no dialog close it (2026-10-17: a
 #   dismissed prompt came back within a minute, twice).
-# - While the episode is open the runner is held (a marker its LaunchAgent's wrapper waits on) and, once it has no
-#   job, stopped, so queued jobs go to another Mac or wait instead of each being refused here in seconds. The episode's
-#   close releases it.
+# - While the episode is open the runner is held (a marker its LaunchAgent's wrapper waits on) and stopped between
+#   jobs: when its job ends, or once it is confirmed idle. Queued jobs then go to another Mac or wait instead of each
+#   being refused here in seconds. The episode's close releases it.
+#
+# `dialog-watch.sh --job-end <pid>` is the drain at one job's end, started by job-completed.sh (job_end below).
 #
 # Every external call has a deadline. Nothing here clicks, types or dismisses anything.
 set -uo pipefail
@@ -79,19 +81,25 @@ first_read() {
   log "frontmost is $name: a system dialog; the episode opens if the next read sees it too"
 }
 
-# What the runner is doing: `busy <pid>…`, `idle` or `stopped` (runner-state.py, which reads the kernel's executable
-# paths, never a command line). Only `idle` lets the drain stop it; anything else, a failure included, leaves it be.
+# What the runner is doing: `busy <pid>…`, `idle <listener log> <size>` or `stopped` (runner-state.py, which reads the
+# kernel's executable paths, never a command line). Only idle lets the drain stop it, and only on two matching reads;
+# anything else, a failure included, leaves it be.
 runner_state() {
   bounded 10 python3 -I "$here/runner-state.py" "$runner_dir" 2>/dev/null
 }
 
 # The drain. A runner whose hook refuses every job in seconds draws most of the queue and fails it, while another Mac
 # is busy. While the episode is open the marker holds the runner: the agent's program, runner-hold.sh, waits instead of
-# starting it, after a stop, a crash or a reboot alike. An idle runner is stopped with SIGTERM to the agent (runsvc.sh
+# starting it, after a stop, a crash or a reboot alike. The runner is stopped with SIGTERM to the agent (runsvc.sh
 # turns it into the listener's graceful stop) and KeepAlive brings back only the waiting wrapper. Once the episode
 # closes, removing the marker lets the wrapper start the runner. The watcher never loads, unloads, enables or disables
-# anything, so a runner disabled by hand or by `install.sh --disabled` stays off. Stopping can still abort a job the
-# listener took a moment before the check; that job fails as any job that loses its runner.
+# anything, so a runner disabled by hand or by `install.sh --disabled` stays off.
+#
+# A stop must land between jobs. The listener asks for the next job the moment a job's worker exits: on 2026-10-18 the
+# mini was offered one within the second and acquired it two seconds later, twice, while the drain waited for its
+# 60 s tick (job_end below). A stop while a worker runs cancels its job. A stop after the listener has been offered a
+# job, before its worker starts, leaves that job acquired and never run: in progress on an offline runner (09:59:18,
+# when the drain read idle in the second a job was offered; stop_idle below).
 hold() { # under the episode lock: the hold follows the episode as it stands now
   load_state
   if [[ $st_phase == open ]]; then
@@ -111,22 +119,55 @@ hold() { # under the episode lock: the hold follows the episode as it stands now
     fi
   fi
 }
+stop_runner() { # <why>
+  if bounded 10 launchctl kill SIGTERM "$domain/$runner_agent" >/dev/null 2>&1; then
+    log "drain: stopped the runner ($1); it waits for the episode to close"
+  else
+    log "drain: SIGTERM to $runner_agent failed or timed out; retrying at the next read"
+  fi
+}
+# An idle read alone does not show that no job is coming: a job the listener has just been offered has no worker for
+# its first seconds. A second read idle_gap seconds later must print the same line, which also says the listener
+# logged nothing in between (runner-state.py): the offer, and the acquiring that follows it for about two seconds, are
+# logged as they happen. A stop right after the second read reaches the listener before it can acquire a job offered
+# since. Any difference waits for a later read.
+idle_gap=${CI_KIT_IDLE_GAP:-5}
 stop_idle() { # outside the lock: only the watcher closes an episode, so the hold outlasts this
-  local runner
+  local runner again
   runner=$(runner_state) || runner="failed ($?)"
   case $runner in
     stopped) ;;
-    idle)
-      if bounded 10 launchctl kill SIGTERM "$domain/$runner_agent" >/dev/null 2>&1; then
-        log "drain: stopped the runner (no job running); it waits for the episode to close"
+    idle*)
+      sleep "$idle_gap"
+      again=$(runner_state) || again="failed ($?)"
+      if [[ $again == "$runner" ]]; then
+        stop_runner "no job running or offered on two reads $idle_gap s apart"
       else
-        log "drain: SIGTERM to $runner_agent failed or timed out; retrying at the next read"
+        log "drain: two reads $idle_gap s apart differ ($runner, then ${again:-no answer}): a job may be on its way; the runner stops at a later read"
       fi
       ;;
-    busy*) log "drain: a job is running ($runner); the runner stops once it is idle" ;;
+    busy*) log "drain: a job is running ($runner); the runner stops when it ends" ;;
     *) log "drain: could not tell whether a job is running: ${runner:-no answer}; the runner is left running" ;;
   esac
 }
+# The drain at a job's end. job-completed.sh, which runs inside the job's worker before the worker reports the job's
+# result, starts this detached, with its parent: the worker. The worker reports the result and then exits, and this
+# sees the exit as it happens (runner-state.py --wait). If the runner is held then, it is stopped at once: the listener
+# shuts down well before it can acquire the job it asks for next, and the job that ended has already reported. Held or
+# not is decided at the exit, so an episode that opens while the job finishes counts too.
+job_end() { # <pid of the job's worker>
+  local ended deadline=${CI_KIT_JOB_END_WAIT:-600}
+  ended=$(bounded "$deadline" python3 -I "$here/runner-state.py" "$runner_dir" --wait "$1" 2>/dev/null) || ended="failed ($?)"
+  [[ -e $drain_marker ]] || return 0
+  case $ended in
+    exited) stop_runner "its job ended while it was held" ;;
+    *) log "drain: the end of this job could not be watched (${ended:-no answer}); the next idle read stops the runner" ;;
+  esac
+}
+if [[ ${1:-} == --job-end ]]; then
+  job_end "${2:-0}"
+  exit 0
+fi
 
 # One locked step per run: the read's effect on the episode, then the hold that follows from it. The job hook
 # publishes an episode under the same lock, so a release never acts on a phase the hook has since replaced. A run

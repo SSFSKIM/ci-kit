@@ -63,7 +63,7 @@ unload() { # <label>
 job_running() {
   local state
   state=$(python3 -I "$here/hooks/runner-state.py" "$RUNNER_DIR" 2>/dev/null) || return 0
-  [[ $state != idle && $state != stopped ]]
+  [[ $state != idle* && $state != stopped ]]
 }
 
 usage() { awk 'NR > 1 && !/^#/ { exit } NR > 1' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
