@@ -26,73 +26,19 @@ if [[ ${1:-} == --parsec ]]; then
 fi
 
 if [[ ${1:-} == --screensharing ]]; then
-  # Non-root socket visibility works even though screensharingd runs as root. Count incoming connections, not the
-  # enabled/listening service or this Mac's outgoing viewer. High-performance sharing can use only peered UDP
-  # 5900–5902. This is default-port transport presence, not authentication or UDP liveness proof (see mac-lane.md).
-  sockets=$(LC_ALL=C netstat -an 2>/dev/null) && net=0 || net=$?
-  if ((net == 0)); then
-    result=$(awk '
-      /^Proto/ && /Local Address/ && /Foreign Address/ { header=1 }
-      /^tcp[46]/ { if (NF < 6) bad=1; if ($4 ~ /[.]5900$/ && $6 == "ESTABLISHED") attached=1 }
-      /^udp[46]/ {
-        if (NF < 5) bad=1
-        if ($4 ~ /[.]590[012]$/ && $5 !~ /\*/ && $5 ~ /[.][0-9]+$/) attached=1
-      }
-      END { print attached ? "screensharing" : (header && !bad ? "none" : "unknown") }
-    ' <<<"$sockets") && status=0 || status=$?
+  # screensharingd by its exact name, in the table the computer-use read uses. launchd holds the listener and starts the
+  # daemon when a viewer connects, over whatever transport it serves; it exits about 15 s after the last viewer leaves.
+  # Not netstat: in a job hook it leaves out every Internet socket (#50). SSMenuAgent outlives a session.
+  if table=$(LC_ALL=C ps -axco pid=,comm= 2>/dev/null); then
+    LC_ALL=C awk '
+      { name=$0; if (!sub(/^ *[0-9]+ +/, "", name)) { bad=1; next }; rows++ }
+      name == "screensharingd" { found=1 }
+      END { print found ? "screensharing" : (rows && !bad ? "none" : "unknown") }
+    ' <<<"$table"
   else
-    result=unknown status=0
+    echo unknown
   fi
-  printf '%s\n' "$result"
-  # #50: job hooks read none with a viewer attached, while every other context tried reads screensharing. While the
-  # trigger file exists, each run appends what it saw to posture-debug.log: a few KB, no other environment, inside this
-  # probe's deadline. In a subshell, so no failure there, even under an inherited errexit, changes the result.
-  # SHELLOPTS lists this shell's own options too (the defaults, nounset, pipefail); any other was inherited.
-  if [[ -e $HOME/Library/Logs/ci-kit/posture-debug ]]; then
-    (
-      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) run=${GITHUB_RUN_ID:--} job=${GITHUB_JOB:--}" \
-        "--screensharing: printed $result, exit $status"
-      # Sockets on ports 5900-5909, not every line containing 590: under load, ephemeral ports (59049) and the
-      # unix-socket section's hex addresses match by the dozen and would push the one that matters past the cap.
-      printf '%s' "$sockets" | /usr/bin/awk -v net="$net" '
-        /^(tcp|udp)/ && (/[.:]590[0-9][ \t]/ || /[.:]590[0-9]$/) && ++n <= 30 { hit[n] = substr($0, 1, 100) }
-        END {
-          print "  netstat: exit " net ", " NR " lines, " (n + 0) " on ports 5900-5909"
-          for (i = 1; i <= n && i <= 30; i++) print "    " hit[i]
-        }'
-      echo "  uid $(id -u), pid $$, ppid $PPID"
-      /bin/ps -A -o pid=,ppid=,comm= | /usr/bin/awk -v pid="$PPID" '
-        { up[$1] = $2; name = $0; sub(/^ *[0-9]+ +[0-9]+ +/, "", name)
-          comm[$1] = length(name) > 120 ? "..." substr(name, length(name) - 116) : name }
-        END {
-          for (i = 0; i < 24 && pid in comm; i++) {
-            chain = chain (i ? " < " : "") pid " " comm[pid]
-            if (pid == 1) break
-            pid = up[pid]
-          }
-          print "  parents: " chain
-        }'
-      # The job hooks' first records saw ~555 sockets and none on 5900 while ssh saw ~840 with the viewer's: which
-      # kinds are missing, and whether the process table hides root's processes (screensharingd runs as root) too.
-      printf '%s' "$sockets" | /usr/bin/awk '
-        /^(tcp|udp)[46]/ { n[$1]++; next } /^Proto|^Active/ { next } { other++ }
-        END { printf "  sockets:"; for (p in n) printf " %s %d", p, n[p]; print " other " (other + 0) }'
-      /bin/ps -A -o user=,comm= | /usr/bin/awk '
-        { all++; if ($1 == "root") root++; if ($0 ~ /screensharingd$/) sd = "yes"; if ($0 ~ /SSMenuAgent$/) menu = "yes" }
-        END { print "  processes: " (all + 0) ", root " (root + 0) ", screensharingd " (sd ? sd : "no") ", SSMenuAgent " (menu ? menu : "no") }'
-      # One whole socket table, once: the run that finds this second trigger writes it and removes the trigger.
-      full=$HOME/Library/Logs/ci-kit/posture-debug-full
-      if [[ -e $full ]] && rm -f "$full"; then
-        printf '%s\n' "$sockets" >"$HOME/Library/Logs/ci-kit/posture-debug-netstat-$(date -u +%Y%m%dT%H%M%SZ)-$$.txt"
-        echo "  wrote the whole socket table"
-      fi
-      for name in PATH LANG LC_ALL SHELLOPTS BASHOPTS TMPDIR; do
-        if [[ -n ${!name+set} ]]; then value=${!name}; echo "  $name=${value:0:1024}"; else echo "  $name unset"; fi
-      done
-      for tool in netstat awk perl; do printf '  command -v %s: %s\n' "$tool" "$(command -v "$tool" || echo none)"; done
-    ) >>"$HOME/Library/Logs/ci-kit/posture-debug.log" 2>/dev/null || true
-  fi
-  exit "$status"
+  exit
 fi
 
 if [[ ${1:-} == --computeruse ]]; then
