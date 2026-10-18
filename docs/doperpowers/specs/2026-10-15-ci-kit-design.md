@@ -182,6 +182,18 @@ How to see it working: §Acceptance. The shortest proofs are:
     from a new on-disk copy, which triggers a per-copy screen-capture confirmation. The second,
     10:27–10:59Z, was a "data from other apps" prompt during an XProtect scan burst. The owner
     answered both; nothing automated clicks a prompt.
+- [x] (2026-10-18 08:10Z) MAWS's Linux-lane `e2e:desk-web` moves from hosted `ubuntu-24.04` to GCE
+  `cpus-4` through MAWS#34, which maws-fe's architect lands and records as its gate-offload Decision
+  Log 68. The image needs no change (Decision Log, "MAWS's desk-web on GCE"); `docs/pool.md` records
+  what a job sees.
+  - Proof, run 39109128439 on c3d-highcpu-4 spot: green, 123 passed (chromium 118, phone-webkit 5) in
+    3.7 min; the job 317 s, the run 392 s, queue to start 64 s; the ledger row $0.0053 for 417
+    VM-seconds.
+  - Hosted, run 39086762891 (10-18 01:30Z, the last hosted desk-web run): green, 118 passed in 4.6 min;
+    the job 419 s, billed 7 min, $0.042; the run 430 s.
+  - At 10-17's 55 hosted minutes a day (about $9.9 a month), the same runs cost about $1.3 a month on
+    GCE (about eight runs a day at $0.0053). Once the MAWS change lands, MAWS's only hosted job is
+    `plan`.
 
 ## Context: what was measured (2026-10-15)
 
@@ -3417,6 +3429,24 @@ euros, jobs, and the projected month at the current rate.
       taken by the next bake's runner. That bake's own job would wait, and the bake would fail.
   - **Date/Author:** 2026-10-17, ci-kit#24 executor for CI-opt.
 
+- **Decision (MAWS's desk-web on GCE): the image stays as baked; the job installs WebKit and the
+  browsers' libraries itself.**
+  - Measured on MAWS run 39108523336 (c3d-highcpu-4), with the install split in two:
+    `playwright install-deps chromium webkit` took 24 s (211 packages through apt) and
+    `playwright install chromium webkit` 3.7 s (WebKit's download; Chromium came from the image, at
+    revision 1243, the one MAWS's lockfile pins). In the proof run the single step took 36 s.
+    Hosted, the same step takes 38–50 s, since both browsers download there; the pool's whole job is
+    still faster (317 s against 419 s).
+  - Baking WebKit's libraries and browser, and MAWS's e2e fonts, would save about 30 s a run, under
+    $0.0005. The cost: about 390 MB installed for WebKit's and GStreamer's libraries (122 MB of
+    archives), plus MAWS's fonts (about 140 MB installed) and WebKit itself (a 102 MiB download, more
+    once unpacked), so well over 500 MB more in an image every pool job boots. And a copy of
+    Playwright's dependency list in the Dockerfile that drifts with each Playwright bump.
+  - Nothing is half-installed either way: the runner's sudo is passwordless, so `--with-deps` installs
+    whatever the image lacks.
+  - Revisit if desk-web's runs grow several-fold, or its install passes about a minute.
+  - **Date/Author:** 2026-10-18, CI-opt's desk-web worker.
+
 - **Decision (M10 step 3, the executor's calls, accepted):**
   - **Allocation ids** are the launch minute plus 5 random base36 characters. The runners API
     gives no creation time, so a runner's age comes from its id. A repeated id is drawn again.
@@ -3451,6 +3481,7 @@ euros, jobs, and the projected month at the current rate.
   - MAWS's class 1a (static, unit, probes) runs on GCE spot from 18:39Z on 10-16.
   - MAWS's unit:darwin and its 27 e2e groups run on the mini (`GATE_E2E_RUNNER=macos`, maws-fe DL 45).
   - Only `plan` (on `ubuntu-slim`) and Linux-lane `e2e:desk-web` runs still run hosted; `warm` is gone.
+    From MAWS#34 (Progress, 10-18), Linux-lane `e2e:desk-web` runs on GCE `cpus-4` too.
 - **A1–A13 pass.** The exceptions are below.
 
 **Acceptance exceptions and open items.**

@@ -301,8 +301,14 @@ the issue it was written on and is finalized there. For history, search the sand
 for "pool ledger".
 
 **Preemption** is recorded, not re-run. GCE deletes a preempted spot VM (its termination action), GitHub fails the
-job ("runner lost"), and the launcher finalizes the row `preempted` with the job the runner held, which it wrote on
-the row while the job ran. Re-run it, for example with `ci-gate` again.
+job, and the launcher finalizes the row `preempted` with the job the runner held, which it wrote on the row while the
+job ran. Re-run it, for example with `ci-gate` again. GitHub's conclusion is `failure`, the same as a red test's,
+not `cancelled`: the runner gets the guest's shutdown, so the job's annotations read "The operation was canceled."
+and "Process completed with exit code 130.", and its log "The runner has received a shutdown signal" (A13's
+simulated preemption, sandbox run 38927837115). A job that hits its `timeout-minutes` also reads "The operation was
+canceled.", beside "has exceeded the maximum execution time". So a reader that must tell a preemption from a red
+test goes by the runner (`ci-kit-gce-*`) and those annotations, or by the ledger's `preempted` row, which names the
+job.
 
 Every resource carries a `ci-kit` label: `gce-builder` (builders and smoke VMs, with `ci-kit-run=<run id>` and
 `ci-kit-role`), `gce-image` (images, with `ci-kit-commit` and `ci-kit-ready`). The bake selects by label and checks
@@ -385,6 +391,19 @@ config from metadata `ci-kit-jit`, reports `ci-kit/job=exit:<code>`, and the uni
 (`poweroff-immediate`: no orderly shutdown, since the disk is discarded; an orderly one took about 85 s). A VM with no
 `ci-kit-jit` and no `ci-kit-smoke` reports `ci-kit/job=failed:no-jit` and powers off. Every VM needs metadata
 `enable-guest-attributes=TRUE` for the reports.
+
+**What a job sees** (measured in MAWS's `e2e:desk-web` job 117619513767 on c3d-highcpu-4, 2026-10-18, image
+`ci-kit-runner-20261017-102843-n8tx-dbd88509`):
+- The user `runner` with passwordless sudo (the actions-runner image's), so `apt-get` works. Playwright's
+  `install --with-deps chromium webkit` installed 211 packages in 24 s.
+- `/proc/sys` is read-only. `sudo sysctl -w` prints "ignoring: Read-only file system" and exits 0, so a kernel
+  setting a job lifts is a silent no-op, not an error.
+- `PLAYWRIGHT_BROWSERS_PATH` holds Chromium, its headless shell and ffmpeg at the revisions of the Playwright that
+  MAWS's lockfile pinned when the image was baked (1.63.0: Chromium 1243). A job at that version downloads no
+  Chromium; one at another version downloads its own, and WebKit, never baked, downloads in about 4 s.
+- `xvfb-run` and `xauth`, and a 2 GB `/dev/shm`.
+- The VM's whole memory, with no container cap, and about 39 GB of the 50 GB disk free. The desk-web job peaked at
+  2.9 GB used, more than an e2-highcpu-2 (`cpus-2`) has, so MAWS runs it on `cpus-4`.
 
 **Deploy.** From a clean checkout of a commit on GitHub, with gcloud's default account (an owner of the project):
 
