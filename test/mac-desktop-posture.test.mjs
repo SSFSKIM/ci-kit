@@ -23,11 +23,27 @@ const withinHangs = (run, hangs, deadline = scaled) => {
 };
 
 // The process table `ps -axco pid=,comm=` prints: each executable name in full, never its path, so a cua runtime's node is
-// `node`. None of these is a computer-use process.
-const idle = '    1 launchd\n  410 Terminal\n  512 cursor-park\n  520 node\n  521 node_repl\n  733 Google Chrome Helper (Renderer)\n';
+// `node`. None of these is a computer-use process or a Screen Sharing viewer: SSMenuAgent keeps running after a session.
+const idle = '    1 launchd\n  410 Terminal\n  512 cursor-park\n  520 node\n  521 node_repl\n  540 SSMenuAgent\n  733 Google Chrome Helper (Renderer)\n';
+// A viewer attached: launchd has started screensharingd, and its agent with it.
+const sharing = `${idle}  690 screensharingd\n  691 ScreensharingAgent\n`;
+// What netstat prints inside a job hook on the mini (#50): exit 0 and no Internet section, while the Multipath, pfkey and
+// routing sections still carry a Local/Foreign Address header. Every fixture's netstat prints it, as every job's does.
+const jobNetstat = [
+  'Active Multipath Internet connections',
+  'Proto/ID  Flags      Local Address          Foreign Address        (state)',
+  'Active LOCAL (UNIX) domain sockets',
+  'Address          Type   Recv-Q Send-Q            Inode             Conn             Refs          Nextref Addr',
+  'eb3b92f1b45a02a7 stream      0      0                0 463131fb0676b37a                0                0',
+  'Active pfkey sockets',
+  'Proto  Recv-Q Send-Q Local Address      Foreign Address',
+  'Active routing sockets',
+  'Proto  Recv-Q Send-Q Local Address      Foreign Address',
+  '',
+].join('\n');
 
 // Real hook wrappers and desktop reads; only the desktop, cursor, process-table and process-sweeping boundaries are faked.
-function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, missing = false, parsec, parsecHang = false, logFailure = false, frontStatus = 0, frontHang = false, connections = 'Proto Recv-Q Send-Q Local Address Foreign Address (state)\n', netStatus = 0, netHang = false, processes = idle, psStatus = 0, psHang = false, ignoreAlarm = false, clock = scaled, forkDelay = 0 } = {}) {
+function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, missing = false, parsec, parsecHang = false, logFailure = false, frontStatus = 0, frontHang = false, processes = idle, psStatus = 0, psHang = false, ignoreAlarm = false, clock = scaled, forkDelay = 0 } = {}) {
   const dir = mkdtempSync(join(root, 'job-'));
   const bin = join(dir, 'bin');
   const installed = join(dir, 'hooks');
@@ -39,12 +55,13 @@ function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, mi
   const executable = (path, text) => { writeFileSync(path, `#!/bin/bash\n${text}\n`); chmodSync(path, 0o755); };
   const front = join(dir, 'front');
   writeFileSync(front, 'Terminal');
-  const hangingRead = (source) => `${ignoreAlarm ? "trap '' ALRM" : ''}\necho $$ > '${join(dir, `${source}-pid`)}'\nexec /bin/sleep 60`;
+  // Appended: both process reads run ps, so a ps hang leaves two PIDs to check.
+  const hangingRead = (source) => `${ignoreAlarm ? "trap '' ALRM" : ''}\necho $$ >> '${join(dir, `${source}-pid`)}'\nexec /bin/sleep 60`;
   executable(join(bin, 'lsappinfo'), `${frontHang ? hangingRead('front') : ''}\nif [[ $1 == front ]]; then echo ASN:0x0-1:; else printf '"LSDisplayName"="%s"\\n' "$(cat '${front}')"; fi\nexit ${frontStatus}`);
   executable(join(bin, 'open'), 'exit 91'); // Already in Terminal; no real LaunchServices calls.
-  writeFileSync(join(dir, 'connections'), connections);
-  // Builtin read/printf replay the connections: no extra process for a loaded machine to schedule late.
-  executable(join(bin, 'netstat'), `[[ $* == -an ]] || exit 92\n${netHang ? hangingRead('net') : ''}\nIFS= read -r -d '' replay < '${join(dir, 'connections')}'; printf '%s' "$replay"; exit ${netStatus}`);
+  writeFileSync(join(dir, 'netstat'), jobNetstat);
+  // Builtin read/printf replay each table: no extra process for a loaded machine to schedule late.
+  executable(join(bin, 'netstat'), `[[ $* == -an ]] || exit 92\nIFS= read -r -d '' replay < '${join(dir, 'netstat')}'; printf '%s' "$replay"; exit 0`);
   writeFileSync(join(dir, 'processes'), processes);
   executable(join(bin, 'ps'), `[[ $* == '-axco pid=,comm=' ]] || exit 93\n${psHang ? hangingRead('ps') : ''}\nIFS= read -r -d '' replay < '${join(dir, 'processes')}'; printf '%s' "$replay"; exit ${psStatus}`);
   if (parsecHang) executable(join(bin, 'awk'), `if [[ \${!#} == '${join(dir, '.parsec/log.txt')}' ]]; then\n${hangingRead('parsec')}\nfi\nexec /usr/bin/awk "$@"`);
@@ -86,7 +103,7 @@ ${hang ? `trap '' ALRM\necho $$ > '${join(dir, 'helper-pid')}'\nexec /bin/sleep 
     const survivors = [];
     const observed = [];
     const recorded = [];
-    for (const source of ['helper', 'front', 'parsec', 'net', 'ps']) {
+    for (const source of ['helper', 'front', 'parsec', 'ps']) {
       const pidFile = join(dir, `${source}-pid`);
       if (!existsSync(pidFile)) continue;
       observed.push(source);
@@ -169,20 +186,19 @@ test('one Parsec client disconnecting does not hide another client still connect
   }
 });
 
-const tcp = (local, foreign, state) => `Proto Recv-Q Send-Q Local Address Foreign Address (state)\ntcp4 0 0 ${local} ${foreign} ${state}\n`;
-
+// A hanging ps holds both process reads, Screen Sharing and computer use, each to its own deadline.
 for (const ignoreAlarm of [false, true]) {
-  for (const [options, remote, hangingSource] of [
-    [{ parsec: connected, netHang: true }, 'parsec', 'net'],
-    [{ parsecHang: true, connections: tcp('127.0.0.1.5900', '127.0.0.1.53100', 'ESTABLISHED') }, 'screensharing', 'parsec'],
+  for (const [options, remote, computeruse, hangs, hangingSource] of [
+    [{ parsec: connected, psHang: true }, 'parsec', 'unknown', 2, 'ps'],
+    [{ parsecHang: true, processes: sharing }, 'screensharing', 'none', 1, 'parsec'],
   ]) {
     test(`${remote} remains positive when the other source hangs${ignoreAlarm ? ' and ignores SIGALRM' : ''}`, () => {
       const run = fixture({ ...options, ignoreAlarm }).run('end');
       assert.equal(run.status, 0, run.stderr);
-      withinHangs(run, 1);
+      withinHangs(run, hangs);
       assert.deepEqual(run.observed, [hangingSource]);
       assert.deepEqual(run.survivors, []);
-      assert.match(run.stdout, new RegExp(`remote=${remote} computeruse=none$`, 'm'));
+      assert.match(run.stdout, new RegExp(`remote=${remote} computeruse=${computeruse}$`, 'm'));
       assert.match(run.stdout, /sweep .*job-completed/);
     });
   }
@@ -191,7 +207,7 @@ for (const ignoreAlarm of [false, true]) {
 test('all five hanging reads stay bounded and optional under bash -e -o pipefail', () => {
   // Production's real 1 s clock, so this costs five seconds; marker files are not asserted, because under load a fake may be
   // abandoned before it writes one.
-  const run = fixture({ frontHang: true, hang: true, parsecHang: true, netHang: true, psHang: true, ignoreAlarm: true, clock: null }).runPosture();
+  const run = fixture({ frontHang: true, hang: true, parsecHang: true, psHang: true, ignoreAlarm: true, clock: null }).runPosture();
   assert.equal(run.status, 0, run.stderr);
   withinHangs(run, 5, 1);
   assert.deepEqual(run.survivors, []);
@@ -208,97 +224,34 @@ test('a probe child held before it has its own process group is still killed at 
   assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=unknown display=unknown remote=unknown computeruse=unknown']);
 });
 
-test('Screen Sharing means an established incoming 5900 transport, not a listener or an outgoing viewer', () => {
-  for (const [connections, remote] of [
-    [tcp('192.168.1.2.5900', '192.168.1.3.53100', 'ESTABLISHED'), 'screensharing'],
-    [tcp('::1.5900', '::1.53100', 'ESTABLISHED').replace('tcp4', 'tcp6'), 'screensharing'],
-    [tcp('*.5900', '*.*', 'LISTEN'), 'none'],
-    [tcp('192.168.1.2.53100', '192.168.1.3.5900', 'ESTABLISHED'), 'none'],
+test('Screen Sharing is screensharingd running, by its exact name, whatever the job hook’s netstat shows (#50)', () => {
+  for (const [processes, remote] of [
+    [sharing, 'screensharing'],
+    [`${sharing}unrecognized\n`, 'screensharing'],
+    [idle, 'none'],
+    // Names that merely contain it, a path where `ps -c` prints names, the agent alone, and this Mac's own outgoing viewer.
+    [`${idle}  690 screensharingdx\n  691 xscreensharingd\n  692 /System/Library/CoreServices/RemoteManagement/screensharingd.bundle/Contents/MacOS/screensharingd\n  693 ScreensharingAgent\n  694 Screen Sharing\n`, 'none'],
   ]) {
-    const run = fixture({ connections }).run('end');
+    const run = fixture({ processes }).runPosture();
     assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stdout, new RegExp(`remote=${remote} computeruse=none$`, 'm'));
-  }
-  const both = fixture({ connections: tcp('127.0.0.1.5900', '127.0.0.1.53100', 'ESTABLISHED'), parsec: connected }).run('end');
-  assert.match(both.stdout, /remote=parsec,screensharing computeruse=none$/m);
-});
-
-test('high-performance Screen Sharing uses peer-associated UDP 5900–5902, not wildcard listeners', () => {
-  for (const port of [5900, 5901, 5902]) {
-    for (const [foreign, remote] of [['192.168.1.3.53100', 'screensharing'], ['*.*', 'none'], ['192.168.1.3.*', 'none']]) {
-      const connections = `Proto Recv-Q Send-Q Local Address Foreign Address (state)\nudp4 0 0 192.168.1.2.${port} ${foreign}\n`;
-      const run = fixture({ connections }).run('end');
-      assert.equal(run.status, 0, run.stderr);
-      assert.match(run.stdout, new RegExp(`remote=${remote} computeruse=none$`, 'm'));
-    }
+    assert.match(posture(run.stdout)[0], new RegExp(` remote=${remote} `), processes);
   }
 });
 
-test('failed or unrecognized remote reads are unknown rather than a clean desktop', () => {
-  for (const options of [{ netStatus: 1 }, { connections: 'unrecognized output' }]) {
-    const run = fixture(options).run('end');
-    assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stdout, /remote=unknown computeruse=none$/m);
-  }
-});
-
-test('the Screen Sharing debug record (#50) is written only while its trigger exists and never changes the read', () => {
-  const viewer = tcp('100.92.238.1.5900', '100.110.27.36.64359', 'ESTABLISHED');
-  const ephemeral = 'tcp4 0 0 127.0.0.1.8641 127.0.0.1.59049 ESTABLISHED';
-  const header = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ run=123456 job=e2e --screensharing: printed (\S+), exit 0$/gm;
-  for (const [options, remote, netstat] of [
-    [{ connections: `${viewer}${ephemeral}\n` }, 'screensharing', 'exit 0, 3 lines, 1 on ports 5900-5909'],
-    [{ connections: viewer, netStatus: 1 }, 'unknown', 'exit 1, 2 lines, 1 on ports 5900-5909'],
-    [{}, 'none', 'exit 0, 1 lines, 0 on ports 5900-5909'],
+test('Parsec and Screen Sharing combine in either direction, and neither unknown hides the other', () => {
+  const unknownParsec = '[I 2026-10-17 10:30:04] starting\n';
+  for (const [options, remote] of [
+    [{ parsec: connected, processes: sharing }, 'parsec,screensharing'],
+    [{ parsec: connected }, 'parsec'],
+    [{ parsec: `${connected}\n${disconnected}\n`, processes: sharing }, 'screensharing'],
+    [{ parsec: connected, psStatus: 1 }, 'parsec'],
+    [{ parsec: unknownParsec, processes: sharing }, 'screensharing'],
+    [{ parsec: unknownParsec }, 'unknown'],
   ]) {
-    const job = fixture(options);
-    const logs = join(job.home, 'Library/Logs/ci-kit');
-    const trigger = join(logs, 'posture-debug');
-    const record = join(logs, 'posture-debug.log');
-    const off = job.runPosture();
-    assert.equal(off.status, 0, off.stderr);
-    assert.match(posture(off.stdout)[0], new RegExp(` remote=${remote} `));
-    assert.equal(existsSync(record), false);
-    writeFileSync(trigger, '');
-    const on = job.runPosture();
-    assert.equal(on.status, 0, on.stderr);
-    assert.deepEqual(posture(on.stdout), posture(off.stdout));
-    const text = readFileSync(record, 'utf8');
-    assert.deepEqual([...text.matchAll(header)].map((match) => match[1]), [remote]);
-    assert.ok(text.includes(`\n  netstat: ${netstat}\n`), text);
-    if (options.connections) assert.ok(text.includes(`\n    ${viewer.split('\n')[1]}\n`), text);
-    assert.equal(text.includes(ephemeral), false);
-    rmSync(trigger);
-    assert.equal(job.runPosture().status, 0);
-    assert.equal(readFileSync(record, 'utf8'), text);
+    const run = fixture(options).runPosture();
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(posture(run.stdout)[0], new RegExp(` remote=${remote} `), JSON.stringify(options));
   }
-
-  // The rest of the record: the uid, the parent chain from the probe's supervisor up to pid 1, six variables by name,
-  // and where the reads' tools resolve. Many matching sockets still keep it to a few KB.
-  const busy = Array.from({ length: 200 }, (_, i) => `tcp4 0 0 10.0.0.1.5900 10.0.0.2.${50000 + i} ESTABLISHED\n`).join('');
-  const job = fixture({ connections: `${tcp('*.5900', '*.*', 'LISTEN')}${busy}` });
-  mkdirSync(join(job.home, 'Library/Logs/ci-kit'), { recursive: true });
-  writeFileSync(join(job.home, 'Library/Logs/ci-kit/posture-debug'), '');
-  const run = job.runPosture();
-  assert.equal(run.status, 0, run.stderr);
-  assert.match(run.stdout, /remote=screensharing /);
-  const text = readFileSync(join(job.home, 'Library/Logs/ci-kit/posture-debug.log'), 'utf8');
-  assert.ok(text.length < 6 * 1024, `record is ${text.length} bytes`);
-  assert.ok(text.includes('\n  netstat: exit 0, 202 lines, 201 on ports 5900-5909\n'), text);
-  assert.equal(text.split('\n').filter((line) => line.startsWith('    tcp4 ')).length, 30);
-  assert.match(text, new RegExp(`\\n  uid ${process.getuid()}, pid \\d+, ppid \\d+\\n`));
-  assert.match(text, /\n {2}parents: \d+ \S*perl < \d+ \S*bash < .* < 1 \S+\n/);
-  assert.ok(text.includes(`\n  PATH=${join(job.home, 'bin')}:/usr/bin:/bin\n  LANG unset\n  LC_ALL unset\n`), text);
-  assert.match(text, /\n {2}SHELLOPTS=\S*nounset:pipefail\n {2}BASHOPTS[= ].*\n {2}TMPDIR unset\n/);
-  assert.ok(text.endsWith(`  command -v netstat: ${join(job.home, 'bin/netstat')}\n  command -v awk: /usr/bin/awk\n  command -v perl: /usr/bin/perl\n`), text);
-
-  // A record that cannot be written is skipped, and the read is the same.
-  const blocked = fixture({ connections: viewer });
-  mkdirSync(join(blocked.home, 'Library/Logs/ci-kit/posture-debug.log'), { recursive: true });
-  writeFileSync(join(blocked.home, 'Library/Logs/ci-kit/posture-debug'), '');
-  const unwritable = blocked.runPosture();
-  assert.equal(unwritable.status, 0, unwritable.stderr);
-  assert.match(unwritable.stdout, /remote=screensharing computeruse=none$/m);
 });
 
 test('failed or hanging frontmost reads are unknown without blocking the other fields or the job', () => {
@@ -339,23 +292,23 @@ test('a computer-use list too long for the posture read keeps whole names and en
   assert.deepEqual(posture(run.stdout), [`ci-kit desktop (end): frontmost=Terminal display=2560x1440@2x remote=none computeruse=${list}`]);
 });
 
-test('failed, hanging, empty or unrecognized process reads are unknown without blocking the other fields', () => {
+test('failed, hanging, empty or unrecognized process reads leave Screen Sharing and computer use unknown, nothing else', () => {
   for (const options of [{ psStatus: 1 }, { processes: '' }, { processes: 'unrecognized output\n' }, { psHang: true }, { psHang: true, ignoreAlarm: true }]) {
     const run = fixture(options).run('end');
     assert.equal(run.status, 0, run.stderr);
-    withinHangs(run, options.psHang ? 1 : 0);
+    withinHangs(run, options.psHang ? 2 : 0);
     assert.deepEqual(run.survivors, []);
-    assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=Terminal display=2560x1440@2x remote=none computeruse=unknown']);
+    assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=Terminal display=2560x1440@2x remote=unknown computeruse=unknown']);
     assert.match(run.stdout, /sweep .*job-completed/);
   }
 });
 
 test('a computer-use name survives an unrecognized row and another read hanging', () => {
   const service = '  612 SkyComputerUseService\n';
-  for (const [options, remote] of [[{ processes: `${service}unrecognized\n` }, 'none'], [{ processes: service, netHang: true }, 'unknown']]) {
+  for (const [options, remote] of [[{ processes: `${service}unrecognized\n` }, 'unknown'], [{ processes: service, parsecHang: true }, 'unknown']]) {
     const run = fixture(options).run('end');
     assert.equal(run.status, 0, run.stderr);
-    withinHangs(run, options.netHang ? 1 : 0);
+    withinHangs(run, options.parsecHang ? 1 : 0);
     assert.deepEqual(run.survivors, []);
     assert.match(run.stdout, new RegExp(`remote=${remote} computeruse=SkyComputerUseService$`, 'm'));
   }

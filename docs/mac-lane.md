@@ -192,9 +192,12 @@ ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none c
   newest `user#id connected.` / `disconnected.` event **per client** in `~/.parsec/log.txt` and reports `parsec` while
   any observed client remains connected: Alice connecting, Bob connecting, then Bob disconnecting still leaves Alice.
   An absent log means no Parsec signal, while an unreadable log or one with no connection history is unknown.
-  Screen Sharing uses non-root `netstat -an`:
-  incoming TCP **local** port 5900 in `ESTABLISHED`, or UDP local ports 5900–5902 with a concrete foreign peer (not a
-  wildcard listener), including loopback tunnels. UDP covers [High Performance Screen Sharing's ports](https://support.apple.com/guide/remote-desktop/use-high-performance-screen-sharing-apdf8e09f5a9/mac).
+  Screen Sharing is `screensharingd` running, matched by its exact name in the same non-root `ps -axco pid=,comm=`
+  table the computer-use read uses. launchd holds the Screen Sharing listener and starts the daemon when a viewer
+  connects, so the read covers every transport the daemon serves: TCP 5900 or a remapped port, a tunnel, and
+  [High Performance Screen Sharing's](https://support.apple.com/guide/remote-desktop/use-high-performance-screen-sharing-apdf8e09f5a9/mac)
+  UDP. `SSMenuAgent`, which keeps running after a session, and this Mac's own outgoing viewer (`Screen Sharing`) are
+  not counted.
   Failed, timed-out or unrecognized reads give `unknown` unless another signal already establishes a remote connection.
 - `computeruse`: the distinct names of running computer-use processes, comma-separated in byte order (a list too long
   for the line ends in `+N more`), or `none`. A name counts when it is `SkyComputerUseService` (Codex and ChatGPT
@@ -213,24 +216,17 @@ log is still the record (`/usr/bin/log show --predicate 'process == "SkyComputer
 the full path because zsh has a `log` builtin). The names were checked on the MacBook (macOS 26) against running
 processes carrying them, and the mini's (macOS 27) `ps -c` output read-only.
 
-Screen Sharing is a **transport signal, not authentication proof**: TCP can be established at the login prompt
-([ScreenSharingMonitor documents this](https://github.com/mm2270/ScreenSharingMonitor)); a peered UDP socket does not
-prove viewer liveness. `none` means no observed default-port transport, not coverage of remapped ports, Apple-ID relay
-paths or other remote-control products. The MacBook's macOS 26 socket layout and absent-session case were checked
-read-only; active TCP/UDP cases are covered by fixtures, not a live sharing session.
-
-**A debug record for the Screen Sharing read** exists for [#50](https://github.com/SSFSKIM/ci-kit/issues/50): job
-hooks on the mini read `remote=none` with a viewer attached, while the same read gives `screensharing` from ssh and
-from launchd agents. While `~/Library/Logs/ci-kit/posture-debug` exists, every Screen Sharing read appends a record to
-`~/Library/Logs/ci-kit/posture-debug.log`: what it printed, netstat's exit status, line count and sockets on ports
-5900–5909, the uid and parent chain, `PATH`, `LANG`, `LC_ALL`, `SHELLOPTS`, `BASHOPTS` and `TMPDIR`, and where
-`netstat`, `awk` and `perl` resolve. A record is a few KB, written inside the read's deadline; a failed write is
-skipped, and the read is the same either way. It is off by default:
-
-```bash
-ssh mini 'touch ~/Library/Logs/ci-kit/posture-debug'   # on: each job's start and end reads add a record
-ssh mini 'rm -f ~/Library/Logs/ci-kit/posture-debug'   # off
-```
+Screen Sharing is a **daemon signal, not authentication proof**. launchd starts `screensharingd` when a connection
+arrives, before anyone authenticates, so a viewer still at the login prompt reads `screensharing`. The daemon exits
+about 15 s after the last viewer leaves, so `screensharing` can trail a session by up to that much. Observed twice on
+the mini (macOS 27) on 2026-10-18: `No viewers so time to exit` 15 s after the last viewer was removed, then launchd's
+`service inactive: com.apple.screensharing`; `ScreensharingAgent` went with the daemon, and `SSMenuAgent` was running
+afterwards. `none` means the daemon was not running; remote control that does not go through it is not covered. The
+read used to be `netstat -an`'s incoming 5900 sockets, which works from ssh and launchd agents but not in a job hook:
+inside Runner.Worker's process tree the kernel's Internet socket list is withheld (likely Local Network privacy, not
+proven), netstat exits 0 without its `Active Internet connections` section, and the read printed `none` with a viewer
+attached ([#50](https://github.com/SSFSKIM/ci-kit/issues/50)). The process table is not filtered there: a job's `ps`
+lists root's processes, `screensharingd` among them.
 
 The five posture reads — frontmost, display, Parsec, Screen Sharing and computer use — each have an independent,
 unconditional 1 s Perl-supervisor deadline, which kills and reaps a hanging probe even if it ignores SIGALRM.
