@@ -3527,6 +3527,10 @@ euros, jobs, and the projected month at the current rate.
   - MAWS's unit:darwin and its 27 e2e groups run on the mini (`GATE_E2E_RUNNER=macos`, maws-fe DL 45).
   - Only `plan` (on `ubuntu-slim`) and Linux-lane `e2e:desk-web` runs still run hosted; `warm` is gone.
     From MAWS#34 (Progress, 10-18), Linux-lane `e2e:desk-web` runs on GCE `cpus-4` too.
+  - manim-master (private) adopted the kit on 10-18 through manim-master#70 and #71. It has 7 gates. forge, runtime,
+    platform and platform-e2e run on GCE `cpus-4`, where a Postgres started inside the job replaces compose, since a
+    pool job has no docker socket. pipeline, protocol and catalog run hosted. A full run costs about $0.047, against
+    $0.16–0.17 all-hosted. The repo is in `gce.json` from #47.
 - **A1–A13 pass.** The exceptions are below.
 
 **Acceptance exceptions and open items.**
