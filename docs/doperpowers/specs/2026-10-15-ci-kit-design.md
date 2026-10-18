@@ -2171,8 +2171,10 @@ euros, jobs, and the projected month at the current rate.
 - Hooks `mac/hooks/job-started.sh` and `mac/hooks/job-completed.sh`, logging to
   `~/Library/Logs/ci-kit/mac-runner-hooks.log`.
 - LaunchAgent `com.ssfskim.ci-kit.dialog-watch` (RunAtLoad, every 60 s): the dialog watcher, which shares the job
-  hook's dialog episode and, while one is open, holds the runner and stops it when no job runs (docs/mac-lane.md).
-  The runner's agent runs `mac/hooks/runner-hold.sh`, which execs `runsvc.sh` only while no hold exists.
+  hook's dialog episode and, while one is open, holds the runner and stops it between jobs: when its job's worker
+  exits (`job-completed.sh` starts `dialog-watch.sh --job-end`), or on two matching idle reads 5 s apart
+  (docs/mac-lane.md). The runner's agent runs `mac/hooks/runner-hold.sh`, which execs `runsvc.sh` only while no hold
+  exists.
 - A dialog alert's title is `ci-kit alert: <machine>: <dialog> since <YYYY-MM-DDTHH:MMZ>`, plus ` (<source>)` when
   attribution found one. MAWS reads open alerts with `^ci-kit alert: ([a-z0-9-]+): (\S+) since (\S+)`. A refusal line
   carries the same `since` time, and still starts with `ci-kit: ` and ends with `rerun`.
@@ -2660,6 +2662,33 @@ euros, jobs, and the projected month at the current rate.
 
   What happens to an edit at the cap was not measured, since reaching it takes 2,500 comments. The
   rotation threshold keeps every ledger issue below it (Decision Log, ci-kit#25).
+
+- **Observation (2026-10-18, ci-kit#46):** the mac runner's listener asks for its next job the moment a
+  job's worker exits, so the drain's 60 s tick could not stop it between jobs.
+  - The first dialog episode with the drain live held the busy runner at 09:57:17Z. Its job's worker
+    exited at 09:58:58Z, the listener was given the next job in the same second and acquired it at
+    09:59:00Z. The same happened at 09:59:07 → 09:59:09. Both jobs were refused.
+  - At 09:59:18Z the drain read the runner idle and stopped it, in the second it was given a third
+    job (started_at 09:59:18Z), which stayed in progress on the offline runner. A job just given has
+    no worker for its first ~2 s, while the listener acknowledges and acquires it.
+  - The listener's diag log (`_diag/Runner_*.log`) records the offer at once ("Acknowledging runner
+    request"). While idle it logs only a token refresh about every 50 minutes: four lines from 19:06
+    to 21:01Z on 10-17.
+  - actions/runner 2.338.0's source: a job-completed hook is the job's last post step, before
+    `FinalizeJob` (which kills new processes carrying the job's `RUNNER_TRACKING_ID`) and before the
+    worker reports the job to the run service. The listener skips its own completion call for run
+    service jobs, and a shutdown while the worker runs sends it `RunnerShutdown`, which marks the job
+    "The runner has received a shutdown signal" and cancels its remaining steps.
+
+  - The busy job's own worker log shows that order: the hook started at 09:58:53 as `/bin/bash -e
+    …/job-completed.sh`, the worker's direct child in the workspace; the orphan cleanup read each new
+    process's environment at 09:58:54; "Raising job completed against run service" at 09:58:57;
+    "Job completed." and the exit at 09:58:58.
+
+  Evidence: the mini's `~/Library/Logs/ci-kit/mac-runner-hooks.log`,
+  `_diag/Runner_20261018-071539-utc.log` and `_diag/Worker_20261018-095502-utc.log`, 09:53–10:08Z;
+  `src/Runner.Worker/JobRunner.cs`, `JobExtension.cs` and `src/Runner.Listener/JobDispatcher.cs` at
+  tag v2.338.0.
 
 ## Decision Log
 
@@ -3461,6 +3490,22 @@ euros, jobs, and the projected month at the current rate.
   - **The sandbox moved by a direct commit on main**, because the launcher reads its config from
     main.
   - **Date/Author:** 2026-10-16, task-executor, recorded by plan-executor.
+
+- **Decision (ci-kit#46):** the drain stops a held runner at its job's end, from the worker's exit,
+  and stops an idle one only on two matching reads.
+  - **At a job's end.** The job-completed hook leaves a detached process that waits for the worker's
+    exit (kqueue) and stops the runner if the marker exists then. The hook returns once that watch is
+    armed (5 s at most): under a full test run the waiter once started after a short-lived worker had
+    exited, and nothing else orders the two. The worker has reported by then, and
+    the stop reaches the listener in tens of milliseconds, against about 2 s to acquire its next job.
+  - **Considered and rejected:** stopping from the hook itself, which cancels the job it runs in; a
+    short watcher poll while a job runs, which still lands after the listener was given a job; and
+    freezing the listener (SIGSTOP) across the exit, which closes the last milliseconds but leaves a
+    runner frozen if the freezing process dies.
+  - **Idle.** A second read 5 s later must print the same line: no worker, and the listener's diag
+    log the same length. Two process reads alone have the same ~2 s blind spot before the second
+    read. GitHub's busy flag was not used: only the mini's credentials can read MAWS's runners.
+  - **Date/Author:** 2026-10-18, CI-opt's ci-kit#46 worker.
 
 ## Outcomes & Retrospective
 

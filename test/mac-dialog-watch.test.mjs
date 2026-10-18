@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { chmodSync, constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -258,15 +258,15 @@ test('while an episode is open the runner is held, an idle runner is stopped, an
   assert.equal(run.marker, `held at ${iso(T0 + 60)}: SecurityAgent since ${iso(T0)}\n`);
   assert.deepEqual(run.launchctl, [kill], 'never load, unload, enable or disable');
   assert.equal(run.runner, 'stopped');
-  assert.deepEqual(run.python, [`-I ${hooks}runner-state.py ${d.dir}/actions-runner-maws`]);
+  assert.deepEqual(run.python, Array(2).fill(`-I ${hooks}runner-state.py ${d.dir}/actions-runner-maws`), 'idle, confirmed by a second read');
   assert.match(run.log, new RegExp(`dialog-watch .*drain: holding the runner while SecurityAgent holds the front \\(since ${iso(T0)}\\)`));
-  assert.match(run.log, /drain: stopped the runner \(no job running\); it waits for the episode to close/);
+  assert.match(run.log, /drain: stopped the runner \(no job running or offered on two reads 0 s apart\); it waits for the episode to close/);
   const later = run.watch(security);
   assert.deepEqual(later.launchctl, [kill], 'a stopped runner is not signalled again');
 });
 
 test('a running job, or a runner state that cannot be read, is left running', () => {
-  for (const [runner, why] of [['busy', /a job is running \(busy 4242\); the runner stops once it is idle/], ['fail', /could not tell whether a job is running: failed \(2\)/], ['garbage', /could not tell whether a job is running: failed \(1\)/], ['hang', /could not tell whether a job is running: failed \(124\)/]]) {
+  for (const [runner, why] of [['busy', /a job is running \(busy 4242\); the runner stops when it ends/], ['fail', /could not tell whether a job is running: failed \(2\)/], ['garbage', /could not tell whether a job is running: failed \(1\)/], ['hang', /could not tell whether a job is running: failed \(124\)/]]) {
     const run = opened({ runner });
     assert.equal(run.status, 0, run.stderr);
     assert.deepEqual(run.launchctl, [], runner);
@@ -282,6 +282,33 @@ test('a running job, or a runner state that cannot be read, is left running', ()
   d.runner('idle');
   const idle = d.watch(security, { at: 120 });
   assert.deepEqual([idle.launchctl, idle.runner], [[kill], 'stopped']);
+});
+
+test('an idle read stops the runner only when a second read the gap later matches it; a job assigned between waits a tick', () => {
+  // 2026-10-18T09:59:18Z: the drain read idle in the second the mini was given a job, and stopped it; the job stayed in
+  // progress on an offline runner. A job just given has no worker for its first seconds, but the listener logs it.
+  const idle = 'idle Runner_20261018-071539-utc.log 812345';
+  const d = desktop({ runner: `${idle}\nbusy` });
+  d.watch(security, { at: 0 });
+  const raced = d.watch(security, { at: 60 });
+  assert.equal(raced.status, 0, raced.stderr);
+  assert.deepEqual(raced.launchctl, [], 'no stop that tick');
+  assert.equal(raced.python.length, 2);
+  assert.ok(raced.log.includes(`drain: two reads 0 s apart differ (${idle}, then busy 4242): a job may be on its way; the runner stops at a later read`), raced.log);
+  // No worker yet, but the listener logged between the reads: a job it is acquiring.
+  d.runner(`${idle}\nidle Runner_20261018-071539-utc.log 813020`);
+  const given = d.watch(security, { at: 120 });
+  assert.deepEqual(given.launchctl, []);
+  assert.ok(given.log.includes('then idle Runner_20261018-071539-utc.log 813020): a job may be on its way'), given.log);
+  // A second read that fails confirms nothing either.
+  d.runner(`${idle}\nfail`);
+  assert.deepEqual(d.watch(security, { at: 180 }).launchctl, []);
+  // Two matching reads, the gap apart, stop it.
+  d.runner(idle);
+  const confirmed = d.watch(security, { at: 240, extraEnv: { CI_KIT_IDLE_GAP: '1' } });
+  assert.deepEqual([confirmed.launchctl, confirmed.runner], [[kill], 'stopped']);
+  assert.ok(confirmed.elapsed >= 1000, `the second read waits the gap (${confirmed.elapsed} ms)`);
+  assert.match(confirmed.log, /drain: stopped the runner \(no job running or offered on two reads 1 s apart\)/);
 });
 
 test('the hold is released only after the third clear read', () => {
@@ -467,12 +494,41 @@ test('runner-state.py reads the kernel\'s executable paths: decoys never count, 
     await start(process.execPath, sleeping, { cwd: bin });
     assert.deepEqual([read().stdout, read().status], ['stopped\n', 0]);
     await running(listener);
-    assert.equal(read().stdout, 'idle\n');
+    // Idle carries the listener's newest diag log and its length; a listener without one is not read as idle.
+    assert.deepEqual([read().stdout, read().status], ['', 2]);
+    const diag = join(runner, '_diag');
+    mkdirSync(diag);
+    writeFileSync(join(diag, 'Runner_20261017-221759-utc.log'), 'an older listener\n');
+    writeFileSync(join(diag, 'Worker_20261018-095502-utc.log'), 'a job\'s worker\n');
+    const newest = join(diag, 'Runner_20261018-071539-utc.log');
+    writeFileSync(newest, '[2026-10-18 09:58:58Z INFO Runner] Listening for Jobs\n');
+    const quiet = `idle Runner_20261018-071539-utc.log ${statSync(newest).size}\n`;
+    assert.equal(read().stdout, quiet);
+    assert.equal(read().stdout, quiet, 'a listener that logs nothing reads the same');
+    appendFileSync(newest, "[2026-10-18 09:58:58Z INFO BrokerMessageListener] Acknowledging runner request '500ef975'.\n");
+    const given = `idle Runner_20261018-071539-utc.log ${statSync(newest).size}\n`;
+    assert.notEqual(given, quiet);
+    assert.equal(read().stdout, given, 'a job given to the listener changes the line');
     const job = await running(worker);
     assert.equal(read().stdout, `busy ${job.pid}\n`);
+    // --wait sees the worker's exit as it happens.
+    const waiting = spawn('python3', ['-I', join(hooks, 'runner-state.py'), runner, '--wait', String(job.pid)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let waited = '';
+    waiting.stdout.on('data', (chunk) => { waited += chunk; });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(waiting.exitCode, null, 'it waits while the worker runs');
+    const jobExit = once(job, 'exit');
+    const waitEnd = once(waiting, 'close');
     job.kill('SIGKILL');
-    await once(job, 'exit');
-    assert.equal(read().stdout, 'idle\n');
+    const killed = Date.now();
+    await waitEnd;
+    assert.deepEqual([waited, waiting.exitCode], ['exited\n', 0]);
+    assert.ok(Date.now() - killed < 2000, `seen at once (${Date.now() - killed} ms)`);
+    await jobExit;
+    assert.equal(read().stdout, given);
+    const wait = (pid) => spawnSync('python3', ['-I', join(hooks, 'runner-state.py'), runner, '--wait', String(pid)], { encoding: 'utf8', timeout: 10_000 }).stdout;
+    assert.equal(wait(job.pid), 'gone\n');
+    assert.equal(wait(children[0].pid), 'not-worker\n', 'a process naming the worker is not it');
     // A runner that updated itself: bin is a symlink to bin.<version>, and the kernel reports the resolved path.
     const updated = join(dir, 'updated');
     const versioned = join(updated, 'bin.2.339.0');
@@ -491,4 +547,131 @@ test('runner-state.py reads the kernel\'s executable paths: decoys never count, 
     for (const child of children) child.kill('SIGKILL');
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// The drain at a job's end, against real processes. A stand-in Runner.Worker (a clone of node at the runner's worker
+// path) runs the installed job-completed.sh as the mini's runner did (its Worker_*.log of 2026-10-18): as its own child,
+// `/bin/bash -e <hook>`, in the job's workspace, with the job's RUNNER_TRACKING_ID, its output piped and waited for. Once the hook's output closes, the
+// worker takes `finishing` ms (the runner's orphan cleanup and its report of the job's result: 4 s on the mini), says it
+// reported, and exits. launchctl records each call with the time, and the RUNNER_TRACKING_ID and directory of the
+// process that made it. The mini's listener acquires its next job about 2 s after a worker exits (09:58:58 → 09:59:00
+// and 09:59:07 → 09:59:09 on 2026-10-18), so a stop must come well within that.
+const nextJobAfter = 1000;
+const standInWorker = `
+const { spawn } = require('node:child_process');
+const [hook, workspace, finishing] = process.argv.slice(1);
+const started = Date.now();
+const child = spawn('/bin/bash', ['-e', hook], { cwd: workspace, stdio: ['ignore', 'pipe', 'pipe'] });
+let output = '';
+child.stdout.on('data', (chunk) => { output += chunk; });
+child.stderr.on('data', (chunk) => { output += chunk; });
+child.on('close', (code) => {
+  console.log(JSON.stringify({ event: 'hook closed', after: Date.now() - started, code, output }));
+  setTimeout(() => { console.log(JSON.stringify({ event: 'reported', at: Date.now() })); process.exit(0); }, Number(finishing));
+});`;
+// The job-end waiters of one job: [pid, process group] of each process running `dialog-watch.sh --job-end <worker> …`.
+const waiters = (hooksDir, worker) => spawnSync('ps', ['-axo', 'pid=,pgid=,command='], { encoding: 'utf8' }).stdout.split('\n')
+  .filter((line) => line.includes(` ${hooksDir}/dialog-watch.sh --job-end ${worker} `))
+  .map((line) => line.trim().split(/\s+/).slice(0, 2).map(Number));
+
+async function jobEnd({ held = true, whileFinishing = () => {}, finishing = 400, standIn = true, env = {} } = {}) {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'ci-kit-job-end-')));
+  const runner = join(home, 'actions-runner-maws');
+  const installed = join(runner, 'ci-kit/hooks');
+  const workspace = join(runner, '_work/MAWS/MAWS');
+  const logs = join(home, 'Library/Logs/ci-kit');
+  const fakes = join(home, 'fakes');
+  const temp = join(home, 'tmp');
+  for (const dir of [installed, workspace, logs, fakes, temp, join(runner, 'bin')]) mkdirSync(dir, { recursive: true });
+  for (const file of ['job-completed.sh', 'dialog.sh', 'dialog-watch.sh', 'runner-state.py']) copyFileSync(join(hooks, file), join(installed, file));
+  const script = (path, body) => { writeFileSync(path, `#!/bin/bash\n${body}\n`); chmodSync(path, 0o755); };
+  script(join(installed, 'desktop-posture.sh'), 'exit 0');
+  script(join(fakes, 'node'), 'echo "sweep $*"'); // the sweep's selection is mac-strays' to test
+  const calls = join(home, 'launchctl.calls');
+  script(join(fakes, 'launchctl'), `printf '%s|%s|%s|%s\\n' "$(perl -MTime::HiRes=time -e 'printf "%d", time * 1000')" "$*" "\${RUNNER_TRACKING_ID-unset}" "$PWD" >> '${calls}'`);
+  const marker = join(logs, 'runner-drained');
+  if (held) writeFileSync(marker, 'held at 2026-10-18T09:57:17Z: UserNotificationCenter since 2026-10-18T09:56:01Z\n');
+  const worker = join(runner, 'bin/Runner.Worker');
+  copyFileSync(process.execPath, worker, constants.COPYFILE_FICLONE);
+  const hook = join(installed, 'job-completed.sh');
+  const jobEnv = { HOME: home, TMPDIR: temp, PATH: `${fakes}:/usr/bin:/bin`, RUNNER_TRACKING_ID: 'github_0f3d', GITHUB_RUN_ID: '39116987843', GITHUB_JOB: 'e2e', ...env };
+  const job = standIn
+    ? spawn(worker, ['-e', standInWorker, hook, workspace, String(finishing)], { stdio: ['ignore', 'pipe', 'inherit'], env: jobEnv })
+    : spawn(process.execPath, ['-e', standInWorker, hook, workspace, String(finishing)], { stdio: ['ignore', 'pipe', 'inherit'], env: jobEnv });
+  const events = {};
+  let detached;
+  let buffered = '';
+  job.stdout.on('data', (chunk) => {
+    buffered += chunk;
+    for (let at = buffered.indexOf('\n'); at >= 0; at = buffered.indexOf('\n')) {
+      const event = JSON.parse(buffered.slice(0, at));
+      buffered = buffered.slice(at + 1);
+      events[event.event] = event;
+      if (event.event === 'hook closed') {
+        detached = { waiters: waiters(installed, job.pid), group: Number(spawnSync('ps', ['-o', 'pgid=', '-p', String(job.pid)], { encoding: 'utf8' }).stdout) };
+        whileFinishing(marker);
+      }
+    }
+  });
+  const exit = once(job, 'exit');
+  try {
+    await exit;
+    // The drain is done once its waiter is gone.
+    for (let waited = 0; waiters(installed, job.pid).length > 0; waited += 50) {
+      assert.ok(waited < 15_000, 'the job-end waiter exits');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const log = existsSync(join(logs, 'mac-runner-hooks.log')) ? readFileSync(join(logs, 'mac-runner-hooks.log'), 'utf8') : '';
+    const stops = existsSync(calls) ? readFileSync(calls, 'utf8').trim().split('\n').map((line) => {
+      const [at, call, tracking, cwd] = line.split('|');
+      return { at: Number(at), call, tracking, cwd };
+    }) : [];
+    const errors = existsSync(join(logs, 'dialog-watch.err.log')) ? readFileSync(join(logs, 'dialog-watch.err.log'), 'utf8') : '';
+    return { events, detached, log, stops, errors, leftovers: readdirSync(temp) };
+  } finally {
+    job.kill('SIGKILL');
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+test('a held runner is stopped when its job ends: after the worker reports and exits, before the next job', macOnly, async () => {
+  const run = await jobEnd();
+  assert.equal(run.events['hook closed'].code, 0, run.events['hook closed'].output);
+  assert.ok(run.events['hook closed'].after < 6000, `the hook neither waits for the job's end nor leaves its output open (${run.events['hook closed'].after} ms)`);
+  assert.deepEqual(run.leftovers, [], 'the ready file is gone');
+  assert.deepEqual(run.stops.map((stop) => stop.call), [`kill SIGTERM gui/${uid}/${runnerAgent}`], run.log + run.errors);
+  const [stop] = run.stops;
+  const reported = run.events.reported.at;
+  assert.ok(stop.at >= reported, `nothing stops the runner while the worker finishes (${stop.at - reported} ms)`);
+  assert.ok(stop.at - reported < nextJobAfter, `stopped ${stop.at - reported} ms after the job reported`);
+  // Detached from the job: the worker's orphan cleanup kills what carries its RUNNER_TRACKING_ID, the sweep what sits in
+  // the workspace, and launchd what is left in the runner's process group.
+  assert.deepEqual([stop.tracking, stop.cwd], ['unset', '/']);
+  assert.ok(run.detached.waiters.length > 0, 'a waiter while the worker finishes');
+  for (const [pid, group] of run.detached.waiters) assert.notEqual(group, run.detached.group, `${pid} is out of the job's process group`);
+  assert.match(run.log, /dialog-watch run=39116987843 job=e2e drain: stopped the runner \(its job ended while it was held\); it waits for the episode to close/);
+  // The hook returns only once the worker is watched, so even a worker that exits the moment the hook closes is seen.
+  const abrupt = await jobEnd({ finishing: 0 });
+  assert.deepEqual(abrupt.stops.map((stop) => stop.call), [`kill SIGTERM gui/${uid}/${runnerAgent}`], abrupt.log);
+});
+
+test('the job-end decision is the marker at the worker\'s exit: an episode opening while the job finishes stops it, one closing does not', macOnly, async () => {
+  const free = await jobEnd({ held: false });
+  assert.deepEqual([free.stops, free.log, free.errors], [[], '', ''], 'nothing held: nothing stopped, nothing logged');
+  const opened = await jobEnd({ held: false, whileFinishing: (marker) => writeFileSync(marker, 'held at …\n') });
+  assert.deepEqual(opened.stops.map((stop) => stop.call), [`kill SIGTERM gui/${uid}/${runnerAgent}`]);
+  assert.ok(opened.stops[0].at >= opened.events.reported.at);
+  const closed = await jobEnd({ whileFinishing: (marker) => unlinkSync(marker) });
+  assert.deepEqual([closed.stops, closed.log], [[], '']);
+});
+
+test('a job end that cannot be watched stops nothing and says so; the watcher\'s confirmed idle read is left to stop it', macOnly, async () => {
+  // A hook whose parent is not the runner's worker (run by hand, or by a runner that wraps its hooks).
+  const unwatched = await jobEnd({ standIn: false });
+  assert.deepEqual(unwatched.stops, []);
+  assert.match(unwatched.log, /drain: the end of this job could not be watched \(not-worker\); the next idle read stops the runner/);
+  // The wait has its deadline.
+  const slow = await jobEnd({ finishing: 3000, env: { CI_KIT_JOB_END_WAIT: '1' } });
+  assert.deepEqual(slow.stops, []);
+  assert.match(slow.log, /drain: the end of this job could not be watched \(failed \(124\)\)/);
 });

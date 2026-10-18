@@ -22,7 +22,7 @@ On every machine:
 | Labels | `self-hosted`, `macOS`, `ARM64` (what MAWS's `gate.yml` targets), `ci-kit-mac` |
 | Directory | `~/actions-runner-maws` (work directory `~/actions-runner-maws/_work`) |
 | LaunchAgent | `com.ssfskim.ci-kit.mac-runner` — RunAtLoad, KeepAlive, `ProcessType` Interactive, Aqua session only; its program is the hooks' `runner-hold.sh`, which execs the runner's `runsvc.sh` unless the dialog watcher holds the runner |
-| Hooks | `~/actions-runner-maws/ci-kit/hooks/job-started.sh` (the desktop check, then the sweep), `job-completed.sh` (copied from `mac/hooks/`) |
+| Hooks | `~/actions-runner-maws/ci-kit/hooks/job-started.sh` (the desktop check, then the sweep), `job-completed.sh` (the [drain](#the-drain)'s job end, then the sweep), copied from `mac/hooks/` |
 | Dialog watcher | `com.ssfskim.ci-kit.dialog-watch` — RunAtLoad, every 60 s, `ProcessType` Background, Aqua session only; runs the hooks' `dialog-watch.sh` ([below](#the-dialog-watcher)) |
 | Logs | `~/Library/Logs/ci-kit/mac-runner-hooks.log` (the hooks and the watcher), `mac-runner.out.log` / `.err.log` (the runner), `dialog-watch.err.log`, `~/actions-runner-maws/_diag/` |
 | State | `~/Library/Logs/ci-kit/dialog-alert.state` (the dialog episode), `runner-drained` (the watcher's hold on the runner) |
@@ -317,8 +317,8 @@ second, who opened it (the watcher, or a refused job and its run id), the source
 
 With two runners on the same labels, a machine whose hook refuses every job in seconds draws most of the queue and fails
 it, while the healthy machine is busy with one job (2026-10-17, the mini alone: 14 jobs refused in three minutes). So
-while an episode is open, the watcher holds the runner, and stops it whenever it has no job. Queued jobs then go to the
-other machine, or wait. On a single machine, the drain turns refusals into queued jobs, which run once the dialog is
+while an episode is open, the watcher holds the runner, and stops it between jobs. Queued jobs then go to the other
+machine, or wait. On a single machine, the drain turns refusals into queued jobs, which run once the dialog is
 dismissed and the episode closes.
 
 - **The hold** is the marker `~/Library/Logs/ci-kit/runner-drained`, written when the episode opens. The runner's
@@ -327,15 +327,35 @@ dismissed and the episode closes.
   cannot be looked up, behind a directory that is not searchable for instance, holds the runner too, and the wrapper
   logs why. KeepAlive, RunAtLoad and a reboot can therefore start only the waiting wrapper, never the runner. The
   wrapper execs, so launchd's `/bin/bash` stays every job's responsible process.
-- **Stopping.** While the hold is on and the runner is idle, the watcher sends the agent SIGTERM
-  (`launchctl kill SIGTERM`). `runsvc.sh` turns that into the listener's graceful stop, and KeepAlive brings back the
-  waiting wrapper.
+- **Stopping, between jobs only.** A stop is SIGTERM to the agent (`launchctl kill SIGTERM`): `runsvc.sh` turns it
+  into the listener's graceful stop, and KeepAlive brings back the waiting wrapper. A stop while a job's worker runs
+  cancels that job ("The runner has received a shutdown signal"), and the listener asks for its next job the moment a
+  worker exits. On 2026-10-18 the mini was given the next job in the second the busy one ended, and acquired it 2 s
+  later, twice in a row (09:58:58 → 09:59:00, 09:59:07 → 09:59:09), while the drain waited for its 60 s tick: both
+  were refused. So the runner is stopped at one of two moments.
+  - **When its job ends.** The job-completed hook runs inside the job's worker, as the job's last step and before the
+    worker reports the job's result, so it never stops the runner itself. It starts `dialog-watch.sh --job-end`,
+    detached from the job: its own session, outside the workspace, without the job's `RUNNER_TRACKING_ID` (the worker
+    kills what still carries it after the last step) and without the hook's output, which the worker waits on. That
+    process sees the worker exit as it happens (`runner-state.py --wait`, a kqueue), and the hook returns only once it
+    is watching (5 s at most), so even a worker that exits at once is seen. The worker reports the result to
+    GitHub before it exits, so if the marker exists then, it stops the runner at once: tens of milliseconds, against
+    the 2 s the listener takes to acquire the next job. Held or not is decided at the exit, so an episode that opens
+    while a job finishes counts; without the marker it does nothing and logs nothing.
+  - **When it is confirmed idle.** On a watcher read with the hold on and the runner idle, the watcher reads again
+    5 s later and stops the runner only if the two reads match (idle, below). Any difference waits for the next
+    read.
 - **Idle** is what `runner-state.py` reads from the kernel's executable paths of this user's processes (`proc_pidpath`,
   `bin` resolved, since a runner that updated itself runs from `bin.<version>`): the listener runs and no process is
   `~/actions-runner-maws/bin/Runner.Worker`. A command line, `argv[0]` or working directory naming that path does not
   count. A process whose path cannot be read (its file was deleted or replaced) counts as a job when the kernel still
   names it `Runner.Worker`. A read that fails or times out counts as a job too: the runner is left alone, and the
-  watcher asks again next minute.
+  watcher asks again next minute. An idle read also carries the length of the listener's newest diag log
+  (`~/actions-runner-maws/_diag/Runner_*.log`): a job the listener has just been given has no worker for its first
+  seconds, but the listener logs it at once. While it waits it logs only a token refresh about every 50 minutes,
+  which delays a stop by one read. Two matching idle reads therefore saw no job running and none given in between.
+  On 2026-10-18 at 09:59:18 the drain stopped the mini on a single idle read in the second it was given a job, and the
+  job stayed in progress on the offline runner.
 - **Releasing.** When the episode closes, the watcher removes the marker, and the wrapper starts the runner within
   5 s. A marker left while no episode is pending or open goes at the next read. The watcher writes and removes the
   marker under the episode's lock, in the same step as its read, so it never releases a runner for an episode a job
@@ -343,8 +363,12 @@ dismissed and the episode closes.
 - **An operator's runner stays the operator's.** The watcher never loads, unloads, enables or disables the runner's
   agent. A runner disabled by hand or by `install.sh --disabled` stays off, and one enabled during an episode waits for
   it to close.
-- **Known window.** The listener can take a job between the idle check and the SIGTERM. That job is stopped with the
-  runner and fails like any job that loses its runner; MAWS relaunches it as usual.
+- **What is left.** A job given to the listener in the milliseconds between the worker's exit, or the second idle read,
+  and the stop is never acquired, since the listener shuts down first, so it does not stay in progress here. A job end
+  the drain could not watch (the hook's parent is not the runner's worker, or the worker took more than 10 minutes to
+  exit) is logged, and the next confirmed idle read stops the runner. If the stop reaches the listener before it has
+  noticed the worker's exit, its line for that job in `mac-runner.out.log` says `Canceled`; GitHub keeps the result the
+  worker reported.
 - Every hold, stop, release and job left alone is a `dialog-watch … drain:` line in the hooks log. The wrapper's own
   `runner-hold:` lines are in `mac-runner.out.log`.
 

@@ -29,8 +29,10 @@ const executable = (path, body) => { writeFileSync(path, `#!/bin/bash\n${body}\n
 // A fake that hangs ignoring SIGALRM, recording its pid so a run can tell whether the deadline killed it.
 const hangs = (dir) => `trap '' ALRM\necho "$$" >> '${join(dir, 'hung-pids.txt')}'\nexec /bin/sleep 60`;
 
-// runner: what runner-state.py reports (idle, busy, stopped), or a failure of it (fail, garbage, hang). `launchctl kill
-// SIGTERM` stops an idle runner, as runsvc.sh's trap does: it reads stopped afterwards.
+// runner: what runner-state.py reports (idle, with or without its listener-log mark, busy, stopped), or a failure of it
+// (fail, garbage, hang); one line per read, the last line standing for every read after it. `launchctl kill SIGTERM`
+// stops an idle runner, as runsvc.sh's trap does: it reads stopped afterwards. The drain's second idle read follows the
+// first at once (CI_KIT_IDLE_GAP=0) unless a run says otherwise.
 export function desktop({ status = 0, afterOpen, openStatus = 0, logOutput = '', logStatus = 0, logResponses = {}, now, ghStatus = 0, logHang = false, ghHang = false, env = {}, alertToken, runner = 'idle' } = {}) {
   const dir = join(root, String(Math.random()).slice(2));
   const bin = join(dir, 'bin');
@@ -90,12 +92,14 @@ if [[ $1 == issue && $2 == create ]]; then echo https://github.com/SSFSKIM/ci-ki
   executable(join(bin, 'launchctl'), `printf '%s\\n' "$*" >> '${file('launchctl.calls')}'
 [[ $1 == "\${FAKE_LAUNCHCTL_HANG:-}" ]] && { ${hangs(dir).replace(/\n/g, '; ')}; }
 case $1 in
-  kill) [[ $(cat '${processes}') != idle ]] || echo stopped >'${processes}' ;;
+  kill) [[ $(head -1 '${processes}') != idle* ]] || echo stopped >'${processes}' ;;
   *) exit 64 ;;
 esac`);
   executable(join(bin, 'python3'), `printf '%s\\n' "$*" >> '${file('python.calls')}'
-case $(cat '${processes}') in
-  idle) echo idle ;;
+state=$(head -1 '${processes}')
+if (($(grep -c '' '${processes}') > 1)); then tail -n +2 '${processes}' >'${processes}.next'; mv '${processes}.next' '${processes}'; fi
+case $state in
+  idle*) echo "$state" ;;
   busy) echo 'busy 4242' ;;
   stopped) echo stopped ;;
   fail) exit 2 ;;
@@ -117,7 +121,7 @@ esac`);
       env: {
         PATH: `${bin}:/usr/bin:/bin`, HOME: dir,
         CI_KIT_LOG_BIN: log, CI_KIT_GH_BIN: gh, FAKE_GH_STATUS: String(ghExit), FAKE_GH_HANG: ghStall ? '1' : '0',
-        ...job, ...env, ...extraEnv,
+        CI_KIT_IDLE_GAP: '0', ...job, ...env, ...extraEnv,
       },
     });
     const elapsed = Date.now() - started;
