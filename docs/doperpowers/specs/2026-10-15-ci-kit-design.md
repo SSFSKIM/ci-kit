@@ -3438,8 +3438,10 @@ euros, jobs, and the projected month at the current rate.
     Hosted, the same step takes 38–50 s, since both browsers download there; the pool's whole job is
     still faster (317 s against 419 s).
   - Baking WebKit's libraries and browser, and MAWS's e2e fonts, would save about 30 s a run, under
-    $0.0005. The cost: about 120 MB of WebKit and GStreamer packages in an image every pool job boots,
-    and a copy of Playwright's dependency list in the Dockerfile that drifts with each Playwright bump.
+    $0.0005. The cost: about 390 MB installed for WebKit's and GStreamer's libraries (122 MB of
+    archives), plus MAWS's fonts (about 140 MB installed) and WebKit itself (a 102 MiB download, more
+    once unpacked), so well over 500 MB more in an image every pool job boots. And a copy of
+    Playwright's dependency list in the Dockerfile that drifts with each Playwright bump.
   - Nothing is half-installed either way: the runner's sudo is passwordless, so `--with-deps` installs
     whatever the image lacks.
   - Revisit if desk-web's runs grow several-fold, or its install passes about a minute.
