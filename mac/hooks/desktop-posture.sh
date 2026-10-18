@@ -72,6 +72,20 @@ if [[ ${1:-} == --screensharing ]]; then
           }
           print "  parents: " chain
         }'
+      # The job hooks' first records saw ~555 sockets and none on 5900 while ssh saw ~840 with the viewer's: which
+      # kinds are missing, and whether the process table hides root's processes (screensharingd runs as root) too.
+      printf '%s' "$sockets" | /usr/bin/awk '
+        /^(tcp|udp)[46]/ { n[$1]++; next } /^Proto|^Active/ { next } { other++ }
+        END { printf "  sockets:"; for (p in n) printf " %s %d", p, n[p]; print " other " (other + 0) }'
+      /bin/ps -A -o user=,comm= | /usr/bin/awk '
+        { all++; if ($1 == "root") root++; if ($0 ~ /screensharingd$/) sd = "yes"; if ($0 ~ /SSMenuAgent$/) menu = "yes" }
+        END { print "  processes: " (all + 0) ", root " (root + 0) ", screensharingd " (sd ? sd : "no") ", SSMenuAgent " (menu ? menu : "no") }'
+      # One whole socket table, once: the run that finds this second trigger writes it and removes the trigger.
+      full=$HOME/Library/Logs/ci-kit/posture-debug-full
+      if [[ -e $full ]] && rm -f "$full"; then
+        printf '%s\n' "$sockets" >"$HOME/Library/Logs/ci-kit/posture-debug-netstat-$(date -u +%Y%m%dT%H%M%SZ)-$$.txt"
+        echo "  wrote the whole socket table"
+      fi
       for name in PATH LANG LC_ALL SHELLOPTS BASHOPTS TMPDIR; do
         if [[ -n ${!name+set} ]]; then value=${!name}; echo "  $name=${value:0:1024}"; else echo "  $name unset"; fi
       done
