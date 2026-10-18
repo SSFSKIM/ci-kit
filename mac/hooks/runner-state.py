@@ -15,10 +15,11 @@
 # which the watcher takes as busy too.
 #
 # With --wait <pid>, it waits instead for <pid>, a job's worker, to exit (kqueue, so the exit is seen as it happens),
-# and prints exited; or gone, when <pid> had already exited; or not-worker, when <pid> is some other process. The
-# caller sets the deadline.
+# and prints exited; or gone, when <pid> had already exited; or not-worker, when <pid> is some other process. Once the
+# watch is armed, or there is nothing to watch, it writes `armed` to the ready file given, so the caller can know that
+# an exit from then on is seen. The caller sets the deadline.
 #
-# Run as python3 -I runner-state.py <runner dir> [--wait <pid>].
+# Run as python3 -I runner-state.py <runner dir> [--wait <pid> [<ready file>]].
 import ctypes
 import errno
 import os
@@ -52,20 +53,13 @@ def main():
         return True, None  # nothing about it can be read: it may be a job
 
     if len(sys.argv) > 2 and sys.argv[2] == '--wait':
-        pid = int(sys.argv[3])
-        if pid < 1:
-            return 'not-worker'
         queue = select.kqueue()
-        try:  # watch first, then check what pid is, so an exit in between is not missed
-            queue.control([select.kevent(pid, select.KQ_FILTER_PROC, select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
-                                         select.KQ_NOTE_EXIT)], 0, 0)
-        except ProcessLookupError:
-            return 'gone'
-        try:
-            if not is_worker(pid)[0]:
-                return 'not-worker'
-        except ProcessLookupError:
-            pass  # it exited after the watch began: its event is queued
+        nothing = arm(queue, int(sys.argv[3]), is_worker)
+        if len(sys.argv) > 4:
+            with open(sys.argv[4], 'w') as ready:
+                ready.write('armed\n')
+        if nothing:
+            return nothing
         queue.control(None, 1)
         return 'exited'
 
@@ -96,6 +90,22 @@ def main():
     if not logs:
         raise FileNotFoundError(errno.ENOENT, 'no Runner_*.log', diag)
     return f'idle {logs[-1]} {os.stat(os.path.join(diag, logs[-1])).st_size}'
+
+
+def arm(queue, pid, is_worker):  # watches pid's exit on queue; returns why there is nothing to wait for, or None
+    if pid < 1:
+        return 'not-worker'
+    try:  # watch first, then check what pid is, so an exit in between is not missed
+        queue.control([select.kevent(pid, select.KQ_FILTER_PROC, select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                                     select.KQ_NOTE_EXIT)], 0, 0)
+    except ProcessLookupError:
+        return 'gone'
+    try:
+        if not is_worker(pid)[0]:
+            return 'not-worker'
+    except ProcessLookupError:
+        pass  # it exited after the watch began: its event is queued
+    return None
 
 
 try:

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { appendFileSync, chmodSync, constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -569,9 +569,9 @@ child.on('close', (code) => {
   console.log(JSON.stringify({ event: 'hook closed', after: Date.now() - started, code, output }));
   setTimeout(() => { console.log(JSON.stringify({ event: 'reported', at: Date.now() })); process.exit(0); }, Number(finishing));
 });`;
-// The job-end waiters of one job: [pid, process group] of each process running `dialog-watch.sh --job-end <worker>`.
+// The job-end waiters of one job: [pid, process group] of each process running `dialog-watch.sh --job-end <worker> …`.
 const waiters = (hooksDir, worker) => spawnSync('ps', ['-axo', 'pid=,pgid=,command='], { encoding: 'utf8' }).stdout.split('\n')
-  .filter((line) => line.endsWith(` ${hooksDir}/dialog-watch.sh --job-end ${worker}`))
+  .filter((line) => line.includes(` ${hooksDir}/dialog-watch.sh --job-end ${worker} `))
   .map((line) => line.trim().split(/\s+/).slice(0, 2).map(Number));
 
 async function jobEnd({ held = true, whileFinishing = () => {}, finishing = 400, standIn = true, env = {} } = {}) {
@@ -581,7 +581,8 @@ async function jobEnd({ held = true, whileFinishing = () => {}, finishing = 400,
   const workspace = join(runner, '_work/MAWS/MAWS');
   const logs = join(home, 'Library/Logs/ci-kit');
   const fakes = join(home, 'fakes');
-  for (const dir of [installed, workspace, logs, fakes, join(runner, 'bin')]) mkdirSync(dir, { recursive: true });
+  const temp = join(home, 'tmp');
+  for (const dir of [installed, workspace, logs, fakes, temp, join(runner, 'bin')]) mkdirSync(dir, { recursive: true });
   for (const file of ['job-completed.sh', 'dialog.sh', 'dialog-watch.sh', 'runner-state.py']) copyFileSync(join(hooks, file), join(installed, file));
   const script = (path, body) => { writeFileSync(path, `#!/bin/bash\n${body}\n`); chmodSync(path, 0o755); };
   script(join(installed, 'desktop-posture.sh'), 'exit 0');
@@ -593,7 +594,7 @@ async function jobEnd({ held = true, whileFinishing = () => {}, finishing = 400,
   const worker = join(runner, 'bin/Runner.Worker');
   copyFileSync(process.execPath, worker, constants.COPYFILE_FICLONE);
   const hook = join(installed, 'job-completed.sh');
-  const jobEnv = { HOME: home, PATH: `${fakes}:/usr/bin:/bin`, RUNNER_TRACKING_ID: 'github_0f3d', GITHUB_RUN_ID: '39116987843', GITHUB_JOB: 'e2e', ...env };
+  const jobEnv = { HOME: home, TMPDIR: temp, PATH: `${fakes}:/usr/bin:/bin`, RUNNER_TRACKING_ID: 'github_0f3d', GITHUB_RUN_ID: '39116987843', GITHUB_JOB: 'e2e', ...env };
   const job = standIn
     ? spawn(worker, ['-e', standInWorker, hook, workspace, String(finishing)], { stdio: ['ignore', 'pipe', 'inherit'], env: jobEnv })
     : spawn(process.execPath, ['-e', standInWorker, hook, workspace, String(finishing)], { stdio: ['ignore', 'pipe', 'inherit'], env: jobEnv });
@@ -625,7 +626,8 @@ async function jobEnd({ held = true, whileFinishing = () => {}, finishing = 400,
       const [at, call, tracking, cwd] = line.split('|');
       return { at: Number(at), call, tracking, cwd };
     }) : [];
-    return { events, detached, log, stops, errors: existsSync(join(logs, 'dialog-watch.err.log')) ? readFileSync(join(logs, 'dialog-watch.err.log'), 'utf8') : '' };
+    const errors = existsSync(join(logs, 'dialog-watch.err.log')) ? readFileSync(join(logs, 'dialog-watch.err.log'), 'utf8') : '';
+    return { events, detached, log, stops, errors, leftovers: readdirSync(temp) };
   } finally {
     job.kill('SIGKILL');
     rmSync(home, { recursive: true, force: true });
@@ -635,7 +637,8 @@ async function jobEnd({ held = true, whileFinishing = () => {}, finishing = 400,
 test('a held runner is stopped when its job ends: after the worker reports and exits, before the next job', macOnly, async () => {
   const run = await jobEnd();
   assert.equal(run.events['hook closed'].code, 0, run.events['hook closed'].output);
-  assert.ok(run.events['hook closed'].after < 3000, `the hook neither waits for the job's end nor leaves its output open (${run.events['hook closed'].after} ms)`);
+  assert.ok(run.events['hook closed'].after < 6000, `the hook neither waits for the job's end nor leaves its output open (${run.events['hook closed'].after} ms)`);
+  assert.deepEqual(run.leftovers, [], 'the ready file is gone');
   assert.deepEqual(run.stops.map((stop) => stop.call), [`kill SIGTERM gui/${uid}/${runnerAgent}`], run.log + run.errors);
   const [stop] = run.stops;
   const reported = run.events.reported.at;
@@ -647,6 +650,9 @@ test('a held runner is stopped when its job ends: after the worker reports and e
   assert.ok(run.detached.waiters.length > 0, 'a waiter while the worker finishes');
   for (const [pid, group] of run.detached.waiters) assert.notEqual(group, run.detached.group, `${pid} is out of the job's process group`);
   assert.match(run.log, /dialog-watch run=39116987843 job=e2e drain: stopped the runner \(its job ended while it was held\); it waits for the episode to close/);
+  // The hook returns only once the worker is watched, so even a worker that exits the moment the hook closes is seen.
+  const abrupt = await jobEnd({ finishing: 0 });
+  assert.deepEqual(abrupt.stops.map((stop) => stop.call), [`kill SIGTERM gui/${uid}/${runnerAgent}`], abrupt.log);
 });
 
 test('the job-end decision is the marker at the worker\'s exit: an episode opening while the job finishes stops it, one closing does not', macOnly, async () => {

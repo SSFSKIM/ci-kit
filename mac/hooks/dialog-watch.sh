@@ -12,7 +12,8 @@
 #   jobs: when its job ends, or once it is confirmed idle. Queued jobs then go to another Mac or wait instead of each
 #   being refused here in seconds. The episode's close releases it.
 #
-# `dialog-watch.sh --job-end <pid>` is the drain at one job's end, started by job-completed.sh (job_end below).
+# `dialog-watch.sh --job-end <pid> [<ready file>]` is the drain at one job's end, started by job-completed.sh (job_end
+# below).
 #
 # Every external call has a deadline. Nothing here clicks, types or dismisses anything.
 set -uo pipefail
@@ -151,13 +152,15 @@ stop_idle() { # outside the lock: only the watcher closes an episode, so the hol
   esac
 }
 # The drain at a job's end. job-completed.sh, which runs inside the job's worker before the worker reports the job's
-# result, starts this detached, with its parent: the worker. The worker reports the result and then exits, and this
-# sees the exit as it happens (runner-state.py --wait). If the runner is held then, it is stopped at once: the listener
+# result, starts this detached, with its parent: the worker, and a ready file it waits on until the watch is armed, so
+# the worker cannot exit unseen. The worker reports the result and then exits, and this sees the exit as it happens
+# (runner-state.py --wait). If the runner is held then, it is stopped at once: the listener
 # shuts down well before it can acquire the job it asks for next, and the job that ended has already reported. Held or
 # not is decided at the exit, so an episode that opens while the job finishes counts too.
-job_end() { # <pid of the job's worker>
+job_end() { # <pid of the job's worker> [<ready file>]
   local ended deadline=${CI_KIT_JOB_END_WAIT:-600}
-  ended=$(bounded "$deadline" python3 -I "$here/runner-state.py" "$runner_dir" --wait "$1" 2>/dev/null) || ended="failed ($?)"
+  ended=$(bounded "$deadline" python3 -I "$here/runner-state.py" "$runner_dir" --wait "$1" ${2:+"$2"} 2>/dev/null) ||
+    ended="failed ($?)"
   [[ -e $drain_marker ]] || return 0
   case $ended in
     exited) stop_runner "its job ended while it was held" ;;
@@ -165,7 +168,7 @@ job_end() { # <pid of the job's worker>
   esac
 }
 if [[ ${1:-} == --job-end ]]; then
-  job_end "${2:-0}"
+  job_end "${2:-0}" ${3:+"$3"}
   exit 0
 fi
 

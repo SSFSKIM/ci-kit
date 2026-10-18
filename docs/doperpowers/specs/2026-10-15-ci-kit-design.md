@@ -3494,7 +3494,9 @@ euros, jobs, and the projected month at the current rate.
 - **Decision (ci-kit#46):** the drain stops a held runner at its job's end, from the worker's exit,
   and stops an idle one only on two matching reads.
   - **At a job's end.** The job-completed hook leaves a detached process that waits for the worker's
-    exit (kqueue) and stops the runner if the marker exists then. The worker has reported by then, and
+    exit (kqueue) and stops the runner if the marker exists then. The hook returns once that watch is
+    armed (5 s at most): under a full test run the waiter once started after a short-lived worker had
+    exited, and nothing else orders the two. The worker has reported by then, and
     the stop reaches the listener in tens of milliseconds, against about 2 s to acquire its next job.
   - **Considered and rejected:** stopping from the hook itself, which cancels the job it runs in; a
     short watcher poll while a job runs, which still lands after the listener was given a job; and

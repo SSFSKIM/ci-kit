@@ -337,7 +337,8 @@ dismissed and the episode closes.
     worker reports the job's result, so it never stops the runner itself. It starts `dialog-watch.sh --job-end`,
     detached from the job: its own session, outside the workspace, without the job's `RUNNER_TRACKING_ID` (the worker
     kills what still carries it after the last step) and without the hook's output, which the worker waits on. That
-    process sees the worker exit as it happens (`runner-state.py --wait`, a kqueue). The worker reports the result to
+    process sees the worker exit as it happens (`runner-state.py --wait`, a kqueue), and the hook returns only once it
+    is watching (5 s at most), so even a worker that exits at once is seen. The worker reports the result to
     GitHub before it exits, so if the marker exists then, it stops the runner at once: tens of milliseconds, against
     the 2 s the listener takes to acquire the next job. Held or not is decided at the exit, so an episode that opens
     while a job finishes counts; without the marker it does nothing and logs nothing.
