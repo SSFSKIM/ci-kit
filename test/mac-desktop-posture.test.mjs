@@ -99,7 +99,7 @@ ${hang ? `trap '' ALRM\necho $$ > '${join(dir, 'helper-pid')}'\nexec /bin/sleep 
     }
     return { ...result, elapsed: Date.now() - started, survivors, observed, log: !logFailure && existsSync(log) ? readFileSync(log, 'utf8') : '' };
   }
-  return { run, runPosture: (phase = 'end') => run(phase, 0, true), front };
+  return { run, runPosture: (phase = 'end') => run(phase, 0, true), front, home: dir };
 }
 
 const posture = (stdout) => stdout.split('\n').filter((line) => line.startsWith('ci-kit desktop ('));
@@ -240,6 +240,65 @@ test('failed or unrecognized remote reads are unknown rather than a clean deskto
     assert.equal(run.status, 0, run.stderr);
     assert.match(run.stdout, /remote=unknown computeruse=none$/m);
   }
+});
+
+test('the Screen Sharing debug record (#50) is written only while its trigger exists and never changes the read', () => {
+  const viewer = tcp('100.92.238.1.5900', '100.110.27.36.64359', 'ESTABLISHED');
+  const ephemeral = 'tcp4 0 0 127.0.0.1.8641 127.0.0.1.59049 ESTABLISHED';
+  const header = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ run=123456 job=e2e --screensharing: printed (\S+), exit 0$/gm;
+  for (const [options, remote, netstat] of [
+    [{ connections: `${viewer}${ephemeral}\n` }, 'screensharing', 'exit 0, 3 lines, 1 on ports 5900-5909'],
+    [{ connections: viewer, netStatus: 1 }, 'unknown', 'exit 1, 2 lines, 1 on ports 5900-5909'],
+    [{}, 'none', 'exit 0, 1 lines, 0 on ports 5900-5909'],
+  ]) {
+    const job = fixture(options);
+    const logs = join(job.home, 'Library/Logs/ci-kit');
+    const trigger = join(logs, 'posture-debug');
+    const record = join(logs, 'posture-debug.log');
+    const off = job.runPosture();
+    assert.equal(off.status, 0, off.stderr);
+    assert.match(posture(off.stdout)[0], new RegExp(` remote=${remote} `));
+    assert.equal(existsSync(record), false);
+    writeFileSync(trigger, '');
+    const on = job.runPosture();
+    assert.equal(on.status, 0, on.stderr);
+    assert.deepEqual(posture(on.stdout), posture(off.stdout));
+    const text = readFileSync(record, 'utf8');
+    assert.deepEqual([...text.matchAll(header)].map((match) => match[1]), [remote]);
+    assert.ok(text.includes(`\n  netstat: ${netstat}\n`), text);
+    if (options.connections) assert.ok(text.includes(`\n    ${viewer.split('\n')[1]}\n`), text);
+    assert.equal(text.includes(ephemeral), false);
+    rmSync(trigger);
+    assert.equal(job.runPosture().status, 0);
+    assert.equal(readFileSync(record, 'utf8'), text);
+  }
+
+  // The rest of the record: the uid, the parent chain from the probe's supervisor up to pid 1, six variables by name,
+  // and where the reads' tools resolve. Many matching sockets still keep it to a few KB.
+  const busy = Array.from({ length: 200 }, (_, i) => `tcp4 0 0 10.0.0.1.5900 10.0.0.2.${50000 + i} ESTABLISHED\n`).join('');
+  const job = fixture({ connections: `${tcp('*.5900', '*.*', 'LISTEN')}${busy}` });
+  mkdirSync(join(job.home, 'Library/Logs/ci-kit'), { recursive: true });
+  writeFileSync(join(job.home, 'Library/Logs/ci-kit/posture-debug'), '');
+  const run = job.runPosture();
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /remote=screensharing /);
+  const text = readFileSync(join(job.home, 'Library/Logs/ci-kit/posture-debug.log'), 'utf8');
+  assert.ok(text.length < 6 * 1024, `record is ${text.length} bytes`);
+  assert.ok(text.includes('\n  netstat: exit 0, 202 lines, 201 on ports 5900-5909\n'), text);
+  assert.equal(text.split('\n').filter((line) => line.startsWith('    tcp4 ')).length, 30);
+  assert.match(text, new RegExp(`\\n  uid ${process.getuid()}, pid \\d+, ppid \\d+\\n`));
+  assert.match(text, /\n {2}parents: \d+ \S*perl < \d+ \S*bash < .* < 1 \S+\n/);
+  assert.ok(text.includes(`\n  PATH=${join(job.home, 'bin')}:/usr/bin:/bin\n  LANG unset\n  LC_ALL unset\n`), text);
+  assert.match(text, /\n {2}SHELLOPTS=\S*nounset:pipefail\n {2}BASHOPTS[= ].*\n {2}TMPDIR unset\n/);
+  assert.ok(text.endsWith(`  command -v netstat: ${join(job.home, 'bin/netstat')}\n  command -v awk: /usr/bin/awk\n  command -v perl: /usr/bin/perl\n`), text);
+
+  // A record that cannot be written is skipped, and the read is the same.
+  const blocked = fixture({ connections: viewer });
+  mkdirSync(join(blocked.home, 'Library/Logs/ci-kit/posture-debug.log'), { recursive: true });
+  writeFileSync(join(blocked.home, 'Library/Logs/ci-kit/posture-debug'), '');
+  const unwritable = blocked.runPosture();
+  assert.equal(unwritable.status, 0, unwritable.stderr);
+  assert.match(unwritable.stdout, /remote=screensharing computeruse=none$/m);
 });
 
 test('failed or hanging frontmost reads are unknown without blocking the other fields or the job', () => {
