@@ -219,6 +219,19 @@ prove viewer liveness. `none` means no observed default-port transport, not cove
 paths or other remote-control products. The MacBook's macOS 26 socket layout and absent-session case were checked
 read-only; active TCP/UDP cases are covered by fixtures, not a live sharing session.
 
+**A debug record for the Screen Sharing read** exists for [#50](https://github.com/SSFSKIM/ci-kit/issues/50): job
+hooks on the mini read `remote=none` with a viewer attached, while the same read gives `screensharing` from ssh and
+from launchd agents. While `~/Library/Logs/ci-kit/posture-debug` exists, every Screen Sharing read appends a record to
+`~/Library/Logs/ci-kit/posture-debug.log`: what it printed, netstat's exit status, line count and sockets on ports
+5900–5909, the uid and parent chain, `PATH`, `LANG`, `LC_ALL`, `SHELLOPTS`, `BASHOPTS` and `TMPDIR`, and where
+`netstat`, `awk` and `perl` resolve. A record is a few KB, written inside the read's deadline; a failed write is
+skipped, and the read is the same either way. It is off by default:
+
+```bash
+ssh mini 'touch ~/Library/Logs/ci-kit/posture-debug'   # on: each job's start and end reads add a record
+ssh mini 'rm -f ~/Library/Logs/ci-kit/posture-debug'   # off
+```
+
 The five posture reads — frontmost, display, Parsec, Screen Sharing and computer use — each have an independent,
 unconditional 1 s Perl-supervisor deadline, which kills and reaps a hanging probe even if it ignores SIGALRM.
 Supervision covers the direct child before it has established its process group, as well as the group's descendants.
