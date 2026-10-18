@@ -107,6 +107,9 @@ How to see it working: §Acceptance. The shortest proofs are:
 - [x] (2026-10-16 18:55Z) M9 — Acceptance: A1–A13 walked, Outcomes written, and `v1` moved to the
   final main. Handed to CI-opt as residue: the full-day 10-17 figures (MAWS hosted minutes, the
   mini's queue waits, the first GCE daily ledger line).
+  - [x] (2026-10-18 00:50Z) Residue 1–4 measured for UTC 10-17: GCE $0.99 (month $29.61), MAWS
+    hosted 167 min ($0.55, month about $16.6), total about $46 a month against $50; unit setup median 30 s, so
+    the bake stays weekly; the mini's waits median 30.6 min, driven by the landings (Outcomes, Cost).
   - [x] (2026-10-16 12:30Z) A1–A12 walk: all PASS except A12's budget fit. A7 passes with the
     accepted scheduled-cadence deviation. A2's red and concurrency cases ran on cua today.
     `npm test` 344/344. Still open: MAWS hosted minutes and mini queue waits for UTC 10-17; A13;
@@ -3447,7 +3450,7 @@ euros, jobs, and the projected month at the current rate.
   - cua and doperpowers run their PR checks on GitHub-hosted runners through `gates.yml@v1` (cua#143, doperpowers#198).
   - MAWS's class 1a (static, unit, probes) runs on GCE spot from 18:39Z on 10-16.
   - MAWS's unit:darwin and its 27 e2e groups run on the mini (`GATE_E2E_RUNNER=macos`, maws-fe DL 45).
-  - Only `plan` and `warm` still run hosted.
+  - Only `plan` (on `ubuntu-slim`) and Linux-lane `e2e:desk-web` runs still run hosted; `warm` is gone.
 - **A1–A13 pass.** The exceptions are below.
 
 **Acceptance exceptions and open items.**
@@ -3461,19 +3464,37 @@ euros, jobs, and the projected month at the current rate.
   - The sandbox's A13 runs: 48 allocations at about $0.002 each.
   - MAWS's first GCE gate (run 38949019226) cost $0.0172: probes $0.0019, static $0.0045, unit
     $0.0108.
-- **Projection.** M7 measured per-job VMs at about $41 a month warm, at MAWS's 116 gates a day.
-  - PR #20 cuts about 85 s of guest shutdown from every job VM, so that figure is now an upper bound.
-  - Add the mini at no cost and hosted `plan`/`warm`. The month comes to about $45–50 once maws-fe drops `warm` and moves `plan` off paid hosted minutes. Without that it is about $120, because of hosted minutes.
-  - **Correct the projection** with the first full GCE day of ledger rows (10-17), which CI-opt has as residue.
-- **MAWS hosted minutes.**
-  - From the flip at 10:04Z to 17:35Z on 10-16: 140 billable minutes.
-    - `plan`: 67 jobs, 67 min. The 1-minute minimum makes each run cost 1 min.
-    - `warm`: 56 jobs, 58 min.
-    - `e2e:desk-web`: 3 jobs, 15 min.
-  - About 450 min a day, roughly $2.7 a day or $80 a month, against the owner's ~$15 a month budget.
-  - CI-opt is taking two levers to maws-fe: drop `warm`, which has no hosted consumer left, and move `plan` to `ubuntu-slim` or a light second runner.
-  - The full-day 10-17 figure is CI-opt's residue.
-- **Mini queue waits.** From the flip to 17:35Z: 70 jobs, median 0.1 min, p90 2.0, max 3.6. A full class-1b gate holds the mini for about 45 min of job time, roughly 30 full gates a day at one job at a time. maws-fe owns the scoping lever. If waits stay above 30 min, a second Mac goes to the owner.
+- **Measured month, from the full UTC day 10-17** (measured 10-18 00:43Z; this replaces the earlier estimate of
+  about $41 GCE plus hosted minutes, $45–120 a month):
+  | | 10-17 | month at that rate |
+  |---|---|---|
+  | GCE spot (ledger daily line: 174 VMs, 57,445 VM-seconds, all spot) | $0.99 | $29.61 |
+  | MAWS hosted: `plan` 112 min on `ubuntu-slim` at $0.002 | $0.22 | $6.7 |
+  | MAWS hosted: `e2e:desk-web` 55 min on `ubuntu-24.04` at $0.006 | $0.33 | $9.9 |
+  | the mini, cua and doperpowers (public, hosted free) | $0 | $0 |
+  | **total** | **$1.54** | **about $46**, against the ~$50 budget |
+  - Hosted is at list price, before Pro's 3,000 included minutes. Those ran out on 10-15, so they come back only with
+    the next billing cycle; until then every MAWS hosted minute is paid.
+  - `warm` is gone (no `warm` job on 10-17), and `plan` runs on `ubuntu-slim` (job labels), so both hosted levers
+    landed.
+  - On 10-16, from the flip at 10:04Z to 17:35Z, hosted was 140 billable minutes (`plan` 67, `warm` 58,
+    `e2e:desk-web` 15), about $80 a month at the 2-core rate.
+- **Bake cadence stays weekly.** On 10-17, 57 `unit` jobs on GCE spent a median of 30 s (p90 32, max 48) in checkout
+  plus setup, well under the 1.5 min that would have made the bake daily.
+- **Mini queue waits on 10-17.** 449 jobs waited a median of 30.6 min (p90 69.5, max 135.2); the mini was busy 798 of
+  1,440 minutes. The waits follow the landings, not the day:
+  | jobs created (UTC) | jobs | median wait | p90 | busy min |
+  |---|---|---|---|---|
+  | 00–06 | 201 | 30.2 | 69.8 | 339 |
+  | 06–12 | 187 | 40.1 | 70.8 | 266 |
+  | 12–18 | 38 | 20.7 | 45.3 | 89 |
+  | 18–24 | 23 | 4.4 | 13.3 | 104 |
+  - The mini was blocked 20:06:43–20:18:45Z by a keychain dialog after a securityd crash; no job was refused,
+    because MAWS's children held their runs.
+  - On 10-16 the first 70 jobs waited a median of 0.1 min. The levers since are maws-fe's: one full set per child
+    (MAWS DL 59), `default` running only its own specs (DL 60, about 8 min less per full set), and relaunching only
+    refused or failed groups. P3-HD's two connectors groups add about 16 min per full set (DL 63). The owner
+    decided on 10-17 to add a second Mac; provisioning is in progress (`docs/mac-lane.md`, "Adding a Mac").
 
 **A9.** Passed (run 38868739039). Confirmed after GATE_RUNNER flipped (run 38884821068):
 - vitest `--maxWorkers=8` on cores 8–15 of a 16-vCPU host;
