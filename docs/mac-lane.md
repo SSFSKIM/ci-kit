@@ -283,6 +283,60 @@ ssh mini 'pgrep -fl actions-runner-maws/_work'   # expect no output after a job
 Without `--dry-run`, a sweep by hand kills what it lists; it refuses while a job runs, since the job's own processes
 would be its strays.
 
+## The measured-job guard
+
+A timing measurement taken while the desktop was not the calibrated one is void. On 2026-10-18 MAWS lost two measured
+sets on the mini: one to another session's parallel renders, which held the 1-minute load at 15 and more, and one to a
+Parsec viewer, which switched the display from @2x to @1x. Until then a person watched the mini and sent the go by
+hand. The guard is the action `SSFSKIM/ci-kit/mac/settle@v1`, the first step of a job that is measured; which jobs
+those are is the calling repository's to say (MAWS lists its groups in `gate.yml`). It is a step, not part of the
+job-started hook, because the hook cannot tell one matrix entry from another: `GITHUB_JOB` is `e2e` for every group.
+
+```yaml
+- uses: SSFSKIM/ci-kit/mac/settle@v1   # every input has the default below
+```
+
+| Input | Default | The job is released only while |
+|---|---|---|
+| `load` | `5` | the 1-minute load average is under it (two decimals at most) |
+| `display` | `@2x` | the main display is at that scale |
+| `remote` | `none` | no Parsec viewer is connected and `screensharingd` is not running |
+| `computeruse` | `none` | no computer-use process runs |
+| `bound` | `15` | minutes: the job is refused once the next read would come after them |
+
+`any` leaves a condition unchecked. A malformed input fails the step with `ci-kit settle: <input> takes …` (exit 2),
+never in the refusal's shape.
+
+**Settled** is two reads 30 s apart that each meet every condition, so a quiet desktop releases the job 30 s in. A read
+is `desktop-posture.sh --read`: the posture line's six reads under their 1 s deadlines, printed without the line's label
+and logged nowhere. A read that fails is `unknown`, and unknown meets no condition: an unreadable load holds the job as
+a high one does.
+
+**Where the reads come from.** The guard runs `desktop-posture.sh` from the action's own checkout
+(`_work/_actions/SSFSKIM/ci-kit/v1/`), not from the installed hooks: the guard and the reads it judges move together when
+`v1` moves, and a tag move never meets an installed hook set older than a read it calls. What a checkout lacks is the
+compiled display helper, which `install.sh` builds into the runner's hooks. The guard takes `cursor-park` from the
+directory of `ACTIONS_RUNNER_HOOK_JOB_STARTED`, which the runner's `.env` gives every job, else from
+`~/actions-runner-maws/ci-kit/hooks`, and hands it to the posture script as `CI_KIT_CURSOR_PARK`. Without it `display`
+reads `unknown` and no job settles, which the refusal names.
+
+**One line either way**, in the job's log and in the hooks log as a `settle` line (`<time> settle run=<id> job=<job>
+<line>`): how long the job waited, the posture at the first read, and the posture at release or at refusal.
+
+```
+ci-kit settle: settled in 90 s; start: frontmost=Terminal display=2560x1440@2x remote=none load=7.20/6.10/5.02 computeruse=none; release: frontmost=Terminal display=2560x1440@2x remote=none load=3.10/5.20/4.90 computeruse=none
+ci-kit: the mini did not settle for a measured job within 15 min (display @1x); waited 900 s; start: frontmost=Terminal display=2560x1440@1x remote=parsec load=2.10/2.00/1.90 computeruse=none; refusal: frontmost=Terminal display=2560x1440@1x remote=none load=1.20/1.50/1.70 computeruse=none — fix that there and rerun
+```
+
+**At the bound the job is refused** as the job-started check refuses one, with a `ci-kit: … rerun` line, so MAWS's
+`scripts/ci-gate.sh` counts the job as refused by the mini, not red, and puts it in its relaunch line. The parenthesis
+names each condition the last read did not meet, with what it read: `load 7.20`, `display @1x`, `parsec`,
+`screensharingd`, `computeruse <names>`, or `<condition> unknown`; when the last read met them all and the one before it
+did not, it names that one's. A cause that persists, a display left at @1x or a viewer left connected, then reads the
+same on every refused job, and is fixed on the machine. No read starts after the bound: a refused job has waited at most
+the bound and one read. The wait counts toward the job's `timeout-minutes`, which the caller sizes for the bound and the
+measured run together.
+
 ## The dialog watcher
 
 The job hook sees a dialog only when a job starts. On 2026-10-17 securityd crashed, and a SecurityAgent keychain-unlock

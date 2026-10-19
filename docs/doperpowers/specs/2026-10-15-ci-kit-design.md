@@ -2178,6 +2178,12 @@ euros, jobs, and the projected month at the current rate.
 - A dialog alert's title is `ci-kit alert: <machine>: <dialog> since <YYYY-MM-DDTHH:MMZ>`, plus ` (<source>)` when
   attribution found one. MAWS reads open alerts with `^ci-kit alert: ([a-z0-9-]+): (\S+) since (\S+)`. A refusal line
   carries the same `since` time, and still starts with `ci-kit: ` and ends with `rerun`.
+- The measured-job guard, the action `mac/settle` (`uses: SSFSKIM/ci-kit/mac/settle@v1`, #55), a measured job's first
+  step: inputs `load` (5), `display` (`@2x`), `remote` (`none`), `computeruse` (`none`), each `any` to leave it
+  unchecked, and `bound` (15 minutes). It releases the job on two reads 30 s apart that each meet every condition, read
+  by `mac/hooks/desktop-posture.sh --read` from the action's checkout with the installed `cursor-park`. At the bound its
+  line starts with `ci-kit: ` and ends with `rerun`, like the job hook's refusals, and names each condition the last
+  read did not meet; settled or refused, one `settle` line goes to the job's log and the hooks log.
 
 **I11 — The janitor.**
 
