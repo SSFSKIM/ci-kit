@@ -180,8 +180,8 @@ whoever is using the machine's desktop when a job starts.
 cleanup can hide a leaked app, `desktop-posture.sh` prints one line to stdout and the hooks log:
 
 ```text
-ci-kit desktop (start): frontmost=Terminal display=2560x1440@2x remote=parsec computeruse=none
-ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none computeruse=SkyComputerUseService,cua-sandbox-golden
+ci-kit desktop (start): frontmost=Terminal display=2560x1440@2x remote=parsec load=3.12/2.87/2.51 computeruse=none
+ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none load=15.70/11.06/6.38 computeruse=SkyComputerUseService,cua-sandbox-golden
 ```
 
 - `frontmost`: the same localized `lsappinfo` name the desktop check reads, through its read-only `--frontmost` mode.
@@ -199,6 +199,13 @@ ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none c
   UDP. `SSMenuAgent`, which keeps running after a session, and this Mac's own outgoing viewer (`Screen Sharing`) are
   not counted.
   Failed, timed-out or unrecognized reads give `unknown` unless another signal already establishes a remote connection.
+- `load`: the 1, 5 and 15 minute load averages, `/`-separated, each exactly as `sysctl -n vm.loadavg` prints it (two
+  decimals). It lets a reader tell a red caused by the machine's load from the branch's own: on 2026-10-18 three of
+  MAWS's timing-measured groups went red on the mini at a 1-minute load of 15.7–17.3, from another session's parallel
+  renders, and that load had to be rebuilt from the other session's transcript
+  ([#54](https://github.com/SSFSKIM/ci-kit/issues/54)). At `end`, the 5 and 15 minute figures also carry the load
+  during the job. A failed, timed-out or unrecognized read gives `unknown`. The line does not name the processes behind
+  the load.
 - `computeruse`: the distinct names of running computer-use processes, comma-separated in byte order (a list too long
   for the line ends in `+N more`), or `none`. A name counts when it is `SkyComputerUseService` (Codex and ChatGPT
   computer use; cua drives the desktop through it too), contains `CUAService`, or starts with `cua` (`cua-driver`,
@@ -228,13 +235,13 @@ proven), netstat exits 0 without its `Active Internet connections` section, and 
 attached ([#50](https://github.com/SSFSKIM/ci-kit/issues/50)). The process table is not filtered there: a job's `ps`
 lists root's processes, `screensharingd` among them.
 
-The five posture reads — frontmost, display, Parsec, Screen Sharing and computer use — each have an independent,
+The six posture reads — frontmost, display, Parsec, Screen Sharing, load and computer use — each have an independent,
 unconditional 1 s Perl-supervisor deadline, which kills and reaps a hanging probe even if it ignores SIGALRM.
 Supervision covers the direct child before it has established its process group, as well as the group's descendants.
 Results are combined only afterward, so a positive Parsec read survives a hanging Screen Sharing read and vice versa.
-All five timing out takes about 5 s plus process overhead. Local positive fixtures scale the supervisor's clock only
+All six timing out takes about 6 s plus process overhead. Local positive fixtures scale the supervisor's clock only
 inside their test processes so scheduling load does not look like a failed read; hanging fakes sleep far beyond it. The
-all-five-hung and delayed-process-group regressions use the real, unscaled clock. Fixtures also cover interleaved
+all-six-hung and delayed-process-group regressions use the real, unscaled clock. Fixtures also cover interleaved
 Parsec clients and both positive/hanging directions with and without SIGALRM ignored, including strict-shell runs.
 The probes only read state: no GUI actions, AppleScript, new permissions or remote-session changes, and no signal to
 any process the computer-use read finds. Posture and hooks-log failures never affect the sweep's or the job's outcome.
@@ -539,7 +546,7 @@ ssh $host 'launchctl print gui/$(id -u)/com.ssfskim.ci-kit.dialog-watch | grep -
 
 ```bash
 ssh $host "grep -m1 'ci-kit desktop (start)' ~/Library/Logs/ci-kit/mac-runner-hooks.log"
-#   expect: … ci-kit desktop (start): frontmost=Terminal display=2560x1440@2x remote=… computeruse=…
+#   expect: … ci-kit desktop (start): frontmost=Terminal display=2560x1440@2x remote=… load=… computeruse=…
 ```
 
 (`remote=screensharing` while the owner's VNC session is connected. The mini, whose locale is Korean, shows Terminal as

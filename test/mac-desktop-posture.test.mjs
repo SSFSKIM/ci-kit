@@ -42,8 +42,8 @@ const jobNetstat = [
   '',
 ].join('\n');
 
-// Real hook wrappers and desktop reads; only the desktop, cursor, process-table and process-sweeping boundaries are faked.
-function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, missing = false, parsec, parsecHang = false, logFailure = false, frontStatus = 0, frontHang = false, processes = idle, psStatus = 0, psHang = false, ignoreAlarm = false, clock = scaled, forkDelay = 0 } = {}) {
+// Real hook wrappers and desktop reads; only the desktop, cursor, process-table, load and process-sweeping boundaries are faked.
+function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, missing = false, parsec, parsecHang = false, logFailure = false, frontStatus = 0, frontHang = false, processes = idle, psStatus = 0, psHang = false, loadavg = '{ 1.52 1.37 1.29 }\n', loadStatus = 0, loadHang = false, ignoreAlarm = false, clock = scaled, forkDelay = 0 } = {}) {
   const dir = mkdtempSync(join(root, 'job-'));
   const bin = join(dir, 'bin');
   const installed = join(dir, 'hooks');
@@ -64,6 +64,9 @@ function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, mi
   executable(join(bin, 'netstat'), `[[ $* == -an ]] || exit 92\nIFS= read -r -d '' replay < '${join(dir, 'netstat')}'; printf '%s' "$replay"; exit 0`);
   writeFileSync(join(dir, 'processes'), processes);
   executable(join(bin, 'ps'), `[[ $* == '-axco pid=,comm=' ]] || exit 93\n${psHang ? hangingRead('ps') : ''}\nIFS= read -r -d '' replay < '${join(dir, 'processes')}'; printf '%s' "$replay"; exit ${psStatus}`);
+  // What macOS's sysctl prints for vm.loadavg: the 1, 5 and 15 minute averages, each %.2f, in braces.
+  writeFileSync(join(dir, 'loadavg'), loadavg);
+  executable(join(bin, 'sysctl'), `[[ $* == '-n vm.loadavg' ]] || exit 94\n${loadHang ? hangingRead('sysctl') : ''}\nIFS= read -r -d '' replay < '${join(dir, 'loadavg')}'; printf '%s' "$replay"; exit ${loadStatus}`);
   if (parsecHang) executable(join(bin, 'awk'), `if [[ \${!#} == '${join(dir, '.parsec/log.txt')}' ]]; then\n${hangingRead('parsec')}\nfi\nexec /usr/bin/awk "$@"`);
   executable(join(bin, 'node'), 'echo "sweep $*"');
   if (!missing) executable(join(installed, 'cursor-park'), `
@@ -103,7 +106,7 @@ ${hang ? `trap '' ALRM\necho $$ > '${join(dir, 'helper-pid')}'\nexec /bin/sleep 
     const survivors = [];
     const observed = [];
     const recorded = [];
-    for (const source of ['helper', 'front', 'parsec', 'ps']) {
+    for (const source of ['helper', 'front', 'parsec', 'ps', 'sysctl']) {
       const pidFile = join(dir, `${source}-pid`);
       if (!existsSync(pidFile)) continue;
       observed.push(source);
@@ -125,14 +128,14 @@ test('start reports the desktop after the cursor work; end observes drift withou
   const job = fixture();
   const start = job.run();
   assert.equal(start.status, 0, start.stderr);
-  assert.deepEqual(posture(start.stdout), ['ci-kit desktop (start): frontmost=Terminal display=2560x1440@2x remote=none computeruse=none']);
+  assert.deepEqual(posture(start.stdout), ['ci-kit desktop (start): frontmost=Terminal display=2560x1440@2x remote=none load=1.52/1.37/1.29 computeruse=none']);
   assert.ok(start.stdout.indexOf('cursor-parked') < start.stdout.indexOf('ci-kit desktop (start)'));
   assert.ok(start.stdout.indexOf('ci-kit desktop (start)') < start.stdout.indexOf('sweep '));
-  assert.match(start.log, /run=123456 job=e2e ci-kit desktop \(start\): frontmost=Terminal display=2560x1440@2x remote=none computeruse=none/);
+  assert.match(start.log, /run=123456 job=e2e ci-kit desktop \(start\): frontmost=Terminal display=2560x1440@2x remote=none load=1\.52\/1\.37\/1\.29 computeruse=none/);
   writeFileSync(job.front, 'Google Chrome');
   const end = job.run('end');
   assert.equal(end.status, 0, end.stderr);
-  assert.deepEqual(posture(end.stdout), ['ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@2x remote=none computeruse=none']);
+  assert.deepEqual(posture(end.stdout), ['ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@2x remote=none load=1.52/1.37/1.29 computeruse=none']);
   assert.match(end.log, /ci-kit desktop \(end\): frontmost=Google Chrome/);
 });
 
@@ -140,7 +143,7 @@ test('missing, failing and malformed display helpers leave display unknown and l
   for (const options of [{ missing: true }, { displayStatus: 2 }, { display: 'not a display' }]) {
     const run = fixture(options).run();
     assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stdout, /ci-kit desktop \(start\): frontmost=Terminal display=unknown remote=none computeruse=none/);
+    assert.match(run.stdout, /ci-kit desktop \(start\): frontmost=Terminal display=unknown remote=none load=1\.52\/1\.37\/1\.29 computeruse=none/);
     assert.match(run.stdout, /sweep .*job-started/);
   }
 });
@@ -150,7 +153,7 @@ test('a display helper ignoring SIGALRM is killed and reaped at the probe deadli
   assert.equal(run.status, 0, run.stderr);
   withinHangs(run, 1);
   assert.deepEqual(run.survivors, []);
-  assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=Terminal display=unknown remote=none computeruse=none']);
+  assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=Terminal display=unknown remote=none load=1.52/1.37/1.29 computeruse=none']);
 });
 
 const connected = '[I 2026-10-17 10:30:04] user#123 connected.';
@@ -165,7 +168,7 @@ test('Parsec uses each client’s newest host connection event, ignoring unrelat
   ]) {
     const run = fixture({ parsec }).run();
     assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stdout, new RegExp(`remote=${remote} computeruse=none$`, 'm'));
+    assert.match(run.stdout, new RegExp(`remote=${remote} load=1\\.52/1\\.37/1\\.29 computeruse=none$`, 'm'));
   }
 });
 
@@ -182,7 +185,7 @@ test('one Parsec client disconnecting does not hide another client still connect
   ]) {
     const run = fixture({ parsec }).run('end');
     assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stdout, new RegExp(`remote=${remote} computeruse=none$`, 'm'));
+    assert.match(run.stdout, new RegExp(`remote=${remote} load=1\\.52/1\\.37/1\\.29 computeruse=none$`, 'm'));
   }
 });
 
@@ -198,30 +201,66 @@ for (const ignoreAlarm of [false, true]) {
       withinHangs(run, hangs);
       assert.deepEqual(run.observed, [hangingSource]);
       assert.deepEqual(run.survivors, []);
-      assert.match(run.stdout, new RegExp(`remote=${remote} computeruse=${computeruse}$`, 'm'));
+      assert.match(run.stdout, new RegExp(`remote=${remote} load=1\\.52/1\\.37/1\\.29 computeruse=${computeruse}$`, 'm'));
       assert.match(run.stdout, /sweep .*job-completed/);
     });
   }
 }
 
-test('all five hanging reads stay bounded and optional under bash -e -o pipefail', () => {
-  // Production's real 1 s clock, so this costs five seconds; marker files are not asserted, because under load a fake may be
+test('all six hanging reads stay bounded and optional under bash -e -o pipefail', () => {
+  // Production's real 1 s clock, so this costs six seconds; marker files are not asserted, because under load a fake may be
   // abandoned before it writes one.
-  const run = fixture({ frontHang: true, hang: true, parsecHang: true, psHang: true, ignoreAlarm: true, clock: null }).runPosture();
+  const run = fixture({ frontHang: true, hang: true, parsecHang: true, psHang: true, loadHang: true, ignoreAlarm: true, clock: null }).runPosture();
   assert.equal(run.status, 0, run.stderr);
-  withinHangs(run, 5, 1);
+  withinHangs(run, 6, 1);
   assert.deepEqual(run.survivors, []);
-  assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=unknown display=unknown remote=unknown computeruse=unknown']);
+  assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=unknown display=unknown remote=unknown load=unknown computeruse=unknown']);
 });
 
 test('a probe child held before it has its own process group is still killed at the deadline', () => {
   // Production's real 1 s clock. Each supervisor's child is held 6 s inside fork, so every alarm finds no process group to
-  // kill; a supervisor that waited for the child instead took at least 30 s over the five probes.
+  // kill; a supervisor that waited for the child instead took at least 36 s over the six probes.
   const run = fixture({ clock: null, forkDelay: 6 }).runPosture();
   assert.equal(run.status, 0, run.stderr);
-  withinHangs(run, 5, 1);
+  withinHangs(run, 6, 1);
   assert.deepEqual(run.survivors, []);
-  assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=unknown display=unknown remote=unknown computeruse=unknown']);
+  assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=unknown display=unknown remote=unknown load=unknown computeruse=unknown']);
+});
+
+test('load is the 1, 5 and 15 minute averages exactly as sysctl prints them (#54)', () => {
+  for (const [loadavg, load] of [
+    ['{ 1.52 1.37 1.29 }\n', '1.52/1.37/1.29'],
+    ['{ 0.00 0.00 0.00 }\n', '0.00/0.00/0.00'],
+    // A Mac far past its cores, as the MacBook read while this was written.
+    ['{ 157.18 184.78 176.54 }\n', '157.18/184.78/176.54'],
+  ]) {
+    const run = fixture({ loadavg }).run('end');
+    assert.equal(run.status, 0, run.stderr);
+    const line = `ci-kit desktop (end): frontmost=Terminal display=2560x1440@2x remote=none load=${load} computeruse=none`;
+    assert.deepEqual(posture(run.stdout), [line]);
+    assert.ok(run.log.includes(line));
+  }
+});
+
+test('failed, hanging or malformed load reads are unknown without touching another field or the job', () => {
+  for (const options of [
+    { loadStatus: 1 },
+    { loadavg: '' },
+    { loadavg: 'vm.loadavg: { 1.52 1.37 1.29 }\n' },
+    { loadavg: '{ 1.52 1.37 }\n' },
+    { loadavg: '{ 1.5 1.37 1.29 }\n' },
+    { loadavg: '{ 1,52 1,37 1,29 }\n' },
+    { loadavg: '{ 1.52 1.37 1.29 }\n{ 1.52 1.37 1.29 }\n' },
+    { loadHang: true },
+    { loadHang: true, ignoreAlarm: true },
+  ]) {
+    const run = fixture(options).run('end');
+    assert.equal(run.status, 0, run.stderr);
+    withinHangs(run, options.loadHang ? 1 : 0);
+    assert.deepEqual(run.survivors, []);
+    assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=Terminal display=2560x1440@2x remote=none load=unknown computeruse=none'], JSON.stringify(options));
+    assert.match(run.stdout, /sweep .*job-completed/);
+  }
 });
 
 test('Screen Sharing is screensharingd running, by its exact name, whatever the job hook’s netstat shows (#50)', () => {
@@ -259,7 +298,7 @@ test('failed or hanging frontmost reads are unknown without blocking the other f
     const run = fixture(options).run('end');
     assert.equal(run.status, 0, run.stderr);
     withinHangs(run, options.frontHang ? 1 : 0);
-    assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=unknown display=2560x1440@2x remote=none computeruse=none']);
+    assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=unknown display=2560x1440@2x remote=none load=1.52/1.37/1.29 computeruse=none']);
   }
 });
 
@@ -276,7 +315,7 @@ test('computer-use processes are named once each, in byte order, by executable n
   const processes = `${idle}  612 SkyComputerUseService\n  700 cua-sandbox-golden\n  701 cua-sandbox-golden\n  702 cua-driver\n  800 com.openai.sky.CUAService\n`;
   const run = fixture({ processes }).run('end');
   assert.equal(run.status, 0, run.stderr);
-  const line = 'ci-kit desktop (end): frontmost=Terminal display=2560x1440@2x remote=none computeruse=SkyComputerUseService,com.openai.sky.CUAService,cua-driver,cua-sandbox-golden';
+  const line = 'ci-kit desktop (end): frontmost=Terminal display=2560x1440@2x remote=none load=1.52/1.37/1.29 computeruse=SkyComputerUseService,com.openai.sky.CUAService,cua-driver,cua-sandbox-golden';
   assert.deepEqual(posture(run.stdout), [line]);
   assert.ok(run.log.includes(line));
   assert.match(run.stdout, /sweep .*job-completed/);
@@ -289,7 +328,7 @@ test('a computer-use list too long for the posture read keeps whole names and en
   assert.equal(run.status, 0, run.stderr);
   const list = `${names.slice(0, 30).join(',')},+10 more`;
   assert.equal(names.slice(0, 30).join(',').length, 479);
-  assert.deepEqual(posture(run.stdout), [`ci-kit desktop (end): frontmost=Terminal display=2560x1440@2x remote=none computeruse=${list}`]);
+  assert.deepEqual(posture(run.stdout), [`ci-kit desktop (end): frontmost=Terminal display=2560x1440@2x remote=none load=1.52/1.37/1.29 computeruse=${list}`]);
 });
 
 test('failed, hanging, empty or unrecognized process reads leave Screen Sharing and computer use unknown, nothing else', () => {
@@ -298,7 +337,7 @@ test('failed, hanging, empty or unrecognized process reads leave Screen Sharing 
     assert.equal(run.status, 0, run.stderr);
     withinHangs(run, options.psHang ? 2 : 0);
     assert.deepEqual(run.survivors, []);
-    assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=Terminal display=2560x1440@2x remote=unknown computeruse=unknown']);
+    assert.deepEqual(posture(run.stdout), ['ci-kit desktop (end): frontmost=Terminal display=2560x1440@2x remote=unknown load=1.52/1.37/1.29 computeruse=unknown']);
     assert.match(run.stdout, /sweep .*job-completed/);
   }
 });
@@ -310,6 +349,6 @@ test('a computer-use name survives an unrecognized row and another read hanging'
     assert.equal(run.status, 0, run.stderr);
     withinHangs(run, options.parsecHang ? 1 : 0);
     assert.deepEqual(run.survivors, []);
-    assert.match(run.stdout, new RegExp(`remote=${remote} computeruse=SkyComputerUseService$`, 'm'));
+    assert.match(run.stdout, new RegExp(`remote=${remote} load=1\\.52/1\\.37/1\\.29 computeruse=SkyComputerUseService$`, 'm'));
   }
 });

@@ -107,8 +107,18 @@ elif [[ $parsec == unknown || $sharing == unknown ]]; then
 else
   remote=none
 fi
+# The 1, 5 and 15 minute load averages as sysctl prints them, `{ 1.52 1.37 1.29 }` (macOS formats each %.2f), so a reader
+# can tell a load-induced red from the branch's own (#54).
+load=$(probe sysctl -n vm.loadavg) || load=unknown
+avg='([0-9]+[.][0-9]{2})'
+if [[ $load =~ ^[{]\ $avg\ $avg\ $avg\ [}]$ ]]; then
+  load=${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/${BASH_REMATCH[3]}
+else
+  load=unknown
+fi
 computeruse=$(probe /bin/bash "$0" --computeruse) || computeruse=unknown
-line="ci-kit desktop (${1:-unknown}): frontmost=${front:-unknown} display=$display remote=$remote computeruse=${computeruse:-unknown}"
+# computeruse stays last: a long list cannot push a field after it out of view.
+line="ci-kit desktop (${1:-unknown}): frontmost=${front:-unknown} display=$display remote=$remote load=$load computeruse=${computeruse:-unknown}"
 printf '%s\n' "$line"
 {
   mkdir -p "$HOME/Library/Logs/ci-kit" &&
