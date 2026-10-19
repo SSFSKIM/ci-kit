@@ -203,9 +203,10 @@ ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none l
   decimals). It lets a reader tell a red caused by the machine's load from the branch's own: on 2026-10-18 three of
   MAWS's timing-measured groups went red on the mini at a 1-minute load of 15.7–17.3, from another session's parallel
   renders, and that load had to be rebuilt from the other session's transcript
-  ([#54](https://github.com/SSFSKIM/ci-kit/issues/54)). At `end`, the 5 and 15 minute figures also carry the load
-  during the job. A failed, timed-out or unrecognized read gives `unknown`. The line does not name the processes behind
-  the load.
+  ([#54](https://github.com/SSFSKIM/ci-kit/issues/54)). `start` shows the load the job walked into. `end`'s figures
+  count the job's own processes too: after a job longer than a minute or so, its 1-minute figure is the job's last
+  minute, and the 5 and 15 minute figures reach back across the job. A failed, timed-out or unrecognized read gives
+  `unknown`. The line does not name the processes behind the load.
 - `computeruse`: the distinct names of running computer-use processes, comma-separated in byte order (a list too long
   for the line ends in `+N more`), or `none`. A name counts when it is `SkyComputerUseService` (Codex and ChatGPT
   computer use; cua drives the desktop through it too), contains `CUAService`, or starts with `cua` (`cua-driver`,
