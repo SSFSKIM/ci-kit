@@ -1,0 +1,38 @@
+# The measured-job guard (#55, docs/mac-lane.md): a timing-measured job's first step on the mac lane. It holds the job
+# until the desktop has settled, and refuses it, as the job-started check refuses one, when it has not within the bound.
+#   - uses: SSFSKIM/ci-kit/mac/settle@v1
+# Each condition is checked on two reads 30 s apart; `any` leaves it unchecked.
+name: ci-kit mac settle
+description: Hold a timing-measured job on the mac lane until the desktop has settled; refuse it at the bound.
+inputs:
+  load:
+    description: The 1-minute load average must be under this (two decimals at most).
+    required: false
+    default: '5'
+  display:
+    description: The main display's scale, as the posture line prints it (@2x is the lane's calibrated one).
+    required: false
+    default: '@2x'
+  remote:
+    description: none, no Parsec viewer and no screensharingd.
+    required: false
+    default: none
+  computeruse:
+    description: none, no computer-use process.
+    required: false
+    default: none
+  bound:
+    description: Minutes to wait before refusing the job.
+    required: false
+    default: '15'
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SETTLE_LOAD: ${{ inputs.load }}
+        SETTLE_DISPLAY: ${{ inputs.display }}
+        SETTLE_REMOTE: ${{ inputs.remote }}
+        SETTLE_COMPUTERUSE: ${{ inputs.computeruse }}
+        SETTLE_BOUND: ${{ inputs.bound }}
+      run: bash "$GITHUB_ACTION_PATH/settle.sh"

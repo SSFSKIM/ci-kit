@@ -91,7 +91,9 @@ trap '[[ -z $out ]] || rm -f "$out"' EXIT
 front=$(probe "$here/desktop-check.sh" --frontmost) || front=unknown
 front=${front//$'\n'/ }
 front=${front//$'\r'/ }
-display=$(probe "$here/cursor-park" --describe) || display=unknown
+# The compiled display helper sits beside this script where install.sh built it. Run from a checkout, as the measured-job
+# guard runs it (mac/settle), the caller names the installed one in CI_KIT_CURSOR_PARK.
+display=$(probe "${CI_KIT_CURSOR_PARK:-$here/cursor-park}" --describe) || display=unknown
 [[ $display =~ ^[0-9]+x[0-9]+@[0-9]+([.][0-9]+)?x$ ]] || display=unknown
 # Keep the remote reads independent: one stalled source must not erase the other's positive signal.
 parsec=$(probe /bin/bash "$0" --parsec) || parsec=unknown
@@ -118,7 +120,14 @@ else
 fi
 computeruse=$(probe /bin/bash "$0" --computeruse) || computeruse=unknown
 # computeruse stays last: a long list cannot push a field after it out of view.
-line="ci-kit desktop (${1:-unknown}): frontmost=${front:-unknown} display=$display remote=$remote load=$load computeruse=${computeruse:-unknown}"
+fields="frontmost=${front:-unknown} display=$display remote=$remote load=$load computeruse=${computeruse:-unknown}"
+# --read: the fields alone, logged nowhere, for the measured-job guard (mac/settle), which reads them every 30 s and
+# logs one line of its own.
+if [[ ${1:-} == --read ]]; then
+  printf '%s\n' "$fields"
+  exit 0
+fi
+line="ci-kit desktop (${1:-unknown}): $fields"
 printf '%s\n' "$line"
 {
   mkdir -p "$HOME/Library/Logs/ci-kit" &&

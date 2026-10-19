@@ -352,3 +352,12 @@ test('a computer-use name survives an unrecognized row and another read hanging'
     assert.match(run.stdout, new RegExp(`remote=${remote} load=1\\.52/1\\.37/1\\.29 computeruse=SkyComputerUseService$`, 'm'));
   }
 });
+
+test('--read prints the same fields alone and logs nothing, for the measured-job guard (mac/settle)', () => {
+  const job = fixture({ processes: sharing });
+  const read = job.runPosture('--read');
+  assert.equal(read.status, 0, read.stderr);
+  assert.equal(read.stdout, 'frontmost=Terminal display=2560x1440@2x remote=screensharing load=1.52/1.37/1.29 computeruse=none\n');
+  assert.equal(read.log, '');
+  assert.deepEqual(posture(job.runPosture('end').stdout), [`ci-kit desktop (end): ${read.stdout.trim()}`]);
+});
