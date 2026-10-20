@@ -158,6 +158,7 @@ test('a display helper ignoring SIGALRM is killed and reaped at the probe deadli
 
 const connected = '[I 2026-10-17 10:30:04] user#123 connected.';
 const disconnected = '[I 2026-10-17 10:34:04] user#123 disconnected.';
+const started = '[F 2026-10-20 14:54:57] ===== Parsec: Started =====';
 test('Parsec uses each client’s newest host connection event, ignoring unrelated lines and older sessions', () => {
   for (const [parsec, remote] of [
     [`${connected}\n`, 'parsec'],
@@ -165,6 +166,11 @@ test('Parsec uses each client’s newest host connection event, ignoring unrelat
     [`${disconnected}\n${connected}\n[I 2026-10-17 10:35:00] relay disconnected.\n`, 'parsec'],
     [undefined, 'none'],
     ['[I 2026-10-17 10:30:04] starting\n', 'unknown'],
+    // parsecd's start clears every client: a fresh log after a reboot is none, a client connected before it is gone,
+    // and one connecting after it counts.
+    [`${started}\n[D 2026-10-20 14:54:57] log: Parsec release15 (150-105c, Service: -1, Loader: 14)\n`, 'none'],
+    [`${connected}\n${started}\n`, 'none'],
+    [`${connected}\n${started}\n${connected}\n`, 'parsec'],
   ]) {
     const run = fixture({ parsec }).run();
     assert.equal(run.status, 0, run.stderr);

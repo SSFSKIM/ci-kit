@@ -191,7 +191,10 @@ ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none l
 - `remote`: `parsec`, `screensharing`, both comma-separated, or `none` when neither signal is present. Parsec tracks the
   newest `user#id connected.` / `disconnected.` event **per client** in `~/.parsec/log.txt` and reports `parsec` while
   any observed client remains connected: Alice connecting, Bob connecting, then Bob disconnecting still leaves Alice.
-  An absent log means no Parsec signal, while an unreadable log or one with no connection history is unknown.
+  parsecd's own start line (`===== Parsec: Started =====`, written at login, after a reboot or an update) clears every
+  client, since none survives it, so a log that has rotated at parsecd's start reads `none` until someone connects.
+  An absent log means no Parsec signal, while an unreadable log or one with neither a start line nor connection
+  history is unknown.
   Screen Sharing is `screensharingd` running, matched by its exact name in the same non-root `ps -axco pid=,comm=`
   table the computer-use read uses. launchd holds the Screen Sharing listener and starts the daemon when a viewer
   connects, so the read covers every transport the daemon serves: TCP 5900 or a remapped port, a tunnel, and

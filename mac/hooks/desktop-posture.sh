@@ -6,7 +6,10 @@ here=$(dirname "$0")
 
 if [[ ${1:-} == --parsec ]]; then
   if [[ -e $HOME/.parsec/log.txt ]]; then
+    # parsecd writes "===== Parsec: Started =====" when it starts (at login, after a reboot, on an update), and no
+    # client survives that: every client before it is gone, and a log that holds only that start has no client.
     awk '
+      /^\[[A-Z] [^]]+\] ===== Parsec: Started =====$/ { split("", clients); seen=1; next }
       /^\[I [^]]+\] .+#[0-9]+ (dis)?connected\.$/ {
         client=$0
         sub(/^\[I [^]]+\] /, "", client)
