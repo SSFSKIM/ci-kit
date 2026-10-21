@@ -83,7 +83,10 @@ toward the boot alone, and below it for the jobs a warm runner covers.
 - [ ] M3 — The tick and the boot. Merged as #74 (5e4dfb4); deployed 17:03Z (launcher ci-kit-launcher-00011-4hq),
   17:24Z (image ci-kit-runner-20261021-171029-sszz-5e4dfb42: no cloud-init, zsh and fonts; smoke on c4d-2 and c3d-4
   ok) and 17:27Z (`deploy.sh base`: serial port logging). First insert 3.1–4.2 s into a launch tick; the first job on
-  the new image went insert accepted → started in 26.1 s on c4d-highcpu-4. The day-of-rows proofs remain.
+  the new image went insert accepted → started in 26.1 s on c4d-highcpu-4. MAWS on the new image (CI-opt's run
+  39644078413, class 1a on master 057db0320 with MAWS #109): green, unit 1/4 logs `apt: zsh already installed`, setup
+  12–19 s per unit shard against 36 s (C4D, old image, 39638465062) and 52 s (C3D, 39630519998); plan → last 294 s
+  against #108's 310 s (on C3D, the burst holding us-west4; one sample). The day-of-rows proofs remain.
 - [ ] M4 — Launch on GitHub's `workflow_job` webhook.
 - [ ] M5 — Pre-launch of a run's gate VMs (the owner chose it 2026-10-21; no warm runner).
 
