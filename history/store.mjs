@@ -1,7 +1,7 @@
 // The store directory (test history spec, Design "Store"): under <root>/<owner>/<repo>/,
 //   runs/<YYYY-MM-DD>.jsonl              one line per (run, attempt, job), by the job's completion day (UTC)
-//   base/<YYYY-MM-DD>/<job>.json.gz      the day's first complete report of the job, which run lines refer to
-//   durations/<YYYY-MM-DD>/<job>.json.gz the day's last green report's file durations
+//   base/<YYYY-MM-DD>/<job>.json.gz      the day's first complete unselected report, which delta lines refer to
+//   durations/<YYYY-MM-DD>/<job>.json.gz the day's last unselected green report's file durations
 // Every day's run lines are read (≈ 100 KB a day: the previous-run search reaches a re-run or a resumed change
 // weeks back); writes are staged and flushed at the end, each file only when its bytes change.
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';

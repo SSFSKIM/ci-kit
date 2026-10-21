@@ -31,11 +31,27 @@ const commitGh = { gitCommit: async (_repo, sha) => commits[sha] };
 
 test("the tested commit is a ci-gate run's nonce parent; a run whose head is not such a commit tested its head", async () => {
   assert.deepEqual(await resolveTested(commitGh, 'o/r', { event: 'push', head_branch: 'ci/unit-junit-83a54fc7', head_sha: 'nonce' }),
-    { producer: 'maws-ci-gate', label: 'unit-junit', gates: 'unit', tested: '83a54fc7aaaa', tree: 'T1' });
+    { producer: 'maws-ci-gate', label: 'unit-junit', gates: 'unit', selection: null, tested: '83a54fc7aaaa', tree: 'T1' });
   assert.deepEqual(await resolveTested(commitGh, 'o/r', { event: 'push', head_branch: 'ci/unit-junit-83a54fc7', head_sha: 'stray' }),
-    { producer: 'other', label: null, gates: null, tested: 'stray', tree: 'T9' });
+    { producer: 'other', label: null, gates: null, selection: null, tested: 'stray', tree: 'T9' });
   assert.deepEqual(await resolveTested(commitGh, 'o/r', { event: 'push', head_branch: 'master', head_sha: 'main1' }),
-    { producer: 'other', label: null, gates: null, tested: 'main1', tree: 'T5' });
+    { producer: 'other', label: null, gates: null, selection: null, tested: 'main1', tree: 'T5' });
+});
+
+test('selection comes from the run head, never the tested parent or a mention in its subject', async () => {
+  const run = { event: 'push', head_branch: 'ci/unit-junit-83a54fc7', head_sha: 'nonce' };
+  for (const [message, expected] of [
+    ['ci-gate: 83a54fc7 affected\n\nGates: unit\nSelection: affected\n', 'affected'],
+    ['ci-gate: 83a54fc7\n\nSelection:\taffected  \nGates: unit', 'affected'],
+    ['ci-gate: 83a54fc7 affected', null],
+    ['ci-gate: 83a54fc7\n\nSelection: full', null],
+    ['ci-gate: 83a54fc7\n\nNote: Selection: affected', null],
+  ]) {
+    const gh = { gitCommit: async (_repo, sha) => ({ ...commits[sha], message: sha === 'nonce' ? message : 'work\n\nSelection: affected' }) };
+    const resolved = await resolveTested(gh, 'o/r', run);
+    assert.equal(resolved.selection, expected, message);
+    assert.equal(resolved.tested, '83a54fc7aaaa');
+  }
 });
 
 const line = (run, over = {}) => ({

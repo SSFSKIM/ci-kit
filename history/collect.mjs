@@ -138,7 +138,7 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
     }
   }
 
-  // 3. Each item's run and job, in the order the jobs completed, so a day's base is its first report.
+  // 3. Each item's run and job, in the order the jobs completed, so a day's base is its first unselected report.
   const work = [];
   for (const item of items.values()) {
     try {
@@ -203,11 +203,12 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
     const summary = summarize(reports);
     const day = dayOf(job.completed_at);
     let base = store.base(day, name);
-    if (!base) {
+    if (!base && prov.selection === null) {
       base = buildBase(prov, summary);
       store.setBase(day, name, base);
     }
-    if (job.conclusion === 'success') {
+    // Selected reports are not whole-suite snapshots, even when a fallback happened to run every test.
+    if (job.conclusion === 'success' && prov.selection === null) {
       const held = store.durations(day, name);
       const later = !held || held.completed < prov.completed || (held.completed === prov.completed && (held.run < prov.run || (held.run === prov.run && held.attempt < prov.attempt)));
       if (later) store.setDurations(day, name, buildDurations(prov, summary));

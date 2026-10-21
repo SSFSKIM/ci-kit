@@ -1,6 +1,6 @@
 // The record's pure parts (test history spec, Design "Store"): case ids, a report's summary, a day's base and
-// durations, a run line with its membership as a delta from the base, the reconstruction that checks it, and the
-// idempotent merge of lines.
+// durations, a run line with exact membership (a delta or explicit ids, whichever is smaller), the reconstruction
+// that checks it, and the idempotent merge of lines.
 import { createHash } from 'node:crypto';
 
 // A case id is [project, file, name]. A report can hold the same triple more than once (one test title written
@@ -95,8 +95,8 @@ export function reportWithinJob(reports, job, skewMs = 60_000) {
 
 const source = (prov) => ({ run: prov.run, attempt: prov.attempt, job: prov.job, completed: prov.completed });
 
-// A day's base for a job: the first complete report collected for the day. Every run line of that day and job
-// records its membership against it.
+// A day's base for a job: the first complete, unselected report collected for the day. Run lines can use it for
+// deltas; explicit lines collected before it remain self-contained.
 export function buildBase(prov, summary) {
   return { ...source(prov), hash: hashIds(summary.ids), cases: summary.ids, skipped: summary.skipped, files: summary.files };
 }
@@ -112,9 +112,18 @@ function delta(ids, baseIds) {
   return { added: ids.filter((id) => !inBase.has(idKey(id))), removed: baseIds.filter((id) => !inRun.has(idKey(id))) };
 }
 
+// A selected run may omit almost all of a full base. Compare the serialized forms rather than the id counts:
+// titles have different lengths, and the explicit form needs only one field. Without a base it is self-contained.
+function compact(ids, baseIds) {
+  const explicit = { ids };
+  if (!baseIds) return explicit;
+  const diff = delta(ids, baseIds);
+  return Buffer.byteLength(JSON.stringify(explicit)) < Buffer.byteLength(JSON.stringify(diff)) ? explicit : diff;
+}
+
 // One (run, attempt, job). `prov` is the provenance (collect.mjs builds it); `report` is 'present', 'missing',
-// 'unparseable' or 'rejected'; `summary` and `base` are given for a present report only. `previous` starts null
-// and is filled once every line of the pass is known (provenance.mjs, previousRun).
+// 'unparseable' or 'rejected'; `summary` is given for a present report only, with a base when one exists. `previous`
+// starts null and is filled once every line of the pass is known (provenance.mjs, previousRun).
 export function buildRunLine(prov, artifact, report, summary = null, base = null) {
   const line = {
     run: prov.run,
@@ -129,6 +138,7 @@ export function buildRunLine(prov, artifact, report, summary = null, base = null
     producer: prov.producer,
     label: prov.label,
     gates: prov.gates,
+    selection: prov.selection ?? null,
     jobId: prov.jobId,
     runner: prov.runner,
     conclusion: prov.conclusion,
@@ -144,22 +154,23 @@ export function buildRunLine(prov, artifact, report, summary = null, base = null
     previous: null,
   };
   if (report !== 'present') return line;
-  line.membership = { count: summary.ids.length, hash: hashIds(summary.ids), ...delta(summary.ids, base.cases) };
+  line.membership = { count: summary.ids.length, hash: hashIds(summary.ids), ...compact(summary.ids, base?.cases) };
   line.failed = summary.failed;
-  line.skipped = { count: summary.skipped.length, ...delta(summary.skipped, base.skipped) };
+  line.skipped = { count: summary.skipped.length, hash: hashIds(summary.skipped), ...compact(summary.skipped, base?.skipped) };
   line.projects = summary.projects;
   line.ms = summary.ms;
   return line;
 }
 
-function rebuild(baseIds, { added, removed }) {
+function rebuild(baseIds, { ids, added, removed }) {
+  if (ids) return sortIds(ids);
   const gone = new Set(removed.map(idKey));
   return sortIds([...baseIds.filter((id) => !gone.has(idKey(id))), ...added]);
 }
 
-// A present line's full membership from its day's base, checked against the hash the line stored.
+// Both encodings reconstruct to canonical ids and check the stored hash. Only delta lines need the day's base.
 export function membershipOf(line, base) {
-  const ids = rebuild(base.cases, line.membership);
+  const ids = rebuild(base?.cases, line.membership);
   if (ids.length !== line.membership.count || hashIds(ids) !== line.membership.hash) {
     throw new Error(`history: run ${line.run} attempt ${line.attempt} ${line.job}: membership does not match its hash`);
   }
@@ -167,9 +178,13 @@ export function membershipOf(line, base) {
 }
 
 export function skippedOf(line, base) {
-  const ids = rebuild(base.skipped, line.skipped);
+  const ids = rebuild(base?.skipped, line.skipped);
   if (ids.length !== line.skipped.count) {
     throw new Error(`history: run ${line.run} attempt ${line.attempt} ${line.job}: skipped set does not match its count`);
+  }
+  // M2's skipped deltas carried a count only; keep those existing store lines readable.
+  if (line.skipped.hash !== undefined && hashIds(ids) !== line.skipped.hash) {
+    throw new Error(`history: run ${line.run} attempt ${line.attempt} ${line.job}: skipped set does not match its hash`);
   }
   return ids;
 }
