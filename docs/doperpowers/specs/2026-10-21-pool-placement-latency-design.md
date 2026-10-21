@@ -89,8 +89,22 @@ toward the boot alone, and below it for the jobs a warm runner covers.
   against #108's 310 s (on C3D, the burst holding us-west4; one sample). The day-of-rows proofs remain.
 - [ ] M4 — Launch on GitHub's `workflow_job` webhook. (2026-10-21) Built, reviewer-high clean after two fix waves, ci-gate green; PR to
   CI-opt. Merged as #76 (0c71271); `deploy.sh base` 2026-10-21 (receiver's service account). A load-sensitive gce
-  test failure seen once while it was reviewed is ci-kit #77. The owner's secret and App steps, the deploy and the
-  proofs follow.
+  test failure seen once while it was reviewed is ci-kit #77. Live 2026-10-21: owner's secret 18:03Z; `launcher
+  webhook` 18:04Z (launcher ci-kit-launcher-00012-27v, receiver ci-kit-webhook-00001-z7r); `app-hook`; owner's App
+  clicks (`events: ["workflow_job"]` at 18:09:50Z). Proofs:
+  - Receiver: unsigned and forged-signature POSTs got 401 and published nothing; scanners' GETs get 405.
+  - Launcher: a scratch topic's push subscriptions (no auth; `ci-kit-webhook@` as identity) made 10 pushes to
+    `/request`, every one 403 from Cloud Run, no code ran; scratch resources deleted the same minute.
+  - Burst (sandbox 39650257002): five cpus-4 jobs queued 18:10:19, five signed deliveries 18:10:20–21, one requested
+    tick at 18:10:29.67 (10 s after the scheduled one, `requests: 5`, first insert 4.9 s in) launched all five; the
+    pushes were answered when it ended; jobs started 41–43 s after queued, where the next scheduled tick (18:11:07.9)
+    would have begun 38 s later.
+  - Dropped delivery: the owner rotated the secret (version 2, 18:18:13Z); past the receiver's 60 s copy, sandbox job
+    119401… (run 39651686488) queued 18:19:46, its delivery got 401 (`delivery refused: its signature does not
+    verify`), and the 18:20:13 scheduled tick launched its VM (C4D quota full, us-central1-a out of C3D spot, the
+    us-central1-b insert outlasting the tick, settled next tick; started 18:22:25). `app-hook` resynced; the next
+    delivery (18:24:48) verified and requested a tick.
+  - Acceptance 4 (a day's median queued → started ≤ 50 s) is read from `latency-report.mjs` after a day of traffic.
 - [ ] M5 — Pre-launch of a run's gate VMs (the owner chose it 2026-10-21; no warm runner).
 
 ## Acceptance
