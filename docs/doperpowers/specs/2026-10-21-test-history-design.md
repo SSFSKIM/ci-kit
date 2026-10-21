@@ -38,7 +38,7 @@ After this work:
 ### What it must not be
 
 - **No test is skipped at landing.** Selection applies to iteration runs only. A landing needs a full green run on the
-  head's tree (M4 makes this checkable).
+  head's tree; M4 marks every selected run so it cannot pass for one.
 - **No test deleted or quarantined by CI on its own.** History nominates; a repo's session or architect decides, and
   records the decision in that repo.
 - **No MAWS test names in a public place.** The collector runs in `SSFSKIM/ci-kit-sandbox`, which is private. Its store
@@ -82,7 +82,7 @@ After this work:
   run's unsuffixed name and the fault-injection run), 0 errors, 5 files on `test-history`; its log carries counts only.
   Reconstructed membership equals the log's `Tests` line on three runs (22,360; 22,360; 22,454).
 - [ ] M3 — Labels and reports (starts when the store holds ≥ 14 days).
-- [ ] M4 — Selection for iteration runs (with the MAWS architect).
+- [ ] M4 — Selection for iteration runs: agreed with the MAWS architect and written 2026-10-21 08:1xZ; building.
 - [ ] M5 — Unit overhead experiment: written 2026-10-21 08:0xZ (arms S, C, D, I); running.
 - [ ] M6 — The `ci-kit:optimize` skill.
 
@@ -185,15 +185,33 @@ later attempt of R) in which T ran and passed.
 
 Each report is a Markdown file under `<repo>/reports/` on the store branch, and is posted to the repo's architect.
 
-**Selection (M4).** Its decisions are settled with the MAWS architect before M4's execution is written. The starting
-proposal:
-- `ci-gate --affected` passes the changed files (from the merge base with the default branch) to the gate in a
-  `Changed:` trailer.
-- MAWS's plan narrows unit to `vitest related <files>` and e2e to the groups a path map names.
-- A run made this way is marked `Selection: affected` in its summary.
-- The landing check accepts only a run without that mark on the head's tree.
-- The full suite still runs on every landing candidate, so what selection misses is caught before master. Selection
-  can miss what the module graph cannot see: fixtures, config, JSON read at run time, build output.
+**Selection (M4).** Agreed with the MAWS architect on 2026-10-21 (Decision Log). An iteration run may test only what
+a change can reach; a landing never does. About three of every four MAWS unit runs are iteration runs on trees that
+never land (10-20: 18 landings, about 75 unit runs).
+- **Opt-in per call.** `scripts/ci-gate.sh --affected` sends the change's paths, with their git status, from the merge
+  base with `origin/master` to the tested commit.
+- **The mark.** A run made this way is marked in three places a reader cannot miss:
+  - the run's display title (the pushed commit's subject), so `gh run list` and `gh run view` show `affected`;
+  - a `Selection: affected` trailer;
+  - the run's summary.
+- **What runs.** MAWS's plan narrows `unit`, and `unit:darwin` when it runs, to the tests `vitest related` finds for the
+  changed paths. Other jobs run as asked; e2e selection is out of M4.
+- **Fallbacks.** The plan runs the full suite, and says why in the summary, when the change touches what the module
+  graph cannot see:
+  - the lockfile or any `package.json`;
+  - any vitest or vite config, or test support;
+  - gate files (`.github/`, `scripts/`);
+  - any path outside the source and test trees;
+  - a deleted or renamed non-test file, since `related` cannot follow a path that is gone;
+  - any directory tests read through `fs` or a glob rather than an import (`spikes/protocol-probe/fixtures`, and any
+    others the build finds).
+- **Landing rule.** A marked run never counts as landing evidence, even when a fallback made it run the full suite. A
+  full class 1a on the head's tree stays required, so what selection misses is caught before master. A marked run that
+  is red counts as red.
+- **Enforcement.** The architect checks by hand; the mark exists to make that check impossible to get wrong. Children's
+  briefs say iteration runs may use `--affected` and the hand-back's class 1a is a full run.
+- **History.** The collector records a run's selection. A selected run is never a day's base, and its membership is
+  stored as an explicit list when that is smaller than the delta from the base.
 
 **Overhead (M5).** In MAWS, 55% of vitest's worker time is import, transform and environment setup, not tests (run
 39564672977: `Duration 414.16s (tests 45%, import 27%, transform 15%, environment 12%)`). Vitest 5 itself prints that
@@ -378,11 +396,75 @@ Proof:
 - Every arm's row is in Surprises & Discoveries, adopted or not.
 - The combined commit's three runs are green, and the PR's class 1a pool run is green.
 
-### M3, M4, M6
+### M4 — Selection for iteration runs
+
+At the end, `scripts/ci-gate.sh <worktree> --gates unit --class1a pool --affected` runs only the unit tests the change
+can reach. The run is marked `affected` in its title, its trailer and its summary, and the store records it as a
+selected run. Without `--affected`, every run is exactly as today.
+
+MAWS (one PR, which the architect lands):
+- **`scripts/ci-gate.sh --affected`.**
+  - It fetches `origin/master` and takes the change's paths with their status (`git diff --name-status -M` from the merge
+    base to the tested commit). A stale `origin/master` only widens the set.
+  - It puts them in the pushed commit's message, one trailer line per path, beside `Selection: affected`.
+  - The commit's subject becomes `ci-gate: <short> affected`, which is the run's display title.
+  - Above a bound on paths, it sends no list, and the plan runs the full suite with the reason "too many paths". Choose
+    the bound so the message stays well under the runner's environment-variable limit, and say why in a comment.
+  - The header's usage text documents the flag and the landing rule.
+- **`.github/scripts/gate-plan.mjs`** decides, as a pure function its test file covers:
+  - whether `unit` and `unit:darwin` run `related` with a list of paths, or the full suite with a reason, by the fallback
+    rules in Design;
+  - "outside the source and test trees" means any path not under `src/`, `test/`, `apps/<app>/src/` or
+    `apps/<app>/test/`;
+  - the fs/glob directories are found by reading the suites (`readFileSync`, `readdir`, `glob`, `import.meta.glob` in
+    test files and test support), and kept as a named list with a comment.
+
+  It writes the decision to the plan's outputs and one line to the summary:
+  - `Selection: affected — <n> paths, unit runs vitest related`, or
+  - `Selection: affected — full suite: <reason>`.
+
+  A run without the trailer is unchanged: no output differs, and no summary line is added.
+- **`.github/workflows/gate.yml`**, the test steps of `unit` and `unit-darwin`, when the plan gives a list:
+  - they run vitest's `related` mode on the paths that still exist, with `--passWithNoTests` for a change no test
+    reaches;
+  - `unit:darwin` keeps its own file set (`scripts/darwin-unit-files.sh`) and runs only the files in both sets;
+  - the JUnit report, the upload and the step names stay as they are.
+- **`.github/scripts/gate-plan.test.mjs`** covers:
+  - each fallback;
+  - a rename and a delete of a test file (selection holds) and of a non-test file (full);
+  - the bound;
+  - a run with no trailer, whose outputs are byte-identical to today's.
+
+ci-kit (one PR, `doperpowers:reviewer-medium`, merged by CI-opt; the sandbox workflow reads `main`, so no tag moves):
+- `history/provenance.mjs` reads the `Selection:` trailer from the tested run's head commit. The run line gets
+  `selection: 'affected'` or `null`.
+- `history/record.mjs`:
+  - a selected run never becomes a day's base;
+  - a run line stores its membership (and its skipped set) as an explicit list when that is shorter than the delta
+    from the base, or when the day has no base yet;
+  - `membershipOf` and `skippedOf` read both forms and still check the hash.
+- Tests in `test/history/` for these cases, and for a day whose first report is a selected run.
+
+Proof:
+- `node --test .github/scripts/gate-plan.test.mjs` passes, and so does ci-kit's `npm test`.
+- Scratch runs off the PR branch, unit only, on the pool:
+  1. **A source-only change.** A comment edit in one module, run with `--affected`. `gh run list` shows `affected` in
+     the title. The summary gives the path count. The `Tests` line is a small fraction of the full suite's, and the JUnit
+     report names only files related to the module. Record the unit job's wall time against a full run.
+  2. **A planted failure.** A failing assertion in a test file related to the edited module, with `--affected`: the run
+     is red.
+  3. **A fallback.** A change that touches `package.json`, or a fixture directory from the list, with `--affected`:
+     the full suite runs, and the summary says why.
+- The PR head's class 1a on the pool, without `--affected`, is green. That run is the landing evidence.
+- One `unit:darwin` run with `--affected` on the mini, scheduled through CI-opt (never inside a hold), runs the
+  intersection.
+- After both PRs land, the next collection records one selected run with `selection: 'affected'`. Its membership
+  reconstructs to its `Tests` line, and the day's base is not that run.
+
+### M3, M6
 
 Each is written here in full when its condition holds:
 - M3 when the store holds 14 days;
-- M4 when the architect has agreed the landing rule;
 - M6 after M3–M5.
 
 ## Verification
@@ -393,7 +475,9 @@ Each is written here in full when its condition holds:
 - M5: the numbers are checked by the spec's owner against the run logs; the MAWS PR is landed by the architect; a ci-kit
   PR, if C needs one, gets `doperpowers:reviewer-medium`. No separate spec review: M5 is an experiment whose every
   adoption is gated on green runs and the architect.
-- M3, M4, M6: named when each is written.
+- M4: the scratch runs above, checked by the spec's owner; the MAWS PR is landed by the architect; the ci-kit PR gets
+  `doperpowers:reviewer-medium` before merge.
+- M3, M6: named when each is written.
 
 ## Decision Log
 
@@ -425,6 +509,21 @@ Each is written here in full when its condition holds:
   arm in one combined run. It lost because one run cannot attribute a gain or a failure to an arm. Running the renderer
   suites only under the compiler would save the most (`renderer`'s 256 s of summed test time), but it drops a tested
   configuration, so it goes to the architect as a proposal, not as an arm.
+- 2026-10-21 (M4 agreed with the MAWS architect): **the landing rule and the mark.**
+  - A run marked `Selection: affected` never counts as landing evidence, even when a fallback ran the full suite; a red
+    marked run counts as red.
+  - The architect enforces this by hand, so the mark goes into the run's display title as well as the trailer and the
+    summary.
+  - Opt-in per call; children's briefs allow it for iteration runs only.
+  - The architect added three fallbacks: any path outside the source and test trees, a deleted or renamed non-test
+    file, and directories tests read through `fs` or a glob. The same selection applies to `unit:darwin`.
+  - CI-opt read "source and test trees" to include `apps/<app>/src` and `apps/<app>/test`, since the desk's apps are
+    vitest projects of the same run; the architect is told. `e2e/` and `docs/` changes run the full unit suite by this
+    rule. Whether they could select nothing is left for the store's data.
+  - The strongest alternative was the plan job computing the change itself. It lost because the plan checks out only
+    `package.json` and `.github` sparsely, with no history, and a full fetch there costs every run.
+  - The collector changes (never a selected base; an explicit list when shorter) follow from the store's delta design:
+    a selected run of 200 cases against a 22,500-case base would otherwise store about 22,300 removed ids per line.
 
 ## Surprises & Discoveries
 
