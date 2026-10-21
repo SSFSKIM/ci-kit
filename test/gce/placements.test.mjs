@@ -32,6 +32,17 @@ test('a placement is validated: every size named, zones of its region, its disk 
   assert.throws(() => parseGceConfig(JSON.stringify({ ...COMMON, placements: [WEST], zones: ['us-west4-a'] })), /unknown key "zones"/);
 });
 
+// Egress (2026-10-21): job and bake VMs take an external address unless gce.json routes them through the NAT, parked
+// because GitHub's runner endpoints stall first connections from it in bursts (docs/pool.md, The network).
+test('egress: "external", the default when absent, or "nat"; any other value is a config error', () => {
+  const { egress: _, ...noEgress } = COMMON;
+  assert.equal(parseGceConfig(JSON.stringify({ ...noEgress, placements: [WEST] })).egress, 'external');
+  const with_ = (egress) => JSON.stringify({ ...noEgress, placements: [WEST], egress });
+  assert.equal(parseGceConfig(with_('external')).egress, 'external');
+  assert.equal(parseGceConfig(with_('nat')).egress, 'nat');
+  for (const bad of ['NAT', 'none', '', true, null]) assert.throws(() => parseGceConfig(with_(bad)), /egress must be "external" or "nat"/, String(bad));
+});
+
 test('the walk: spot in every zone of each placement in order, then on demand in the same order', () => {
   assert.deepEqual(placements(8, NEW_CFG).map(key), [
     ...WEST.zones.map((z) => `c4d-highcpu-8/spot@${z}`), ...CENTRAL.zones.map((z) => `c3d-highcpu-8/spot@${z}`),
@@ -154,4 +165,6 @@ test('the shipped gce.json is the spec\'s pool: C4D us-west4 and C3D us-central1
   const rest = ({ repos: _, placements: __, max_vcpus: ___, ...others }) => others;
   assert.ok(Number.isInteger(shipped.max_vcpus) && shipped.max_vcpus > 0);
   assert.deepEqual(rest(shipped), rest(COMMON), 'every other key keeps its value');
+  // Egress is named in the file, not left to the default: re-enabling the NAT is this one value, changed on main.
+  assert.equal(JSON.parse(readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8')).egress, 'external');
 });

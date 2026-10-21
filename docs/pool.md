@@ -278,13 +278,15 @@ GitHub. A tick:
    not busy for a while after its job ends (a job this tick read names it, its row recorded a job, or it reported
    `ci-kit/job`). Static job 119166794835 waited 126 s on 2026-10-21 behind a VM whose job had just ended. Nor is a
    VM unclaimed whose runner never came online 3 minutes after the VM started: it booted but cannot reach GitHub
-   (its region's NAT missing, misconfigured or out of ports), and the launcher logs it at ERROR each tick,
+   (under `egress: "nat"`, its region's NAT missing, misconfigured or out of ports), and the launcher logs it at ERROR each tick,
    `runner never online` with its zone and region, until the idle rule removes it;
    then, with what those launches leave of `max_vcpus` and only when no queued job waits, pre-launches the VMs of
-   each run that has begun before its pool jobs are queued (Pre-launch, below);
+   each run that has begun before its pool jobs are queued (Pre-launch, below), and races an insert still unsettled
+   after 20 s with a second allocation (The race of a slow insert, below). A launching row whose insert never settled
+   counts as its VM would (vCPUs, and cover while its runner waits);
 4. beside the launches, cleans up (below), finalizes rows whose VM is gone, and records on each running row the job
    its runner holds;
-5. once a day, in its first two hours (UTC), writes yesterday's daily line.
+5. once a day, between 00:05 and 02:00 UTC, writes yesterday's daily line.
 
 The launches start as soon as the reads are in, before the cleanup, and the two run together: a VM about to be
 deleted still counts against `max_vcpus` for that tick, so launching first can only under-admit, never over-admit.
@@ -303,8 +305,8 @@ region and family, any other regional quota (`CPUS`, `INSTANCES`, `IN_USE_ADDRES
 more vCPUs is skipped, in this walk and the tick's later ones, since a smaller VM may still fit. A launch whose every
 attempt is so ruled out makes no runner or row and its job waits in GitHub's queue; no other launch stops. An insert
 whose outcome is unknown is settled through its zone operation before any other zone is tried, and if it stays
-unknown the walk stops and the cleanup rules settle it. The VM: no service account, its placement's subnetwork, the
-JIT config in metadata `ci-kit-jit`, `maxRunDuration` = `max_run_minutes` with a `DELETE` action, a boot disk of the
+unknown the walk stops and the cleanup rules settle it. The VM: no service account, its placement's subnetwork with
+the egress `gce.json` names (an ephemeral external address by default; The network, below), the JIT config in metadata `ci-kit-jit`, `maxRunDuration` = `max_run_minutes` with a `DELETE` action, a boot disk of the
 placement's `disk_type` and `disk_gb` that goes with it, labels `ci-kit=gce`, `ci-kit-alloc`,
 `ci-kit-repo=<owner>--<repo>`, `ci-kit-cpus`, `ci-kit-provisioning=spot|standard`, `ci-kit-disk=<disk type>` and
 `ci-kit-config=<gce.json commit, 8>`.
@@ -470,6 +472,41 @@ served repo's run begins, the tick launches the VMs its pool jobs will ask for, 
   (<workflow>) in <repo>`, and its tick line lists them in `prelaunched`. The ledger's row and daily line and the
   latency report show what they did (Reading the GCE ledger, below).
 
+**The race of a slow insert** (spec 2026-10-21 M6). An ordinary insert is accepted in 8–15 s; on 2026-10-21 every
+one whose outcome stayed unknown settled as created after 41–121 s, and the walk, which stops at an unknown outcome
+(two zones must never hold one allocation's VM), made its job wait all of it. So an insert still unsettled 20 s after
+it was sent (`RACE_AFTER_MS` in `logic.mjs`, provisional until the tick lines' `inserts` re-size it) starts a second
+allocation of the same size: its own row, name and JIT runner, walking the attempts after the pending one in other
+zones, another region first, spot before on demand.
+
+- The first allocation keeps waiting on its own operation as before and makes no further attempt: refused after its
+  race began, it is abandoned, never walked to another zone. Whichever VM's runner GitHub gives a job to first serves
+  it (either may take any job of its repo and size); the other is an unclaimed VM the idle rule removes.
+- An allocation races at most once and a race never races. A race starts only once every queued job of the tick has
+  made its first launch attempt, and none starts past the tick's budget, with no zone left, or beyond `max_vcpus`: it
+  reserves its largest machine like any launch, and pre-launch plans against what is left.
+- Only a definite outcome settles an insert. One whose wait call ended before its operation did, still running when
+  reconciled, stays eligible for its race, which the launch waits for within the tick.
+- An insert whose outcome stays unknown leaves its row `launching` with the insert's send time (`slow`); a race's row,
+  and its original's pending insert, are written before the race's insert. Until a later tick reads the end of the
+  zone operation, such a row keeps the vCPUs its launch reserved (`reserved`, as recorded then, whatever the placements
+  say now) and, while its runner waits, covers a job of its size as its VM would: the next tick, or a launcher
+  restarted mid-race, neither launches nor races again for the same job. Those reads go one per zone, a few zones at
+  once, within 15 s and beside the cleanup's deletions; a zone not read waits for the next tick, and what was read is
+  written before any row is finalized. An insert is matched to its own operation (the link the API gave, else the
+  newest sent no earlier than it), never to a walk's earlier attempt in the same zone. A refusal learned that way joins
+  the row's `refused`, and a launching row so
+  refused is abandoned and its runner unregistered at once: no VM will come. A race starts only once its original's
+  pending insert is on the ledger. Overlapping ticks remain the accepted overlap below; there is no strict bound of
+  two VMs per job.
+- A pre-launched VM and the race of its slow insert fill one slot of the run's shape, the race alone when the original
+  is abandoned.
+- **To check:** the launcher logs `<instance>: its insert in <zone> is unsettled after 20 s; a second allocation races
+  it` (or `no race (<why>)`) and `raced <instance> (<machine>, <spot|standard>, <zone>) against <instance> for job
+  <id>`; the tick line lists races in `raced` (`<race> for <original>`), every insert sent in `inserts` (zone, machine,
+  provisioning, outcome, seconds from send to settle, null when it never settled), and, of the rows its launches wrote,
+  `refusals`, `slow` and `onDemand` as the daily line counts them.
+
 **Overlap.** Two ticks can run at once (Cloud Run can briefly exceed one instance; a deploy overlaps two revisions).
 Nothing depends on it never happening: deletes and unregisters treat 404 as done, rows are keyed by allocation and
 only move forward, two comments for one allocation converge on the most final, and an over-launch leaves idle runners
@@ -519,12 +556,22 @@ the label again before it acts.
 
 **The network.** Every builder, smoke VM and job VM sits on its placement's subnetwork of the VPC `ci-kit`
 (`network` and each placement's `subnetwork` in `gce.json`: `ci-kit-us-central1`, 10.64.0.0/20, and `ci-kit-us-west4`,
-10.64.16.0/20). No VM has a public IP: each subnetwork has Private Google Access, so Google APIs are reached
-without one, and all other egress (GitHub, apt, npm, Docker Hub) goes through the region's Cloud NAT, `ci-kit-nat` on the
-Cloud Router `ci-kit-router` (spec 2026-10-21 M6). The NAT allocates its own addresses as needed, so the region's
-`IN_USE_ADDRESSES` quota does not bound the pool; it covers every range of the region's subnetworks, gives each VM 1024
-ports to 65536 by dynamic allocation (pnpm and apt open many connections at once; provisional, sized by M6's burst
-proof), and logs dropped connections only, which `gce/deploy.sh alert` mails.
+10.64.16.0/20). How a VM reaches GitHub, apt, npm and Docker Hub is `gce.json`'s `egress`, a commit on main read by the
+next tick (the bake's, by the `gce.json` bundled at its deploy):
+- `"external"`, the default when the key is absent: each VM takes an ephemeral external IPv4, priced on its ledger
+  row. Each counts against its region's `IN_USE_ADDRESSES` quota (Quotas and budget), whose refusal is a quota
+  refusal: the walk goes on to the next placement.
+- `"nat"`: no VM has a public IP. Each subnetwork has Private Google Access, so Google APIs are reached without one,
+  and all other egress goes through the region's Cloud NAT, `ci-kit-nat` on the Cloud Router `ci-kit-router` (spec
+  2026-10-21 M6). The NAT allocates its own addresses as needed, so the address quota does not bound the pool; it
+  covers every range of the region's subnetworks, gives each VM 1024 ports to 65536 by dynamic allocation (pnpm and
+  apt open many connections at once), and logs dropped connections only, which `gce/deploy.sh alert` mails.
+
+The NAT is parked since 2026-10-21: behind it, GitHub's runner endpoints (`pipelines*.actions.githubusercontent.com`)
+refuse or stall the runners' first connections in a burst. In a 20-VM burst the median from boot to "Connected to
+GitHub" was 54–70 s behind the NAT, whether 1, 3 or 11 NAT addresses carried it, against 12 s with external
+addresses. So `gce.json` says `"egress": "external"`; the routers, NATs and Private Google Access stay deployed, so
+switching back is that one value.
 The VPC has no firewall rule: GCE's implied rules deny all ingress and allow all egress. The project's `default`
 network is never used, since its stock rules open ssh and RDP to the internet. `gce/deploy.sh network` creates the
 VPC, a subnetwork for each placement of `gce.json` (a new one takes the first free /20 of 10.64.0.0/16,
@@ -700,15 +747,32 @@ per allocation:
   hand outside the launcher).
 - `seconds` runs from the VM's creation to its deletion, `$` at the rates in `gce/launcher/ledger.mjs` by region and
   family (c3d and e2 in us-central1, 2026-10-16; c4d in us-west4, the Cloud Billing catalog on 2026-10-21, SKU ids
-  beside the table), the VM's hours of its region's Cloud NAT gateway ($0.0014 an hour; the NAT's GB processed and
-  its addresses are per region, not per VM, and go on the daily line with M6's counts) and the disk by region and
-  type included (Hyperdisk Balanced with the IOPS and throughput its defaults provision above the free baseline). A
+  beside the table), its egress (its external IPv4, $0.0025 an hour on spot and $0.005 on demand; or under `nat` its
+  hours of its region's Cloud NAT gateway, $0.0014 an hour, the NAT's GB processed and its addresses being per region,
+  not per VM, and going on the daily line with M6's counts) and the disk by region and type included (Hyperdisk Balanced with the IOPS and throughput its defaults provision above the free baseline). A
   VM in a region, family or disk type with no rate there shows `-`. The row's JSON carries the disk type (`diskType`; a row without one is from before placements,
-  on `pd-balanced`).
+  on `pd-balanced`) and the egress its VM launched with (`egress`, which prices it whatever `gce.json` says by its
+  end; a row without one is priced by the config's).
 - The daily line, `**GCE pool, <day> (UTC):** …`, totals the day's VMs, seconds and dollars, projects the month at
   that rate, gives each family@region's VMs and dollars (and how many it could not price), on a day with
   pre-launches how many VMs were pre-launched, how many no job claimed and what those cost (`Pre-launched: N VMs, M
   unclaimed ($x)`), and names the gce.json commit the launcher ran.
+- Since M6 the daily line also counts, on a day that has any: the walks' refusals of the day's final rows by kind,
+  quota metric and zone (`Refusals: quota C4D_CPUS us-west4-a 2, capacity us-central1-a 1`); their slow inserts,
+  those unsettled 20 s after they were sent or never settled, with how many never did and the settle times of the rest
+  (`Slow inserts: 3, 1 unsettled, the rest settled in 41, 63 s`); the races launched that day by what was observed of
+  each pair (which VM a job claimed first by the jobs' start, `tied` or `unknown` when the starts are equal or missing,
+  both, neither, or unresolved while either row is not final; a first claim is not latency saved) and what the pairs' VMs that ran no job cost; and the VMs that ran on demand. Each row's JSON keeps
+  its walk's `refused` ({kind, zone, metric}) and `slow` ({zone, outcome, sent, done}) inserts, a slow insert's `done`
+  learned from its zone operation by a later tick when its own tick could not wait for it; a race's row keeps `race`
+  ({of: the allocation it raced, demand: the job or run that allocation was for}), apart from the job its VM ran.
+- The day's Cloud NAT, per region, from Cloud Monitoring (`router.googleapis.com/nat/*` on `nat_gateway`
+  `ci-kit-nat`, read once, when the line is posted, from 00:05 UTC: the NAT's samples take minutes to land): GiB processed both ways at $0.045 and address-hours at $0.005
+  (`NAT: us-west4 2 GiB, 2 address-hours, $0.1000; $0.1000 in all.`), apart from the VMs' dollars and month. An
+  address-hour is counted from `allocated_ports`, one point a minute per NAT address while it holds a VM's ports:
+  auto-allocated addresses are released when no VM needs them. A read that fails, or that Monitoring answers only in
+  part, shows `NAT: unread`, never a guess;
+  the launcher's account needs `monitoring.timeSeries.list` (`roles/monitoring.viewer`).
 - A writer reads a row's comment again just before updating it, and drops the write if the comment is already as
   far along; a final row is never rewritten. Issue comments have no compare-and-swap, so during an overlap of two
   ticks a row is eventually final rather than finalized once: a stale write that lands in the milliseconds after
@@ -747,15 +811,15 @@ quotas are the hard cap, and a refusal is a wait. Parallelism comes first: the o
 never be the bottleneck, and that cost is not a reason to lower parallelism. So `max_vcpus` follows the quotas. Granted
 through Cloud Quotas:
 - 2026-10-21: `CPUS-ALL-REGIONS` 256, C3D per-family 192 in us-central1, `INSTANCES` 64, `SSD-TOTAL-GB` 4096;
-  `IN-USE-ADDRESSES` asked 64, still 32 when this was written (a job VM held one external address until M6's Cloud
-  NAT; it holds none now, so this quota no longer bounds the pool);
+  `IN-USE-ADDRESSES` asked 64, still 32 when this was written (each job VM holds one external address under
+  `egress: "external"`, so 32 VMs at once in a region until granted; under `"nat"` it holds none);
 - 2026-10-16: the first grants;
 - never granted: E2 per-family stays at its default 24 (asked 64, refused twice), so at most 12 `cpus-2` VMs run on E2
   and the rest fell back to `c3d-highcpu-4` (`machine_fallback`); E2 has since left the pool with that key.
 
 A job reserves the largest machine its walk could land on in the launcher's count (a `cpus-2` job: `c3d-highcpu-4`).
 `max_vcpus` admits only; it tracks the sum of the placements' granted family quotas, and a placement's own refusal
-(family vCPUs, instances, disk capacity) falls through to the next one, so raise it with each grant (C4D us-west4's
+(family vCPUs, addresses, instances, disk capacity) falls through to the next one, so raise it with each grant (C4D us-west4's
 re-filed 128 was denied 2026-10-21, so it stays 50).
 `PREEMPTIBLE_CPUS` is 0, so spot VMs count against the ordinary CPU quotas. To check:
 

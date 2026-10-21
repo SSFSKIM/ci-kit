@@ -110,7 +110,7 @@ async function realJob(gce, gh, { cfg, names, runId, image, check, sleep, now, l
   check.run = run.workflow_run_id;
   log(`real job: ${run.html_url}`);
   const vm = await createFirst(gce, placements(cfg.placements, smokeMachines),
-    ({ machine, zone, placement }) => checkInstance({ name: names.check, zone, machine, runId, image, diskGb: cfg.disk_gb, placement, jit: jit.encoded_jit_config }), log);
+    ({ machine, zone, placement }) => checkInstance({ name: names.check, zone, machine, runId, image, diskGb: cfg.disk_gb, placement, egress: cfg.egress, jit: jit.encoded_jit_config }), log);
   let report = null;
   for (;;) {
     let instance;
@@ -151,7 +151,7 @@ export async function runBake(gce, { cfg, sha, runId, token, gh, script, sleep, 
   }
   try {
     const builder = await createFirst(gce, placements(cfg.placements, () => BUILDER_MACHINES),
-      ({ machine, zone, placement }) => builderInstance({ name: names.builder, zone, machine, runId, script, token, placement }), log);
+      ({ machine, zone, placement }) => builderInstance({ name: names.builder, zone, machine, runId, script, token, placement, egress: cfg.egress }), log);
     const built = await awaitReport(gce, builder, 'ci-kit/bake', BAKE_TIMEOUT_MS, wait);
     if (!built.ok) throw new Error(`ci-kit: the builder did not finish: ${built.reason}`);
 
@@ -174,7 +174,7 @@ export async function runBake(gce, { cfg, sha, runId, token, gh, script, sleep, 
     for (const [k, placement] of cfg.placements.entries()) {
       const name = `${names.smoke}-${k + 1}`;
       const smoke = await createFirst(gce, placements([placement], smokeMachines),
-        ({ machine, zone }) => smokeInstance({ name, zone, machine, runId, image: source, diskGb: cfg.disk_gb, placement }), log);
+        ({ machine, zone }) => smokeInstance({ name, zone, machine, runId, image: source, diskGb: cfg.disk_gb, placement, egress: cfg.egress }), log);
       const checked = await awaitReport(gce, smoke, 'ci-kit/smoke', SMOKE_TIMEOUT_MS, wait);
       if (!checked.ok) throw new Error(`ci-kit: the smoke VM in placement ${k + 1} (${placement.region}) did not pass: ${checked.reason}`);
       await deleteIfOwned(gce, smoke, runId, log);

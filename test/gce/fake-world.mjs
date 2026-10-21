@@ -3,6 +3,9 @@
 // requests do. Like the other fakes it ignores filters, so the code under test must check labels itself.
 // The world also plays the VM and GitHub's side: boot() brings a runner online, take() gives it a job, finish() ends
 // the job (the JIT runner unregisters, the guest powers off), preempt() is GCE deleting a spot VM.
+// Time is the world's clock: after(ms) is a timer on it (the launcher's `after`), fired by advance(). An insert can be
+// held (hooks.holdInsert returns a promise it waits on), and an insert error with `running: true` leaves its operation
+// running, as a wait that outlived its deadline does; sim.completeInsert() finishes it later.
 import { GceError } from '../../lib/gce.mjs';
 
 const ZONE_URL = (zone) => `https://www.googleapis.com/compute/v1/projects/ssfskim-ci-kit/zones/${zone}`;
@@ -33,6 +36,7 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
   const counts = new Map(); // successful (non-404) deletes and unregisters per resource
   const count = (key) => counts.set(key, (counts.get(key) ?? 0) + 1);
   const hooks = {};
+  let timers = []; // {due, fire}
 
   const runnersOf = (repo) => {
     if (!gh.runners.has(repo)) gh.runners.set(repo, []);
@@ -57,9 +61,15 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
     insertInstance: async (zone, body, opts = {}) => {
       log.push(`insert-wait ${body.name} ${opts.deadlineMs}`);
       hooks.beforeInsert?.(zone, body);
+      const held = hooks.holdInsert?.(zone, body);
+      if (held) await held;
       const i = g.insertErrors.findIndex((e) => e.match(zone, body));
       if (i >= 0) {
         const [e] = g.insertErrors.splice(i, 1);
+        if (e.running) {
+          log.push(`insert ${body.name} ${zone} unsettled`);
+          throw e.error(operation(zone, body, 'RUNNING'));
+        }
         if (e.accepted) create(zone, body);
         log.push(`insert ${body.name} ${zone} refused`);
         throw e.error();
@@ -86,8 +96,21 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
       if (hooks.operationsFail) throw new GceError(503, 'operations listing failed');
       return g.preempted.map((p) => structuredClone(p));
     },
-    zoneOperations: async (zone, filter) => g.ops.filter((o) => filter.includes(o.targetLink.split('/').pop()) && o.zone === zone).map((o) => structuredClone(o)),
-    operation: async (link) => structuredClone(g.ops.find((o) => o.selfLink === link) ?? null),
+    // hooks.zoneOperations(zone, filter): a promise the read waits on first (it may reject, as a failed read).
+    zoneOperations: async (zone, filter) => {
+      log.push(`read operations ${zone}`);
+      await hooks.zoneOperations?.(zone, filter);
+      return listOperations(zone, filter);
+    },
+    operation: async (link) => {
+      const { body, ...op } = g.ops.find((o) => o.selfLink === link) ?? {};
+      return op.name ? structuredClone(op) : null;
+    },
+    // Cloud Monitoring: hooks.timeSeries(filter, opts) answers (it may throw, as a refused read); none by default.
+    timeSeries: async (filter, opts) => {
+      log.push(`time series ${/nat\/([a-z_]+)/.exec(filter)?.[1] ?? filter}`);
+      return hooks.timeSeries ? hooks.timeSeries(filter, opts) : [];
+    },
     guestAttribute: async (zone, name, path) => {
       const inst = g.instances.find((i) => i.name === name);
       if (!inst) throw new GceError(404, 'notFound', ['notFound']);
@@ -96,16 +119,28 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
     },
   };
 
-  function create(zone, body) {
+  const listOperations = (zone, filter) => g.ops.filter((o) => filter.includes(o.targetLink.split('/').pop()) && o.zone === zone).map(({ body, ...o }) => structuredClone(o));
+
+  function operation(zone, body, status) {
+    const op = `op-${nextId++}`;
+    const made = {
+      name: op, zone, operationType: 'insert', status, insertTime: new Date(clock).toISOString(), targetLink: `${ZONE_URL(zone)}/instances/${body.name}`, selfLink: `${ZONE_URL(zone)}/operations/${op}`,
+      ...(status === 'DONE' ? { endTime: new Date(clock).toISOString() } : {}), body,
+    };
+    g.ops.push(made);
+    return made;
+  }
+
+  function create(zone, body, { withOperation = true } = {}) {
     const inst = {
       kind: 'compute#instance', name: body.name, status: 'PROVISIONING', zone: ZONE_URL(zone),
       machineType: `${ZONE_URL(zone)}/machineTypes/${body.machineType.split('/').pop()}`,
       creationTimestamp: new Date(clock).toISOString(), labels: { ...body.labels }, scheduling: body.scheduling, metadata: body.metadata,
+      networkInterfaces: structuredClone(body.networkInterfaces),
     };
     g.instances.push(inst);
     g.disks.push({ name: body.name, zone: ZONE_URL(zone), users: [`${ZONE_URL(zone)}/instances/${body.name}`], labels: { ...body.disks[0].initializeParams.labels }, creationTimestamp: inst.creationTimestamp });
-    const op = `op-${nextId++}`;
-    g.ops.push({ name: op, zone, operationType: 'insert', status: 'DONE', targetLink: `${ZONE_URL(zone)}/instances/${body.name}`, selfLink: `${ZONE_URL(zone)}/operations/${op}` });
+    if (withOperation) operation(zone, body, 'DONE');
   }
 
   const github = {
@@ -152,7 +187,9 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
     },
     issueComments: async (_repo, n, { since } = {}) =>
       gh.comments.filter((c) => (c.issue ?? 1) === n && (!since || c.updated_at >= since)).map((c) => ({ ...c })),
+    // hooks.commentWrite(body): a promise a comment's creation or edit waits on first (it may reject: a failed write).
     createComment: async (_repo, n, body) => {
+      await hooks.commentWrite?.(body);
       if (commentCount(n) >= 2500) throw httpError(403, 'Commenting is disabled on issues with more than 2500 comments');
       const c = { id: nextId++, issue: n, body, updated_at: new Date(clock).toISOString() };
       gh.comments.push(c);
@@ -164,6 +201,7 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
       return { ...c };
     },
     updateComment: async (_repo, id, body) => {
+      await hooks.commentWrite?.(body);
       const c = gh.comments.find((x) => x.id === id);
       if (!c) throw httpError(404);
       c.body = body;
@@ -220,6 +258,14 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
       sim.vm(name).attrs = { ...sim.vm(name).attrs, 'ci-kit/job': `exit:${code}` };
       if (poweredOff) sim.vm(name).status = 'TERMINATED';
     },
+    // An insert left running (an insert error with `running: true`) finishes now: its VM is created, or with `codes`
+    // (and the error's `message`) the operation ends in that error and creates nothing.
+    completeInsert(name, { codes, message } = {}) {
+      const op = g.ops.find((o) => o.status === 'RUNNING' && o.targetLink.endsWith(`/instances/${name}`));
+      Object.assign(op, { status: 'DONE', endTime: new Date(clock).toISOString() });
+      if (codes) op.error = { errors: codes.map((code) => ({ code, ...(message ? { message } : {}) })) };
+      else create(op.zone, op.body, { withOperation: false });
+    },
     preempt(name) {
       const inst = sim.vm(name);
       g.instances = g.instances.filter((i) => i !== inst);
@@ -231,7 +277,18 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
   return {
     gce, github, sim, g, gh, log, counts, hooks,
     now: () => clock,
-    advance: (ms) => { clock += ms; },
+    advance: (ms) => {
+      clock += ms;
+      const due = timers.filter((t) => t.due <= clock);
+      timers = timers.filter((t) => t.due > clock);
+      for (const t of due) t.fire();
+    },
+    after: (ms) => {
+      const t = { due: clock + ms };
+      const promise = new Promise((resolve) => { t.fire = resolve; });
+      timers.push(t);
+      return { promise, cancel: () => { timers = timers.filter((x) => x !== t); } };
+    },
   };
 }
 

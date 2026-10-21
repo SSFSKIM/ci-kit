@@ -82,7 +82,7 @@ export async function cleanUpSample({ gce, gh, runId, runner, run, log, sleep: w
 
 class QuotaStop extends Error {}
 
-async function sample({ gce, gh, cfg, placement, project, image, machine, token, out, log }) {
+export async function sample({ gce, gh, cfg, placement, project, image, machine, token, out, log }) {
   const runId = bakeRunId(new Date());
   const names = bakeNames(runId, 'sample00');
   const record = { runId, image, region: placement.region, machine, vm: names.check };
@@ -96,7 +96,7 @@ async function sample({ gce, gh, cfg, placement, project, image, machine, token,
     for (const z of placement.zones) {
       try {
         await gce.insertInstance(z, checkInstance({
-          name: names.check, zone: z, machine, runId, image: `projects/${project}/global/images/${image}`, diskGb: cfg.disk_gb, placement, jit: jit.encoded_jit_config,
+          name: names.check, zone: z, machine, runId, image: `projects/${project}/global/images/${image}`, diskGb: cfg.disk_gb, placement, egress: cfg.egress, jit: jit.encoded_jit_config,
         }));
         zone = z;
         break;

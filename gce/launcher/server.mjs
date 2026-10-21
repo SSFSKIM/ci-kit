@@ -65,7 +65,8 @@ async function tick({ trigger, requests }) {
   const served = { trigger, requests, started: new Date(began).toISOString() };
   try {
     const out = await reconcile();
-    const ahead = out.prelaunched.length ? ` (${out.prelaunched.length} pre-launched)` : '';
+    const extra = [out.prelaunched.length && `${out.prelaunched.length} pre-launched`, out.raced.length && `${out.raced.length} racing a slow insert`].filter(Boolean);
+    const ahead = extra.length ? ` (${extra.join(', ')})` : '';
     say('INFO', `tick: ${out.launched.length} launched${ahead}, ${out.deleted.length} deleted, ${out.finalized.length} finalized`,
       { ...out, ...served, ms: Date.now() - began });
     return out;
