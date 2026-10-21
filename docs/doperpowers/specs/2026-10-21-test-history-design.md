@@ -517,8 +517,8 @@ Each is written here in full when its condition holds:
   - Opt-in per call; children's briefs allow it for iteration runs only.
   - The architect added three fallbacks: any path outside the source and test trees, a deleted or renamed non-test
     file, and directories tests read through `fs` or a glob. The same selection applies to `unit:darwin`.
-  - CI-opt read "source and test trees" to include `apps/<app>/src` and `apps/<app>/test`, since the desk's apps are
-    vitest projects of the same run; the architect is told. `e2e/` and `docs/` changes run the full unit suite by this
+  - "Source and test trees" includes `apps/<app>/src` and `apps/<app>/test`, since the desk's apps are vitest projects
+    of the same run (CI-opt's reading, confirmed by the architect; `apps/<app>/e2e` is outside). `e2e/` and `docs/` changes run the full unit suite by this
     rule. Whether they could select nothing is left for the store's data.
   - The strongest alternative was the plan job computing the change itself. It lost because the plan checks out only
     `package.json` and `.github` sparsely, with no history, and a full fetch there costs every run.
