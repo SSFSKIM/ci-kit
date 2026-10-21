@@ -43,11 +43,12 @@ if [[ $1 == bootstrap && $3 == *${runnerAgent}*.plist ]]; then log=\${3##*/}; lo
   for (const name of ['node', 'corepack', 'git', 'soffice']) fake(name, 'echo fixture-tool');
   // Never download/register a runner or invoke any real compiler or desktop tool.
   fake('curl', 'echo "$*" >> "$HOME/curl.calls"\nexit 90');
+  // FAIL_COMPILE names the helpers whose compile fails, leaving partial output behind as a failed compiler may.
   fake('xcrun', `if [[ $1 == clang ]]; then echo fixture-clang; exit 0; fi
-[[ $1 == swiftc && $2 == -O && $3 == -o ]] || exit 91
-printf '#!/bin/bash\\necho cursor-park\\n' > "$4"
+[[ $1 == swiftc && $2 == -O && $3 == -o && $5 == */mac/hooks/\${4##*/}.swift ]] || exit 91
+printf '#!/bin/bash\\necho %s\\n' "\${4##*/}" > "$4"
 chmod +x "$4"
-[[ \${FAIL_COMPILE:-0} != 1 ]]`);
+[[ " \${FAIL_COMPILE:-} " != *" \${4##*/} "* ]]`);
   fake('cp', `if [[ \${FAIL_COPY:-0} == 1 && $1 == */hooks/job-started.sh ]]; then
   /bin/cp "$1" "\${!#}/"
   exit 73
@@ -79,7 +80,7 @@ printf '\\xef\\xbb\\xbf{"agentName": "%s"}' "$name" > .runner`);
   instance(runner, registered);
   const hooks = join(runner, 'ci-kit/hooks');
   mkdirSync(hooks, { recursive: true });
-  for (const file of [...hookFiles, 'cursor-park', 'obsolete']) writeFileSync(join(hooks, file), `old ${file}\n`);
+  for (const file of [...hookFiles, ...helpers, 'obsolete']) writeFileSync(join(hooks, file), `old ${file}\n`);
   writeFileSync(join(runner, '.env'), 'old environment\n');
   const snapshot = () => Object.fromEntries(readdirSync(hooks).sort().map((name) => [name, readFileSync(join(hooks, name), 'utf8')]));
   const run = (script = 'mac/install.sh', args = ['--disabled'], extra = {}, input = '') => spawnSync('/bin/bash', [join(kit, script), ...args], {
@@ -99,13 +100,19 @@ function isolatedPath(f) {
   return empty;
 }
 
-function assertNewHooks(f, { cursor = true } = {}) {
-  assert.deepEqual(readdirSync(f.hooks).sort(), [...hookFiles, ...(cursor ? ['cursor-park'] : [])].sort());
+// The compiled helpers each instance's hooks carry beside the scripts.
+const helpers = ['cursor-park', 'window-list'];
+
+function assertNewHooks(f, { compiled = helpers } = {}) {
+  assert.deepEqual(readdirSync(f.hooks).sort(), [...hookFiles, ...compiled].sort());
   for (const file of hookFiles) {
     assert.equal(readFileSync(join(f.hooks, file), 'utf8'), readFileSync(join(f.kit, 'mac/hooks', file), 'utf8'));
     if (file.endsWith('.sh')) assert.ok(statSync(join(f.hooks, file)).mode & 0o111, file);
   }
-  if (cursor) assert.ok(statSync(join(f.hooks, 'cursor-park')).mode & 0o111);
+  for (const helper of compiled) {
+    assert.ok(statSync(join(f.hooks, helper)).mode & 0o111, helper);
+    assert.equal(readFileSync(join(f.hooks, helper), 'utf8'), `#!/bin/bash\necho ${helper}\n`);
+  }
   assert.match(readFileSync(join(f.runner, '.env'), 'utf8'), new RegExp(`ACTIONS_RUNNER_HOOK_JOB_STARTED=${f.hooks}/job-started.sh`));
 }
 
@@ -136,7 +143,7 @@ test('incomplete or invalid staged hooks never replace the old hooks', macOnly, 
   }
 });
 
-test('a successful refresh replaces the full old set, including the compiled cursor helper', macOnly, () => {
+test('a successful refresh replaces the full old set, including the compiled helpers', macOnly, () => {
   const f = fixture();
   const result = f.run();
   assert.equal(result.status, 0, result.stderr);
@@ -144,12 +151,15 @@ test('a successful refresh replaces the full old set, including the compiled cur
   assert.deepEqual(readdirSync(join(f.runner, 'ci-kit')), ['hooks']);
 });
 
-test('a failed Swift compile warns and publishes complete hooks without a partial cursor binary', macOnly, () => {
-  const f = fixture();
-  const result = f.run(undefined, undefined, { FAIL_COMPILE: '1' });
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /warning: cursor-park did not compile/);
-  assertNewHooks(f, { cursor: false });
+test('a failed Swift compile warns and publishes complete hooks without that partial binary', macOnly, () => {
+  for (const [failed, compiled] of [['cursor-park', ['window-list']], ['window-list', ['cursor-park']], ['cursor-park window-list', []]]) {
+    const f = fixture();
+    const result = f.run(undefined, undefined, { FAIL_COMPILE: failed });
+    assert.equal(result.status, 0, result.stderr);
+    for (const helper of failed.split(' ')) assert.match(result.stdout, new RegExp(`warning: ${helper} did not compile \\(see .*/${helper}-build\\.log\\)`));
+    if (failed.includes('window-list')) assert.match(result.stdout, /window-list did not compile .*; the dialog check sees a dialog only in front/);
+    assertNewHooks(f, { compiled });
+  }
 });
 
 test('a first install publishes hooks when there is no old directory', macOnly, () => {

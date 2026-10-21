@@ -6,7 +6,7 @@ import { appendFileSync, chmodSync, constants, copyFileSync, existsSync, mkdirSy
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { T0, asnShape, desktop, iso, minute, runnerAgent, terminal } from './fake-mac-desktop.mjs';
+import { T0, asnShape, desktop, iso, minute, runnerAgent, terminal, withWindow } from './fake-mac-desktop.mjs';
 
 // The dialog watcher (mac/hooks/dialog-watch.sh) on a faked desktop (fake-mac-desktop.mjs). Each `watch` is one run of
 // the LaunchAgent, a minute after the run before unless told `at` (seconds after T0); `hook` is a job's start.
@@ -88,7 +88,7 @@ test('three consecutive reads without a dialog close the episode; a dialog betwe
   run = run.watch(terminal);
   assert.equal(run.stateText, null);
   assert.deepEqual(run.ghCalls.map((call) => call.slice(1, 3)), [['create', '--repo'], ['comment', alertURL], ['close', alertURL]]);
-  assert.equal(argValue(run.ghCalls[1], '--body'), `cleared at ${iso(T0 + 60 * 7)}: no dialog in front on 3 reads in a row since ${firstClear}`);
+  assert.equal(argValue(run.ghCalls[1], '--body'), `cleared at ${iso(T0 + 60 * 7)}: no dialog on 3 reads in a row since ${firstClear}`);
   assert.match(run.log, /no dialog on 3 reads in a row; the episode of SecurityAgent since .* closes/);
 });
 
@@ -133,7 +133,7 @@ test('an alert whose close fails stays owed and is tried at each read until it g
   const tried = [['comment', alertURL], ['close', alertURL], ['repos/SSFSKIM/ci-kit-sandbox/issues/42', '--jq']];
   assert.deepEqual(done.ghCalls.map((call) => call.slice(1, 3)), [['create', '--repo'], ...tried, ...tried, ...tried, ['close', alertURL]]);
   for (const call of done.ghCalls.filter((call) => call[1] === 'comment')) {
-    assert.equal(argValue(call, '--body'), `cleared at ${cleared}: no dialog in front on 3 reads in a row since ${iso(T0 + 120)}`);
+    assert.equal(argValue(call, '--body'), `cleared at ${cleared}: no dialog on 3 reads in a row since ${iso(T0 + 120)}`);
   }
   assert.ok(done.log.includes(`frontmost is 터미널: the alert ${alertURL} of the episode of SecurityAgent since ${iso(T0)}, which closed at ${cleared}, is closed`), done.log);
   assert.equal(done.watch(terminal).ghCalls.length, done.ghCalls.length, 'nothing is owed after it');
@@ -223,7 +223,7 @@ test('a state file the version before wrote still loads: its episode closes on t
   const done = d.watch(terminal);
   assert.equal(done.stateText, null);
   const comment = done.ghCalls.filter((call) => call[1] === 'comment').at(-1);
-  assert.equal(argValue(comment, '--body'), `cleared at ${iso(T0 + 60)}: no dialog in front on 3 reads in a row since ${iso(T0 - 60)}`);
+  assert.equal(argValue(comment, '--body'), `cleared at ${iso(T0 + 60)}: no dialog on 3 reads in a row since ${iso(T0 - 60)}`);
 });
 
 test('an unreadable frontmost app changes nothing', () => {
@@ -383,7 +383,7 @@ test('while an episode is open the runner is held, an idle runner is stopped, an
   assert.deepEqual(run.launchctl, [kill], 'never load, unload, enable or disable');
   assert.equal(run.runner, 'stopped');
   assert.deepEqual(run.python, Array(2).fill(`-I ${hooks}runner-state.py ${d.dir}/actions-runner-maws`), 'idle, confirmed by a second read');
-  assert.match(run.log, new RegExp(`dialog-watch .*drain: holding the runner while SecurityAgent holds the front \\(since ${iso(T0)}\\)`));
+  assert.match(run.log, new RegExp(`dialog-watch .*drain: holding the runner while SecurityAgent is up \\(since ${iso(T0)}\\)`));
   assert.match(run.log, /drain: stopped the runner \(no job running or offered on two reads 0 s apart\); it waits for the episode to close/);
   const later = run.watch(security);
   assert.deepEqual(later.launchctl, [kill], 'a stopped runner is not signalled again');
@@ -848,4 +848,68 @@ test('a job end that cannot be watched stops nothing and says so; the watcher\'s
   const slow = await jobEnd({ finishing: 3000, env: { CI_KIT_JOB_END_WAIT: '1' } });
   assert.deepEqual(slow.stops, []);
   assert.match(slow.log, /drain: the end of this job could not be watched \(failed \(124\)\)/);
+});
+
+// A dialog on screen without focus counts as one in front (2026-10-21: a SecurityAgent keychain prompt sat on the
+// mini's screen for hours with Terminal in front, and no alert opened).
+const keychainPrompt = withWindow({ pid: 4711, layer: 2002, x: 1020, y: 400, width: 520, height: 260, bundle: 'com.apple.SecurityAgent', name: 'SecurityAgent' });
+const onScreen = 'frontmost is 터미널; on screen: SecurityAgent (pid 4711, layer 2002, 520x260 at 1020,400)';
+
+test('a dialog on screen without focus opens the episode on two reads and holds the runner; once its window is gone, three clear reads close it', () => {
+  const d = desktop({ logOutput: keychainRequest });
+  const first = d.watch(terminal, { at: 0, windows: keychainPrompt });
+  assert.equal(first.status, 0, first.stderr);
+  assert.deepEqual([first.state.phase, first.state.name, first.state.since], ['pending', 'SecurityAgent', iso(T0)]);
+  assert.ok(first.log.includes(`dialog-watch run=- job=- ${onScreen}: a system dialog; the episode opens if the next read sees it too\n`), first.log);
+  const open = d.watch(terminal, { at: 60, windows: keychainPrompt });
+  assert.equal(open.state.phase, 'open');
+  const [create] = creates(open);
+  assert.equal(argValue(create, '--title'), `ci-kit alert: mini: SecurityAgent since ${minute(T0)} (security request from security)`);
+  assert.ok(argValue(create, '--body').includes('Dialog: SecurityAgent is on screen without focus (pid 4711, layer 2002, 520x260 at 1020,400)\nFrontmost app: 터미널\n'));
+  assert.ok(open.log.includes(`${onScreen} since ${iso(T0)}: security request from security; the episode opens`), open.log);
+  assert.notEqual(open.marker, null, 'the runner is held');
+  // The process may run on without its window: the window is what counts.
+  const closed = clearReads(open);
+  assert.equal(closed.stateText, null);
+  assert.equal(closed.marker, null);
+  assert.deepEqual(closed.ghCalls.slice(-2).map((call) => call[1]), ['comment', 'close']);
+});
+
+test('a dialog that loses focus but stays on screen is the same episode', () => {
+  const d = desktop();
+  d.watch(security, { at: 0, windows: keychainPrompt });
+  const open = d.watch(terminal, { at: 60, windows: keychainPrompt });
+  assert.deepEqual([open.state.phase, open.state.since], ['open', iso(T0)]);
+  const still = open.watch(terminal, { windows: keychainPrompt });
+  assert.deepEqual([still.state.phase, still.state.clear], ['open', '0']);
+  assert.equal(creates(still).length, 1);
+});
+
+test('a dialog on screen counts even when the app in front cannot be read', () => {
+  const run = desktop().watch('', { windows: keychainPrompt });
+  assert.equal(run.state.phase, 'pending');
+  assert.match(run.log, /frontmost is unreadable; on screen: SecurityAgent \(pid 4711, .*\): a system dialog; the episode opens/);
+  assert.doesNotMatch(run.log, /nothing changes/);
+});
+
+test('a window list that cannot be read is logged when that starts and when it ends, not at every read; a dialog in front still opens the episode', () => {
+  const d = desktop();
+  const missing = 'dialog-watch run=- job=- could not read the windows on screen (window-list is missing); a dialog is seen only in front until it can';
+  const count = (run, line) => run.log.split('\n').filter((entry) => entry.endsWith(line)).length;
+  let run = d.watch(terminal, { windowList: 'missing', windows: keychainPrompt });
+  assert.equal(count(run, missing), 1);
+  assert.equal(run.stateText, null, 'only the frontmost read decides');
+  run = d.watch(terminal, { windowList: 'missing' });
+  assert.equal(count(run, missing), 1, 'not again at the next read');
+  run = d.watch(terminal, { windowList: 'hang' });
+  assert.equal(count(run, 'could not read the windows on screen (window-list timed out); a dialog is seen only in front until it can'), 1);
+  assert.deepEqual(run.ghSurvivors, []);
+  run = d.watch(security, { windowList: 1 });
+  run = d.watch(security, { windowList: 1 });
+  assert.equal(run.state.phase, 'open');
+  assert.equal(count(run, 'could not read the windows on screen (window-list failed (1)); a dialog is seen only in front until it can'), 1);
+  run = d.watch(terminal);
+  assert.equal(count(run, 'the windows on screen read again'), 1);
+  run = d.watch(terminal);
+  assert.equal(count(run, 'the windows on screen read again'), 1, 'once');
 });

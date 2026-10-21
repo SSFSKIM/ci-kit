@@ -1,24 +1,27 @@
 #!/bin/bash
 # Part of the mac runner's job-started hook: make this Mac's desktop the same before every job.
 #
-# - A system dialog in front refuses the job at once. An e2e job under a modal alert fails group after group on focus
-#   and pasteboard (2026-10-16: seven groups red, UserNotificationCenter frontmost). Dialogs are the human's to dismiss;
-#   this never tries to clear one. The refusal opens the machine's dialog episode and its alert issue unless the dialog
-#   watcher already did (dialog.sh, dialog-watch.sh): they share it.
+# - A system dialog in front, or on screen without focus, refuses the job at once. An e2e job under a modal alert fails
+#   group after group on focus and pasteboard (2026-10-16: seven groups red, UserNotificationCenter frontmost), and its
+#   real input can land on one that floats over the app in front (2026-10-21: a SecurityAgent keychain prompt sat on
+#   screen for hours with Terminal in front). Dialogs are the human's to dismiss; this never tries to clear one. The
+#   refusal opens the machine's dialog episode and its alert issue unless the dialog watcher already did (dialog.sh,
+#   dialog-watch.sh): they share it.
 # - Any other app in front is replaced by Terminal: some of MAWS's paste and to-human results depend on the app in
 #   front (Finder where focus falls when an e2e app quits; Chrome after a test leaked a URL into it), so every job
 #   starts from the same one. `open -a Terminal` goes through LaunchServices (no Apple Events, no Automation consent);
 #   the job fails fast if Terminal is not in front within about 5 s. It acts only before the job, so MAWS's own
 #   MAWS_E2E_FOREGROUND=1 is never fought.
 #
-# When the frontmost app cannot be read, the job is not blocked; the miss is logged.
+# When the frontmost app cannot be read, the job is not blocked unless a dialog is on screen; when the windows on
+# screen cannot be read, a dialog is seen only in front. Either miss is logged.
 set -uo pipefail
 log_tag='desktop-check'
 # shellcheck source=dialog.sh
 source "$(dirname "$0")/dialog.sh"
 
 # A refused job opens the episode at once when none is open; a pending first read by the watcher lends it its time. In
-# an open episode it names the episode's time, and the episode's source when the same dialog is in front: the source
+# an open episode it names the episode's time, and the episode's source when the same dialog is up: the source
 # is read once per episode, when it opens. Its read restarts the watcher's count of clear reads. A closed episode whose
 # alert's close is owed is settled as the watcher settles it (reopen_episode): the close is tried, and while it cannot
 # go through the episode reopens with its alert. The lock wait outlasts the watcher's longest hold (attribution, then
@@ -47,8 +50,8 @@ refuse_dialog() {
       [[ $st_name != "$dialog" ]] || source=$st_source
     fi
   fi
-  log "frontmost is $name: $source; a system dialog holds focus since $since; failing the job"
-  echo "ci-kit: a system dialog ($dialog: $source) holds focus on the $machine since $(minute "$since") — dismiss it there and rerun" >&2
+  log "$seen: $source; a system dialog $dialog_held since $since; failing the job"
+  echo "ci-kit: a system dialog ($dialog: $source) $dialog_held on the $machine since $(minute "$since") — dismiss it there and rerun" >&2
   [[ -z $opened ]] || alert_episode "a refused job (run ${GITHUB_RUN_ID:--})" || true
   unlock_state
 }
@@ -73,15 +76,17 @@ if [[ ${1:-} == --frontmost ]]; then
   printf '%s\n' "${name:-unknown}"
   exit 0
 fi
-if [[ -z $name ]]; then
-  log "could not read the frontmost app; not blocking the job"
-  exit 0
-fi
+read_windows
+[[ -z $windows_miss ]] || log "could not read the windows on screen ($windows_miss); a dialog is seen only in front"
 
 if is_dialog; then
   clock
   refuse_dialog
   exit 1
+fi
+if [[ -z $name ]]; then
+  log "could not read the frontmost app; not blocking the job"
+  exit 0
 fi
 passed_dialog || true
 

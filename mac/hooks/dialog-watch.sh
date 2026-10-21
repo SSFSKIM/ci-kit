@@ -4,7 +4,8 @@
 # when a job starts; this sees one when no job does (2026-10-17: a SecurityAgent keychain dialog held the mini for 12
 # minutes while MAWS held its runs, and nobody was told).
 #
-# - Each run reads the frontmost app, read-only (dialog.sh's lsappinfo read; no AppleScript, no GUI action).
+# - Each run reads the frontmost app and the windows on screen, read-only (dialog.sh's lsappinfo read and window-list;
+#   no AppleScript, no GUI action), so a dialog on screen without focus counts as one in front does.
 # - A dialog on two consecutive reads opens the machine's episode: the source is attributed once, and the alert issue
 #   is opened, unless the job hook opened it first. Three consecutive reads with no dialog close it (2026-10-17: a
 #   dismissed prompt came back within a minute, twice), and its alert with it: a close that fails is tried again at
@@ -38,7 +39,7 @@ watch_read() {
     case $st_phase in
       open)
         st_at=$now_epoch
-        if ((st_clear > 0)); then log "frontmost is $name: the dialog is back; the count of clear reads restarts"; fi
+        if ((st_clear > 0)); then log "$seen: the dialog is back; the count of clear reads restarts"; fi
         st_clear=0 st_clear_since=''
         [[ -n $st_name ]] || st_name=$dialog
         save_state || true
@@ -54,7 +55,7 @@ watch_read() {
       pending)
         if [[ $st_name == "$dialog" ]] && consecutive; then
           if start_episode "$st_since"; then
-            log "frontmost is $name since $st_since: $source; the episode opens"
+            log "$seen since $st_since: $source; the episode opens"
             alert_episode 'the dialog watcher (two reads in a row)'
           fi
         else
@@ -73,16 +74,16 @@ watch_read() {
         fi
         st_at=$now_epoch
         if ((st_clear >= clear_reads)); then
-          log "frontmost is $name: no dialog on $clear_reads reads in a row; the episode of $st_name since $st_since closes"
+          log "$seen: no dialog on $clear_reads reads in a row; the episode of $st_name since $st_since closes"
           close_episode
         else
-          log "frontmost is $name: no dialog ($st_clear of $clear_reads reads)"
+          log "$seen: no dialog ($st_clear of $clear_reads reads)"
           save_state || true
         fi
         ;;
       closed) retry_close || true ;;
       pending)
-        log "frontmost is $name: the $st_name seen at $st_since is gone; no episode"
+        log "$seen: the $st_name seen at $st_since is gone; no episode"
         drop_state || true
         ;;
       *) drop_state || true ;;
@@ -93,7 +94,7 @@ first_read() {
   st_phase=pending st_name=$dialog st_since=$now st_at=$now_epoch st_source='' st_issue='' st_clear=0 st_clear_since=''
   st_cleared='' st_commented=''
   save_state || true
-  log "frontmost is $name: a system dialog; the episode opens if the next read sees it too"
+  log "$seen: a system dialog; the episode opens if the next read sees it too"
 }
 
 # What an instance's runner is doing: `busy <pid>…`, `idle <listener log> <size>` or `stopped` (runner-state.py, which
@@ -123,7 +124,7 @@ hold() { # under the episode lock: the hold follows the episode as it stands now
         log "drain: could not write $drain_marker; the runner is not held"
         return 0
       fi
-      log "drain: holding the runner while ${st_name:-a system dialog} holds the front (since $st_since)"
+      log "drain: holding the runner while ${st_name:-a system dialog} is up (since $st_since)"
     fi
     held=1
   elif [[ (-z $st_phase || $st_phase == closed) && -e $drain_marker ]]; then
@@ -200,16 +201,34 @@ if [[ ${1:-} == --job-end ]]; then
   exit 0
 fi
 
+# A window list that cannot be read is logged when that starts and when it ends, not at every read: until then each
+# read sees a dialog only in front, as before the helper.
+windows_noted=$ci_kit_logs/window-list.miss
+note_windows() {
+  local noted=''
+  [[ ! -e $windows_noted ]] || IFS= read -r noted <"$windows_noted" 2>/dev/null || true
+  if [[ -n $windows_miss && $windows_miss != "$noted" ]]; then
+    log "could not read the windows on screen ($windows_miss); a dialog is seen only in front until it can"
+    printf '%s\n' "$windows_miss" >"$windows_noted" || true
+  elif [[ -z $windows_miss && -e $windows_noted ]]; then
+    log "the windows on screen read again"
+    rm -f "$windows_noted" || true
+  fi
+}
+
 # One locked step per run: the read's effect on the episode, then the hold that follows from it. The job hook
 # publishes an episode under the same lock, so a release never acts on a phase the hook has since replaced. A run
-# that finds the lock taken changes nothing and tries again a minute later.
+# that finds the lock taken changes nothing and tries again a minute later. A read that cannot tell the app in front
+# changes nothing either, unless a dialog is on screen: that one is up whatever is in front.
 held=
 read_front
+read_windows
 clock
-[[ -n $name ]] || log "could not read the frontmost app; nothing changes"
+note_windows
+[[ -n $name || -n $screen_dialog ]] || log "could not read the frontmost app; nothing changes"
 if [[ -e $dialog_state || -e $drain_marker ]] || is_dialog; then
   if lock_state 0; then
-    [[ -z $name ]] || watch_read
+    [[ -z $name && -z $screen_dialog ]] || watch_read
     hold
     unlock_state
   else
