@@ -8,7 +8,10 @@ export const BAKE_TIMEOUT_MS = 30 * 60_000;
 export const SMOKE_TIMEOUT_MS = 15 * 60_000;
 // From the dispatch to the check VM's power-off: a boot of about a minute and a job of about one.
 export const CHECK_TIMEOUT_MS = 10 * 60_000;
-export const STALE_MS = 2 * 3600_000;
+// A bake's builder, check runner or unready image younger than this may belong to a bake still running, so an
+// overlapping bake and the launcher leave it alone. It stays above the bake job's task timeout in gce/deploy.sh (180 min
+// for eight placements smoked in turn), which bounds a bake's life; test/gce/bake.test.mjs holds the two together.
+export const STALE_MS = 4 * 3600_000;
 export const KEEP_READY = 2;
 // The builder needs memory for the image build and pnpm's fetch; it is on demand, since a preempted bake is a lost
 // week. N2D stands in when E2 is refused (spec M10: quota requests were reconciling).
@@ -69,10 +72,10 @@ export const ownsBakeImage = (image, runId) => labelled(image, 'gce-image') && i
 // included) may have, and is checked by label.
 export const refusedOutright = (err) => err?.status >= 400 && err.status < 500 && !err.accepted;
 
-// Builders, smoke and check VMs of any bake older than 2 h: a bake killed mid-run (its job's timeout) cannot clean up.
+// Builders, smoke and check VMs of any bake older than STALE_MS (4 h): a bake killed mid-run (its job's timeout) cannot clean up.
 export const staleBakeInstances = (instances, now) => instances.filter((i) => labelled(i, 'gce-builder') && now - created(i) > STALE_MS);
 
-// The check runners of earlier bakes (ci-kit-bake-<run id>) that are older than 2 h, by the time in their run id, and
+// The check runners of earlier bakes (ci-kit-bake-<run id>) that are older than STALE_MS, by the time in their run id, and
 // not busy: a bake killed mid-check leaves its registration behind. A younger one may be a bake in flight.
 export function staleBakeRunners(runners, now) {
   return runners.filter((r) => {
@@ -81,7 +84,7 @@ export function staleBakeRunners(runners, now) {
   });
 }
 
-// Images of the family beyond the two newest ready ones, and unready ones older than 2 h (a bake that died before it
+// Images of the family beyond the two newest ready ones, and unready ones older than STALE_MS (a bake that died before it
 // could delete its own). A younger unready image may be a bake in flight, and is left to it.
 export function imagesToPrune(images, { family, now, keep = KEEP_READY }) {
   const ours = images.filter((i) => labelled(i, 'gce-image') && i.family === family);

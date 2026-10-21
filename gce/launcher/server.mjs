@@ -19,6 +19,7 @@ import { createAppTokens } from '../../lib/github-app.mjs';
 import { createConfigSource } from './source.mjs';
 import { createGceLedger } from './ledger-store.mjs';
 import { Launcher } from './launcher.mjs';
+import { stockoutMemory } from './logic.mjs';
 import { createTicker } from './ticker.mjs';
 import { createHandler } from './routes.mjs';
 
@@ -42,7 +43,8 @@ async function deps() {
   const gh = createGitHub(createAppTokens({ appId: appId.trim(), pem, owner: 'SSFSKIM' }));
   const source = createConfigSource({ gh, fetchText, readBundled: bundled, bundledCommit: process.env.CI_KIT_COMMIT || 'bundled', log });
   github = gh;
-  return { gce, gh, source, ledgers: new Map() };
+  // stockouts: capacity refusals remembered across ticks (logic.mjs stockoutMemory), for this process's life.
+  return { gce, gh, source, ledgers: new Map(), stockouts: stockoutMemory() };
 }
 
 async function reconcile() {
@@ -54,7 +56,7 @@ async function reconcile() {
   const key = `${cfg.ledger.repo}#${cfg.ledger.issue_title}`;
   if (!d.ledgers.has(key)) d.ledgers.set(key, createGceLedger(d.gh, cfg.ledger, { log }));
   const error = (message, fields) => say('ERROR', message, fields);
-  const launcher = new Launcher({ gce: d.gce, gh: d.gh, ledger: d.ledgers.get(key), cfg, config, poolRepos, log, error });
+  const launcher = new Launcher({ gce: d.gce, gh: d.gh, ledger: d.ledgers.get(key), cfg, config, poolRepos, log, error, stockouts: d.stockouts });
   return { config: config.slice(0, 8), repos: cfg.repos.map((r) => r.repo), ...(await launcher.tick()), github: d.gh.stats() };
 }
 

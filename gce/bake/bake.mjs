@@ -4,8 +4,11 @@
 //   node gce/bake/bake.mjs
 // No inbound network or ssh: the builder does its work through its startup script, reports through a guest
 // attribute and powers off; this script images it only on `ok`, smoke-boots the image once in every placement of
-// gce.json (spec 2026-10-21: an image that does not boot on a placement's family is never ready), runs one real
-// Actions job on a VM booted from it, and marks it ready only when all of them pass. Every VM and runner registration
+// gce.json, runs one real Actions job on a VM booted from it, and marks it ready only when they pass. A placement whose
+// smoke VM no zone or machine takes (capacity or quota: a stock-out, live 2026-10-21 in C4D us-central1) is skipped
+// with a warning; a smoke VM that boots and fails fails the bake. The image is ready only when every machine family of
+// gce.json passed a smoke (on a machine of that family) in at least one placement: it boots on each family's hardware,
+// and a busy placement does not hold back every image. Every VM and runner registration
 // the bake made is gone when it ends, a failed bake deletes its own image, and the two newest ready images are kept.
 // Env (optional): CI_KIT_COMMIT, the kit commit to bake (default: main's head); CI_KIT_BAKE_RUN, the run id.
 import { readFile } from 'node:fs/promises';
@@ -44,7 +47,7 @@ async function createFirst(gce, options, body, log) {
     try {
       await gce.insertInstance(zone, spec);
       log(`${spec.name}: ${machine}@${zone} created`);
-      return { name: spec.name, zone };
+      return { name: spec.name, zone, machine };
     } catch (err) {
       const why = refusal(err);
       if (!why) throw err;
@@ -52,8 +55,15 @@ async function createFirst(gce, options, body, log) {
       if (why === 'quota') skip.add(where);
     }
   }
-  throw new Error(`ci-kit: no placement took the VM: ${tried.join(', ')}`);
+  throw new Refused(`ci-kit: no placement took the VM: ${tried.join(', ')}`);
 }
+
+// Every attempt of createFirst was refused for capacity or quota: nothing was created.
+class Refused extends Error {}
+
+// A machine's family (c4d, c3d, …), and the families a placement's machines name.
+const familyOf = (machine) => machine.split('-')[0];
+const familiesOf = (placement) => new Set(Object.values(placement.machines).map(familyOf));
 
 // One look at a bake VM: the instance and its report at `path`. The report is remembered across looks, since it may
 // no longer be readable once the guest is off. A VM relabelled by someone (to keep it for debugging) is theirs from
@@ -171,13 +181,31 @@ export async function runBake(gce, { cfg, sha, runId, token, gh, script, sleep, 
     await deleteIfOwned(gce, builder, runId, log);
 
     const source = `projects/${cfg.project}/global/images/${image}`;
+    const skipped = [];
+    const proven = new Set();
     for (const [k, placement] of cfg.placements.entries()) {
       const name = `${names.smoke}-${k + 1}`;
-      const smoke = await createFirst(gce, placements([placement], smokeMachines),
-        ({ machine, zone }) => smokeInstance({ name, zone, machine, runId, image: source, diskGb: cfg.disk_gb, placement, egress: cfg.egress }), log);
+      const label = `placement ${k + 1} (${[...familiesOf(placement)].join('/')}@${placement.region})`;
+      let smoke;
+      try {
+        smoke = await createFirst(gce, placements([placement], smokeMachines),
+          ({ machine, zone }) => smokeInstance({ name, zone, machine, runId, image: source, diskGb: cfg.disk_gb, placement, egress: cfg.egress }), log);
+      } catch (err) {
+        if (!(err instanceof Refused)) throw err;
+        log(`warning: ${label} skipped: no zone took its smoke VM (${err.message.replace(/^ci-kit: no placement took the VM: /, '')})`);
+        skipped.push(label);
+        continue;
+      }
       const checked = await awaitReport(gce, smoke, 'ci-kit/smoke', SMOKE_TIMEOUT_MS, wait);
       if (!checked.ok) throw new Error(`ci-kit: the smoke VM in placement ${k + 1} (${placement.region}) did not pass: ${checked.reason}`);
       await deleteIfOwned(gce, smoke, runId, log);
+      proven.add(familyOf(smoke.machine)); // what booted, not the rest of the placement's machine map
+    }
+    const families = new Set(cfg.placements.flatMap((p) => [...familiesOf(p)]));
+    const unproven = [...families].filter((f) => !proven.has(f));
+    if (unproven.length) {
+      const why = skipped.length ? `: ${skipped.join(', ')} ${skipped.length === 1 ? 'was' : 'were'} skipped` : '';
+      throw new Error(`ci-kit: no smoke VM passed on ${unproven.join(', ')}${why}`);
     }
 
     const url = await realJob(gce, gh, { cfg, names, runId, image: source, check, ...wait });
@@ -186,7 +214,7 @@ export async function runBake(gce, { cfg, sha, runId, token, gh, script, sleep, 
     await gce.setImageLabels(image, { ...made.labels, 'ci-kit-ready': 'true' });
     ready = true;
     log(`image ${image} is ready`);
-    return { image, check: url };
+    return { image, check: url, skipped };
   } finally {
     await cleanUp(gce, { cfg, runId, image: ready ? null : image, gh, check, sleep, now, log });
   }
@@ -276,8 +304,8 @@ async function main() {
   const gh = createGitHub(createAppTokens({ ...app, scope: CHECK_SCOPE }));
   const script = fillBuilderScript(await readFile(new URL('./builder.sh', import.meta.url), 'utf8'), { sha });
   log(`bake ${runId}: kit ${sha.slice(0, 8)}, project ${cfg.project}`);
-  const { image, check } = await runBake(gce, { cfg, sha, runId, token, gh, script, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), log });
-  log(`done: ${image}, real job ${check}`);
+  const { image, check, skipped } = await runBake(gce, { cfg, sha, runId, token, gh, script, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), log });
+  log(`done: ${image}, real job ${check}${skipped.length ? `; not smoked (no zone took its VM): ${skipped.join(', ')}` : ''}`);
 }
 
 // Both sides canonical: argv[1] is the path as typed, the module URL is resolved through symlinks.

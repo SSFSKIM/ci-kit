@@ -3,7 +3,9 @@
 // of its arguments (without the global --project and --quiet). A call it does not know exits 3, so a test sees any
 // call the script starts to make.
 // state: {network: bool, subnets: [{name, region, range, pga}], routers: [region], nats: [region], firewall: [line],
-//   metrics: [{name, description, filter}], channel: name or null, policies: [the policy files' JSON]}
+//   metrics: [{name, description, filter}], channel: name or null, policies: [the policy files' JSON],
+//   services: {<Cloud Run service>: {revisions: n, latestReady: name, traffic: [{revisionName, percent, latestRevision}],
+//   stuck?: true (update-traffic succeeds and changes nothing), trafficFails?: true (update-traffic exits 1)}}; the webhook part's secret, topic and subscription calls succeed}
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 
 const args = process.argv.slice(2).filter((a) => !a.startsWith('--project=') && a !== '--quiet');
@@ -74,6 +76,41 @@ function answer() {
   if (call === 'alpha monitoring policies create') {
     return change(() => state.policies.push(JSON.parse(readFileSync(flag('policy-from-file'), 'utf8'))));
   }
+  // Cloud Run as it behaves: a deploy adds a revision, and traffic that follows the latest moves to it; traffic pinned
+  // to a revision by name (after `update-traffic --to-revisions=<old>=100`) stays there.
+  const service = () => state.services?.[words[3]];
+  const verb = words.slice(0, 3).join(' ');
+  if (words[0] === 'run' && words[1] === 'deploy') {
+    return change(() => {
+      state.services ??= {};
+      const svc = (state.services[words[2]] ??= { revisions: 0, latestReady: null, traffic: [{ percent: 100, latestRevision: true }] });
+      svc.revisions += 1;
+      svc.latestReady = `${words[2]}-${String(svc.revisions).padStart(5, '0')}-new`;
+      for (const t of svc.traffic) if (t.latestRevision) t.revisionName = svc.latestReady;
+    });
+  }
+  if (verb === 'run services update-traffic' && service()) {
+    if (!has('to-latest')) return 3;
+    if (service().trafficFails) {
+      console.error('ERROR: (gcloud.run.services.update-traffic) failed');
+      return 1;
+    }
+    if (service().stuck) return 0;
+    return change(() => { service().traffic = [{ revisionName: service().latestReady, percent: 100, latestRevision: true }]; });
+  }
+  if (verb === 'run services describe') {
+    if (!service()) return 1;
+    if (flag('format') === 'json') console.log(JSON.stringify({ status: { url: `https://${words[3]}.run.app`, latestReadyRevisionName: service().latestReady, traffic: service().traffic } }));
+    else console.log(`https://${words[3]}.run.app`);
+    return 0;
+  }
+  if (verb === 'run services add-iam-policy-binding') return 0;
+  if (call.startsWith('secrets describe')) return 0;
+  if (call.startsWith('secrets get-iam-policy')) {
+    console.log('serviceAccount:ci-kit-webhook@ssfskim-ci-kit.iam.gserviceaccount.com');
+    return 0;
+  }
+  if (words[0] === 'pubsub') return 0;
   console.error(`fake gcloud: unexpected call ${JSON.stringify(args)}`);
   return 3;
 }

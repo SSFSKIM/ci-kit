@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { stagesOf, summarize, samplePlacement, cleanUpSample, sample } from '../../gce/tools/boot-sample.mjs';
-import { NEW_CFG } from './config-fixtures.mjs';
+import { NEW_CFG, M6_CFG, C4D_CENTRAL, CENTRAL } from './config-fixtures.mjs';
 
 const s = (accepted, running, started) => ({ accepted: `2026-10-21T13:00:${accepted}Z`, running: `2026-10-21T13:00:${running}Z`, started });
 
@@ -23,6 +23,19 @@ test('a run samples one placement: the region asked for, else the first, and its
   assert.deepEqual(samplePlacement(NEW_CFG, { region: 'us-central1' }), { placement: NEW_CFG.placements[1], machine: 'c3d-highcpu-4' });
   assert.equal(samplePlacement(NEW_CFG, { region: 'us-central1', machine: 'c3d-highcpu-8' }).machine, 'c3d-highcpu-8');
   assert.throws(() => samplePlacement(NEW_CFG, { region: 'europe-west1' }), /no placement in europe-west1/);
+});
+
+// Review (M6 placements, P2): two placements share us-central1 (C4D first, C3D after); a requested machine picks the
+// placement that names it, so a C3D sample boots on C3D's pd-balanced, never on C4D's Hyperdisk.
+test('in a region two placements share, the machine or --family picks the placement', () => {
+  assert.deepEqual(samplePlacement(M6_CFG, { region: 'us-central1' }), { placement: C4D_CENTRAL, machine: 'c4d-highcpu-4' }, 'the region\'s first');
+  assert.deepEqual(samplePlacement(M6_CFG, { region: 'us-central1', machine: 'c3d-highcpu-4' }), { placement: CENTRAL, machine: 'c3d-highcpu-4' });
+  assert.deepEqual(samplePlacement(M6_CFG, { region: 'us-central1', family: 'c3d' }), { placement: CENTRAL, machine: 'c3d-highcpu-4' });
+  assert.deepEqual(samplePlacement(M6_CFG, { region: 'us-central1', family: 'c3d', machine: 'c3d-highcpu-16' }).placement, CENTRAL);
+  assert.equal(samplePlacement(M6_CFG, { machine: 'c3d-highcpu-8' }).placement.region, 'us-central1', 'no region: the first placement naming it');
+  assert.throws(() => samplePlacement(M6_CFG, { region: 'us-east5', machine: 'c3d-highcpu-4' }), /no placement in us-east5 names c3d-highcpu-4/);
+  assert.throws(() => samplePlacement(M6_CFG, { region: 'us-east5', family: 'c3d' }), /no c3d placement in us-east5/);
+  assert.throws(() => samplePlacement(M6_CFG, { family: 'c4d', machine: 'c3d-highcpu-4' }), /no c4d placement names c3d-highcpu-4/);
 });
 
 // Review (M3, P2): an insert accepted whose wait then failed, or a runner registered whose response was lost, leaves

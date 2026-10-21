@@ -251,11 +251,31 @@ machine for every size (`machines`: 2, 4, 8, 16) and the boot `disk_type`.
 ]
 ```
 
+The pool's placements (spec M6, 2026-10-21), in walk order; C4D's sizes are `c4d-highcpu-2/4/8/16` on
+`hyperdisk-balanced`, C3D's `c3d-highcpu-4/4/8/16` on `pd-balanced`. A region with two placements has one subnetwork:
+
+| # | family | region | zones | subnetwork |
+|---|---|---|---|---|
+| 1 | C4D | us-west4 | a, b, c | `ci-kit-us-west4` |
+| 2 | C4D | us-central1 | a, b, c, f | `ci-kit-us-central1` |
+| 3 | C4D | us-east1 | b, c, d | `ci-kit-us-east1` |
+| 4 | C4D | us-east4 | a, b, c | `ci-kit-us-east4` |
+| 5 | C4D | us-east5 | a, b, c | `ci-kit-us-east5` |
+| 6 | C3D | us-central1 | a, b, c, f | `ci-kit-us-central1` |
+| 7 | C3D | us-east1 | b, c, d | `ci-kit-us-east1` |
+| 8 | C3D | us-east4 | a, b, c | `ci-kit-us-east4` |
+
+Every zone named offers the placement's machines (`gcloud compute machine-types list`, 2026-10-21). us-south1 and
+us-west2 offer no C4D; us-east5 is C4D only, its C3D grant (24) left unused. How `max_vcpus` follows these
+placements is under Quotas and budget.
+
 The order is speed first; reordering is a commit on main, read by the next tick. `placements` is the only form: the
 old keys (`region`, `subnetwork`, `zones`, `machines`, `machine_fallback`) are refused by `gce/launcher/config.mjs`.
-E2 left the pool with them (its us-central1 quota raise was refused twice); size 2 in us-central1 runs on
+E2 left the pool with them (its us-central1 quota raise was refused twice); size 2 on a C3D placement runs on
 `c3d-highcpu-4`. Adding a placement is a block in this list plus `gce/deploy.sh network`, which creates its
-subnetwork. The bake reads the `gce.json` bundled at its deploy, so a change to the placements reaches it with
+subnetwork, router and NAT, and a smoke VM there, both from the change's checkout before it merges (the launcher reads
+main's list every tick, so a placement published before its region is provisioned is walked into and refused). The
+bake reads the `gce.json` bundled at its deploy, so a change to the placements reaches it with
 `gce/deploy.sh bake`.
 
 **The launcher.** Cloud Scheduler's `ci-kit-launcher-tick` POSTs to `ci-kit-launcher`'s `/tick` every minute with an
@@ -298,9 +318,13 @@ A launch writes the `launching` row, mints the JIT config (runner name = instanc
 `ci-kit-pool`, `cpus-N`, `ci-kit-gce`, work folder `/var/lib/ci-kit/cache/work/<instance>`), then creates
 `ci-kit-gce-<allocation id>` from the newest image labelled `ci-kit-ready=true`. It walks the placements: the
 size's machine as spot in each zone of the first placement, then of the next, and so on; then on demand in the same
-order (an attempt two placements share is made once). `ZONE_RESOURCE_POOL_EXHAUSTED*` moves to the next zone. A quota
-refusal is remembered for the rest of the tick, scoped to what its message names: a family's CPUs (`C4D_CPUS`) by
-region and family, any other regional quota (`CPUS`, `INSTANCES`, `IN_USE_ADDRESSES`, disk capacity) by region,
+order (an attempt two placements share is made once). `ZONE_RESOURCE_POOL_EXHAUSTED*` moves to the next zone, and the
+launcher remembers that zone, machine and provisioning as stocked out for 5 min (in its process, across ticks; a
+restart forgets): with eight placements a size has 26 spot attempts before its first on-demand one, more refusals than
+one tick's 45 s holds, so the next ticks skip the zones already refused and reach the rest, then on demand. A quota
+refusal is remembered for the rest of the tick, scoped to what its message names: a family's CPUs (`CPUS_PER_VM_FAMILY`,
+the refused machine's family, or the older `C3D_CPUS` form) by region and family, so C4D refused in us-central1 leaves
+C3D there to try, any other regional quota (`CPUS`, `INSTANCES`, `IN_USE_ADDRESSES`, disk capacity) by region,
 `CPUS_ALL_REGIONS` everywhere, a `PREEMPTIBLE_` one for spot only; every later attempt in that scope of the same or
 more vCPUs is skipped, in this walk and the tick's later ones, since a smaller VM may still fit. A launch whose every
 attempt is so ruled out makes no runner or row and its job waits in GitHub's queue; no other launch stops. An insert
@@ -330,7 +354,7 @@ Cleanup, every tick:
 - a VM older than `max_run_minutes` + 5 is deleted, and an alert opens (Compute Engine should have deleted it);
 - a `ci-kit-gce-*` runner with no VM, more than 5 min after its launch, is unregistered (a crash between the mint and
   the insert);
-- a `ci-kit=gce` disk attached to nothing for 10 min, and a `ci-kit=gce-builder` instance older than 2 h, are
+- a `ci-kit=gce` disk attached to nothing for 10 min, and a `ci-kit=gce-builder` instance older than 4 h, are
   deleted;
 - a `launching` row with no VM and no runner 10 min after its launch is finalized `abandoned`.
 
@@ -556,7 +580,9 @@ the label again before it acts.
 
 **The network.** Every builder, smoke VM and job VM sits on its placement's subnetwork of the VPC `ci-kit`
 (`network` and each placement's `subnetwork` in `gce.json`: `ci-kit-us-central1`, 10.64.0.0/20, and `ci-kit-us-west4`,
-10.64.16.0/20). How a VM reaches GitHub, apt, npm and Docker Hub is `gce.json`'s `egress`, a commit on main read by the
+10.64.16.0/20; M6's new regions take the next free /20s when `gce/deploy.sh network` runs with them, `ci-kit-us-east1`,
+`ci-kit-us-east4` and `ci-kit-us-east5` in that order, 10.64.32.0/20, 10.64.48.0/20 and 10.64.64.0/20 on today's
+network). How a VM reaches GitHub, apt, npm and Docker Hub is `gce.json`'s `egress`, a commit on main read by the
 next tick (the bake's, by the `gce.json` bundled at its deploy):
 - `"external"`, the default when the key is absent: each VM takes an ephemeral external IPv4, priced on its ledger
   row. Each counts against its region's `IN_USE_ADDRESSES` quota (Quotas and budget), whose refusal is a quota
@@ -596,7 +622,8 @@ A VM short of NAT ports shows as an error entry in the NAT's log (`resource.type
 CI_KIT_COMMIT=$(git rev-parse HEAD) node gce/bake/bake.mjs     # default commit: the kit's main
 ```
 
-1. It deletes builders and smoke VMs any bake left more than 2 h ago.
+1. It deletes builders and smoke VMs any bake left more than 4 h ago (`STALE_MS`, above the bake job's 180-min task
+   timeout, so a bake still running is never swept).
 2. It creates `ci-kit-gce-builder-<run id>` (the run id is UTC seconds plus four random characters, so two bakes never
    share one; on demand: `e2-standard-4`, else `n2d-standard-4` when E2 is refused, on `pd-balanced`; the placements
    and their zones in `gce.json` order) from `ubuntu-2404-lts-amd64`. Its startup script (`gce/bake/builder.sh`)
@@ -607,17 +634,22 @@ CI_KIT_COMMIT=$(git rev-parse HEAD) node gce/bake/bake.mjs     # default commit:
 3. Only on `ok` and power-off within 30 min, it images the builder's disk into the family, labelled
    `ci-kit-ready=false`, and deletes the builder.
 4. In each placement in turn it boots `ci-kit-gce-builder-<run id>-smoke-<n>` from the image on the placement's
-   subnetwork and disk type, on its `cpus-2` machine (the next size's when that is refused), so an image that does not
-   boot on a placement's family is never ready, with metadata `ci-kit-smoke=<vCPUs>` in place of a JIT config. The job
+   subnetwork and disk type, on its `cpus-2` machine (the next size's when that is refused), with metadata
+   `ci-kit-smoke=<vCPUs>` in place of a JIT config. A placement whose smoke VM no zone or machine takes (capacity or
+   quota refused every attempt; C4D us-central1 had no capacity even on demand on 2026-10-21) is skipped, logged as a
+   `warning:` naming it and listed again on the bake's last line; a smoke VM that boots and fails its checks fails the
+   bake. An image that does not boot on a machine family of `gce.json` is never ready: every family needs a smoke VM of
+   that family to pass in at least one placement (a smoke proves the machine it booted, not the rest of its
+   placement's map), so a family whose every placement was skipped fails the bake. The job
    unit runs `gce/vm/smoke.sh` in a job container: vCPUs, user, isolation, the runner, zsh and MAWS's fonts, Node 22
    and 24, every warmed
    cache, the work directory, DNS, egress, and the metadata server refused. It reports
    `ci-kit/smoke=ok|failed:<check>` and powers off.
-5. It runs the real job on a VM booted from the image in the first placement that takes it. When every smoke VM
-   and the real job passed, the image is labelled `ci-kit-ready=true`; the launcher uses only ready images (never
+5. It runs the real job on a VM booted from the image in the first placement that takes it. When every family's
+   smoke and the real job passed, the image is labelled `ci-kit-ready=true`; the launcher uses only ready images (never
    `getFromFamily`, which would return an unready one). On any failure the bake deletes its own image.
 6. On every exit it deletes its instances, and keeps the two newest ready images (unready images of other runs
-   are dropped once 2 h old). It deletes an image only while that image carries its `ci-kit-run` label: an image
+   are dropped once 4 h old). It deletes an image only while that image carries its `ci-kit-run` label: an image
    insert refused because the name exists leaves the existing image alone.
 
 The Cloud Run job `ci-kit-bake` runs the same script as `ci-kit-launcher@`, at main's head, with the `gce.json` it was
@@ -695,7 +727,11 @@ gce/deploy.sh alert                 # log-based metrics and alert policies maile
 gce/deploy.sh app-hook              # not in "every part": the App's webhook URL and secret (The webhook, above)
 ```
 
-Every part is idempotent. `base` also gives the project's default compute account `roles/run.builder`: Cloud Run
+Every part is idempotent. `launcher` and `webhook` each end by sending all of their service's traffic to the revision
+just deployed (`update-traffic --to-latest`) and checking that it serves, and fail naming what does if not: a manual
+rollback (`gcloud run services update-traffic <service> --to-revisions=<old>=100`) pins traffic by name, and
+`gcloud run deploy` alone would then leave the new revision at 0% while the script said ok. Their `ok` line names the
+serving revision. `base` also gives the project's default compute account `roles/run.builder`: Cloud Run
 source builds run as it in a project created after 2024, and no kit VM uses it. Both Cloud Run images are
 buildpack builds, so their command is the CNB `launcher` (`launcher node <script>`), which puts the image's node on
 the PATH. If every gcloud call stalls for minutes on the MacBook, its IPv6 route to Google is down (2026-10-16:
@@ -734,10 +770,11 @@ per allocation:
   and queued → started of the pool jobs of pre-launched runs beside every other run's (Acceptance 5).
   Rows on rotated ledger issues closed since the window began are read too. A row or tick without a stage's fields
   (written before M3) is left out of that stage.
-- `node gce/tools/boot-sample.mjs --image <name> [--region <r>] [--machine <m>] [--count 5] [--parallel 2] [--out <dir>]`
+- `node gce/tools/boot-sample.mjs --image <name> [--region <r>] [--family <f>] [--machine <m>] [--count 5] [--parallel 2] [--out <dir>]`
   times job VMs from an image through the bake's real-job path (one `bake-check` job per sample in ci-kit-sandbox,
-  on its own JIT runner) in one placement: `--region`'s (default: the first), on its zones, subnetwork and boot disk
-  type, with `--machine` (default: its size-4 machine). It reports insert accepted → RUNNING → job started, keeps each
+  on its own JIT runner) in one placement: the first in `--region` (default: any) of `--family` (`c4d`, `c3d`) that
+  names `--machine`, so `--region us-central1 --machine c3d-highcpu-4` samples C3D there, not the C4D placement before
+  it; on its zones, subnetwork and boot disk type, with `--machine` (default: its size-4 machine). It reports insert accepted → RUNNING → job started, keeps each
   sample's console and `ci-kit/job` report, and gives the median and range of each stage. It shares the pool's quota and stops at the first quota refusal;
   every VM and runner it made is gone when it ends.
 - `end`: `done` (its job ended, or its runner did), `cancelled-idle` (no job came within `idle_runner_minutes`, or
@@ -746,8 +783,9 @@ per allocation:
   the launcher had no row for, or one that vanished before its run limit with no preemption recorded: deleted by a
   hand outside the launcher).
 - `seconds` runs from the VM's creation to its deletion, `$` at the rates in `gce/launcher/ledger.mjs` by region and
-  family (c3d and e2 in us-central1, 2026-10-16; c4d in us-west4, the Cloud Billing catalog on 2026-10-21, SKU ids
-  beside the table), its egress (its external IPv4, $0.0025 an hour on spot and $0.005 on demand; or under `nat` its
+  family (c3d and e2 in us-central1, 2026-10-16; c4d in us-west4, and M6's c4d in us-central1, us-east1, us-east4
+  and us-east5 and c3d in us-east1 and us-east4, the Cloud Billing catalog on 2026-10-21, SKU ids beside the table),
+  its egress (its external IPv4, $0.0025 an hour on spot and $0.005 on demand; or under `nat` its
   hours of its region's Cloud NAT gateway, $0.0014 an hour, the NAT's GB processed and its addresses being per region,
   not per VM, and going on the daily line with M6's counts) and the disk by region and type included (Hyperdisk Balanced with the IOPS and throughput its defaults provision above the free baseline). A
   VM in a region, family or disk type with no rate there shows `-`. The row's JSON carries the disk type (`diskType`; a row without one is from before placements,
@@ -805,11 +843,34 @@ work there to end, then add it to the new file; jobs queued in between wait in G
 idle runners first, at once. To know the launcher runs the removal commit, read `config` in its tick log (a launcher
 that cannot read main keeps its last good copy, and its log says so).
 
-**Quotas and budget.** `max_vcpus` (242: the granted C3D us-central1 192 plus C4D us-west4 50, 2026-10-21) is the
-launcher's soft cap on the vCPUs of its VMs in flight; the project's
+**Quotas and budget.** `max_vcpus` is the launcher's soft cap on the vCPUs of its VMs in flight; the project's
 quotas are the hard cap, and a refusal is a wait. Parallelism comes first: the owner ruled on 2026-10-21 that CI must
-never be the bottleneck, and that cost is not a reason to lower parallelism. So `max_vcpus` follows the quotas. Granted
-through Cloud Quotas:
+never be the bottleneck, and that cost is not a reason to lower parallelism. So `max_vcpus` follows the quotas.
+
+The sizing rule: `max_vcpus` is the sum over the placements' regions of what each region can hold at once, the lesser
+of its families' granted vCPUs (`CPUS-PER-VM-FAMILY`, summed over the region's placements) and its granted external
+addresses times 8. Under `egress: "external"` every VM holds one address, and 8 vCPUs is the pool's mean VM (a MAWS
+class 1a run is 50 vCPUs on 6 VMs), so a region of 8 addresses holds about 64 vCPUs whatever its CPU grants. On
+2026-10-21 (Cloud Quotas, read-only):
+
+| region | family vCPUs granted | addresses | addresses × 8 | holds |
+|---|---|---:|---:|---:|
+| us-west4 | C4D 50 | 8 | 64 | 50 |
+| us-central1 | C4D 24 + C3D 192 = 216 | 32 | 256 | 216 |
+| us-east1 | C4D 24 + C3D 24 = 48 | 8 | 64 | 48 |
+| us-east4 | C4D 24 + C3D 24 = 48 | 8 | 64 | 48 |
+| us-east5 | C4D 24 | 8 | 64 | 24 |
+| | | | `max_vcpus` | **386** |
+
+386 is under `CPUS-ALL-REGIONS` (512), which bounds every region together. Recompute it when a grant changes: an
+address raise lifts only the regions whose addresses bind (none today), a family raise its region up to its addresses.
+Under `egress: "nat"` no VM holds an address and the sum is of the family grants alone, the same 386 today. Each region also holds a
+Hyperdisk Balanced capacity quota (`HDB-TOTAL-GB`: 4096 in us-west4, us-central1, us-east1 and us-east5; us-east4 still
+500, ten 50 GB boot disks, above its 8 addresses) and `SSD-TOTAL-GB` for pd-balanced (500 in the east regions, ten
+disks). Granted through Cloud Quotas:
+- 2026-10-21 (M6): `CPUS-ALL-REGIONS` 512; C4D per-family 24 in us-central1, us-east1, us-east4 and us-east5 (the
+  default), C3D 24 in us-east1 and us-east4 (the default); `HDB-TOTAL-GB` 4096 as above; each east region's
+  `IN-USE-ADDRESSES` is its default 8;
 - 2026-10-21: `CPUS-ALL-REGIONS` 256, C3D per-family 192 in us-central1, `INSTANCES` 64, `SSD-TOTAL-GB` 4096;
   `IN-USE-ADDRESSES` asked 64, still 32 when this was written (each job VM holds one external address under
   `egress: "external"`, so 32 VMs at once in a region until granted; under `"nat"` it holds none);
@@ -818,13 +879,17 @@ through Cloud Quotas:
   and the rest fell back to `c3d-highcpu-4` (`machine_fallback`); E2 has since left the pool with that key.
 
 A job reserves the largest machine its walk could land on in the launcher's count (a `cpus-2` job: `c3d-highcpu-4`).
-`max_vcpus` admits only; it tracks the sum of the placements' granted family quotas, and a placement's own refusal
-(family vCPUs, addresses, instances, disk capacity) falls through to the next one, so raise it with each grant (C4D us-west4's
-re-filed 128 was denied 2026-10-21, so it stays 50).
-`PREEMPTIBLE_CPUS` is 0, so spot VMs count against the ordinary CPU quotas. To check:
+`max_vcpus` admits only; a placement's own refusal (family vCPUs, addresses, instances, disk capacity) falls through to
+the next one, so recompute it by the sizing rule with each grant (C4D us-west4's re-filed 128 was denied 2026-10-21, so
+it stays 50).
+`PREEMPTIBLE_CPUS` is 0, so spot VMs count against the ordinary CPU quotas. A family's refusal reads `Quota
+'CPUS_PER_VM_FAMILY' exceeded.  Limit: 50.0 in region us-west4.`, and the launcher skips only that family there for the
+rest of the tick. To check the regional quotas, and the family and all-regions ones (Cloud Quotas only: `regions
+describe` does not list them):
 
 ```
-gcloud compute regions describe us-central1 --project=ssfskim-ci-kit --format=json | jq '.quotas[]|select(.metric|test("^(CPUS|E2_CPUS|INSTANCES|IN_USE_ADDRESSES|SSD_TOTAL_GB)$"))'
+for r in us-west4 us-central1 us-east1 us-east4 us-east5; do gcloud compute regions describe $r --project=ssfskim-ci-kit --format=json | jq -c --arg r $r '[.quotas[]|select(.metric|test("^(INSTANCES|IN_USE_ADDRESSES|SSD_TOTAL_GB)$"))|{(.metric):.limit}]|add+{region:$r}'; done
+for q in CPUS-PER-VM-FAMILY-per-project-region HDB-TOTAL-GB-per-project-region CPUS-ALL-REGIONS-per-project; do curl -4 -s -H "Authorization: Bearer $(gcloud auth print-access-token)" -H 'x-goog-user-project: ssfskim-ci-kit' "https://cloudquotas.googleapis.com/v1/projects/ssfskim-ci-kit/locations/global/services/compute.googleapis.com/quotaInfos/$q" | jq -c '.dimensionsInfos[]|select(.details.value!=null)|{d:.dimensions,v:.details.value}' | grep -E 'us-(west4|central1|east1|east4|east5)|"d":null'; done
 ```
 
 The billing budget alert on the project ($40, mails at 50/90/100 %) is the billing admin's to create (spec,

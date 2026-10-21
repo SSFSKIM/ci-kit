@@ -8,8 +8,8 @@ import { world, gceErr } from './fake-world.mjs';
 import { Launcher } from '../../gce/launcher/launcher.mjs';
 import { createGceLedger } from '../../gce/launcher/ledger-store.mjs';
 import { parseRow, launchRow, renderRow, finalRow, runningRow, dollars } from '../../gce/launcher/ledger.mjs';
-import { WEST, CENTRAL, ONE_REGION_CFG } from './config-fixtures.mjs';
-import { allocationId, instanceName, jobInstance, jitRequest } from '../../gce/launcher/logic.mjs';
+import { WEST, CENTRAL, ONE_REGION_CFG, M6_CFG } from './config-fixtures.mjs';
+import { allocationId, instanceName, jobInstance, jitRequest, placements, stockoutMemory } from '../../gce/launcher/logic.mjs';
 import { GceError } from '../../lib/gce.mjs';
 
 const SBX = 'SSFSKIM/ci-kit-sandbox';
@@ -232,6 +232,40 @@ test('spot refused in every zone: the same machine on demand, recorded on the ro
   assert.deepEqual([row.provisioning, row.machine], ['standard', 'c3d-highcpu-8']);
 });
 
+// Review (M6 placements, P2): with eight placements a size has 26 spot attempts before its first on-demand one, and
+// a refusal takes ~2 s, so one tick's 45 s budget runs out first. The server builds a Launcher per tick and hands each
+// the same stock-out memory, so the next tick skips the zones already refused and reaches on demand.
+test('spot stocked out in all 26 zones of eight placements: the next tick skips what was refused and launches on demand', async () => {
+  const cfg = { ...M6_CFG, repos: [{ repo: SBX }] };
+  const { w, make } = setup({ cfg });
+  const stockouts = stockoutMemory();
+  w.sim.queue(SBX, L(8));
+  const spot = placements(8, cfg).filter((p) => p.provisioning === 'spot');
+  // Every spot zone stays stocked out for both ticks: each tick's inserts there are refused, 2 s apiece.
+  const stockOut = () => {
+    w.g.insertErrors = w.g.insertErrors.filter((e) => !e.stockout);
+    for (const p of spot) {
+      w.g.insertErrors.push({ stockout: true, match: (zone, body) => zone === p.zone && body.scheduling.provisioningModel === 'SPOT', error: () => {
+        w.advance(2000);
+        return gceErr(['ZONE_RESOURCE_POOL_EXHAUSTED'])();
+      } });
+    }
+  };
+  stockOut();
+  const first = await make({ stockouts }).tick();
+  assert.deepEqual(first.launched, [], 'the tick\'s budget ends inside the spot half');
+  const refusedFirst = w.log.filter((l) => / refused$/.test(l)).length;
+  assert.ok(refusedFirst > 20 && refusedFirst < spot.length, String(refusedFirst));
+  w.advance(MIN);
+  stockOut();
+  const second = await make({ stockouts }).tick();
+  assert.equal(second.launched.length, 1);
+  assert.equal(w.log.filter((l) => / refused$/.test(l)).length, spot.length, 'no zone refused in the first tick is asked again');
+  const vm = w.sim.vm(second.launched[0]);
+  assert.equal(vm.labels['ci-kit-provisioning'], 'standard');
+  assert.equal(vm.zone.split('/').pop(), 'us-west4-a');
+});
+
 test('an insert whose call timed out but which GCE accepted is found through its zone operation; no second zone is tried', async () => {
   const { w, launcher } = setup();
   w.sim.queue(SBX, L(4));
@@ -344,7 +378,7 @@ test('a ci-kit=gce instance with no row is still cleaned, and gets an orphan row
   await w.gce.insertInstance('us-central1-b', jobInstance({ alloc, zone: 'us-central1-b', machine: 'e2-highcpu-2', provisioning: 'spot', repo: SBX, cpus: 2, image: 'i', jit: 'j', placement: CFG.placements[0], cfg: { ...CFG, egress: 'nat' }, config: COMMIT }));
   w.sim.vm(instanceName(alloc)).status = 'TERMINATED';
   w.g.disks.push({ name: 'stray', zone: 'zones/us-central1-c', users: [], labels: { 'ci-kit': 'gce' }, creationTimestamp: new Date(T0 - 20 * MIN).toISOString() });
-  w.g.instances.push({ name: 'ci-kit-gce-builder-old', status: 'RUNNING', zone: 'zones/us-central1-a', labels: { 'ci-kit': 'gce-builder' }, creationTimestamp: new Date(T0 - 3 * 60 * MIN).toISOString(), machineType: 'x/e2-standard-4' });
+  w.g.instances.push({ name: 'ci-kit-gce-builder-old', status: 'RUNNING', zone: 'zones/us-central1-a', labels: { 'ci-kit': 'gce-builder' }, creationTimestamp: new Date(T0 - 5 * 60 * MIN).toISOString(), machineType: 'x/e2-standard-4' });
   await settle(w, launcher, 2);
   assert.equal(only(rows(w)).end, 'orphan');
   assert.equal(only(rows(w)).egress, 'nat', 'the orphan row takes the egress its VM\'s network interface shows, not the config\'s');

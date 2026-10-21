@@ -12,7 +12,10 @@ const ZONE_URL = (zone) => `https://www.googleapis.com/compute/v1/projects/ssfsk
 const httpError = (status, message = `HTTP ${status}`) => Object.assign(new Error(message), { status });
 
 // zones: the zones an aggregated listing returns a scope for (every zone of the project, as the real one does).
-const ZONES = ['us-central1-a', 'us-central1-b', 'us-central1-c', 'us-central1-f', 'us-west4-a', 'us-west4-b', 'us-west4-c', 'europe-west4-a'];
+const ZONES = [
+  'us-central1-a', 'us-central1-b', 'us-central1-c', 'us-central1-f', 'us-west4-a', 'us-west4-b', 'us-west4-c',
+  'us-east1-b', 'us-east1-c', 'us-east1-d', 'us-east4-a', 'us-east4-b', 'us-east4-c', 'us-east5-a', 'us-east5-b', 'us-east5-c', 'europe-west4-a',
+];
 
 export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: true } }, images, zones = ZONES } = {}) {
   let clock = start;

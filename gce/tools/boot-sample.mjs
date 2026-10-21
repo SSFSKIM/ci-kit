@@ -5,9 +5,9 @@
 // and records when Compute Engine accepted the insert (creationTimestamp), when it called the VM RUNNING
 // (lastStartTimestamp) and when GitHub started the job; the VM's serial console is kept beside the result. From the
 // Mac, with gcloud's default account:
-//   node gce/tools/boot-sample.mjs --image <image name> [--region <r>] [--machine <m>] [--count 5] [--parallel 2] [--out <dir>]
-// It samples one placement of gce.json: --region's (default: the first), on its zones, subnetwork and boot disk type,
-// with --machine (default: the placement's size-4 machine).
+//   node gce/tools/boot-sample.mjs --image <image name> [--region <r>] [--family <f>] [--machine <m>] [--count 5] [--parallel 2] [--out <dir>]
+// It samples one placement of gce.json: the first in --region (default: any) of --family (c4d, c3d) that names
+// --machine, on its zones, subnetwork and boot disk type, with --machine (default: the placement's size-4 machine).
 // Every VM and runner it made is gone when it ends. A quota refusal stops it: the pool shares the quota.
 import { mkdirSync, writeFileSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
@@ -40,11 +40,18 @@ export function summarize(samples) {
   return out;
 }
 
-// The placement a run samples and the machine it boots: opts.region's placement (default: the first), and
+// The placement a run samples and the machine it boots: the first placement in opts.region (any region when absent)
+// of opts.family (its machines' family, e.g. c3d) that names opts.machine, so a region two families share (C4D and
+// C3D in us-central1) samples the placement whose machine, subnetwork and boot disk type go together; and
 // opts.machine (default: that placement's size-4 machine).
-export function samplePlacement(cfg, { region, machine } = {}) {
-  const placement = region ? cfg.placements.find((p) => p.region === region) : cfg.placements[0];
-  if (!placement) throw new Error(`no placement in ${region} in gce.json (${cfg.placements.map((p) => p.region).join(', ')})`);
+export function samplePlacement(cfg, { region, family, machine } = {}) {
+  const familyOf = (p) => p.machines['4'].split('-')[0];
+  const placement = cfg.placements.find((p) => (!region || p.region === region) && (!family || familyOf(p) === family) &&
+    (!machine || Object.values(p.machines).includes(machine)));
+  if (!placement) {
+    const where = [family && `${family} `, 'placement', region && ` in ${region}`, machine && ` names ${machine}`].filter(Boolean).join('');
+    throw new Error(`no ${where} in gce.json (${cfg.placements.map((p) => `${familyOf(p)}@${p.region}`).join(', ')})`);
+  }
   return { placement, machine: machine ?? placement.machines['4'] };
 }
 
@@ -160,8 +167,8 @@ function parseArgs(argv) {
   const opts = { count: 5, parallel: 2, out: '.' };
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i].replace(/^--/, '');
-    if (!(key in opts || ['image', 'region', 'machine'].includes(key)) || argv[i + 1] === undefined) {
-      throw new Error('usage: node gce/tools/boot-sample.mjs --image <name> [--region r] [--machine m] [--count n] [--parallel n] [--out dir]');
+    if (!(key in opts || ['image', 'region', 'family', 'machine'].includes(key)) || argv[i + 1] === undefined) {
+      throw new Error('usage: node gce/tools/boot-sample.mjs --image <name> [--region r] [--family f] [--machine m] [--count n] [--parallel n] [--out dir]');
     }
     opts[key] = ['count', 'parallel'].includes(key) ? Number(argv[i + 1]) : argv[i + 1];
   }
