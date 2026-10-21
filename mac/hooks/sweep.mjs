@@ -18,7 +18,7 @@
 // not the clean desktop it assumes and its result would not be trusted; after one, because the survivor is what that
 // job left.
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,8 +28,12 @@ import { terminate } from './terminate.mjs';
 
 const phase = process.argv[2] ?? 'manual';
 const dryRun = process.argv.includes('--dry-run');
+// The physical path, as lsof prints working directories: a home or runner reached through a symlink must not hide what
+// sits there. The default is physical already (a script's own location is resolved); a --work that is not there yet
+// holds no process.
 const workAt = process.argv.indexOf('--work');
-const workDir = workAt > 0 ? resolve(process.argv[workAt + 1] ?? '') : resolve(dirname(fileURLToPath(import.meta.url)), '../../_work');
+const physical = (path) => { try { return realpathSync(path); } catch { return resolve(path); } };
+const workDir = workAt > 0 ? physical(process.argv[workAt + 1] ?? '') : resolve(dirname(fileURLToPath(import.meta.url)), '../../_work');
 const logDir = join(homedir(), 'Library/Logs/ci-kit');
 const uid = process.getuid();
 

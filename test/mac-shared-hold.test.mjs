@@ -2,7 +2,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { chmodSync, constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -376,9 +376,15 @@ test('with no shared instance the hooks are today\'s: no lock, no hold, no admis
 
 // The recovery sweep against real processes (sweep.mjs reads ps and lsof): the next exclusive worker starts between the
 // watcher's decision and the sweep's own process list; it and its hook survive, what the crashed job left does not.
-for (const [where, prefix] of [['', 'real-'], [' under a path with a space', 'real home ']]) test(`a recovery sweep spares a worker that started after the decision, and its hook; the crashed job's leftover goes${where}`, macOnly, async () => {
+for (const [where, prefix, link] of [['', 'real-'], [' under a path with a space', 'real home '], [' under a home that is a symlink', 'real-linked-', true]]) test(`a recovery sweep spares a worker that started after the decision, and its hook; the crashed job's leftover goes${where}`, macOnly, async () => {
   // ps prints a command line unquoted: a path with a space must not hide a worker from the sweep (the kernel's path does).
-  const home = realpathSync(mkdtempSync(join(root, prefix)));
+  // lsof prints a working directory's physical path: a home reached through a symlink must not hide a leftover.
+  let home = realpathSync(mkdtempSync(join(root, prefix)));
+  if (link) {
+    const alias = `${home}-alias`;
+    symlinkSync(home, alias);
+    home = alias;
+  }
   const lane = join(home, 'actions-runner-maws');
   const installed = join(lane, 'ci-kit/hooks');
   const workspace = join(lane, '_work/MAWS/MAWS');
