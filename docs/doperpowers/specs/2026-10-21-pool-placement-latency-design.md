@@ -53,7 +53,7 @@ toward the boot alone, and below it for the jobs a warm runner covers.
 - [ ] M2 — us-west4 C4D placement live, measured against C3D.
 - [ ] M3 — The tick and the boot.
 - [ ] M4 — Launch on GitHub's `workflow_job` webhook.
-- [ ] M5 — Warm runners (the shape the owner chooses).
+- [ ] M5 — Pre-launch of a run's gate VMs (the owner chose it 2026-10-21; no warm runner).
 
 ## Acceptance
 
@@ -179,7 +179,7 @@ exact command and waits for it. The App's webhook URL and secret can be set thro
 (`PATCH /app/hook/config`, authenticated as the App); subscribing the App to `workflow_job` events may need its
 settings page, which is the owner's to click: M4 finds out and prepares the steps.
 
-### Warm runners and pre-launch (M5, shape pending the owner)
+### Warm runners and pre-launch (M5: pre-launch, the owner's choice)
 
 A run waits only for its slowest gate VM, so a warm runner shortens the run only when every long gate job of the run
 (static and each unit shard) finds one; probes is short enough to start late. The owner was asked on 2026-10-21
@@ -294,6 +294,12 @@ daily line, reported to the owner.
   added to M2; ledger timing fields and `latency-report.mjs` added to M3 (the proofs of M3 and M4 and M5's input had
   no producer); full standby moved to its own design round (its lifecycle conflicts with the coverage window,
   `max_run_minutes` and A13).
+
+- 2026-10-21 (CI-opt): **M5 is pre-launch, no warm runner.** The owner answered the first standby question with
+  "small standby + pre-launch". Its standby half was a warm 2-vCPU VM for a plan hop MAWS does not have (plan runs on
+  hosted `ubuntu-slim`), so what it buys is pre-launch alone: the corrected question's first option. Pre-launch
+  needs the run's start: the plan job's own `workflow_job` event (hosted labels) reaches the receiver of M4, which
+  passes it on for that purpose, and the tick sees runs in progress whose gates are not yet queued.
 
 ## Surprises & Discoveries
 
