@@ -53,6 +53,9 @@ base() {
   # needs no actAs on any other.
   g projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$SA" \
     --role=roles/compute.instanceAdmin.v1 --condition=None > /dev/null
+  # Read the Cloud NAT's day (bytes processed, addresses held) for the ledger's daily line (spec M6).
+  g projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$SA" \
+    --role=roles/monitoring.viewer --condition=None > /dev/null
   # Cloud Run source deploys build as the project's default compute account (new projects since 2024), which needs
   # the builder role to read the uploaded source and push the image. No kit VM runs as that account: VMs have none.
   local number
@@ -269,7 +272,7 @@ alert() {
   alert_on_log ci-kit-runner-never-online cloud_run_revision 0 'ci-kit pool VM runners never online' \
     'ci-kit: pool VMs RUNNING for over 3 min whose runner never came online (spec 2026-10-21 M6)' \
     'resource.type="cloud_run_revision" AND resource.labels.service_name="ci-kit-launcher" AND severity>=ERROR AND jsonPayload.event="runner-never-online"' \
-    "A pool VM has been RUNNING for over 3 minutes and its runner never came online: it booted but cannot reach GitHub, and its job waits for another VM. The usual cause is egress: its region's Cloud NAT (ci-kit-nat on ci-kit-router) missing, misconfigured or out of ports. The launcher's ERROR entries name the VM, zone and region: gcloud logging read 'jsonPayload.event=\"runner-never-online\"' --project=ssfskim-ci-kit --freshness=1h. Then gce/deploy.sh network. docs/pool.md, GCE, The network."
+    "A pool VM has been RUNNING for over 3 minutes and its runner never came online: it booted but cannot reach GitHub, and its job waits for another VM. The usual cause is egress: GitHub unreachable from the VM's external address (or, under gce.json egress \"nat\", its region's Cloud NAT ci-kit-nat missing, misconfigured or out of ports). The launcher's ERROR entries name the VM, zone and region: gcloud logging read 'jsonPayload.event=\"runner-never-online\"' --project=ssfskim-ci-kit --freshness=1h. Then gce/deploy.sh network. docs/pool.md, GCE, The network."
   alert_on_log ci-kit-nat-dropped nat_gateway 0 'ci-kit NAT dropping connections' \
     "ci-kit: connections ci-kit-nat dropped (spec 2026-10-21 M6)" \
     'resource.type="nat_gateway" AND resource.labels.gateway_name="ci-kit-nat" AND jsonPayload.allocation_status="DROPPED"' \
