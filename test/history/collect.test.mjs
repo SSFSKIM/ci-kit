@@ -718,6 +718,38 @@ test('an attempt whose jobs or artifacts name more than one shard count is refus
   assert.equal(existsSync(join(root, REPO)), false);
 });
 
+test('a conflicting shard artifact arriving after the repository-wide listing is refused, sharded or unsharded, and writes nothing', async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  const [s1, s2] = shardSuites();
+  run({ id: 843, ref: 'ci/late-aaaaaaaa', tested: c('a'), tree: 'TA', created: '2026-10-21T07:50:00Z', attempts: [[
+    { name: 'unit 1/2', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z', suites: s1 },
+    { name: 'unit 2/2', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z', suites: s2 },
+  ]] });
+  run({ id: 844, ref: 'ci/late-bbbbbbbb', tested: c('b'), tree: 'TB', created: '2026-10-21T07:50:00Z', attempts: [[
+    { name: 'unit', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z', suites: s1 },
+  ]] });
+  const { fake, pass } = passes(repo, root);
+  const fetchImpl = fake.fetchImpl;
+  fake.fetchImpl = async (href) => {
+    const response = await fetchImpl(href);
+    if (new URL(href).pathname === `/repos/${REPO}/actions/artifacts`) {
+      repo.artifacts.push(
+        { ...repo.artifacts.find((a) => a.run === 843), id: 950, name: 'test-results-unit-1of3-1' },
+        { ...repo.artifacts.find((a) => a.run === 844), id: 951, name: 'test-results-unit-1of2-1' },
+      );
+    }
+    return response;
+  };
+
+  const { counts, errors } = await pass();
+  assert.deepEqual([[...errors].sort(), counts], [[
+    'run 843 attempt 1 unit: history: the attempt has the job in more than one shard count (2, 3)',
+    'run 844 attempt 1 unit: history: the attempt has the job in more than one shard count (2, unsharded)',
+  ], NOTHING]);
+  assert.equal(existsSync(join(root, REPO)), false);
+});
+
 test("each shard's report is checked against its own job: one stamped outside it is rejected, one unreadable is unparseable", async (t) => {
   const root = tempRoot(t);
   const { repo, run } = builder();

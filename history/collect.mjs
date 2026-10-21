@@ -132,10 +132,9 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
 
   // 1. New artifacts, newest first, down to the 8 days an artifact can live (7, and a margin). Every pass lists
   //    them all, so an artifact a pass could not take (its job still running, its download failed) is listed
-  //    again by the next, however many newer ones were stored meanwhile.
-  // An item's `forms` are the shard counts its listed artifacts name (null: unsharded); a shard's artifact is found
-  // with the rest of its set (3.).
-  const items = new Map(); // lineKey → { run, attempt, job, artifact, forms }
+  //    again by the next, however many newer ones were stored meanwhile. A shard's artifact is found with the rest
+  //    of its set (3.).
+  const items = new Map(); // lineKey → { run, attempt, job, artifact }
   const known = store.artifactIds();
   const cutoff = now - 8 * DAY;
   for (let page = 1; ; page += 1) {
@@ -145,8 +144,7 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
       if (!part || a.expired || known.has(a.id)) continue;
       const key = `${a.workflow_run.id}/${part.attempt}/${part.job}`;
       if (store.line(key) && store.line(key).report !== 'missing') continue; // a re-upload of a job already recorded
-      const item = items.get(key) ?? { run: a.workflow_run.id, attempt: part.attempt, job: part.job, artifact: null, forms: new Set() };
-      item.forms.add(part.n);
+      const item = items.get(key) ?? { run: a.workflow_run.id, attempt: part.attempt, job: part.job, artifact: null };
       if (part.n === null) item.artifact = a;
       items.set(key, item);
     }
@@ -170,13 +168,13 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
         const key = `${run.id}/${attempt}/${part.job}`;
         if (items.has(key) || store.line(key)) continue;
         if (part.n !== null) {
-          items.set(key, { run: run.id, attempt, job: part.job, artifact: null, forms: new Set() });
+          items.set(key, { run: run.id, attempt, job: part.job, artifact: null });
           continue;
         }
         try {
           const name = artifactName(job.name, attempt);
           const artifact = (await artifactsOf(run.id)).find((a) => a.name === name && !a.expired && !known.has(a.id)) ?? null;
-          items.set(key, { run: run.id, attempt, job: job.name, artifact, forms: new Set() });
+          items.set(key, { run: run.id, attempt, job: job.name, artifact });
         } catch (err) {
           errors.push(`run ${run.id} attempt ${attempt} ${job.name}: ${describe(err)}`);
         }
@@ -188,13 +186,15 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
   //    A sharded job is taken once all n shards of the attempt completed, and only when each of them ran its tests
   //    in this attempt: a shard a re-run copied from an earlier attempt, or one that never reached its tests, leaves
   //    the attempt without a line, as an unsharded job that did not run its tests has none. An attempt whose jobs
-  //    and artifacts name more than one shard count is refused.
+  //    and unexpired artifacts in the run's own listing name more than one shard count (unsharded included) is refused.
   const work = [];
   for (const item of items.values()) {
     try {
       const run = await runOf(item.run);
       const mine = (await jobsOf(item.run, item.attempt)).filter((j) => jobPart(j.name, reporting)?.job === item.job);
-      const forms = new Set([...item.forms, ...mine.map((j) => jobPart(j.name, reporting).n)]);
+      const artifacts = await artifactsOf(item.run);
+      const parts = artifacts.filter((a) => !a.expired).map((a) => artifactPart(a.name, bySlug)).filter((p) => p?.job === item.job && p.attempt === item.attempt);
+      const forms = new Set([...mine.map((j) => jobPart(j.name, reporting).n), ...parts.map((p) => p.n)]);
       if (forms.size > 1) throw new Error(`history: the attempt has the job in more than one shard count (${[...forms].map((n) => String(n ?? 'unsharded')).sort().join(', ')})`);
       const [n] = forms;
       if (n === null) {
@@ -212,7 +212,6 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
       }
       if (shards.some((j) => j.status !== 'completed')) continue; // the next pass takes it
       if (shards.some((j) => carriedOver(j) || !uploadRan(j))) continue;
-      const artifacts = await artifactsOf(item.run);
       const set = shards.map((job, i) => ({
         job,
         artifact: artifacts.find((a) => a.name === artifactName(item.job, item.attempt, i + 1, n) && !a.expired) ?? null,
