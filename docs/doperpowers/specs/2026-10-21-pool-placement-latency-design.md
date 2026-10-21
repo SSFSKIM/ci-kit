@@ -13,8 +13,9 @@ Two things now set how long a MAWS class 1a run takes, beside the tests themselv
   research is `~/Developer/ci-analysis/vm-cost-research.md`, CI-opt's machine). C4D spot in us-west4 costs 0.69x
   per unit of work at today's prices. The pool's capacity is also one region's quota: C3D 192 vCPUs, 32 external
   addresses.
-- **The start.** A job waits about 100 s from queued to started (97–109 s measured), and a class 1a run waits twice:
-  for its plan job, then for its gates. The critical-path work (`~/Developer/ci-analysis/critical-path.md`)
+- **The start.** A pool job waits about 100 s from queued to started (97–109 s measured). A MAWS class 1a run waits
+  once: its plan job runs on GitHub-hosted `ubuntu-slim` (starts in ~4 s, runs ~14 s), and its gates then wait for
+  their pool VMs. The critical-path work (`~/Developer/ci-analysis/critical-path.md`)
   measured where the time goes:
 
   | Stage | Median | Range |
@@ -40,7 +41,8 @@ toward the boot alone, and below it for the jobs a warm runner covers.
 - **Placement:** one region and machine family the launcher may create a VM in: its zones, subnetwork, the machine
   type for each size (2, 4, 8, 16 vCPUs) and the boot disk type.
 - **Walk:** the ordered attempts for one launch (`walkPlacements`, `logic.mjs`).
-- **Hop:** one queued → started wait. A class 1a run has two on its critical path: plan, then the gates.
+- **Hop:** one queued → started wait for a pool VM. A MAWS class 1a run has one on its critical path: the gates,
+  queued when plan (hosted) ends.
 - **Warm runner:** a booted VM whose runner is registered and listening before any job asks for it.
 
 ## Progress
@@ -61,7 +63,8 @@ toward the boot alone, and below it for the jobs a warm runner covers.
    and static job medians lower on C4D by more than C3D's own spread.
 3. The ledger's daily line prices every VM by its region and family, Hyperdisk included.
 4. A pool job's median queued → started is at most 50 s (from ~100 s) with M3 and M4 in, over a day of MAWS runs.
-5. With M5 in, a job a warm runner covers starts within 10 s of being queued.
+5. With M5 in: pre-launch, a run's gate jobs start a median ≤ 25 s after they are queued; full standby, a job a warm
+   runner covers starts within 10 s.
 6. No regression: the parent spec's A13 clauses (teardown, ledger, alerts, no VM left behind) still hold.
 
 ## Design
@@ -153,20 +156,23 @@ exact command and waits for it. The App's webhook URL and secret can be set thro
 (`PATCH /app/hook/config`, authenticated as the App); subscribing the App to `workflow_job` events may need its
 settings page, which is the owner's to click: M4 finds out and prepares the steps.
 
-### Warm runners (M5, shape pending the owner)
+### Warm runners and pre-launch (M5, shape pending the owner)
 
-The owner was asked on 2026-10-21 which of three shapes to buy; M5 builds the one chosen.
+A run waits only for its slowest gate VM, so a warm runner shortens the run only when every long gate job of the run
+(static and each unit shard) finds one; probes is short enough to start late. The owner was asked on 2026-10-21
+(corrected the same hour: the first question assumed a plan hop on the pool) and M5 builds the shape chosen:
 
-- **Small standby and pre-launch (recommended).** One warm 2-vCPU runner for MAWS covers the plan hop. When a MAWS
-  run's plan job is queued, the launcher pre-launches the VMs that run's gates will ask for, from the shape of the
-  same workflow's recent runs in the ledger (median per size over the last 10), so they boot while plan runs. A
-  pre-launched VM no job claims within 3 minutes of plan's end is deleted. Added cost about $0.5–1 a day.
-- **Full standby.** One run's full set (plan, static, every unit shard, probes) kept warm. About $9 a day; only the
-  first of several concurrent runs gains.
-- **None.** M5 is dropped; M3 and M4 stand.
+- **Pre-launch only (recommended).** When a served repo's run begins (its first job queued, the webhook of M4 or the
+  tick), the launcher launches the VMs that run's gates will ask for, from the shape of the same workflow's recent
+  runs in the ledger (the median count per size over its last 10 runs), so they boot while plan runs (~17 s hidden).
+  A pre-launched VM no job claims within 3 minutes of the run's plan job ending is deleted. Cost: the occasional
+  unclaimed VM (a docs-only run whose plan skips the gates).
+- **Full standby.** Warm runners for one run's long gates (static and every unit shard, ~80 vCPU at 4×16 shards)
+  kept booted: about $11–16 a day; only the first of concurrent runs gains, ~20–30 s over pre-launch.
+- **None, or decide after measuring M3 and M4.** M5 waits or is dropped.
 
-A warm runner is exempt from `idle_runner_minutes` and replaced after 6 hours (fresh image, no stale registration);
-a preempted one is replaced at the next tick. Warm runners count against `max_vcpus`.
+A warm runner (full standby) is exempt from `idle_runner_minutes` and replaced after 6 hours; a preempted one is
+replaced at the next tick. Warm and pre-launched runners count against `max_vcpus`.
 
 ## Plan of Work
 
@@ -244,6 +250,9 @@ daily line, reported to the owner.
 
 ## Surprises & Discoveries
 
+- 2026-10-21 (CI-opt): the first version of this spec and the owner's first standby question assumed a pool hop for
+  MAWS's plan job; plan runs on GitHub-hosted `ubuntu-slim`. Purpose, the glossary, M5 and Acceptance 5 corrected;
+  the owner re-asked.
 - C4D in us-west4 had a family quota of 0 for this project when the preference was filed, though Google lists
   C4D in us-west4-a/b/c. us-central1's external addresses are still granted 32 of 64 asked (reconciling since 10-21
   09:2xZ), which caps that region at 32 VMs.
