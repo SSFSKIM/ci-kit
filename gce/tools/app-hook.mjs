@@ -7,7 +7,8 @@
 // Which events the App subscribes to, and whether its webhook is Active, are not in this API: they are the App's
 // settings page (docs/pool.md, GCE, The webhook).
 import { execFileSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { appJwt } from '../../lib/github-app.mjs';
 
 const PROJECT = 'ssfskim-ci-kit';
@@ -31,7 +32,9 @@ export async function setAppHook({ url, secret, appId, pem, fetchImpl = fetch, l
 
 const access = (name) => execFileSync('gcloud', ['secrets', 'versions', 'access', 'latest', `--secret=${name}`, `--project=${PROJECT}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] });
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Both sides canonical: Node resolves this module's URL through symlinks, argv[1] is the path as typed (macOS's /tmp
+// is /private/tmp), and a guard that misses runs nothing and exits 0, which deploy.sh would read as done.
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   const [url] = process.argv.slice(2);
   if (!url) {
     console.error('usage: node gce/tools/app-hook.mjs <receiver url>');
