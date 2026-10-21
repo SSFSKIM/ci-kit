@@ -316,10 +316,16 @@ it:
 3. **An insert unsettled after 20 s races a second VM.** The first allocation keeps waiting on its own operation, as
    today; the walk does not move it. A new allocation of the same size (its own row, name and JIT runner) is
    launched from the next attempt of the walk, another zone and preferably another region, and its row carries
-   `race: {of: <alloc>}`. Whichever runner registers first takes the job; the other is an unclaimed VM the idle rule
-   removes, as a pre-launched one is. One race per allocation; the race spends `max_vcpus` like any launch and runs
-   only after every queued job's first launch, as pre-launch does. At today's rate (15 slow inserts a day, 4 since
-   placements) the cost is one idle window of one VM per slow insert, a few cents each.
+   `race: {of: <root alloc>}`. A race child never races, so a group is one original and one child; an unresolved
+   original keeps its `max_vcpus` reservation and counts as cover for its demand until reconciled, whether or not the
+   listing shows its instance, and suppresses another race for that demand across ticks (overlapping ticks remain the
+   parent spec's accepted overlap). The race spends `max_vcpus` like any launch and runs only after every queued
+   job's first launch, as pre-launch does. Both JIT runners are minted before their inserts and either may take any
+   matching job, so outcomes are observed, not assumed: first claim (which VM), both claimed, neither claimed,
+   unresolved; the jobs each VM ran are kept apart from the demand that triggered the race, and a first claim is not
+   reported as latency saved. An unclaimed VM is removed by the idle rule, as a pre-launched one is. The 20 s
+   trigger is provisional: the 15 slow inserts of the day are those that outlived the 40 s wait, not every insert
+   over 20 s, so every insert's send → done time is logged and the threshold is re-sized from that distribution.
 4. **The on-demand half of the walk stays as it is** (CI-opt's prior (a)): it already follows spot in every
    placement, and the day gave it no case. A race may land on it when spot attempts are used up.
 5. **Counts on the tick summary and the daily line** (prior (c)): refusals by kind, metric and zone; slow inserts
@@ -387,18 +393,28 @@ reported to the owner.
 ### M6 — Stock-out and quota resilience (candidate; not built until CI-opt approves)
 
 1. NAT: `deploy.sh network` creates router, NAT and Private Google Access for every placement region; `jobInstance`
-   and the bake's smoke VM drop `accessConfigs`. A smoke VM per placement passes before the launcher deploys.
+   and the bake's VMs (builder, smoke, check: one helper) drop `accessConfigs`. Order: `network` (NAT beside the
+   existing external IPs), `bake` deploy, a smoke VM in us-central1 without an external IP, then the launcher.
 2. The race: `logic.mjs` (the race attempt from the walk), `launcher.mjs` (an insert pending past 20 s starts it,
-   after queued launches), `ledger.mjs` (`race` on the row; races on the daily line). Tests: a pending insert races
-   the next zone of another placement; the first allocation is never walked; one race per allocation; a race never
-   runs before a queued job's first launch.
+   after queued launches), `ledger.mjs` (`race` on the row with the insert's send and done times; outcomes on the
+   daily line). Tests: a pending insert races the next zone of another placement; the first allocation is never
+   walked; a child never races; an unresolved original absent from the listing keeps its reservation and suppresses
+   a repeat race; a restart; two timers in one tick; pre-launch competing for admission.
 3. Counts on the tick summary and the daily line, NAT GB priced.
 4. Hyperdisk raises filed for the new C4D regions; `gce.json` adds the placements in the order above, `max_vcpus`
-   their sum; `deploy.sh network` then `bake`, one complete bake by hand.
+   their sum. Rollout so no placement is published before it can serve (the launcher reads `gce.json` from main every
+   tick): `deploy.sh network` from the placement PR's checkout (additive: subnets, routers, NATs) and a smoke VM in
+   each new placement from that checkout, before the PR merges; then merge, `deploy.sh bake` from main, one complete
+   bake by hand. Rolling the list back leaves subnets and NATs in place while VMs drain.
+5. Broken egress is detected, not inferred: a VM RUNNING past a few minutes whose runner never came online is logged
+   at ERROR and stops counting as cover (an offline JIT registration counts today); an alert on it, and one on the
+   NAT's allocation failures. A controlled egress failure (a smoke VM in a region without NAT) shows the detection.
 
 Proof: NAT first, in us-central1: a smoke VM there without an external IP passes before the launcher deploys. Then a
 sandbox burst of 20 cpus-2 jobs launches in one tick with no address refusal, every VM without an external IP, every
-job green (it reaches GitHub, apt and npm through NAT), and the NAT's metrics show no packet dropped for want of ports; the bake log shows a smoke VM in every placement; a
+job green (it reaches GitHub, apt and npm through NAT), and the NAT's metrics show no packet dropped for want of
+ports, with the peak ports per VM recorded (the 1024–65536 dynamic range is provisional until then); the egress
+failure test shows its alert; the bake log shows a smoke VM in every placement; a
 day's counts on the daily line, and no pool job over 90 s queued → started with a refusal or a slow insert in its
 VM's walk.
 
@@ -582,6 +598,12 @@ VM's walk.
   a placement adds, and VMs without a public IP are the better posture. Its cost (the gateway per VM-hour, about
   $0.012 a VM in processing) is reported on the daily line. Hyperdisk Balanced raises to 4096 GB are filed for
   us-central1, us-east1, us-east4 and us-east5, so disks do not become the next ceiling.
+
+- 2026-10-21 (M6, adversarial review on c070dbc: 1 P1, 4 P2, all taken): placements publish only after their region
+  is provisioned and smoked from the PR's checkout; a race group is one original and one child, unresolved
+  originals keep their reservation and cover; race outcomes are observed (first claim, both, neither, unresolved);
+  never-online runners are an ERROR, not cover, with alerts on them and on NAT allocation failure; the 20 s trigger
+  and the NAT port range are provisional, re-sized from logged insert times and the burst's peak port use.
 
 ## Surprises & Discoveries
 
