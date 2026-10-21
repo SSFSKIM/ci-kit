@@ -1241,6 +1241,33 @@ hold-aware plan send them to the guest, which this spec leaves open.
      a verified stop before any delete, the promote that finishes from either name. They are the same rules, read by
      a script that refuses outside the hold instead of an admission that reasons about kinds.
 
+- 2026-10-21 (late, V2's executor, pre-flight; interfaces the V2 tasks share):
+  1. **V2 is built as four tasks, each reviewed before the next consumes it, one PR at the end:** V2a the host side
+     (the lock library below, settle's `vm` condition and measured claim, the exclusive hook's classification and its
+     claim, the end hook's removal); V2b the guest (`kickoff.sh`, `wrapper.sh`, the guest hooks, the `out/` protocol);
+     V2c the launcher (`lane.sh`, its plist, and the Tart steps in a sourced `mac/vm/tart.sh` that `bake.sh` reuses for
+     the trial's boot, kickoff and verified stop); V2d `bake.sh`, `install.sh --vm` and the two `docs/mac-lane.md`
+     sections.
+  2. **"Reused, not copied":** the lock, the start-time read, the liveness test and the marker read and write move out
+     of `shared-hold.sh` into a sourced `mac/hooks/desktop-lock.sh`, behaviour unchanged; `shared-hold.sh`, settle, the
+     hooks and the launcher source it. Settle sources it from its own checkout, as it runs the posture read.
+  3. **"A Mac with the lane installed"** is one with the launcher's LaunchAgent file
+     (`~/Library/LaunchAgents/com.ssfskim.ci-kit.vm-lane.plist`), loaded or not: a disabled lane, and one booted out
+     for maintenance, still classify and claim. Without it the hooks and settle print and write nothing new.
+  4. **The installed kit** is `~/ci-kit-vm/kit/`, published by `install.sh --vm` with the hooks' staged swap, laid out
+     as `mac/` is (`hooks/`, `vm/`), so a relative path that works in the checkout works there. The launcher's plist
+     runs `~/ci-kit-vm/kit/vm/lane.sh`, and the same directory is the clone's read-only `kit` share. In the guest, a
+     symlink baked into the image, `~/ci-kit` → `/Volumes/My Shared Files/kit`, gives the runner's `.env` hook paths
+     with no space in them.
+  5. **Which `gh`:** the queue read and the classification read use the machine user's own `gh` login (SSFSKIM, `repo`
+     scope on the mini, read 10-21), bounded as `dialog.sh` bounds its calls; the alert token reaches only the
+     sandbox's issues, so it serves the lane's alerts alone, through `alert_gh` as today.
+  6. **Fail closed where a claim cannot be named:** a measured job on a Mac with the lane whose settle cannot raise its
+     claim (its worker not found, the write failed) is refused in settle's shape, as a reservation that cannot be
+     written is no boot.
+  7. **Tart is read as JSON, in the C locale:** `tart list --format json` (`Name`, `State`, `Running`), never the
+     table, whose columns the mini prints in Korean.
+
 ## Surprises & Discoveries
 
 - 2026-10-21, M1 (ci-kit #67), from its reviews:
@@ -1295,6 +1322,15 @@ hold-aware plan send them to the guest, which this spec leaves open.
       offer;
     - a trial record tells a trial that took no job (no job id) from one that did, but not an infrastructure failure
       inside a job from the job's own red; V4's rollback rehearsal reads that from `out/` by hand.
+
+- 2026-10-21 (late), V2's pre-flight, read-only on the mini:
+  - **Tart on the mini is 2.40.1**, not the 2.41.1 whose source the design read (`VMDirectory.delete()` refusing a
+    running VM, the display's point path). V1 confirms both behaviours on 2.40.1, or the mini's Tart is upgraded in V1's
+    window; the launcher never relies on the refusal alone (teardown verifies the stop first).
+  - `tart list`'s table is localized (`16시간 전`); its `--format json` is not. The base image and the spike's clone are
+    there (`maws-vm-spike`, 43 GB, display `1920x1200`), 138 GB free; `kern.memorystatus_vm_pressure_level` (1),
+    `kern.memorystatus_level` (77) and `vm.swapusage` (510 MB used) all read on macOS 27. M1's hooks are not installed
+    yet (no `shared-hold.sh` there).
 
 ## Outcomes & Retrospective
 
