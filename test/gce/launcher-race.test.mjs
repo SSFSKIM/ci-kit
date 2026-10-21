@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { world, gceErr } from './fake-world.mjs';
 import { Launcher } from '../../gce/launcher/launcher.mjs';
 import { createGceLedger } from '../../gce/launcher/ledger-store.mjs';
-import { parseRow, renderRow, dailyLine } from '../../gce/launcher/ledger.mjs';
+import { parseRow, renderRow, dailyLine, launchRow } from '../../gce/launcher/ledger.mjs';
 import { allocOf, instanceName, RACE_AFTER_MS } from '../../gce/launcher/logic.mjs';
 import { NEW_CFG } from './config-fixtures.mjs';
 import { GceError } from '../../lib/gce.mjs';
@@ -69,7 +69,7 @@ const placed = (w, name) => {
 };
 const insertsOf = (w, name) => w.log.filter((l) => l.startsWith(`insert-wait ${name} `)).length;
 // An insert whose wait ended before its operation did: accepted, still running (sim.completeInsert finishes it).
-const unsettled = (name) => ({
+const unsettled = (name = null) => ({
   match: (zone, body) => body.name === name, running: true,
   error: (op) => new GceError(0, 'gce operation did not finish in 40 s', [], { accepted: true, operation: op.selfLink }),
 });
@@ -119,7 +119,7 @@ test('a pending insert races the next zone of another placement; one job, two VM
   assert.deepEqual([a.state, a.end, a.job, b.state, b.end, b.job?.id], ['final', 'cancelled-idle', undefined, 'final', 'done', job.id]);
   const line = dailyLine([...rows(w).values()], '2026-10-16', COMMIT);
   assert.deepEqual(line.races, {
-    started: 1, firstClaim: { race: 1, original: 0 }, bothClaimed: 0, neitherClaimed: 0, unresolved: 0, unclaimedDollars: a.dollars,
+    started: 1, firstClaim: { race: 1, original: 0, tied: 0, unknown: 0 }, bothClaimed: 0, neitherClaimed: 0, unresolved: 0, unclaimedDollars: a.dollars,
   });
 });
 
@@ -188,12 +188,13 @@ test('one race per allocation and none of a race; an unsettled pair keeps its jo
   // The operations finish (the first created, the race's refused); the next tick learns when, from the operations.
   w.advance(10_000);
   w.sim.completeInsert(first);
-  w.sim.completeInsert(second, { codes: ['ZONE_RESOURCE_POOL_EXHAUSTED'] });
+  w.sim.completeInsert(second, { codes: ['QUOTA_EXCEEDED'], message: "Quota 'C3D_CPUS' exceeded.  Limit: 24.0 in region us-central1." });
   const done = new Date(w.now()).toISOString();
   w.advance(MIN);
   await make().tick();
   assert.deepEqual([rowOf(w, first).state, rowOf(w, first).slow.at(-1)], ['running', { zone: 'us-west4-a', outcome: 'created', sent: rowOf(w, first).slow[0].sent, done }]);
-  assert.deepEqual([rowOf(w, second).state, rowOf(w, second).slow.at(-1).outcome, rowOf(w, second).slow.at(-1).done], ['launching', 'capacity', done]);
+  assert.deepEqual([rowOf(w, second).state, rowOf(w, second).slow.at(-1).outcome, rowOf(w, second).slow.at(-1).done], ['launching', 'quota', done]);
+  assert.deepEqual(rowOf(w, second).refused, [{ kind: 'quota', zone: 'us-central1-a', metric: 'C3D_CPUS' }], 'the refusal learned late is counted, with its metric');
 });
 
 test('two slow inserts in one tick race once each, and the next tick launches nothing more for their jobs', async () => {
@@ -280,4 +281,68 @@ test('pre-launch plans against what the race reserved: a race\'s vCPUs are not g
   held.get([...held.keys()][0])();
   const out = await ticking;
   assert.deepEqual([out.launched.length, out.raced.length, out.prelaunched], [2, 1, []], 'the race took the 4 vCPUs pre-launch would have');
+});
+
+test('a launcher restarted while a race\'s insert is in flight counts both allocations: nothing more is admitted', async () => {
+  const { w, launcher, make } = setup({ cfg: { ...CFG, max_vcpus: 8 } });
+  w.sim.queue(SBX, L(4));
+  const held = hold(w, () => true);
+  const ticking = launcher.tick();
+  await until(() => held.size === 1, 'the first insert');
+  w.advance(RACE_AFTER_MS);
+  await until(() => held.size === 2, 'the race\'s insert, in flight');
+  const [first, second] = held.keys();
+  assert.deepEqual([rowOf(w, first).slow?.[0].done, rowOf(w, second).reserved], [undefined, 4], 'both written before the race\'s insert');
+  w.hooks.holdInsert = null; // a new launch would not be held: if one were admitted, it would show
+  w.sim.queue(SBX, L(4));
+  const next = await make().tick();
+  assert.deepEqual([next.launched, next.raced], [[], []], 'both covered by the pair\'s runners, and 8 of 8 vCPUs reserved');
+  assert.equal(w.log.filter((l) => l.startsWith('jit ')).length, 2);
+  for (const release of held.values()) release();
+  await ticking;
+});
+
+test('an insert whose wait ends before its operation (still running when reconciled) is not settled: its race still starts in the tick', async () => {
+  const { w, launcher } = setup();
+  w.sim.queue(SBX, L(4));
+  w.g.insertErrors.push({ ...unsettled(), match: (zone) => zone === 'us-west4-a' });
+  const ticking = launcher.tick();
+  await until(() => w.log.some((l) => / us-west4-a unsettled$/.test(l)), 'the wait call gave up early');
+  await turns();
+  w.advance(RACE_AFTER_MS);
+  const out = await ticking;
+  assert.equal(out.raced.length, 1);
+  const [first] = [...rows(w).values()].filter((r) => !r.race);
+  assert.deepEqual([first.state, first.slow.at(-1).outcome, races(w)[0].race.of], ['launching', 'unknown', first.alloc]);
+});
+
+test('learning how unsettled inserts ended reads each zone once, never holds a stopped VM\'s deletion, and leaves what its budget missed', async () => {
+  const { w, launcher } = setup();
+  const job = w.sim.queue(SBX, L(4));
+  await launcher.tick();
+  const [vm] = vms(w);
+  w.sim.boot(SBX, vm);
+  w.sim.take(SBX, vm, job);
+  w.sim.finish(SBX, vm, job); // powered off: the next tick deletes it
+  w.advance(MIN);
+  // Three rows whose inserts never settled in their ticks, two in us-west4-a and one in us-central1-a; all done since.
+  const ended = new Date(w.now() - 5_000).toISOString();
+  for (const [alloc, zone] of [['west00000a', 'us-west4-a'], ['west00000b', 'us-west4-a'], ['cent00000a', 'us-central1-a']]) {
+    const row = { ...launchRow({ alloc, repo: SBX, cpus: 4, at: w.now() - 50_000, config: COMMIT, reserved: 4 }), slow: [{ zone, outcome: 'unknown', sent: new Date(w.now() - 49_000).toISOString() }] };
+    w.gh.comments.push({ id: 9000 + w.gh.comments.length, issue: 1, body: renderRow(row), updated_at: new Date(w.now()).toISOString() });
+    const target = `https://www.googleapis.com/compute/v1/projects/ssfskim-ci-kit/zones/${zone}/instances/${instanceName(alloc)}`;
+    w.g.ops.push({ name: `op-${alloc}`, zone, operationType: 'insert', status: 'DONE', endTime: ended, targetLink: target, selfLink: `${target}-op` });
+  }
+  w.hooks.zoneOperations = (zone) => (zone === 'us-west4-a' ? new Promise(() => {}) : null); // that zone's read hangs
+  const ticking = launcher.tick();
+  await until(() => w.log.includes(`delete ${vm}`), 'the stopped VM is deleted while a read hangs');
+  await until(() => rowOf(w, instanceName('cent00000a')).slow[0].done, 'the zone that answered is learned');
+  assert.deepEqual(w.log.filter((l) => l.startsWith('read operations ')).sort(), ['read operations us-central1-a', 'read operations us-west4-a']);
+  w.advance(15_000); // the settlement's budget
+  await ticking;
+  assert.equal(rowOf(w, instanceName('west00000a')).slow[0].done, undefined, 'left for the next tick');
+  w.hooks.zoneOperations = null;
+  w.advance(MIN);
+  await launcher.tick();
+  for (const alloc of ['west00000a', 'west00000b']) assert.deepEqual(rowOf(w, instanceName(alloc)).slow[0], { zone: 'us-west4-a', outcome: 'created', sent: rowOf(w, instanceName(alloc)).slow[0].sent, done: ended });
 });

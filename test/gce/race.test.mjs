@@ -137,6 +137,34 @@ test('an unresolved launching row (its insert never settled, its VM not listed) 
   assert.deepEqual([free.launches.map((l) => l.job.id), free.inflight], [[1], 4]);
 });
 
+test('a race\'s launching row keeps its reserved vCPUs before its VM is listed; a reservation is what the row recorded, not today\'s config', () => {
+  // The race row is written before its runner and insert: a restart while that insert is in flight still counts it.
+  const child = launchRow({ alloc: 'raceaaaaaa', repo: SBX, cpus: 2, at: T0 - 5_000, config: 'c0ffee00', race: { of: 'origaaaaaa', demand: { job: 1 } }, reserved: 4 });
+  const runners = new Map([[SBX, new Map([runner('raceaaaaaa')])]]);
+  // Size 2 reserved a c3d-highcpu-4 when it launched; a placement change since then gives size 2 only 2-vCPU machines.
+  const cfg = { ...NEW_CFG, max_vcpus: 6, placements: [NEW_CFG.placements[0]] };
+  const p = planLaunches({ queued: [job(1, 2), job(2, 2), job(3, 2)], instances: [], runners, rows: [child], now: T0, cfg });
+  assert.equal(p.inflight, 6, 'the row\'s 4, and one more 2');
+  assert.deepEqual(p.launches.map((l) => l.job.id), [2], 'job 1 is covered by the race\'s runner; job 3 does not fit');
+  // A launching row that is neither a race's nor unsettled is a launch in flight in another tick: the accepted overlap.
+  const plain = launchRow({ alloc: 'plainaaaaa', repo: SBX, cpus: 2, at: T0, config: 'c0ffee00', reserved: 4 });
+  assert.equal(planLaunches({ queued: [], instances: [], runners, rows: [plain], now: T0, cfg }).inflight, 0);
+});
+
+test('a reconciled operation\'s own error is the walk\'s: a quota learned through reconciliation keeps its metric and scope', async () => {
+  const memory = [];
+  const opError = new GceError(200, "gce operation op-1: QUOTA_EXCEEDED Quota 'IN_USE_ADDRESSES' exceeded.  Limit: 8.0 in region us-west4.", ['QUOTA_EXCEEDED'], { accepted: true, finished: true });
+  const result = await walkPlacements(placements(4, NEW_CFG), {
+    attempt: async (p) => {
+      if (p.zone === 'us-west4-a') throw new Error('The operation was aborted due to timeout');
+    },
+    reconcile: async () => ({ outcome: 'quota', error: opError }),
+    quota: memory,
+  });
+  assert.deepEqual(result.tried.map((t) => [t.zone, t.outcome, t.metric]), [['us-west4-a', 'quota', 'IN_USE_ADDRESSES'], ['us-central1-a', 'created', undefined]]);
+  assert.deepEqual(memory, [{ region: 'us-west4', vcpus: 4 }], 'an address quota binds the region, not the family');
+});
+
 test('a race row names its original and the demand that started it, apart from the job its VM ran', () => {
   const row = launchRow({ alloc: 'raceaaaaaa', repo: SBX, cpus: 4, at: T0, config: 'c0ffee00', race: { of: 'origaaaaaa', demand: { job: 7 } } });
   assert.deepEqual(row.race, { of: 'origaaaaaa', demand: { job: 7 } });
@@ -184,18 +212,23 @@ test('the daily line counts refusals, slow inserts, on-demand VMs and races by w
     // Unresolved: the original's insert never settled and its row is not final; the race VM's idle cost is counted.
     { alloc: 'o4', state: 'launching', at: iso(T0), slow: [{ zone: 'us-west4-a', outcome: 'unknown', sent: iso(T0) }] },
     final('r4', { ...race('o4', 5), ...idle, dollars: 0.004 }),
+    // Both claimed at the same second: tied; both claimed, one start missing (only its queue time known): unknown.
+    final('o5', { ...ran(6, 80) }),
+    final('r5', { ...race('o5', 6), ...ran(7, 80) }),
+    final('o6', { job: { id: 8, name: 'unit', queued: iso(T0) } }),
+    final('r6', { ...race('o6', 8), ...ran(9, 90) }),
   ];
   const line = dailyLine(rows, day, 'abcdef0123');
   assert.deepEqual(line.refusals, [{ kind: 'capacity', zone: 'us-central1-a', n: 1 }]);
   assert.deepEqual(line.slow, { inserts: 1, unsettled: 0, seconds: [63] }, 'by the rows finalized that day');
   assert.equal(line.onDemand, 1);
   assert.deepEqual(line.races, {
-    started: 4, firstClaim: { race: 1, original: 1 }, bothClaimed: 1, neitherClaimed: 1, unresolved: 1, unclaimedDollars: 0.014,
+    started: 6, firstClaim: { race: 1, original: 1, tied: 1, unknown: 1 }, bothClaimed: 3, neitherClaimed: 1, unresolved: 1, unclaimedDollars: 0.014,
   });
   const text = renderDaily(line);
   assert.match(text, / Refusals: capacity us-central1-a 1\./);
   assert.match(text, / Slow inserts: 1, settled in 63 s\./);
-  assert.match(text, / Races: 4 started; claimed first: the race 1, the original 1; both claimed 1, neither 1, unresolved 1; unclaimed VMs \$0\.0140\./);
+  assert.match(text, / Races: 6 started; claimed first: the race 1, the original 1, tied 1, unknown 1; both claimed 3, neither 1, unresolved 1; unclaimed VMs \$0\.0140\./);
   assert.match(text, / On demand: 1 VMs\./);
   // A day with none of these reads as before.
   const quiet = dailyLine([final('q1', {})], day, 'abcdef0123');

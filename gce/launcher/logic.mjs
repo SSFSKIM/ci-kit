@@ -112,10 +112,11 @@ export function runnersNeverOnline({ instances, runners, now, claimed = new Set(
 // since the vCPUs in flight and the coverage are unknown. A launch reserves the largest machine its walk could land
 // on (any placement's). inflight: the vCPUs in flight with this plan's launches, what pre-launch may add to (none
 // when the listing is incomplete).
-// rows: the ledger's. A launching row whose insert never settled (unsettledInsert) and whose VM is not listed is an
-// allocation whose VM may still appear (spec M6: an insert outcome stays unknown for 41-121 s): it keeps the vCPUs its
-// launch reserved, and while its runner is registered, not busy and unclaimed it covers a job of its size, as its VM
-// would. Without that, the next tick would launch again for the same job, and race again.
+// rows: the ledger's. A launching row whose VM may still appear and is not listed (pendingAllocation: its insert never
+// settled, spec M6, which takes 41-121 s, or it is a race's) keeps the vCPUs its launch reserved (`reserved`, as the
+// row recorded it: a placement changed since must not shrink it), and while its runner is registered, not busy,
+// unclaimed and younger than idle_runner_minutes it covers a job of its size, as its VM would. Without that, the next
+// tick, or a restarted launcher, would launch again for the same job, and race again.
 export function planLaunches({ queued, instances, runners, now, cfg, complete = true, claimed = new Set(), rows = [] }) {
   if (!complete) return { launches: [], waiting: [...queued], unservable: [] };
   const idleMs = cfg.idle_runner_minutes * MIN;
@@ -133,8 +134,8 @@ export function planLaunches({ queued, instances, runners, now, cfg, complete = 
   }
   const listed = new Set(instances.map((i) => i.alloc));
   for (const row of rows) {
-    if (row.state !== 'launching' || listed.has(row.alloc) || !unsettledInsert(row)) continue;
-    inflight += largestMachineCpus(row.cpus, cfg);
+    if (listed.has(row.alloc) || !pendingAllocation(row)) continue;
+    inflight += row.reserved ?? largestMachineCpus(row.cpus, cfg);
     const r = runners.get(row.repo)?.get(row.instance);
     if (r && !r.busy && !claimed.has(row.instance) && now - Date.parse(row.at) < idleMs) cover.set(key(row.repo, row.cpus), (cover.get(key(row.repo, row.cpus)) ?? 0) + 1);
   }
@@ -253,6 +254,10 @@ export function walkRecord(tried) {
   return { ...(refused.length ? { refused } : {}), ...(slow.length ? { slow } : {}) };
 }
 
+// A launching row whose VM may yet appear though none is listed: its insert never settled, or it is a race's, whose row
+// is written before its runner and insert (a launcher restarted while that insert is in flight must count it).
+export const pendingAllocation = (row) => row.state === 'launching' && Boolean(row.race || unsettledInsert(row));
+
 // A row's insert that never settled (outcome unknown, its operation's end not yet learned), or null; none once the row
 // is final. A walk stops at an unknown outcome, so a row has at most one.
 export const unsettledInsert = (row) => (row.state !== 'final' && row.slow?.find((s) => !s.done)) || null;
@@ -261,7 +266,8 @@ export const unsettledInsert = (row) => (row.state !== 'final' && row.slow?.find
 // `quota` (the tick's memory, quotaScope) and every attempt it covers is skipped, here and in the tick's later walks.
 // An unknown outcome is reconciled (through the zone's operation) before anything else is tried, and if it stays
 // unknown the walk stops: two zones must never both hold this allocation's VM.
-// attempt(p) resolves once created and throws the insert's error; reconcile(p, err) resolves to an outcome. No new
+// attempt(p) resolves once created and throws the insert's error; reconcile(p, err) resolves to an outcome, or to
+// {outcome, error} with the error the settled operation carries (its message names a quota's metric). No new
 // attempt starts at or past `deadline` (the tick's budget): the walk stops with 'deadline', having created nothing.
 // Once `raced()` (a second allocation races this one's pending insert, spec M6), the walk makes no further attempt and
 // stops with 'raced': the race carries the job, and this allocation is never moved to another zone.
@@ -284,7 +290,11 @@ export async function walkPlacements(list, { attempt, reconcile, now = Date.now,
     } catch (err) {
       error = err;
       outcome = insertOutcome(err);
-      if (outcome === 'unknown') outcome = await reconcile(p, err);
+      if (outcome === 'unknown') {
+        const settled = await reconcile(p, err);
+        outcome = settled?.outcome ?? settled;
+        error = settled?.error ?? error;
+      }
     }
     tried.push({ ...p, outcome, sent, ms: now() - sent, ...(outcome === 'quota' ? { metric: quotaMetric(error) } : {}) });
     if (outcome === 'created') return { placement: p, tried, quota };

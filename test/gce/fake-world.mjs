@@ -96,7 +96,12 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
       if (hooks.operationsFail) throw new GceError(503, 'operations listing failed');
       return g.preempted.map((p) => structuredClone(p));
     },
-    zoneOperations: async (zone, filter) => g.ops.filter((o) => filter.includes(o.targetLink.split('/').pop()) && o.zone === zone).map(({ body, ...o }) => structuredClone(o)),
+    // hooks.zoneOperations(zone, filter): a promise the read waits on first (it may reject, as a failed read).
+    zoneOperations: async (zone, filter) => {
+      log.push(`read operations ${zone}`);
+      await hooks.zoneOperations?.(zone, filter);
+      return listOperations(zone, filter);
+    },
     operation: async (link) => {
       const { body, ...op } = g.ops.find((o) => o.selfLink === link) ?? {};
       return op.name ? structuredClone(op) : null;
@@ -108,6 +113,8 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
       return inst.attrs?.[path] ?? null;
     },
   };
+
+  const listOperations = (zone, filter) => g.ops.filter((o) => filter.includes(o.targetLink.split('/').pop()) && o.zone === zone).map(({ body, ...o }) => structuredClone(o));
 
   function operation(zone, body, status) {
     const op = `op-${nextId++}`;
@@ -244,11 +251,11 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
       if (poweredOff) sim.vm(name).status = 'TERMINATED';
     },
     // An insert left running (an insert error with `running: true`) finishes now: its VM is created, or with `codes`
-    // the operation ends in that error and creates nothing.
-    completeInsert(name, { codes } = {}) {
+    // (and the error's `message`) the operation ends in that error and creates nothing.
+    completeInsert(name, { codes, message } = {}) {
       const op = g.ops.find((o) => o.status === 'RUNNING' && o.targetLink.endsWith(`/instances/${name}`));
       Object.assign(op, { status: 'DONE', endTime: new Date(clock).toISOString() });
-      if (codes) op.error = { errors: codes.map((code) => ({ code })) };
+      if (codes) op.error = { errors: codes.map((code) => ({ code, ...(message ? { message } : {}) })) };
       else create(op.zone, op.body, { withOperation: false });
     },
     preempt(name) {

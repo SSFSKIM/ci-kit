@@ -87,12 +87,13 @@ const utc = (s) => s.slice(0, 19).replace('T', ' ');
 // prelaunch: {run, attempt, workflow} for a VM launched ahead of a run's pool jobs (spec M5, prelaunch.mjs), which the
 // row keeps to its end: it is what a later tick reads to know the run was served, and what the daily line counts.
 // egress: gce.json's when the VM launched, which prices the row whatever the file says by the time it is final.
-// race: {of: the allocation whose slow insert it races, demand: {job} or {run}, what that allocation was launched for}
-// for a race's allocation (spec M6). Either VM's runner may take any job of its repo and size, so the job a VM ran is
-// its row's `job`, never assumed from the demand.
-export const launchRow = ({ alloc, repo, cpus, at, config, egress, prelaunch, race }) => ({
+// race: {of: the allocation whose slow insert it races, demand: {job} or {run, attempt}, what that allocation was
+// launched for} for a race's allocation (spec M6). Either VM's runner may take any job of its repo and size, so the job
+// a VM ran is its row's `job`, never assumed from the demand. reserved: the vCPUs its launch reserved against
+// max_vcpus (the largest machine its walk could land on), which a later tick keeps counting while its VM may appear.
+export const launchRow = ({ alloc, repo, cpus, at, config, egress, prelaunch, race, reserved }) => ({
   alloc, instance: instanceName(alloc), repo, cpus, at: iso(at), config: config.slice(0, 8), ...(egress ? { egress } : {}),
-  ...(prelaunch ? { prelaunch } : {}), ...(race ? { race } : {}), state: 'launching',
+  ...(prelaunch ? { prelaunch } : {}), ...(race ? { race } : {}), ...(reserved ? { reserved } : {}), state: 'launching',
 });
 
 // inst: {zone, machine, provisioning, diskType, created (ms), running (ms, when it became RUNNING; absent or null
@@ -200,14 +201,22 @@ export function launchCounts(rows) {
 }
 
 // The races launched on `day` (spec M6), each with its original, by what was observed of the pair: which VM a job
-// claimed first (by the jobs' start), both or neither claimed, or unresolved while either row is not final (its VM may
-// still appear and take a job). A first claim is not latency saved: either runner may take any job of its size. The
-// unclaimed dollars are what the pairs' VMs that ran no job cost, once final.
+// claimed first, by the jobs' start (`tied` when both started at once, `unknown` when a start is missing: neither is
+// picked), both or neither claimed, or unresolved while either row is not final (its VM may still appear and take a
+// job). A first claim is not latency saved: either runner may take any job of its size. The unclaimed dollars are what
+// the pairs' VMs that ran no job cost, once final.
 function raceCounts(rows, day) {
   const byAlloc = new Map(rows.map((r) => [r.alloc, r]));
   const races = rows.filter((r) => r.race && r.at?.startsWith(day));
-  const out = { started: races.length, firstClaim: { race: 0, original: 0 }, bothClaimed: 0, neitherClaimed: 0, unresolved: 0, unclaimedDollars: 0 };
-  const startedAt = (r) => r.job?.started ?? r.job?.queued ?? '';
+  const out = {
+    started: races.length, firstClaim: { race: 0, original: 0, tied: 0, unknown: 0 }, bothClaimed: 0, neitherClaimed: 0, unresolved: 0, unclaimedDollars: 0,
+  };
+  const firstOf = (race, original) => {
+    const [a, b] = [Date.parse(race.job.started), Date.parse(original.job.started)];
+    if (Number.isNaN(a) || Number.isNaN(b)) return 'unknown';
+    if (a === b) return 'tied';
+    return a < b ? 'race' : 'original';
+  };
   for (const race of races) {
     const original = byAlloc.get(race.race.of);
     const pair = [race, original].filter(Boolean);
@@ -219,10 +228,8 @@ function raceCounts(rows, day) {
     const claimed = pair.filter((r) => r.job);
     if (claimed.length === 0) out.neitherClaimed += 1;
     if (claimed.length === 2) out.bothClaimed += 1;
-    if (claimed.length) {
-      const first = claimed.length === 2 && startedAt(original) < startedAt(race) ? original : claimed[0];
-      out.firstClaim[first === race ? 'race' : 'original'] += 1;
-    }
+    if (claimed.length === 2) out.firstClaim[firstOf(race, original)] += 1;
+    else if (claimed.length) out.firstClaim[claimed[0] === race ? 'race' : 'original'] += 1;
   }
   out.unclaimedDollars = round4(out.unclaimedDollars);
   return out;
@@ -280,7 +287,8 @@ function renderWalks(d) {
   }
   if (d.races) {
     const r = d.races;
-    parts.push(`Races: ${r.started} started; claimed first: the race ${r.firstClaim.race}, the original ${r.firstClaim.original}; ` +
+    const unsure = ['tied', 'unknown'].filter((k) => r.firstClaim[k]).map((k) => `, ${k} ${r.firstClaim[k]}`).join('');
+    parts.push(`Races: ${r.started} started; claimed first: the race ${r.firstClaim.race}, the original ${r.firstClaim.original}${unsure}; ` +
       `both claimed ${r.bothClaimed}, neither ${r.neitherClaimed}, unresolved ${r.unresolved}; unclaimed VMs $${r.unclaimedDollars.toFixed(4)}.`);
   }
   if (d.onDemand) parts.push(`On demand: ${d.onDemand} VMs.`);

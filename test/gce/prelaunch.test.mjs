@@ -98,3 +98,24 @@ test('pre-launches come after the queued jobs: none while a job waits, and they 
 test('a size the placements do not name is not pre-launched', () => {
   assert.deepEqual(sizes(plan({ rows: [...history, ran(101, 32), ran(102, 32)], cfg: ONE_REGION_CFG })), [16, 8, 8, 8, 8, 2]);
 });
+
+// Spec M6: a pre-launched VM's slow insert raced by a second allocation, whose demand names the same run and attempt.
+const raceOf = (original, { end, state = 'running' } = {}) => ({
+  alloc: `r${(seq += 1)}`, repo: MAWS, cpus: original.cpus, state, ...(end ? { end } : {}),
+  race: { of: original.alloc, demand: { run: original.prelaunch.run, attempt: original.prelaunch.attempt } },
+});
+
+test('a pre-launch and the race of its slow insert fill one slot of the run\'s shape; the race fills it when the original is abandoned', () => {
+  const statics = prelaunched(500, 16);
+  const rest = [8, 8, 8, 8, 2].map((cpus) => prelaunched(500, cpus));
+  // Both live: still one static, not two (two live VMs for a one-VM shape was the bug).
+  assert.deepEqual(plan({ rows: [...history, statics, raceOf(statics), ...rest] }), []);
+  // The original refused after its race began (abandoned): the race's VM is the run's static.
+  const gone = { ...statics, state: 'final', end: 'abandoned' };
+  assert.deepEqual(plan({ rows: [...history, gone, raceOf(statics), ...rest] }), []);
+  // Both abandoned: the slot is open again.
+  assert.deepEqual(sizes(plan({ rows: [...history, gone, raceOf(statics, { state: 'final', end: 'abandoned' }), ...rest] })), [16]);
+  // Another attempt's race fills nothing of this one.
+  const other = { ...raceOf(statics), race: { of: 'zzz', demand: { run: 500, attempt: 2 } } };
+  assert.deepEqual(sizes(plan({ rows: [...history, gone, other, ...rest] })), [16]);
+});

@@ -20,7 +20,7 @@ import { servedRepos, placementZones } from './config.mjs';
 import {
   allocationId, instanceName, repoLabel, viewInstance, isGce, planLaunches, runnersNeverOnline, placements, quotaBlocks, insertOutcome, walkPlacements,
   jobInstance, jitRequest, newestReadyImage, reviewInstances, reviewRows, orphanRunners, orphanDisks, reportable, claimedInstances,
-  largestMachineCpus, raceAttempts, walkRecord, unsettledInsert, RACE_AFTER_MS,
+  largestMachineCpus, raceAttempts, walkRecord, unsettledInsert, quotaMetric, RACE_AFTER_MS,
 } from './logic.mjs';
 import { planPrelaunches } from './prelaunch.mjs';
 import { launchRow, runningRow, withJob, jobRecord, finalRow, dailyLine, launchCounts } from './ledger.mjs';
@@ -29,13 +29,20 @@ export const TICK_BUDGET_MS = 45_000;
 const INSERT_DEADLINE_MS = 40_000;
 const PARALLEL_LAUNCHES = 16; // a burst launches in one round: each insert waits ~10–20 s for its operation
 const DAILY_WITHIN_MS = 2 * 3600_000; // the 26 h ledger window holds all of yesterday only early in the day
+const SETTLE_BUDGET_MS = 15_000; // what a tick spends learning how unsettled inserts ended; the rest wait a tick
+const SETTLE_PARALLEL = 4; // zones whose operations are read at once
 const zoneOf = (r) => r.zone.split('/').pop();
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
 const iso = (ms) => new Date(ms).toISOString();
-// What a finished insert operation means (insertOutcome), from the operation itself.
-const operationOutcome = (op) => (op.error?.errors?.length
-  ? insertOutcome(new GceError(op.httpErrorStatusCode ?? 200, 'insert operation', op.error.errors.map((e) => e.code), { accepted: true, finished: true }))
-  : 'created');
+// What a finished insert operation means: {outcome (insertOutcome), error}, the error worded as lib/gce.mjs words a
+// failed operation, so a quota refusal's message still names its metric and region (quotaScope, quotaMetric).
+function settledAs(op) {
+  if (!op.error?.errors?.length) return { outcome: 'created', error: null };
+  const error = new GceError(op.httpErrorStatusCode ?? 200, `gce operation ${op.name}: ${op.error.errors.map((e) => `${e.code} ${e.message ?? ''}`.trim()).join('; ')}`,
+    op.error.errors.map((e) => e.code), { accepted: true, finished: true, operation: op.selfLink ?? null });
+  return { outcome: insertOutcome(error), error };
+}
+const NEVER = new Promise(() => {});
 
 // deps: {gce, gh, ledger, cfg, config, poolRepos, now, log, error, random, alert, after}; error(message, fields) logs at
 // ERROR what a log-based alert watches (gce/deploy.sh alert), log otherwise.
@@ -78,8 +85,12 @@ export class Launcher {
 
   async cleanUp(seen, out) {
     await this.recordJobs(seen);
-    await this.settleInserts(seen);
+    // Learning how unsettled inserts ended runs beside the retirements, so a slow or failing operation read never holds
+    // a VM's deletion; only finalizing rows, which may rewrite the same rows, waits for it (within its budget).
+    const settling = this.settleInserts(seen);
+    settling.catch(() => {});
     await this.cleanInstances(seen, out);
+    await settling;
     await this.settleRows(seen, out);
     await this.cleanRunners(seen, out);
     await this.cleanLeftovers(seen, out);
@@ -271,22 +282,51 @@ export class Launcher {
   }
 
   // A row whose insert never settled in its tick (spec M6: unknown outcomes settle after 41-121 s) learns when its
-  // operation ended, from the zone's insert operation, so the slow insert's settle time outlives the tick (the
-  // launcher's wait is not the operation's). Until it is learned, a launching row whose VM is not listed keeps its vCPUs
-  // and covers its job (planLaunches). Read from the rows as this tick has written them.
+  // operation ended, from the zone's insert operations, so the slow insert's settle time outlives the tick (the
+  // launcher's wait is not the operation's), and a refusal joins the row's `refused`. Until it is learned, a launching row
+  // whose VM is not listed keeps its vCPUs and covers its job (planLaunches). One read per zone, a few zones at once,
+  // within SETTLE_BUDGET_MS: a zone not read in it, or whose read fails, waits for the next tick.
   async settleInserts(seen) {
+    const byZone = new Map();
     for (const observed of seen.rows) {
-      const row = seen.rowOf.get(observed.alloc) ?? observed;
-      const pending = unsettledInsert(row);
-      if (!pending) continue;
-      try {
-        const op = (await this.gce.zoneOperations(pending.zone, `targetLink eq ".*/instances/${row.instance}"`)).find((o) => o.operationType === 'insert');
-        if (op?.status !== 'DONE') continue;
-        const next = { ...row, slow: row.slow.map((s) => (s === pending ? { ...s, outcome: operationOutcome(op), done: op.endTime ?? iso(this.now()) } : s)) };
-        if (await this.write(next)) seen.rowOf.set(row.alloc, next);
-      } catch (err) {
-        this.log(`the insert of ${row.instance}: ${err.message}`);
-      }
+      const insert = unsettledInsert(seen.rowOf.get(observed.alloc) ?? observed);
+      if (insert) byZone.set(insert.zone, [...(byZone.get(insert.zone) ?? []), observed.alloc]);
+    }
+    if (!byZone.size) return;
+    let expired = false;
+    const budget = this.after(SETTLE_BUDGET_MS);
+    const zones = [...byZone];
+    const worker = async () => {
+      while (zones.length && !expired) await this.settleZone(seen, ...zones.shift(), () => expired);
+    };
+    await Promise.race([
+      Promise.all(Array.from({ length: Math.min(SETTLE_PARALLEL, zones.length) }, worker)),
+      budget.promise.then(() => { expired = true; }),
+    ]);
+    budget.cancel();
+    if (expired) this.log(`unsettled inserts: not all read in ${SETTLE_BUDGET_MS / 1000} s; the rest wait for the next tick`);
+  }
+
+  async settleZone(seen, zone, allocs, expired) {
+    const current = (alloc) => seen.rowOf.get(alloc) ?? seen.rows.find((r) => r.alloc === alloc);
+    let ops;
+    try {
+      ops = await this.gce.zoneOperations(zone, `targetLink eq ".*/instances/(${allocs.map((a) => current(a).instance).join('|')})"`);
+    } catch (err) {
+      this.log(`insert operations in ${zone}: ${err.message}; their rows wait for the next tick`);
+      return;
+    }
+    for (const alloc of allocs) {
+      if (expired()) return;
+      const row = current(alloc);
+      const insert = unsettledInsert(row);
+      const op = ops.find((o) => o.operationType === 'insert' && o.targetLink.endsWith(`/instances/${row.instance}`));
+      if (!insert || op?.status !== 'DONE') continue;
+      const { outcome, error } = settledAs(op);
+      const metric = quotaMetric(error);
+      const refused = outcome === 'capacity' || outcome === 'quota' ? [...(row.refused ?? []), { kind: outcome, zone, ...(metric ? { metric } : {}) }] : row.refused;
+      const next = { ...row, ...(refused ? { refused } : {}), slow: row.slow.map((s) => (s === insert ? { ...s, outcome, done: op.endTime ?? iso(this.now()) } : s)) };
+      if (await this.write(next)) seen.rowOf.set(alloc, next);
     }
   }
 
@@ -480,12 +520,16 @@ export class Launcher {
       seen, deadline, out, image, inflight: plan.inflight, races: [],
       untried: new Set(plan.launches), firstTried: new Promise((resolve) => { open = resolve; }),
     };
-    ctx.tried = (item) => {
-      if (ctx.untried.delete(item) && ctx.untried.size === 0) open();
+    const opened = () => {
+      ctx.opened = true;
+      open();
     };
-    if (ctx.untried.size === 0) open();
+    ctx.tried = (item) => {
+      if (ctx.untried.delete(item) && ctx.untried.size === 0) opened();
+    };
+    if (ctx.untried.size === 0) opened();
     const served = await this.launchQueue(plan.launches, ctx);
-    open(); // a launch the deadline kept from starting makes no first attempt to wait for
+    opened(); // a launch the deadline kept from starting makes no first attempt to wait for
     if (served < plan.launches.length) {
       if (ahead.length) this.log(`no pre-launch this tick: ${plan.launches.length - served} queued job(s) were not served`);
     } else {
@@ -540,7 +584,8 @@ export class Launcher {
     while (seen.rowOf.has(alloc)) alloc = allocationId(at, this.random); // ids are random: never reuse one in the ledger
     seen.rowOf.set(alloc, null);
     const name = instanceName(alloc);
-    const row = launchRow({ alloc, repo, cpus, at, config: this.config, egress: this.cfg.egress, prelaunch: race ? undefined : prelaunch, race });
+    const reserved = item.reserved ?? largestMachineCpus(cpus, this.cfg);
+    const row = launchRow({ alloc, repo, cpus, at, config: this.config, egress: this.cfg.egress, prelaunch: race ? undefined : prelaunch, race, reserved });
     await this.ledger.upsert(row); // a launch with no row never happens: this throws, and nothing was created
     let jit;
     try {
@@ -554,30 +599,64 @@ export class Launcher {
     // deadline, since giving up early saves nothing (the operation runs on) and only defers what it decides. An
     // operation that outlives that wait is uncertain, reconciled now, and if still unsettled left for the next tick.
     // An insert still unsettled RACE_AFTER_MS after it was sent may start this allocation's one race (raceSlowInsert);
-    // once it has, the walk makes no further attempt.
+    // once it has, the walk makes no further attempt. Only a definite outcome settles an insert: one whose wait ended
+    // before its operation did (unknown, and still running when reconciled) stays pending, and the launch waits, within
+    // the tick, for its race to be decided (unsettled).
     let raced = false;
+    let marking = null; // the write of this row's pending insert, made when its race starts
+    let unsettled = null; // {settle, decision, fired}: the last attempt, while its outcome is unknown
     const result = await walkPlacements(attempts, {
       attempt: async (p) => {
         out.firstInsert ??= iso(this.now());
+        const sent = this.now();
         const slow = race ? null : this.after(RACE_AFTER_MS);
         const insert = this.gce.insertInstance(p.zone, jobInstance({
           alloc, ...p, repo, cpus, image: image.selfLink, jit: jit.encoded_jit_config, cfg: this.cfg, config: this.config,
         }), { deadlineMs: this.insertDeadlineMs });
         ctx.tried(item);
         let pending = true;
-        slow?.promise.then(() => this.raceSlowInsert({
-          item, alloc, attempts, pending: p, stillPending: () => pending && !raced, start: () => { raced = true; },
-        }, ctx)).catch((err) => this.log(`race of ${name}: ${err.message}`));
-        try {
-          return await insert;
-        } finally {
+        let decided;
+        const decision = new Promise((resolve) => { decided = resolve; });
+        const settle = () => {
           pending = false;
           slow?.cancel();
+          decided();
+        };
+        slow?.promise.then(() => this.raceSlowInsert({
+          item, row, attempt: p, sent, attempts, stillPending: () => pending && !raced,
+          start: (write) => {
+            raced = true;
+            marking = write;
+          },
+        }, ctx)).catch((err) => this.log(`race of ${name}: ${err.message}`)).finally(decided);
+        try {
+          const done = await insert;
+          settle();
+          return done;
+        } catch (err) {
+          if (race || insertOutcome(err) !== 'unknown') settle();
+          else unsettled = { settle, decision, fired: slow.promise };
+          throw err;
         }
       },
-      reconcile: (p, err) => this.reconcileInsert(p.zone, name, err),
+      reconcile: async (p, err) => {
+        const settled = await this.reconcileInsert(p.zone, name, err);
+        if (settled.outcome !== 'unknown') unsettled?.settle();
+        return settled;
+      },
       now: this.now, deadline, quota: seen.quota, raced: () => raced,
     });
+    if (unsettled) {
+      // Its race is decided by the tick's deadline at the latest; a race that cannot start yet (a queued job not yet
+      // tried) is given up rather than holding this launch's place while that job waits for one.
+      if (result.stop === 'unknown') {
+        const left = this.after(Math.max(0, deadline - this.now()));
+        await Promise.race([unsettled.decision, left.promise, unsettled.fired.then(() => (ctx.opened ? NEVER : undefined))]);
+        left.cancel();
+      }
+      unsettled.settle();
+    }
+    await marking;
     out.inserts.push(...result.tried.map((t) => ({
       zone: t.zone, machine: t.machine, provisioning: t.provisioning, outcome: t.outcome, seconds: t.outcome === 'unknown' ? null : Math.round(t.ms / 100) / 10,
     })));
@@ -617,28 +696,33 @@ export class Launcher {
   // made its first attempt, if the insert is still pending, a second allocation of the same size walks the attempts
   // after it in other zones (raceAttempts), another region first and on demand only after spot, reserving its vCPUs
   // like any launch. None starts past the tick's deadline, beyond max_vcpus, or with no attempt left; an allocation
-  // races at most once, and a race never races.
-  async raceSlowInsert({ item, alloc, attempts, pending, stillPending, start }, ctx) {
+  // races at most once, and a race never races. Before the race's own row, runner and insert, the original's row is
+  // written with its pending insert, and the race's row is written before its runner and insert: a launcher that
+  // restarts meanwhile counts both (planLaunches, pendingAllocation).
+  async raceSlowInsert({ item, row, attempt, sent, attempts, stillPending, start }, ctx) {
     await ctx.firstTried;
     if (!stillPending()) return;
-    const name = instanceName(alloc);
-    const next = raceAttempts(attempts, pending).filter((p) => !quotaBlocks(ctx.seen.quota, p));
+    const name = row.instance;
+    const next = raceAttempts(attempts, attempt).filter((p) => !quotaBlocks(ctx.seen.quota, p));
     const need = largestMachineCpus(item.cpus, this.cfg);
     let why = null;
     if (!next.length) why = 'no other zone left to try';
     else if (this.now() >= ctx.deadline) why = 'the tick\'s budget is spent';
     else if (ctx.inflight + need > this.cfg.max_vcpus) why = `max_vcpus ${this.cfg.max_vcpus} has no room for it`;
-    const unsettled = `${name}: its insert in ${pending.zone} is unsettled after ${RACE_AFTER_MS / 1000} s`;
+    const unsettled = `${name}: its insert in ${attempt.zone} is unsettled after ${RACE_AFTER_MS / 1000} s`;
     if (why) {
       this.log(`${unsettled}; no race (${why})`);
       return;
     }
-    start();
+    const marked = this.write({ ...row, slow: [{ zone: attempt.zone, outcome: 'unknown', sent: iso(sent) }] });
+    start(marked);
     ctx.inflight += need;
     this.log(`${unsettled}; a second allocation races it`);
-    const demand = item.job ? { job: item.job.id } : { run: item.prelaunch.run };
-    const racing = { repo: item.repo, cpus: item.cpus, job: item.job, prelaunch: item.prelaunch, race: { of: alloc, demand }, attempts: next };
-    ctx.races.push(this.launch(racing, ctx).then((r) => {
+    const demand = item.job ? { job: item.job.id } : { run: item.prelaunch.run, attempt: item.prelaunch.attempt };
+    const racing = {
+      repo: item.repo, cpus: item.cpus, job: item.job, prelaunch: item.prelaunch, race: { of: row.alloc, demand }, attempts: next, reserved: need,
+    };
+    ctx.races.push(marked.then(() => this.launch(racing, ctx)).then((r) => {
       if (!r.name) return;
       ctx.out.launched.push(r.name);
       ctx.out.raced.push(`${r.name} for ${name}`);
@@ -647,17 +731,17 @@ export class Launcher {
 
   // An insert whose outcome is unknown, settled through its zone operation before another zone is tried: the
   // operation the error carries, else the zone's insert operation for this name; with no operation, the instance
-  // itself. Anything still undecided is 'unknown'.
+  // itself. Anything still undecided is 'unknown'. Resolves to {outcome, error: the settled operation's, if any}.
   async reconcileInsert(zone, name, err) {
     try {
       const op = err?.operation
         ? await this.gce.operation(err.operation)
         : (await this.gce.zoneOperations(zone, `targetLink eq ".*/instances/${name}"`)).find((o) => o.operationType === 'insert') ?? null;
-      if (op) return op.status === 'DONE' ? operationOutcome(op) : 'unknown';
-      return (await this.gce.instance(zone, name)) ? 'created' : 'unknown';
+      if (op) return op.status === 'DONE' ? settledAs(op) : { outcome: 'unknown' };
+      return { outcome: (await this.gce.instance(zone, name)) ? 'created' : 'unknown' };
     } catch (e) {
       this.log(`reconcile ${name}: ${e.message}`);
-      return 'unknown';
+      return { outcome: 'unknown' };
     }
   }
 

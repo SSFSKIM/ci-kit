@@ -485,10 +485,18 @@ zones, another region first, spot before on demand.
 - An allocation races at most once and a race never races. A race starts only once every queued job of the tick has
   made its first launch attempt, and none starts past the tick's budget, with no zone left, or beyond `max_vcpus`: it
   reserves its largest machine like any launch, and pre-launch plans against what is left.
-- An insert whose outcome stays unknown leaves its row `launching` with the insert's send time (`slow`). Until a later
-  tick reads the end of its zone operation, the row keeps its vCPUs and, while its runner waits, covers a job of its
-  size as its VM would: the next tick, or a restarted launcher, neither launches nor races again for the same job.
-  Overlapping ticks remain the accepted overlap below; there is no strict bound of two VMs per job.
+- Only a definite outcome settles an insert. One whose wait call ended before its operation did, still running when
+  reconciled, stays eligible for its race, which the launch waits for within the tick.
+- An insert whose outcome stays unknown leaves its row `launching` with the insert's send time (`slow`); a race's row,
+  and its original's pending insert, are written before the race's insert. Until a later tick reads the end of the
+  zone operation, such a row keeps the vCPUs its launch reserved (`reserved`, as recorded then, whatever the placements
+  say now) and, while its runner waits, covers a job of its size as its VM would: the next tick, or a launcher
+  restarted mid-race, neither launches nor races again for the same job. Those reads go one per zone, a few zones at
+  once, within 15 s and beside the cleanup's deletions; a zone not read waits for the next tick. A refusal learned
+  that way joins the row's `refused`. Overlapping ticks remain the accepted overlap below; there is no strict bound of
+  two VMs per job.
+- A pre-launched VM and the race of its slow insert fill one slot of the run's shape, the race alone when the original
+  is abandoned.
 - **To check:** the launcher logs `<instance>: its insert in <zone> is unsettled after 20 s; a second allocation races
   it` (or `no race (<why>)`) and `raced <instance> (<machine>, <spot|standard>, <zone>) against <instance> for job
   <id>`; the tick line lists races in `raced` (`<race> for <original>`), every insert sent in `inserts` (zone, machine,
@@ -749,8 +757,8 @@ per allocation:
   quota metric and zone (`Refusals: quota C4D_CPUS us-west4-a 2, capacity us-central1-a 1`); their slow inserts,
   those unsettled 20 s after they were sent or never settled, with how many never did and the settle times of the rest
   (`Slow inserts: 3, 1 unsettled, the rest settled in 41, 63 s`); the races launched that day by what was observed of
-  each pair (which VM a job claimed first, both, neither, or unresolved while either row is not final; a first claim is
-  not latency saved) and what the pairs' VMs that ran no job cost; and the VMs that ran on demand. Each row's JSON keeps
+  each pair (which VM a job claimed first by the jobs' start, `tied` or `unknown` when the starts are equal or missing,
+  both, neither, or unresolved while either row is not final; a first claim is not latency saved) and what the pairs' VMs that ran no job cost; and the VMs that ran on demand. Each row's JSON keeps
   its walk's `refused` ({kind, zone, metric}) and `slow` ({zone, outcome, sent, done}) inserts, a slow insert's `done`
   learned from its zone operation by a later tick when its own tick could not wait for it; a race's row keeps `race`
   ({of: the allocation it raced, demand: the job or run that allocation was for}), apart from the job its VM ran.

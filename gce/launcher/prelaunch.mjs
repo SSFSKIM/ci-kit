@@ -33,13 +33,34 @@ export function runShape(rows, repo, workflow) {
   return shape;
 }
 
+// The VMs pre-launched for a run's attempt, by size: Map cpus → Set of groups, a group being a pre-launched allocation
+// and the race of its slow insert (spec M6), which carries the same run and attempt in its demand. A group fills one
+// slot while any of its rows made or may make a VM (not abandoned): an original abandoned after its race began leaves
+// the slot to the race.
+export function prelaunchedFor(rows, run) {
+  const of = (r) => {
+    if (r.prelaunch?.run === run.id && r.prelaunch.attempt === run.attempt) return r.alloc;
+    if (r.race?.demand?.run === run.id && r.race.demand.attempt === run.attempt) return r.race.of;
+    return null;
+  };
+  const out = new Map();
+  for (const r of rows) {
+    const group = of(r);
+    if (!group || r.end === 'abandoned') continue;
+    if (!out.has(r.cpus)) out.set(r.cpus, new Set());
+    out.get(r.cpus).add(group);
+  }
+  return out;
+}
+
 const isPoolJob = (job) => job.labels.some((l) => l.toLowerCase() === 'ci-kit-pool');
 
 // The VMs to launch now for runs that have begun: [{repo, cpus, prelaunch: {run, attempt, workflow}}].
 // A run has begun and its pool jobs are still to come while none of its listed jobs is a pool job (queued, running or
 // skipped) and none has ended: GitHub creates the jobs that need the first ones when those end, so a run whose first
 // job ended with no pool job listed has none coming. Each such run gets its workflow's shape, less the VMs already
-// pre-launched for it (the rows naming its run and attempt, in any state but abandoned, which made no VM).
+// pre-launched for it (prelaunchedFor: the rows naming its run and attempt, a race with its original as one, in any
+// state but abandoned, which made no VM).
 // runs: [{repo, id, path, attempt}] of the served repos, queued and in progress; jobs: their jobs (run_id, labels,
 // status); rows: the ledger's; runners: Map repo → its runners, for the repos whose listing succeeded (no other repo
 // gets anything); inflight and waiting: the vCPUs in flight after this tick's launches for queued jobs, and how many
@@ -57,10 +78,7 @@ export function planPrelaunches({ runs, jobs, rows, runners, inflight, waiting, 
     const shape = runShape(rows, run.repo, run.path);
     if (!shape) continue;
     const done = new Map();
-    for (const r of rows) {
-      if (r.prelaunch?.run !== run.id || r.prelaunch.attempt !== run.attempt || r.end === 'abandoned') continue;
-      done.set(r.cpus, (done.get(r.cpus) ?? 0) + 1);
-    }
+    for (const [cpus, groups] of prelaunchedFor(rows, run)) done.set(cpus, groups.size);
     const sizes = Object.keys(shape).map(Number).filter((cpus) => cfg.placements[0].machines[cpus]).sort((a, b) => b - a);
     for (const cpus of sizes) {
       for (let k = done.get(cpus) ?? 0; k < shape[cpus]; k += 1) {
