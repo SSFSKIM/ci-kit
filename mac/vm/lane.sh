@@ -41,7 +41,8 @@
 # bound from out/assigned); one running with no assignment goes through the idle handshake where the wrapper runs
 # (out/listening or out/session-conflict) and is stopped where it does not; one stopped or gone is deleted and released;
 # a job clone with no reservation is reserved first, so settle sees it, then torn down the same way. Nothing else is
-# released, ever: a reservation goes only by a verified teardown, whatever became of the launcher that wrote it.
+# released, ever: a reservation goes only by a verified teardown, whatever became of the launcher that wrote it. A
+# recovery that cannot read what it needs waits, boots nothing, and alerts after CI_KIT_VM_STOP_ALERT s.
 #
 # THE IDLE HANDSHAKE. The launcher never signals the listener and never stops a clone that may hold a job. Past the
 # idle bound with no out/assigned, it reads the queue again; with nothing the guest can take, it writes
@@ -49,7 +50,8 @@
 # preparing), stopped (none was: the guest ends), stop-raced (a job was accepted as the listener stopped, which
 # cancelled it: logged, alerted with the run and the job, counted as `raced`).
 #
-# THE BOOT RULE, read at each poll in idle; what fails it is logged once per change, and a boot logs what it read.
+# THE BOOT RULE, read at each poll in idle (the reads are lane-reads.sh's); what fails it is logged once per change,
+# and a boot logs what it read. Conditions 3 and 4 are read again inside the locked step, where they are written.
 #   1. a job wants a guest: a queued job of a queued or in-progress run of CI_KIT_VM_REPO (SSFSKIM/MAWS) whose labels
 #      are a subset of {ci-kit-mac-solo, ci-kit-mac-vm}, read with the machine user's own gh login (the job's or the
 #      alert's token never reaches it), each call bounded as dialog.sh bounds its own;
@@ -68,8 +70,8 @@
 #      installed helper by default), since the guest takes its density from it at boot;
 #   7. CI_KIT_VM_LANE_MODE is always (the default), or hold-only with every host instance held or stopped;
 #   8. every host job now running is VM-safe: a job that is not holds a claim, so this is 3.
-# Outside the rule: the lane parts must be there (Tart, the golden image ~/ci-kit-vm/golden names, CI_KIT_VM_GOLDEN,
-# the slot's identity, the kit CI_KIT_VM_KIT, ~/ci-kit-vm/kit), and a window of CI_KIT_VM_PAUSE_WINDOWS (UTC HH:MM-HH:MM,
+# Outside the rule: the lane's parts must be there (Tart, the golden image ~/ci-kit-vm/golden names (CI_KIT_VM_GOLDEN),
+# read at every boot, the slot's identity, the kit (CI_KIT_VM_KIT, ~/ci-kit-vm/kit)), and a window of CI_KIT_VM_PAUSE_WINDOWS (UTC HH:MM-HH:MM,
 # comma-separated, none by default) keeps the lane down. Missing parts alert after CI_KIT_VM_GOLDEN_ALERT s (3600) of a
 # job waiting. A hold is logged once per change and alerted, per owner, after CI_KIT_VM_HOLD_ALERT s (21600) on.
 #
@@ -496,11 +498,8 @@ The lane boots nothing while any vm-hold.<owner> exists; only its owner removes 
     alert_close memory "pressure 1, available $m_available%"
   fi
 
-  if [[ -z $list_ok ]]; then
-    note boot "no boot: Tart cannot list its VMs"
-    return
-  fi
-  if ! parts_ready "$vms"; then
+  if [[ -z $list_ok ]] || ! parts_ready "$vms"; then
+    [[ -n $list_ok ]] || parts_why="Tart cannot list its VMs ($tart_bin list failed)"
     note boot "no boot: $parts_why"
     waiting=''
     queue_read && wants_guest && waiting=1
@@ -517,6 +516,7 @@ The lane boots nothing while any vm-hold.<owner> exists; only its owner removes 
   fi
   parts_since=''
   alert_close parts 'the lane has its parts'
+  alert_close recover 'recovery went through'
   admit "$vms" || return
   boot
 }
@@ -950,20 +950,35 @@ A job in it is lost: GitHub reports the runner lost, with no ci-kit rerun line. 
 }
 
 # RECOVERY: at the start, under the lock, over job clones alone; repeated until no job clone and no reservation is left.
+# Until it can read what it needs, nothing boots: logged once per change, and alerted after stop_alert s.
+recover_since=''
+recovery_waits() { # <why>
+  note recover "recovery waits: $1; nothing boots"
+  [[ -n $recover_since ]] || recover_since=$now_epoch
+  ((now_epoch - recover_since >= stop_alert)) || return 0
+  alert_open recover "ci-kit alert: vm lane on $machine cannot recover since $(minute "$(date -u -r "$recover_since" +%Y-%m-%dT%H:%M:%SZ)")" \
+    "Why: $1
+The launcher boots nothing until its start-up recovery has read the reservation, Tart's VMs and the process table."
+}
+recovered() {
+  forget recover
+  [[ -z $recover_since ]] || alert_close recover 'recovery went through'
+  recover_since=''
+}
 recover_poll() {
   local vms clones target vstate pids
   ((now_epoch >= ${next_poll:-0})) || return 0
   next_poll=$((now_epoch + queue_poll))
-  if ! lock 30; then note recover 'recovery waits: the desktop lock stayed taken for 30 s'; return; fi
+  if ! lock 30; then recovery_waits 'the desktop lock stayed taken for 30 s'; return; fi
   read_reservation
   if [[ $r_state == unknown ]]; then
     unlock
-    note recover "recovery waits: cannot tell whether a guest is reserved ($r_why); nothing boots"
+    recovery_waits "cannot tell whether a guest is reserved ($r_why)"
     return
   fi
   if ! vms=$(tart_vms); then
     unlock
-    note recover 'recovery waits: Tart cannot list its VMs; nothing boots'
+    recovery_waits "Tart cannot list its VMs ($tart_bin list failed)"
     return
   fi
   clones=$(awk -F'\t' -v p="$job_clone_pattern" '$1 ~ p { print $1 }' <<<"$vms")
@@ -973,14 +988,14 @@ recover_poll() {
     if [[ -z $target ]]; then
       if [[ $r_state == reserved ]] && ! release; then
         unlock
-        note recover "recovery waits: the reservation names no VM, and no job clone exists, but it cannot be removed"
+        recovery_waits 'the reservation names no VM, and no job clone exists, but it cannot be removed'
         return
       fi
       unlock
       [[ $r_state == none ]] || say 'recovery: the reservation named no VM, and no job clone exists; released'
       say 'recovery: no job clone and no reservation; idle'
       recovering=''
-      forget recover
+      recovered
       enter idle
       next_poll=0
       return
@@ -988,18 +1003,18 @@ recover_poll() {
     res_since=$now res_golden='' res_job=''
     if ! write_reservation "$target"; then
       unlock
-      note recover "recovery waits: $target has no reservation, and $reserved_file cannot be written"
+      recovery_waits "$target has no reservation, and $reserved_file cannot be written"
       return
     fi
     say "recovery: $target is a job clone with no reservation; reserved it before its teardown"
   fi
   if ! pids=$(tart_run_pids "$target"); then
     unlock
-    note recover 'recovery waits: the process table cannot be read'
+    recovery_waits 'the process table cannot be read'
     return
   fi
   unlock
-  forget recover
+  recovered
   clear_guest
   clone=$target
   [[ $target != "$r_vm" ]] || res_since=${r_since:-$now} res_golden=$r_golden

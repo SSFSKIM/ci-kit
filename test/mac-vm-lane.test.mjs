@@ -1014,4 +1014,36 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
       spawnSync('/usr/bin/hdiutil', ['detach', m.logs, '-force']);
     }
   });
+
+  test('two launchers cannot run: the second waits for the first\'s lock, and starts with recovery once it is gone', async () => {
+    const m = lane({ queue: [] });
+    const a = m.start();
+    await m.waitLog(/recovery: no job clone and no reservation; idle/);
+    const b = m.start();
+    await m.waitLog(/another launcher holds \S+\/vm-lane\.lock; waiting for it/);
+    await sleep(1000);
+    assert.doesNotMatch(m.log(), new RegExp(`starting \\(pid ${b.pid}`));
+    await a.kill();
+    await m.waitLog(new RegExp(`starting \\(pid ${b.pid}, slot ${m.slot}, mode always\\); recovery first`));
+    await finish(m, b);
+  });
+
+  test('Tart that cannot list its VMs: recovery waits and alerts after its bound, and the boot rule waits with the lane\'s parts alert while a job waits; both close once Tart answers', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_STOP_ALERT: '1', CI_KIT_VM_GOLDEN_ALERT: '1' } });
+    m.flag('fail-list');
+    const a = m.start();
+    await m.waitLog(/recovery waits: Tart cannot list its VMs \(\S+ list failed\); nothing boots/);
+    await m.until(() => m.alerts().length === 1, 'the recovery alert');
+    assert.match(m.alerts()[0], /^ci-kit alert: vm lane on mini cannot recover since /);
+    m.flag('fail-list', false);
+    await m.waitLog(/recovery: no job clone and no reservation; idle/);
+    m.flag('fail-list');
+    await m.waitLog(/no boot: Tart cannot list its VMs \(\S+ list failed\)$/m);
+    await m.until(() => m.alerts().length === 2, 'the parts alert');
+    assert.match(m.alerts()[1], /^ci-kit alert: vm lane on mini cannot boot since \S+: Tart cannot list its VMs/);
+    m.flag('fail-list', false);
+    await m.booted();
+    assert.deepEqual(m.closed().sort(), ['https://github.com/SSFSKIM/ci-kit-sandbox/issues/1', 'https://github.com/SSFSKIM/ci-kit-sandbox/issues/2']);
+    await finish(m, a);
+  });
 });
