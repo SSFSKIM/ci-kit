@@ -284,9 +284,10 @@ cover fix's test reproduces 119166794835's sequence; A13 clauses hold.
 ### M4 — Launch on the webhook
 
 As designed above. Proof: a burst of webhook deliveries against the deployed services (not only the in-process
-handler) produces one coalesced tick per burst; at the receiver, a forged signature gets 401 and starts no tick; at the launcher, an
+handler) produces at most one requested tick per 10 s with none lost, every job queued before a tick starts served by
+it; at the receiver, a forged signature gets 401 and starts no tick; at the launcher, an
 unauthenticated POST and one with a wrong identity are refused by Cloud Run (403) before the code runs; a burst of
-same-size jobs between scheduled ticks is launched by one coalesced requested tick; a webhook dropped on purpose
+same-size jobs between scheduled ticks is launched by requested ticks before the next scheduled one; a webhook dropped on purpose
 (the secret rotated mid-test) still gets its job served by the minute tick; a day's median queued → started ≤ 50 s
 from `latency-report.mjs` (Acceptance 4).
 
@@ -435,6 +436,8 @@ reported to the owner.
   tick ~100 s, the 10 s spacing, the next tick ~100 s, a cold start). Pub/Sub's slow start then holds back only pushes
   that would coalesce into the pending tick anyway, which cannot start before the running one ends, so no tick starts
   later; the cost is at most a few extra requested ticks per burst, bounded by the spacing and the rate-budget rule.
+  The burst proof reads accordingly (CI-opt, 2026-10-21): at most one requested tick per 10 s, none lost, every job
+  queued before a tick starts served by it; "exactly one tick per burst" was never what latency depends on.
 
 ## Surprises & Discoveries
 
