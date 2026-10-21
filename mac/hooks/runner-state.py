@@ -1,5 +1,5 @@
-# What the runner in the directory given is doing, from this user's processes, for the dialog watcher's drain
-# (docs/mac-lane.md). Prints one line:
+# What the runner in the directory given, any instance of the lane, is doing, from this user's processes: for
+# install.sh, the dialog watcher's drain and the shared hold (docs/mac-lane.md). Prints one line:
 #
 #   busy <pid>...      a job runs: a process whose executable is exactly <dir>/bin/Runner.Worker
 #   idle <log> <size>  the listener runs (<dir>/bin/Runner.Listener) and no job does. <log> is the listener's newest

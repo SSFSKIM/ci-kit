@@ -2,12 +2,14 @@
 // The mac runner's job hooks (I10): kill every process a job left under the runner's work directory, before the next
 // job starts and again after each one ends, and log each kill to ~/Library/Logs/ci-kit/mac-runner-hooks.log.
 //
-//   node sweep.mjs <job-started|job-completed|manual> [--dry-run]
+//   node sweep.mjs <job-started|job-completed|manual|shared-hold> [--dry-run] [--spare-workers]
 //
 // Installed by mac/install.sh to <runner>/ci-kit/hooks/, so the work directory is <runner>/_work, two levels up. What
 // counts as a stray is strays.mjs's; how one is ended (SIGTERM, then SIGKILL after 10 s, each only while the pid still
 // holds the process selected) is terminate.mjs's. --dry-run lists and kills nothing; `manual` without it refuses while a
-// job runs.
+// job runs. --spare-workers leaves every live job worker of the user (any instance's Runner.Worker) and what it started
+// alone, read from the sweep's own process list: the shared hold sweeps a _work that is not its job's own, where a job
+// may sit in its own hook or have started since its caller looked (shared-hold.sh).
 //
 // Exit 1 when a stray could not be ended (a signal refused, or a process outliving SIGKILL), with the pids, signals and
 // errors on the last log line. As a hook that fails the job: before a job, because a desktop job beside a survivor is
@@ -19,7 +21,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { identityOf, parseLsofCwd, parsePs, selectStrays } from './strays.mjs';
+import { identityOf, parseLsofCwd, parsePs, selectStrays, workerPids } from './strays.mjs';
 import { terminate } from './terminate.mjs';
 
 const phase = process.argv[2] ?? 'manual';
@@ -45,7 +47,8 @@ const run = (file, args) => {
 const listProcesses = () => parsePs(run('/bin/ps', ['-axo', 'pid=,ppid=,uid=,lstart=,command=']));
 const processes = listProcesses();
 const cwds = parseLsofCwd(run('/usr/sbin/lsof', ['-a', '-u', String(uid), '-d', 'cwd', '-Fpn']));
-const strays = selectStrays({ processes, cwds, workDir, uid, self: process.pid });
+const spare = process.argv.includes('--spare-workers') ? workerPids(processes, uid) : [];
+const strays = selectStrays({ processes, cwds, workDir, uid, self: process.pid, spare });
 // By hand, a sweep during a job would kill the job; the hooks run inside one, as its worker's descendants.
 const worker = `${dirname(workDir)}/bin/Runner.Worker`;
 if (phase === 'manual' && !dryRun && processes.some((p) => p.command.startsWith(worker))) {

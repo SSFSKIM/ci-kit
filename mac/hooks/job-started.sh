@@ -1,9 +1,23 @@
 #!/bin/bash
-# ACTIONS_RUNNER_HOOK_JOB_STARTED of the mac runner (I10): before a job, refuse it at once if a system dialog holds
-# focus on the desktop and put Terminal in front (desktop-check.sh), park the real cursor on the menu bar
+# ACTIONS_RUNNER_HOOK_JOB_STARTED of every instance of the mac lane (I10): before a job, refuse it at once if a system
+# dialog holds focus on the desktop and put Terminal in front (desktop-check.sh), park the real cursor on the menu bar
 # (cursor-park.swift), then kill what an earlier job left under the runner's work directory, so no job starts beside
 # another's Electron windows or test processes.
+#
+# Before all that, on a Mac with shared instances (instances.sh), the job is admitted to the desktop
+# (shared-hold.sh): the exclusive instance's job raises the shared hold and waits until no shared job runs, so it runs
+# alone; a shared instance's job waits while the hold is up. The worker, this hook's parent, names the job. Without
+# shared instances this is the hook it always was.
 here=$(dirname "$0")
+# shellcheck source=instances.sh
+source "$here/instances.sh"
+lane=
+if [[ -n $(shared_instances) ]]; then
+  if shared_number "$(instance_root "$here")" >/dev/null; then lane=shared; else lane=exclusive; fi
+  "$here/shared-hold.sh" "$lane-start" "$PPID" || exit 1
+fi
+# A job refused from here on keeps its admission until its job-completed hook releases it: the steps that run after a
+# failure still run (shared-hold.sh).
 "$here/desktop-check.sh" || exit 1
 # The real cursor goes to the menu bar, out of every app window (cursor-park.swift). The runner runs this hook with
 # -e -o pipefail, so the optional step is fenced: a 5 s deadline (perl's alarm; macOS has no timeout(1)) and every

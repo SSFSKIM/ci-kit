@@ -49,7 +49,7 @@ function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, mi
   const installed = join(dir, 'hooks');
   mkdirSync(bin);
   mkdirSync(installed);
-  for (const file of ['job-started.sh', 'job-completed.sh', 'desktop-check.sh', 'dialog.sh', 'desktop-posture.sh']) {
+  for (const file of ['job-started.sh', 'job-completed.sh', 'desktop-check.sh', 'dialog.sh', 'desktop-posture.sh', 'instances.sh', 'shared-hold.sh']) {
     if (existsSync(join(hooks, file))) copyFileSync(join(hooks, file), join(installed, file));
   }
   const executable = (path, text) => { writeFileSync(path, `#!/bin/bash\n${text}\n`); chmodSync(path, 0o755); };

@@ -5,7 +5,9 @@
 // under it in its command line: the job's Electron, its node from the tool cache, its vitest) or sits in it (its working
 // directory is under it), and so is every descendant of a stray: an app's pty shell in /tmp is the app's. The sweep
 // itself, its ancestors (the hook's shell, the runner's worker and listener) and its own children are never strays,
-// though the hook runs inside the workspace.
+// though the hook runs inside the workspace. Nor, when the sweep is told to spare them, are the runners' live workers
+// and their descendants: a sweep of a _work other than its own job's (shared-hold.sh) must leave alone a job that sits
+// in its own hook there, or one whose worker started since its caller last looked.
 
 /** Rows of `ps -axo pid=,ppid=,uid=,lstart=,command=`, run in the C locale (`lstart` is then `Thu Oct 15 22:02:31 2026`). */
 export function parsePs(text) {
@@ -38,12 +40,21 @@ export function parseLsofCwd(text) {
 }
 
 /**
+ * The runners' live job workers among `processes`: each process of the user whose command runs an executable named
+ * Runner.Worker, as every listener starts one (`<runner>/bin/Runner.Worker spawnclient <out> <in>`, a runner that
+ * updated itself from bin.<version>).
+ */
+export function workerPids(processes, uid) {
+  return processes.filter((p) => p.uid === uid && /(^|\/)Runner\.Worker$/.test(p.command.split(/\s+/)[0])).map((p) => p.pid);
+}
+
+/**
  * @param {{processes: {pid:number, ppid:number, uid:number, started:string, command:string}[], cwds: Map<number,string>,
- *          workDir: string, uid: number, self: number}} input
+ *          workDir: string, uid: number, self: number, spare?: number[]}} input
  * @returns {{pid:number, identity:string, command:string, reason:string}[]} the strays, each with its identity and why:
  *   `command`, `cwd` or `child of <pid>`
  */
-export function selectStrays({ processes, cwds, workDir, uid, self }) {
+export function selectStrays({ processes, cwds, workDir, uid, self, spare = [] }) {
   const root = workDir.replace(/\/+$/, '');
   const under = (path) => path === root || (path ?? '').startsWith(`${root}/`);
   const names = (command) => command.includes(`${root}/`) || command.split(/\s+/).includes(root);
@@ -54,7 +65,8 @@ export function selectStrays({ processes, cwds, workDir, uid, self }) {
 
   const spared = new Set([self]);
   for (let p = byPid.get(self); p && !spared.has(p.ppid) && p.ppid > 0; p = byPid.get(p.ppid)) spared.add(p.ppid);
-  const own = [self];
+  const own = [self, ...spare.filter((pid) => byPid.has(pid))];
+  for (const pid of own) spared.add(pid);
   while (own.length > 0) {
     for (const child of children.get(own.pop()) ?? []) {
       if (!spared.has(child.pid)) {

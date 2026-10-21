@@ -2,15 +2,17 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   The mac lane's runner (I10), a LaunchAgent so it runs in the logged-in user's GUI session, where Electron windows have
-  a WindowServer (a LaunchDaemon has none). mac/install.sh fills in __RUNNER_DIR__ and __LOG_DIR__ and installs it as
-  ~/Library/LaunchAgents/com.ssfskim.ci-kit.mac-runner.plist. Its program, runner-hold.sh from the hooks, execs
-  runsvc.sh, the runner's own service wrapper, unless the dialog watcher holds the runner, and then waits for the hold
-  to end. runsvc.sh reads the runner's .path, and the runner reads its .env, which carries the job hooks.
+  a WindowServer (a LaunchDaemon has none). mac/install.sh fills in __AGENT__, __RUNNER_DIR__, __LOG_DIR__ and
+  __LOG_NAME__ for each instance and installs it as ~/Library/LaunchAgents/<agent>.plist: the exclusive instance's
+  com.ssfskim.ci-kit.mac-runner, a shared instance's com.ssfskim.ci-kit.mac-runner-<n>. Its program, runner-hold.sh
+  from the instance's own hooks, execs runsvc.sh, the runner's own service wrapper, unless the dialog watcher holds the
+  runner, and then waits for the hold to end. runsvc.sh reads the runner's .path, and the runner reads its .env, which
+  carries the job hooks.
 -->
 <plist version="1.0">
   <dict>
     <key>Label</key>
-    <string>com.ssfskim.ci-kit.mac-runner</string>
+    <string>__AGENT__</string>
     <key>ProgramArguments</key>
     <array>
       <string>/bin/bash</string>
@@ -32,8 +34,8 @@
       <string>1</string>
     </dict>
     <key>StandardOutPath</key>
-    <string>__LOG_DIR__/mac-runner.out.log</string>
+    <string>__LOG_DIR__/__LOG_NAME__.out.log</string>
     <key>StandardErrorPath</key>
-    <string>__LOG_DIR__/mac-runner.err.log</string>
+    <string>__LOG_DIR__/__LOG_NAME__.err.log</string>
   </dict>
 </plist>
