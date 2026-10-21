@@ -82,7 +82,8 @@ After this work:
   run's unsuffixed name and the fault-injection run), 0 errors, 5 files on `test-history`; its log carries counts only.
   Reconstructed membership equals the log's `Tests` line on three runs (22,360; 22,360; 22,454).
 - [ ] M3 — Labels and reports (starts when the store holds ≥ 14 days).
-- [ ] M4 — Selection for iteration runs: agreed with the MAWS architect and written 2026-10-21 08:1xZ; building.
+- [ ] M4 — Selection for iteration runs: agreed and written 08:1xZ; ci-kit #64 merged (919f0f6); MAWS #101 open, class 1a
+  green 39575096972; `unit:darwin` proof and the architect's landing pending.
 - [ ] M5 — Unit overhead experiment: written 2026-10-21 08:0xZ (arms S, C, D, I); running.
 - [ ] M6 — The `ci-kit:optimize` skill.
 
@@ -581,6 +582,38 @@ Each is written here in full when its condition holds:
   The cause is vitest 5's `BaseSequencer.sort`: it orders by project name before duration or size. Also seen: the first
   `renderer-compiled` file finished 16 s after the last `renderer` file. The likely cause is the React Compiler's
   transforms, unverified.
+
+- 2026-10-21 (M4, MAWS half): what the build found. MAWS #101, head ebe0d6af5; landing evidence 39575096972, class 1a on
+  the pool without `--affected`, green.
+  - **Proofs.** All unit-only on the pool:
+    - a one-line comment change in a renderer module, run 39570557690, green:
+      - 136 files and 2,006 tests ran, against 22,450 in a full run;
+      - the unit job took 234 s against 471–499 s for full runs (test step 177 s against 421–445 s);
+      - the JUnit report's (project, file) pairs equal vitest's related set computed locally;
+    - a planted failure, run 39571488563: red;
+    - a fixture file added, run 39573713454: green, ran the full suite with the reason in the summary.
+  - **The renderer's graph is dense.** A leaf sidebar module reaches about 130 suites, both `App.test.tsx` among them,
+    and vitest's graph walk costs about 34 s. Expect about half a full unit job for a renderer change, not a tenth.
+  - **The rule rarely selects for a landing-sized change.** Replaying the plan over the last 200 landings' whole diffs,
+    10 would select:
+    - 143 fall back for a path outside the trees, almost always `docs/` (141 of the 200 landings touch it);
+    - gate files 29, too many paths 11, data 4, support 3.
+
+    Exempting `docs/` would give 45, and `docs/` with `e2e/` 63. `docs/` cannot be exempted wholesale:
+    `src/shared/plugins/cli.test.ts` reads `docs/doperpowers/evidence`. Iteration runs are earlier branch states, so
+    10/200 is a floor. The store's `selection` field will show the real rate. A `docs/` exemption, less the evidence
+    directory, went to the architect as a follow-up.
+  - **How it is built.**
+    - The paths travel as `Affected:` trailer lines with an `Affected-Count:`, capped at 200 paths (the 93rd
+      percentile of files per landing; one environment variable is capped at 128 KiB).
+    - The decision is a pure function in `gate-affected.mjs`.
+    - Both unit jobs run `unit-related.mjs` through vitest's `startVitest` API, because the CLI cannot combine
+      related mode with file filters, which `unit:darwin`'s intersection needs.
+  - **Proving the branch needed a workaround.** The branch itself changes `.github/` and `scripts/`, so a change
+    taken from master always falls back as a gate file. The proofs ran from a scratch clone whose `origin/master` was
+    pinned at the PR head. The MAWS friction tracker has the row.
+  - **Two runs for the collector's proof.** Run 39573713454 is a selected run that ran the full suite: it must not
+    become a day's base. Run 39571488563 is a red selected run.
 
 ## Outcomes & Retrospective
 
