@@ -145,7 +145,8 @@ boot_bound=$(whole "${CI_KIT_VM_BOOT:-}" 120)
 kickoff_bound=$(whole "${CI_KIT_VM_KICKOFF:-}" 60)
 session_bound=$(whole "${CI_KIT_VM_SESSION:-}" 300)
 idle_bound=$(whole "${CI_KIT_VM_IDLE:-}" 180)
-job_bound=$(seconds "$(minutes "${CI_KIT_VM_JOB_BOUND:-}" 50)")
+job_bound_min=$(minutes "${CI_KIT_VM_JOB_BOUND:-}" 50)
+job_bound=$(seconds "$job_bound_min")
 answer_bound=$(whole "${CI_KIT_VM_STOP_ANSWER:-}" 180)
 end_wait=$(whole "${CI_KIT_VM_END_WAIT:-}" 60)
 stop_timeout=$(whole "${CI_KIT_VM_STOP_TIMEOUT:-}" 30)
@@ -717,13 +718,19 @@ step_session() {
 # A job seen taken: preparing, the running bound counted from out/assigned.
 take_assigned() {
   assigned_at=$(mtime "$out/assigned") || assigned_at=$now_epoch
-  say "$clone: the listener took a job ($(first_line assigned)); preparing (at most $((job_bound / 60)) min from now)"
+  say "$clone: the listener took a job ($(first_line assigned)); preparing (at most $job_bound_min min from out/assigned)"
   enter preparing
 }
 step_listening() {
   if has assigned; then take_assigned; return; fi
   if run_gone; then
-    if has job || has 'done'; then to_teardown 'the guest ended'; else fail image 'the runner exited without a job'; fi
+    # A job the wrapper saw before its watch wrote assigned ended with the guest; anything else is a runner that never
+    # took one.
+    if has job; then
+      to_teardown 'the guest ended'
+    else
+      fail image "the runner exited without a job (out/done: $(first_line 'done' || true))"
+    fi
     return
   fi
   ((now_epoch - since >= idle_bound)) || return 0
@@ -773,7 +780,7 @@ step_job() { # preparing and running
   fi
   if run_gone; then to_teardown 'the guest powered itself off'; return; fi
   ((now_epoch - assigned_at < job_bound)) ||
-    fail image "the job outlived the running bound ($((job_bound / 60)) min from out/assigned); stopping it"
+    fail image "the job outlived the running bound ($job_bound_min min from out/assigned); stopping it"
 }
 step_ending() {
   if run_gone; then to_teardown 'the guest powered itself off'; return; fi
@@ -924,8 +931,11 @@ guard_sample() {
       to_teardown 'given up for memory: it holds no job'
       ;;
     session | listening)
-      failed=memory
-      count_failure memory "memory pressure warned on two samples ($(memory_line))"
+      # Counted once, though a stop request that could not be written is asked again at the next sample.
+      if [[ -z $failed ]]; then
+        failed=memory
+        count_failure memory "memory pressure warned on two samples ($(memory_line))"
+      fi
       ask_stop 'given up for memory'
       ;;
     preparing | running | stopping | ending)

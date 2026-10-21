@@ -881,7 +881,7 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     { name: 'the kickoff', env: { CI_KIT_VM_KICKOFF: '2' }, reach: states.kicking.reach, line: 'neither out/listening nor out/session-conflict within 2 s', kind: 'image' },
     { name: 'a kickoff that fails', before: (m) => m.flag('fail-kickoff'), reach: (m) => m.booted(), line: 'kickoff.sh failed: kickoff: out/ already holds listening: every clone starts from an empty out/', kind: 'image' },
     { name: 'session recovery', env: { CI_KIT_VM_SESSION: '2' }, reach: states.session.reach, line: 'the slot\'s session was not let go within 2 s', kind: 'session' },
-    { name: 'the running bound', env: { CI_KIT_VM_JOB_BOUND: '0.05' }, reach: states.running.reach, line: 'the job outlived the running bound (0 min from out/assigned); stopping it', kind: 'image' },
+    { name: 'the running bound', env: { CI_KIT_VM_JOB_BOUND: '0.05' }, reach: states.running.reach, line: 'the job outlived the running bound (0.05 min from out/assigned); stopping it', kind: 'image' },
   ]) test(`the bound of ${name} ends in a verified teardown and a counted ${kind} failure`, async () => {
     const m = lane({ queue: [['ci-kit-mac-vm']], env });
     if (before) before(m);
@@ -1044,6 +1044,20 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     m.flag('fail-list', false);
     await m.booted();
     assert.deepEqual(m.closed().sort(), ['https://github.com/SSFSKIM/ci-kit-sandbox/issues/1', 'https://github.com/SSFSKIM/ci-kit-sandbox/issues/2']);
+    await finish(m, a);
+  });
+
+  test('a runner that exits while listening, with no job, is an image failure', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const a = m.start();
+    const clone = await m.booted();
+    await m.listening(clone);
+    m.mark('done', '0');
+    m.powerOff(clone);
+    await m.waitLog(new RegExp(`${clone}: the runner exited without a job \\(out/done: 0\\); teardown`));
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    assert.equal(m.failures().total_image, '1');
+    assert.equal(m.failures().image_run, '1', 'a clone that failed does not end the run of image failures');
     await finish(m, a);
   });
 });
