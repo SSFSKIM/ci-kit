@@ -1,7 +1,8 @@
 #!/bin/bash
 # Sourced by desktop-check.sh (the job-started hook) and dialog-watch.sh (the dialog watcher, every 60 s), so both work
-# from one definition of a system dialog, one read-only frontmost read, one source attribution, and one dialog episode
-# per machine with its alert issue (docs/mac-lane.md). The caller sets log_tag before sourcing.
+# from one definition of a system dialog, the same read-only reads of the frontmost app and the windows on screen, one
+# source attribution, and one dialog episode per machine with its alert issue (docs/mac-lane.md). The caller sets
+# log_tag before sourcing.
 #
 # The episode is the state file below, rewritten whole (a rename) under a lock, so whichever side sees a dialog first
 # opens the one episode and both name it by the same first-seen time:
@@ -26,7 +27,7 @@ dialog_lock=$ci_kit_logs/dialog-alert.lock
 alert_repo=SSFSKIM/ci-kit-sandbox
 reads_apart=150
 clear_reads=3
-dialog=''
+dialog='' dialog_pid='' dialog_held='' dialog_window='' seen=''
 
 log() {
   mkdir -p "$ci_kit_logs"
@@ -51,23 +52,33 @@ bounded() { # <seconds> <command...>
   ' "$@" 9>&-
 }
 
-# The system dialogs, and the login screen, that hold key focus: the job hook refuses a job under one, and the watcher
-# alerts on one. Every e2e group under one fails on focus and pasteboard (2026-10-16: seven groups red with
-# UserNotificationCenter frontmost). Each is its canonical name and bundle id (both read on the mini, macOS 27).
+# The system dialogs, and the login screen: the job hook refuses a job under one, and the watcher alerts on one. Every
+# e2e group under one in front fails on focus and pasteboard (2026-10-16: seven groups red with UserNotificationCenter
+# frontmost). One on screen without focus is in the way too: SecurityAgent and UserNotificationCenter panels float
+# over other apps' windows, where a group's real input can land on them (an automated answer to a keychain or
+# permission prompt) and its screenshots see them. Each is its canonical name and bundle id (both read on the mini,
+# macOS 27).
 dialogs='UserNotificationCenter=com.apple.UserNotificationCenter CoreServicesUIAgent=com.apple.coreservices.uiagent
   SecurityAgent=com.apple.SecurityAgent loginwindow=com.apple.loginwindow'
-# Whether the app read last is one of them, by its bundle id or its name. Sets dialog to the canonical name, which
-# titles, messages and the state carry whatever the display language: lsappinfo's name is localized.
+# Whether a system dialog is up, from the reads made last: the app in front is one (read_front), or, whatever is in
+# front, one has a window on screen (read_windows). Sets dialog to the canonical name, which titles, messages and the
+# state carry whatever the display language (lsappinfo's name is localized); dialog_pid to its process; dialog_held to
+# how it holds the desktop, for the refusal and the alert; dialog_window to its window when it is not the app in front;
+# and seen, which starts the log lines of the read, to what the read saw.
 is_dialog() {
   local entry
-  dialog=''
+  dialog='' dialog_pid='' dialog_held='' dialog_window='' seen="frontmost is ${name:-unreadable}"
   for entry in $dialogs; do
     if [[ $name == "${entry%%=*}" || (-n $bundle && $bundle == "${entry#*=}") ]]; then
-      dialog=${entry%%=*}
+      dialog=${entry%%=*} dialog_pid=$front_pid dialog_held='holds focus'
       return 0
     fi
   done
-  return 1
+  [[ -n $screen_dialog ]] || return 1
+  dialog=$screen_dialog dialog_pid=$screen_pid dialog_window=$screen_window
+  # Without a frontmost read, which app has focus is not known.
+  dialog_held="is on screen${name:+ without focus}"
+  seen+="; on screen: $dialog ($dialog_window)"
 }
 
 # The frontmost app, read with lsappinfo alone: AppleScript or System Events would raise TCC prompts.
@@ -85,6 +96,49 @@ read_front() {
 }
 is_app() { # <bundle id> <name>: whether the frontmost app read last is that app
   [[ $bundle == "$1" || (-z $bundle && $name == "$2") ]]
+}
+
+# The windows on screen, from window-list (window-list.swift, which mac/install.sh compiles beside the hooks; the
+# override lets hook tests use a fake): one line each, front to back, of owner pid, layer, alpha, x, y, width, height,
+# bundle id ('-' for none) and owner name, tab-separated. A listed dialog is told by its bundle id or its name, as in
+# front. Its window counts once it shows (some alpha, some area); the topmost one sets screen_dialog, screen_pid and
+# screen_window. A running process alone would not do: SecurityAgent outlives its window. In a logged-in, unlocked
+# session none of the four owns a window on screen (read 2026-10-21 on the mini, macOS 27, and on a MacBook, macOS
+# 26), loginwindow included: its windows are the lock screen and its shut-down and Force Quit panels, each the human's
+# to answer like the rest.
+#
+# windows_miss says why the list could not be read (no helper, a failure, the deadline): the read then sees a dialog
+# only in front, as it did before the helper. The caller logs it.
+window_list=${CI_KIT_WINDOW_LIST:-$(dirname "${BASH_SOURCE[0]}")/window-list}
+screen_dialog='' screen_pid='' screen_window='' windows_miss=''
+read_windows() {
+  local out status found
+  screen_dialog='' screen_pid='' screen_window='' windows_miss=''
+  if [[ ! -x $window_list ]]; then
+    windows_miss='window-list is missing'
+    return 0
+  fi
+  out=$(mktemp) || { windows_miss='no scratch file'; return 0; }
+  # A file, not a pipe, as for the unified log: nothing the helper leaves behind can hold the read open.
+  if bounded 5 "$window_list" >"$out" 2>/dev/null; then status=0; else status=$?; fi
+  case $status in
+    0)
+      # macOS's awk takes no newline in a -v value.
+      found=$(awk -F'\t' -v dialogs="${dialogs//$'\n'/ }" '
+        BEGIN {
+          n = split(dialogs, entries, /[ \t\n]+/)
+          for (i = 1; i <= n; i++) if (split(entries[i], kv, "=") == 2) { by_name[kv[1]] = kv[1]; by_bundle[kv[2]] = kv[1] }
+        }
+        NF >= 9 && $3 + 0 > 0 && $6 + 0 > 0 && $7 + 0 > 0 {
+          d = ($8 in by_bundle) ? by_bundle[$8] : ($9 in by_name) ? by_name[$9] : ""
+          if (d != "") { printf "%s\t%s\tpid %s, layer %s, %sx%s at %s,%s\n", d, $1, $1, $2, $6, $7, $4, $5; exit }
+        }' "$out") || found=''
+      IFS=$'\t' read -r screen_dialog screen_pid screen_window <<<"$found" || true
+      ;;
+    124) windows_miss='window-list timed out' ;;
+    *) windows_miss="window-list failed ($status)" ;;
+  esac
+  rm -f "$out" || true
 }
 
 clock() {
@@ -106,11 +160,12 @@ dialog_log() { # <output file> <log show arguments...>
 
 dialog_tcc_source() { # <scratch file>; called only after firewall attribution missed
   local out=$1 predicate front_line window start end front_time tcc
-  [[ -n $front_pid ]] || return 0
-  # A quiet runner may not check a dialog for hours. Keep this long query narrow and pid-exact.
-  predicate="process == \"launchservicesd\" AND eventMessage CONTAINS \"SETFRONT: pid=$front_pid \""
+  [[ -n $dialog_pid ]] || return 0
+  # A quiet runner may not check a dialog for hours. Keep this long query narrow and pid-exact. The pid is the dialog's,
+  # in front or not: one on screen without focus came to front when it opened.
+  predicate="process == \"launchservicesd\" AND eventMessage CONTAINS \"SETFRONT: pid=$dialog_pid \""
   dialog_log "$out" --last 3h --predicate "$predicate" || return 0
-  front_line=$(awk -v pid="$front_pid" '
+  front_line=$(awk -v pid="$dialog_pid" '
     /launchservicesd\[/ && index($0, "SETFRONT: pid=" pid " ") { line=$0 }
     END { print line }
   ' "$out") || return 0
@@ -159,7 +214,7 @@ dialog_tcc_source() { # <scratch file>; called only after firewall attribution m
   fi
 }
 
-# Sets source and source_line for the dialog in front ('source unknown' and empty when nothing is found). It runs once
+# Sets source and source_line for the dialog read last ('source unknown' and empty when nothing is found). It runs once
 # per episode, when the episode opens: up to three 10 s log queries.
 dialog_source() {
   local predicate out process
@@ -302,8 +357,9 @@ alert_episode() { # <who opened it>
   local out body issue=''
   out=$(mktemp) || return 0
   read_alert_token
-  printf -v body 'Time: %s\nMachine: %s\nFrontmost app: %s\nFirst seen: %s\nOpened by: %s\nLikely source: %s\nSource line: %s\nRun id: %s\n' \
-    "$now" "$machine" "$st_name" "$st_since" "$1" "$st_source" "${source_line:-source unknown}" "${GITHUB_RUN_ID:--}"
+  printf -v body 'Time: %s\nMachine: %s\nDialog: %s %s%s\nFrontmost app: %s\nFirst seen: %s\nOpened by: %s\nLikely source: %s\nSource line: %s\nRun id: %s\n' \
+    "$now" "$machine" "$st_name" "$dialog_held" "${dialog_window:+ ($dialog_window)}" "${name:-unreadable}" "$st_since" "$1" \
+    "$st_source" "${source_line:-source unknown}" "${GITHUB_RUN_ID:--}"
   if alert_gh issue create --repo "$alert_repo" --label ci-kit-alert --title "$(alert_title)" --body "$body" \
     >"$out" 2>/dev/null; then
     IFS= read -r issue <"$out" || true
@@ -331,7 +387,7 @@ close_alert() {
     read_alert_token
     if [[ -z $st_commented ]]; then
       if alert_gh issue comment "$st_issue" --repo "$alert_repo" \
-        --body "cleared at $st_cleared: no dialog in front on $clear_reads reads in a row since $st_clear_since" >/dev/null 2>&1; then
+        --body "cleared at $st_cleared: no dialog on $clear_reads reads in a row since $st_clear_since" >/dev/null 2>&1; then
         st_commented=$now
       else
         log "dialog alert clear comment failed or timed out" || true
@@ -377,7 +433,7 @@ alert_settled() {
 # A later read's try at an owed close (phase=closed). True, with the file gone, once it has gone through.
 retry_close() {
   close_alert || return 1
-  log "frontmost is $name: the alert $st_issue of the episode of $st_name since $st_since, which closed at $st_cleared, is closed" ||
+  log "$seen: the alert $st_issue of the episode of $st_name since $st_since, which closed at $st_cleared, is closed" ||
     true
 }
 # A dialog in front while the alert's close is owed. The close is tried first: once it goes through (false, the file
@@ -386,7 +442,7 @@ retry_close() {
 # for the caller to save), keeping its name, time and source, so that alert closes when this dialog is gone.
 reopen_episode() {
   retry_close && return 1
-  log "frontmost is $name: the alert $st_issue of the episode of $st_name since $st_since is still open; the episode reopens with it" ||
+  log "$seen: the alert $st_issue of the episode of $st_name since $st_since is still open; the episode reopens with it" ||
     true
   st_phase=open st_clear=0 st_clear_since='' st_cleared='' st_commented=''
 }

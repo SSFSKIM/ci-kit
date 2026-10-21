@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { T0, asnShape, check, minute, pairShape } from './fake-mac-desktop.mjs';
+import { T0, asnShape, check, minute, ordinaryWindows, pairShape, terminal, windowLine, withWindow } from './fake-mac-desktop.mjs';
 
 // Each check has an isolated desktop and HOME (fake-mac-desktop.mjs). `again` runs another job in that same desktop,
 // and `watch` the dialog watcher, a minute after the run before unless told `at`.
@@ -376,7 +376,7 @@ test('repeated failing jobs share one alert; a passing job leaves it to the watc
   assert.equal(cleared.state, null);
   assert.deepEqual(cleared.ghCalls.map((call) => call.slice(0, 2)), [['issue', 'create'], ['issue', 'comment'], ['issue', 'close']]);
   assert.equal(cleared.ghCalls[1][2], alertURL);
-  assert.match(argValue(cleared.ghCalls[1], '--body'), /^cleared at \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z: no dialog in front on 3 reads in a row since \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+  assert.match(argValue(cleared.ghCalls[1], '--body'), /^cleared at \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z: no dialog on 3 reads in a row since \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
   assert.equal(cleared.ghCalls[2][2], alertURL);
   const quiet = cleared.again(asnShape('Terminal'));
   assert.equal(quiet.ghCalls.length, 3, 'a later passing job does nothing');
@@ -534,4 +534,93 @@ test('without a token file gh keeps its own login; an empty one is logged and ch
   assert.deepEqual(empty.ghTokens, ['<unset>']);
   assert.match(empty.log, /alert-token is empty or unreadable; gh uses its own login/);
   assert.equal(empty.state.issue, alertURL, 'the alert is still created');
+});
+
+// A dialog on screen without focus (2026-10-21: a SecurityAgent keychain prompt sat on the mini's screen for hours with
+// Terminal in front, and the frontmost read alone admitted every job under it).
+const keychainPrompt = { pid: 4711, layer: 2002, x: 1020, y: 400, width: 520, height: 260, bundle: 'com.apple.SecurityAgent', name: 'SecurityAgent' };
+
+test('a system dialog on screen without focus fails the job at once, naming it and the app in front', () => {
+  const run = check(terminal, 0, { windows: withWindow(keychainPrompt) });
+  assert.equal(run.status, 1);
+  assert.deepEqual(run.stderr.split('\n').filter(Boolean), [
+    `ci-kit: a system dialog (SecurityAgent: source unknown) is on screen without focus on the mini since ${since} — dismiss it there and rerun`,
+  ]);
+  assert.match(run.log, /desktop-check .*frontmost is 터미널; on screen: SecurityAgent \(pid 4711, layer 2002, 520x260 at 1020,400\): source unknown; a system dialog is on screen without focus since /);
+  assert.deepEqual(run.opened, [], 'nothing is brought over it');
+  assert.equal(run.state.name, 'SecurityAgent');
+  const [create] = run.ghCalls;
+  assert.equal(argValue(create, '--title'), `ci-kit alert: mini: SecurityAgent since ${since}`, 'the title keeps its contract');
+  assert.ok(argValue(create, '--body').includes('Dialog: SecurityAgent is on screen without focus (pid 4711, layer 2002, 520x260 at 1020,400)\nFrontmost app: 터미널\n'));
+  // The same dialog in front reads as before.
+  const front = check(asnShape('SecurityAgent', 'com.apple.SecurityAgent'), 0, { windows: withWindow(keychainPrompt) });
+  assert.match(front.stderr, /\(SecurityAgent: source unknown\) holds focus on the mini since/);
+  assert.ok(argValue(front.ghCalls[0], '--body').includes('Dialog: SecurityAgent holds focus\nFrontmost app: SecurityAgent\n'));
+});
+
+test('every listed dialog is seen on screen, by its bundle id under a localized name or by its name alone; the topmost is named', () => {
+  for (const [name, bundle] of [['UserNotificationCenter', 'com.apple.UserNotificationCenter'], ['CoreServicesUIAgent', 'com.apple.coreservices.uiagent'], ['SecurityAgent', 'com.apple.SecurityAgent'], ['loginwindow', 'com.apple.loginwindow']]) {
+    for (const window of [{ pid: 900, bundle, name: `현지화된 ${name}` }, { pid: 900, name }]) {
+      const run = check(terminal, 0, { windows: withWindow(window) });
+      assert.equal(run.status, 1, `${name} ${JSON.stringify(window)}`);
+      assert.match(run.stderr, new RegExp(`^ci-kit: a system dialog \\(${name}: source unknown\\) is on screen without focus on the mini`, 'm'));
+    }
+  }
+  const two = check(terminal, 0, { windows: `${windowLine({ pid: 901, bundle: 'com.apple.UserNotificationCenter', name: 'UserNotificationCenter' })}\n${withWindow(keychainPrompt)}` });
+  assert.match(two.stderr, /\(UserNotificationCenter: source unknown\)/);
+});
+
+test('a dialog process with no window that shows passes: none on screen, one with no alpha or no area, or an app that only shares a name', () => {
+  for (const windows of [
+    ordinaryWindows,
+    withWindow({ ...keychainPrompt, alpha: '0.0' }),
+    withWindow({ ...keychainPrompt, width: 0 }),
+    withWindow({ ...keychainPrompt, height: 0 }),
+    withWindow({ pid: 902, bundle: 'com.example.SecurityAgentHelper', name: 'SecurityAgentHelper' }),
+    withWindow({ pid: 903, bundle: 'com.apple.loginwindowhelper', name: 'loginwindowhelper' }),
+  ]) {
+    const run = check(terminal, 0, { windows });
+    assert.equal(run.status, 0, `${windows}\n${run.stderr}`);
+    assert.equal(run.stderr, '');
+    assert.equal(run.state, null);
+    assert.equal(run.windowReads, 1);
+  }
+});
+
+test('a window list that is missing, fails or hangs leaves the frontmost read alone deciding, and is logged', () => {
+  for (const [windowList, why] of [['missing', 'window-list is missing'], [1, 'window-list failed (1)'], ['hang', 'window-list timed out']]) {
+    const started = Date.now();
+    const passed = check(terminal, 0, { windowList, windows: withWindow(keychainPrompt) });
+    assert.equal(passed.status, 0, passed.stderr);
+    assert.ok(passed.log.includes(`desktop-check run=123456 job=e2e could not read the windows on screen (${why}); a dialog is seen only in front\n`), passed.log);
+    assert.match(passed.log, /frontmost is 터미널$/m);
+    assert.deepEqual(passed.ghSurvivors, [], 'a hung helper is killed and reaped');
+    assert.ok(Date.now() - started < 15_000, 'the 5 s deadline is enforced');
+    const refused = check(asnShape('SecurityAgent'), 0, { windowList });
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /\(SecurityAgent: source unknown\) holds focus on the mini/);
+  }
+});
+
+test('an unreadable frontmost app does not let a job run under a dialog on screen', () => {
+  const run = check('', 0, { windows: withWindow(keychainPrompt) });
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, new RegExp(`^ci-kit: a system dialog \\(SecurityAgent: source unknown\\) is on screen on the mini since ${since} — dismiss it there and rerun$`, 'm'));
+  assert.match(run.log, /frontmost is unreadable; on screen: SecurityAgent \(pid 4711/);
+});
+
+test('the read-only posture entry point reads no windows', () => {
+  const run = check(terminal, 0, { readOnly: true, windows: withWindow(keychainPrompt) });
+  assert.equal(run.stdout, '터미널\n');
+  assert.equal(run.windowReads, 0);
+});
+
+test("UserNotificationCenter on screen without focus is attributed through its own pid's front transition, not the app in front's", () => {
+  const run = check(asnShape('터미널', 'com.apple.Terminal', 431), 0, {
+    windows: withWindow({ pid: 47183, layer: 8, bundle: 'com.apple.UserNotificationCenter', name: 'UserNotificationCenter' }),
+    logOutput: [...tccRequests, tccFront].join('\n'),
+  });
+  assert.equal(run.status, 1, run.stderr);
+  assert.match(run.stderr, /\(UserNotificationCenter: TCC requests before it came to front: SkyComputerUseService, CursorUIViewService, Finder\) is on screen without focus/);
+  assert.equal(argValue(run.logCalls[1], '--predicate'), 'process == "launchservicesd" AND eventMessage CONTAINS "SETFRONT: pid=47183 "');
 });

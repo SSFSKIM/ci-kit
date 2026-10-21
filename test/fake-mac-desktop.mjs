@@ -1,7 +1,7 @@
 // One Mac's desktop for the dialog hooks' tests: its own HOME, with the job hook (desktop-check.sh) and the dialog
-// watcher (dialog-watch.sh) run against it. Every boundary is faked: the frontmost app (lsappinfo), Terminal (open), the
-// unified log, gh, the clock (date), launchd (launchctl) and the runner's processes (python3, standing in for
-// runner-state.py, whose own test reads real processes).
+// watcher (dialog-watch.sh) run against it. Every boundary is faked: the frontmost app (lsappinfo), the windows on
+// screen (window-list), Terminal (open), the unified log, gh, the clock (date), launchd (launchctl) and the runner's
+// processes (python3, standing in for runner-state.py, whose own test reads real processes).
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -25,6 +25,19 @@ export const asnShape = (name, bundle, pid) =>
 export const pairShape = (name, bundle, pid) => `"LSDisplayName"="${name}"\n${bundle ? `"CFBundleIdentifier"="${bundle}"\n` : ''}${pid === undefined ? '' : `"pid"=${pid}\n`}`;
 export const terminal = asnShape('터미널', 'com.apple.Terminal');
 
+// One line of window-list (mac/hooks/window-list.swift): owner pid, layer, alpha, x, y, width, height, bundle id ('-'
+// for none) and owner name, tab-separated, front to back.
+export const windowLine = ({ pid, layer = 0, alpha = '1.0', x = 1000, y = 400, width = 520, height = 260, bundle = '-', name }) =>
+  [pid, layer, alpha, x, y, width, height, bundle, name].join('\t');
+// An ordinary desktop, as the mini's read on 2026-10-21 (macOS 27): the menu bar, the Dock and Terminal, nothing else.
+export const ordinaryWindows = [
+  windowLine({ pid: 179, layer: 24, x: 0, y: 0, width: 2560, height: 30, name: 'Window Server' }),
+  windowLine({ pid: 457, layer: 20, x: 0, y: 0, width: 2560, height: 1440, bundle: 'com.apple.dock', name: 'Dock' }),
+  windowLine({ pid: 431, x: 1400, y: 280, width: 580, height: 408, bundle: 'com.apple.Terminal', name: '터미널' }),
+].join('\n') + '\n';
+// The same desktop with a dialog's window over it, topmost.
+export const withWindow = (window) => `${windowLine(window)}\n${ordinaryWindows}`;
+
 const executable = (path, body) => { writeFileSync(path, `#!/bin/bash\n${body}\n`); chmodSync(path, 0o755); };
 // A fake that hangs ignoring SIGALRM, recording its pid so a run can tell whether the deadline killed it.
 const hangs = (dir) => `trap '' ALRM\necho "$$" >> '${join(dir, 'hung-pids.txt')}'\nexec /bin/sleep 60`;
@@ -33,7 +46,8 @@ const hangs = (dir) => `trap '' ALRM\necho "$$" >> '${join(dir, 'hung-pids.txt')
 // (fail, garbage, hang); one line per read, the last line standing for every read after it. `launchctl kill SIGTERM`
 // stops an idle runner, as runsvc.sh's trap does: it reads stopped afterwards. The drain's second idle read follows the
 // first at once (CI_KIT_IDLE_GAP=0) unless a run says otherwise.
-export function desktop({ status = 0, afterOpen, openStatus = 0, logOutput = '', logStatus = 0, logResponses = {}, now, ghStatus = 0, logHang = false, ghHang = false, env = {}, alertToken, runner = 'idle' } = {}) {
+// windows and windowList: what window-list prints and how it ends (below) at each run unless the run says otherwise.
+export function desktop({ status = 0, afterOpen, openStatus = 0, logOutput = '', logStatus = 0, logResponses = {}, now, ghStatus = 0, logHang = false, ghHang = false, env = {}, alertToken, runner = 'idle', windows: desktopWindows = ordinaryWindows, windowList: desktopListEnd = 0 } = {}) {
   const dir = join(root, String(Math.random()).slice(2));
   const bin = join(dir, 'bin');
   mkdirSync(bin, { recursive: true });
@@ -49,6 +63,13 @@ export function desktop({ status = 0, afterOpen, openStatus = 0, logOutput = '',
 if [[ $1 == front ]]; then echo 'ASN:0x0-0x48b78b3:'; exit 0; fi
 cat '${front}'
 exit ${status}`);
+  // window-list prints windows.txt and exits with windows-status, or hangs; a run that names it missing points the hooks
+  // at a path with nothing there.
+  const windowList = join(bin, 'window-list');
+  executable(windowList, `echo read >> '${file('window-list.calls')}'
+[[ $(cat '${file('windows-status')}') == hang ]] && { ${hangs(dir).replace(/\n/g, '; ')}; }
+cat '${file('windows.txt')}'
+exit $(cat '${file('windows-status')}')`);
   executable(join(bin, 'open'), `echo "$*" >> '${file('opened.txt')}'
 [[ -f '${file('after.txt')}' ]] && cp '${file('after.txt')}' '${front}'
 exit ${openStatus}`);
@@ -135,11 +156,14 @@ esac`);
   // A run's gh: every call exits ghExit, and the issue subcommands named in ghFail (`'close'`, `'comment close'`) exit 1.
   // ghUnresolved fails comment and close as gh does for an issue GitHub will not resolve: one that does not exist, or one
   // the caller cannot see. `gh api repos/…/issues/<n>` answers ghIssue: its state (open, closed), an HTTP status it
-  // fails with (404, 410), or hang. `gh api repos/<repo>` goes through unless ghRepo is false.
-  function run(script, output, { at, ghExit = ghStatus, ghFail = '', ghUnresolved = false, ghIssue = 'open', ghRepo = true, ghStall = ghHang, args = [], extraEnv = {} } = {}) {
+  // fails with (404, 410), or hang. `gh api repos/<repo>` goes through unless ghRepo is false. windows is what
+  // window-list prints; windowList is how it ends: 0, another exit status, 'hang' or 'missing'.
+  function run(script, output, { at, ghExit = ghStatus, ghFail = '', ghUnresolved = false, ghIssue = 'open', ghRepo = true, ghStall = ghHang, args = [], extraEnv = {}, windows = desktopWindows, windowList: listEnd = desktopListEnd } = {}) {
     last = at === undefined ? (last === null ? 0 : last + 60) : at;
     writeFileSync(clock, String((now ? Date.parse(now) / 1000 : T0) + last));
     writeFileSync(front, output);
+    writeFileSync(file('windows.txt'), windows);
+    writeFileSync(file('windows-status'), String(listEnd === 'missing' ? 0 : listEnd));
     writeFileSync(file('hung-pids.txt'), '');
     const job = script === 'desktop-check.sh' ? { GITHUB_RUN_ID: '123456', GITHUB_JOB: 'e2e' } : {};
     const started = Date.now();
@@ -148,7 +172,7 @@ esac`);
       timeout: 60_000,
       env: {
         PATH: `${bin}:/usr/bin:/bin`, HOME: dir,
-        CI_KIT_LOG_BIN: log, CI_KIT_GH_BIN: gh, FAKE_GH_STATUS: String(ghExit), FAKE_GH_FAIL: ghFail, FAKE_GH_UNRESOLVED: ghUnresolved ? '1' : '0', FAKE_GH_ISSUE: ghIssue, FAKE_GH_REPO: ghRepo ? '1' : '0', FAKE_GH_HANG: ghStall ? '1' : '0',
+        CI_KIT_LOG_BIN: log, CI_KIT_GH_BIN: gh, CI_KIT_WINDOW_LIST: listEnd === 'missing' ? join(bin, 'no-window-list') : windowList, FAKE_GH_STATUS: String(ghExit), FAKE_GH_FAIL: ghFail, FAKE_GH_UNRESOLVED: ghUnresolved ? '1' : '0', FAKE_GH_ISSUE: ghIssue, FAKE_GH_REPO: ghRepo ? '1' : '0', FAKE_GH_HANG: ghStall ? '1' : '0',
         CI_KIT_IDLE_GAP: '0', ...job, ...env, ...extraEnv,
       },
     });
@@ -169,6 +193,7 @@ esac`);
       ...result,
       elapsed,
       ghSurvivors: survivors,
+      windowReads: text('window-list.calls').split('\n').filter((line) => line !== '').length,
       log: text('Library/Logs/ci-kit/mac-runner-hooks.log'),
       opened: text('opened.txt').trim().split('\n').filter(Boolean),
       ghCalls: text('gh-args.txt').split('\0\0').filter(Boolean).map((call) => call.split('\0')),

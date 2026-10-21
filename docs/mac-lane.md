@@ -29,7 +29,7 @@ On every machine:
 | Hooks | `<instance>/ci-kit/hooks/job-started.sh` (admission on a Mac with shared instances, the desktop check, then the sweep), `job-completed.sh` (the [drain](#the-drain)'s job end, then the sweep, then the admission's release), a full copy from `mac/hooks/` in each instance |
 | Dialog watcher | `com.ssfskim.ci-kit.dialog-watch`, one per machine — RunAtLoad, every 60 s, `ProcessType` Background, Aqua session only; runs the exclusive instance's `dialog-watch.sh` ([below](#the-dialog-watcher)) |
 | Logs | `~/Library/Logs/ci-kit/mac-runner-hooks.log` (the hooks and the watcher, every instance's), `mac-runner.out.log` / `.err.log` (the exclusive runner; shared instance n's are `mac-runner-<n>.*`), `dialog-watch.err.log`, `<instance>/_diag/` |
-| State | `~/Library/Logs/ci-kit/dialog-alert.state` (the dialog episode), `runner-drained` (the watcher's hold on every runner); with shared instances, `desktop.lock`, `shared-hold`, `shared-running-<n>` and `shared-hold.alert` ([the shared hold](#instances-and-the-shared-hold)) |
+| State | `~/Library/Logs/ci-kit/dialog-alert.state` (the dialog episode), `runner-drained` (the watcher's hold on every runner), `window-list.miss` (while the watcher cannot read the windows on screen, why); with shared instances, `desktop.lock`, `shared-hold`, `shared-running-<n>` and `shared-hold.alert` ([the shared hold](#instances-and-the-shared-hold)) |
 
 **Why a LaunchAgent.** Electron windows need a WindowServer, which only the user's GUI session has; a LaunchDaemon runs
 outside it. **Why one exclusive runner per machine.** e2e groups contend for the desktop (focus, pointer, clipboard), so
@@ -105,10 +105,11 @@ gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token
   so a refresh never turns a shared instance on or off: that is done per instance (below). While the watcher holds the
   runner, the install loads it held and says so (`loaded, held by the dialog watcher (…)`) instead of waiting for it
   to listen: it starts when the episode closes. New hooks and the optional
-  compiled cursor helper are staged and checked in a sibling directory. Darwin's atomic `RENAME_SWAP` exchanges
-  that directory with `ci-kit/hooks/`, so the fixed hook paths in `.env` never disappear between renames: a job
-  starting during publication finds either complete set. Copy or validation failures leave the old set untouched;
-  a Swift compile failure still warns and installs without the optional helper.
+  compiled helpers (`cursor-park`, `window-list`) are staged and checked in a sibling directory. Darwin's atomic
+  `RENAME_SWAP` exchanges that directory with `ci-kit/hooks/`, so the fixed hook paths in `.env` never disappear
+  between renames: a job starting during publication finds either complete set. Copy or validation failures leave the
+  old set untouched; a Swift compile failure still warns and installs without that helper (its log is
+  `~/Library/Logs/ci-kit/<helper>-build.log`).
 - **Prerequisites** checked on the PATH jobs get: Node ≥ 22.12 (MAWS's `engines`), corepack, the Xcode command line
   tools' `clang` (native modules such as `node-pty`), `python3` (node-gyp), git, and LibreOffice's `soffice` (the
   document groups), found but not launched. MAWS's setup action installs its own Node 22 and pnpm per job into the
@@ -165,25 +166,41 @@ Every instance runs its own copy of the hooks, and each hook acts on the instanc
 work directory from where its copy sits. On a Mac with shared instances, the job-started hook first admits the job to
 the desktop ([the shared hold](#instances-and-the-shared-hold)); on one without, it is the hook described here.
 
-**A system dialog in front fails the job at once.** Before anything else, the job-started hook
+**A system dialog on screen fails the job at once.** Before anything else, the job-started hook
 (`mac/hooks/desktop-check.sh`) reads the frontmost app with `lsappinfo`. If it is `UserNotificationCenter`,
 `CoreServicesUIAgent`, `SecurityAgent` or `loginwindow`, a system dialog or the login screen holds key focus, and every
 e2e group would fail on focus and pasteboard (2026-10-16: seven groups red with `UserNotificationCenter` frontmost).
 Each is known by its bundle id as well as its name (`mac/hooks/dialog.sh` holds the one list the hook and the watcher
-share), because `lsappinfo`'s names are localized. Messages and titles always carry the canonical name. The job then
-fails at "Set up runner" with:
+share), because `lsappinfo`'s names are localized. Messages and titles always carry the canonical name.
+
+One of them with a window on screen fails the job too, whatever is in front. SecurityAgent and UserNotificationCenter
+panels float over other apps' windows without focus, where a group's real input (cua, cursor moves, key events) could
+answer a keychain or permission prompt, and its screenshots would see it (2026-10-21: a SecurityAgent keychain prompt
+sat on the mini's screen for hours with Terminal in front). The hook reads the windows on screen with `window-list`
+(`mac/hooks/window-list.swift`, which `install.sh` compiles beside the hooks): each window's owner, layer, alpha and
+bounds, which need no Screen Recording grant; a window's title would, and is never read. A listed dialog's window
+counts once it shows (some alpha, some area); a running process alone does not, since SecurityAgent outlives its
+window. In a logged-in, unlocked session none of the four owns a window on screen, `loginwindow` included (read on the
+mini, macOS 27, 2026-10-21): its windows are the lock screen and its shut-down and Force Quit panels, each the human's
+to answer like the rest. The job then fails at "Set up runner" with one of:
 
 ```
 ci-kit: a system dialog (<dialog>: <likely source>) holds focus on the <machine> since <first seen> — dismiss it there and rerun
+ci-kit: a system dialog (<dialog>: <likely source>) is on screen without focus on the <machine> since <first seen> — dismiss it there and rerun
 ci-kit: a system dialog (SecurityAgent: security request from codesign) holds focus on the mini since 2026-10-17T05:12Z — dismiss it there and rerun
 ```
+
+The hooks log adds the dialog's window to the frontmost app (`frontmost is 터미널; on screen: SecurityAgent (pid 4711,
+layer 2002, 520x260 at 1020,400): …`); with the frontmost app unreadable the line says `is on screen`.
 
 `<machine>` is the runner's `CI_KIT_MACHINE` (`mini` on the mini). `<first seen>` is the dialog episode's, the same
 time its alert title carries ([below](#the-dialog-watcher)). Every refusal line starts with `ci-kit: ` and ends with
 `rerun`; MAWS's `scripts/ci-gate.sh` tells a refused job by that shape. Dismissing the dialog is the human's, in
-that machine's GUI session (never an agent, never cua). The check uses `lsappinfo` alone: AppleScript or System Events
-would raise TCC prompts. When `lsappinfo` fails or prints nothing, the job is not blocked; the miss is logged. Every
-check logs a `desktop-check` line (the frontmost app) to the job's log and the hooks log.
+that machine's GUI session (never an agent, never cua). The check uses `lsappinfo` and `window-list` alone:
+AppleScript or System Events would raise TCC prompts. When `lsappinfo` fails or prints nothing, the job is not blocked
+unless a dialog is on screen; when `window-list` is missing (a failed compile), fails or passes its 5 s deadline, a
+dialog is seen only in front, as before it existed. Either miss is logged. Every check logs a `desktop-check` line (the
+frontmost app) to the job's log and the hooks log.
 
 **The alert.** A refused job opens the machine's dialog episode, and its `ci-kit-alert` issue in
 `SSFSKIM/ci-kit-sandbox`, when none is open. The dialog watcher ([below](#the-dialog-watcher)) shares the episode and
@@ -465,18 +482,18 @@ ssh mini 'cat ~/Library/Logs/ci-kit/shared-hold ~/Library/Logs/ci-kit/shared-run
 
 The job hook sees a dialog only when a job starts. On 2026-10-17 securityd crashed, and a SecurityAgent keychain-unlock
 dialog covered the mini for 12 minutes; MAWS was holding its runs, so no job started and nobody was told. The watcher,
-the LaunchAgent `com.ssfskim.ci-kit.dialog-watch`, reads the frontmost app at load and every 60 s, whether or not a job
-runs. It runs `~/actions-runner-maws/ci-kit/hooks/dialog-watch.sh`, which `install.sh` copies with the hooks, in every
+the LaunchAgent `com.ssfskim.ci-kit.dialog-watch`, reads the frontmost app and the windows on screen at load and every
+60 s, whether or not a job runs. It runs `~/actions-runner-maws/ci-kit/hooks/dialog-watch.sh`, which `install.sh` copies with the hooks, in every
 mode (`--disabled` turns off the runner, not the alerts), and removes with `--uninstall`.
 
 **One episode per machine, from either side.** The watcher and the job hook share `mac/hooks/dialog.sh`: the dialog
-list, the read-only `lsappinfo` read, the source attribution and the episode, kept in
+list, the read-only `lsappinfo` and `window-list` reads, the source attribution and the episode, kept in
 `~/Library/Logs/ci-kit/dialog-alert.state`. They read and rewrite it under a lock, so one episode is one issue
 whichever side sees the dialog first. The state is the machine's own: a machine comments on and closes only the issue
 it opened, never another machine's.
 
-- **Opening.** The watcher opens an episode when a dialog holds the front on two consecutive reads, at most 150 s
-  apart, so a prompt answered within the minute alerts nobody. A refused job opens one at once, since a job was
+- **Opening.** The watcher opens an episode when a dialog is up, in front or on screen without focus, on two
+  consecutive reads, at most 150 s apart (a dialog that loses focus but stays on screen is the same episode), so a prompt answered within the minute alerts nobody. A refused job opens one at once, since a job was
   already lost.
 - **First seen** is the first read that saw the dialog: the watcher's single read, if a job comes before its second.
   The state keeps it, so every later refusal and the title carry the same time.
@@ -519,8 +536,11 @@ ci-kit alert: rental: loginwindow since 2026-10-17T05:12Z
 - ` (<source>)` follows only when attribution found one.
 
 The kit's other alerts (`ci-kit alert: pool hours on …`, `pool server …`, `bake builder …`, `GCE VM …`) and the
-dialog alerts opened before this format never match it. The body adds the time, the frontmost app, the first-seen
-second, who opened it (the watcher, or a refused job and its run id), the source and its log line.
+dialog alerts opened before this format never match it. The body adds the time, the dialog and how it holds the
+desktop (`Dialog: SecurityAgent holds focus`, or `… is on screen without focus (pid …, layer …, <w>x<h> at <x>,<y>)`),
+the frontmost app, the first-seen second, who opened it (the watcher, or a refused job and its run id), the source and
+its log line. A dialog on screen without focus is attributed as one in front is: UserNotificationCenter's TCC
+requests are read before its own process came to front.
 
 ### The drain
 
@@ -585,8 +605,9 @@ dismissed and the episode closes.
   instance as `shared runner <n>`. Each wrapper's own `runner-hold:` lines are in its instance's
   `mac-runner[-<n>].out.log`.
 
-**Cheap and bounded.** A read with no dialog and no episode costs two `lsappinfo` calls, 5 s deadline each, and writes
-nothing. Every other external call has its own supervised deadline, which kills and reaps it even when it ignores
+**Cheap and bounded.** A read with no dialog and no episode costs two `lsappinfo` calls and one `window-list` run, 5 s
+deadline each, and writes nothing. A window list that cannot be read is logged when that starts and when it ends, not
+at every read. Every other external call has its own supervised deadline, which kills and reaps it even when it ignores
 SIGALRM: 10 s for each `log`, `gh` and `launchctl` call and for the runner-state read. The watcher never clicks,
 types, dismisses or focuses anything, and uses no AppleScript and no new permission.
 
@@ -722,6 +743,9 @@ ssh $host 'for app in LibreOffice "Google Chrome"; do xattr -p com.apple.quarant
 #   01c1;… (approved) or "No such xattr" for each; 0181;… is not yet approved
 ssh $host '~/actions-runner-maws/ci-kit/hooks/cursor-park --describe'
 #   expect: 2560x1440@2x
+ssh $host '~/actions-runner-maws/ci-kit/hooks/window-list | cut -f1-3,8,9'
+#   expect: one line per window on screen (pid, layer, alpha, bundle id, owner), none of SecurityAgent,
+#   UserNotificationCenter, CoreServicesUIAgent or loginwindow while no dialog is up
 ```
 
 **Why `/bin/bash`, and nothing else.** The only grant the mini's jobs hold is Full Disk Access, and they reach it

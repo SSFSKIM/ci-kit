@@ -1,7 +1,7 @@
 #!/bin/bash
 # Installs the mac lane (I10, docs/mac-lane.md) on this Mac: GitHub Actions runners for SSFSKIM/MAWS, each run by a
 # LaunchAgent in the logged-in GUI session, with the job hooks that kill what a job left under its work directory; and
-# the dialog watcher, the LaunchAgent com.ssfskim.ci-kit.dialog-watch, which alerts on a system dialog in front every
+# the dialog watcher, the LaunchAgent com.ssfskim.ci-kit.dialog-watch, which alerts on a system dialog on screen every
 # 60 s and keeps the runners stopped while one holds the desktop.
 #
 # The runners are the machine's instances:
@@ -280,12 +280,21 @@ token=
 hook_files=(job-started.sh job-completed.sh desktop-check.sh desktop-posture.sh dialog.sh dialog-watch.sh runner-hold.sh
   runner-state.py sweep.mjs strays.mjs terminate.mjs instances.sh shared-hold.sh)
 mkdir -p "$LOG_DIR" "$LAUNCH_AGENTS"
-# The cursor park is optional. A failed compiler may leave output, which must not be published as a working helper.
+# The compiled helpers are optional: without the cursor park jobs start with the cursor where it is, and without the
+# window list the dialog check sees a dialog only in front (dialog.sh). A failed compiler may leave output, which must
+# not be published as a working helper.
 [[ -n $tmp ]] || tmp=$(mktemp -d)
-if ! xcrun swiftc -O -o "$tmp/cursor-park" "$here/hooks/cursor-park.swift" 2>"$LOG_DIR/cursor-park-build.log"; then
-  rm -f "$tmp/cursor-park"
-  say "warning: cursor-park did not compile (see $LOG_DIR/cursor-park-build.log); jobs start without the cursor park"
-fi
+helpers=()
+compile() { # <helper> <what is lost without it>
+  if xcrun swiftc -O -o "$tmp/$1" "$here/hooks/$1.swift" 2>"$LOG_DIR/$1-build.log"; then
+    helpers+=("$1")
+  else
+    rm -f "$tmp/$1"
+    say "warning: $1 did not compile (see $LOG_DIR/$1-build.log); $2"
+  fi
+}
+compile cursor-park 'jobs start without the cursor park'
+compile window-list 'the dialog check sees a dialog only in front'
 # Every instance's set is staged and checked before any goes live. A sibling keeps staging on the same volume.
 for ((n = 1; n <= last; n++)); do
   root=$(root_of "$n")
@@ -293,7 +302,7 @@ for ((n = 1; n <= last; n++)); do
   dir=$(mktemp -d "$root/ci-kit/.hooks.XXXXXX")
   staged+=("$dir")
   for file in "${hook_files[@]}"; do cp "$here/hooks/$file" "$dir/"; done
-  [[ ! -f $tmp/cursor-park ]] || cp "$tmp/cursor-park" "$dir/cursor-park"
+  for helper in ${helpers[@]+"${helpers[@]}"}; do cp "$tmp/$helper" "$dir/$helper"; done
   chmod +x "$dir/"*.sh
   for file in "${hook_files[@]}"; do
     [[ -f $dir/$file && -r $dir/$file ]] || die "staged hook missing or unreadable: $file"
@@ -302,9 +311,9 @@ for ((n = 1; n <= last; n++)); do
       bash -n "$dir/$file"
     fi
   done
-  if [[ -f $dir/cursor-park ]]; then
-    [[ -x $dir/cursor-park ]] || die 'staged cursor-park not executable'
-  fi
+  for helper in ${helpers[@]+"${helpers[@]}"}; do
+    [[ -x $dir/$helper ]] || die "staged $helper not executable"
+  done
 done
 # Two renames (old -> backup, staged -> hooks) leave a gap at the fixed paths in .env. Darwin's RENAME_SWAP
 # exchanges both directories in one operation, so a job starting now still finds a complete set at hooks/.
