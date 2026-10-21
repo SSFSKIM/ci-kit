@@ -537,6 +537,12 @@ Each is written here in full when its condition holds:
     `package.json` and `.github` sparsely, with no history, and a full fetch there costs every run.
   - The collector changes (never a selected base; an explicit list when shorter) follow from the store's delta design:
     a selected run of 200 cases against a 22,500-case base would otherwise store about 22,300 removed ids per line.
+  - Built in ci-kit #64 (merge 919f0f6; `reviewer-medium` found nothing material; gate green 39568163133):
+    - a selected run, a fallback that ran the full suite included, sets neither a day's base nor its durations, since
+      the durations snapshot must cover every file;
+    - the explicit form is `ids`, chosen when its serialized UTF-8 size is smaller than the delta's;
+    - new skipped sets carry a hash, and old lines' skipped deltas without one are checked by count only;
+    - the existing store (8 lines, 6 reports, 112,440 memberships) reconstructs with the new readers.
 
 ## Surprises & Discoveries
 
