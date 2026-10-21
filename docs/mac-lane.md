@@ -385,7 +385,11 @@ carries `ci-kit-mac-shared` alone, with none of the runner's defaults, so a job 
 label, and nothing asking for `self-hosted`, `macOS` or `ARM64` can. **What a calling repository does to opt a group
 in:** run it on `runs-on: [ci-kit-mac-shared]` (MAWS: its `MAC_SHARED_E2E` list), only once a trial has shown its
 results unchanged beside neighbours; and give such a job a `timeout-minutes` that covers the shared wait below as well
-as its run. Every other job keeps its labels and runs alone.
+as its run. Every other job keeps its labels and runs alone. **What such a job may rely on:** its runner environment
+sets `CI_KIT_SHARED_DESKTOP=1`, which no exclusive job's does, and its runner's name, `RUNNER_NAME`, is
+`ci-kit-mac-<machine>-<n>`, ending in `-<n>`, the instance's number (2 and above); `install.sh` keeps the short name of
+a machine with shared instances from ending in `-<number>` itself. MAWS gives each instance its own window origin and
+build cache by that number.
 
 **Exclusive and shared jobs never overlap.** Both kinds of job-started hook decide under one lock,
 `~/Library/Logs/ci-kit/desktop.lock` (flock(2) through perl, which the kernel releases with its holder, so a process

@@ -430,6 +430,8 @@ test('--shared 2 registers two shared instances, named after the machine, each w
     const n = i + 2;
     const args = argsOf(dir);
     assert.equal(args[args.indexOf('--name') + 1], `ci-kit-mac-mini-${n}`);
+    // A contract (docs/mac-lane.md): under CI_KIT_SHARED_DESKTOP=1, MAWS reads the instance from RUNNER_NAME's last -<n>.
+    assert.equal(/-([0-9]+)$/.exec(args[args.indexOf('--name') + 1])?.[1], String(n));
     assert.ok(!args.some((arg) => arg.includes('registration-token-123')), 'the token is not an argument');
     assert.equal(readFileSync(join(dir, '.env'), 'utf8'), [
       'LANG=en_US.UTF-8', `ACTIONS_RUNNER_HOOK_JOB_STARTED=${dir}/ci-kit/hooks/job-started.sh`,
