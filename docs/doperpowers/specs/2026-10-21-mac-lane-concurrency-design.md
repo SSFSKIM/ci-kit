@@ -906,9 +906,9 @@ hooks exist; and `docs/mac-lane.md` has a section for the lane and one for the p
   queue read with `gh` through `dialog.sh`'s bounded call and token handling, `vm-lane.lock`, the golden pointer, the
   alerts (one open issue per kind, closed when the condition clears, as the stuck-hold alert is). No admission
   script: the launcher is the only automated boot.
-- **`mac/vm/bake.sh`:** `--bake`, `--register` (both identities, tokens on stdin), `--trial`, `--promote`,
-  `--retire`, each refusing outside the maintenance hold (the hold file, no reservation, the launcher's agent not
-  loaded), the reserve check, the verified stop before every delete, the trial record, the promote that finishes from
+- **`mac/vm/bake.sh`:** `--bake`, `--register` (both identities, tokens on stdin), `--trial` and `--promote`, each
+  refusing outside the maintenance hold (the hold file, no reservation, the launcher's agent not loaded); `--retire`,
+  which needs no hold (maintenance step 8) and refuses a VM that is running or is the pointer's; the reserve check, the verified stop before every delete, the trial record, the promote that finishes from
   either name.
 - **The exclusive hook's classification:** `job-started.sh` on a Mac with the lane reads the workflow at
   `GITHUB_WORKFLOW_SHA` for the contract line, logs `vm-safe:`, and for an unknown job raises its claim and waits on
