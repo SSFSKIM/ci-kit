@@ -57,8 +57,20 @@ const firstLine = (text) => (text ?? '').split('\n').map((l) => l.trim()).find((
 //   none.
 // - `status` is 'failed' for a <failure> or an <error>, else 'skipped' for a <skipped>, else 'passed'. `message` is
 //   the first line of the failure's message attribute, else of its text.
-// Throws on a report that is not well-formed: an unterminated or mismatched tag, or no <testsuites>/<testsuite>.
+// Throws on a report that is not well-formed: an unterminated or mismatched tag, a testcase inside a testcase, or no
+// <testsuites>/<testsuite>. Every error it throws begins `junit: `: the reader is pure over its input, so a fault
+// with no rule of its own is the report's too, and it is named by its kind alone, since its message could quote the
+// report.
 export function parseJUnit(xml) {
+  try {
+    return scan(xml);
+  } catch (err) {
+    if (/^junit: /.test(err?.message ?? '')) throw err;
+    throw new Error(`junit: the report breaks the reader (${err?.name ?? 'Error'})`);
+  }
+}
+
+function scan(xml) {
   const suites = [];
   const cases = [];
   const stack = []; // open element names
@@ -144,7 +156,10 @@ export function parseJUnit(xml) {
     const attrs = attributes(rawAttrs);
     if (name === 'testsuites') sawRoot = true;
     else if (name === 'testsuite') openSuite(attrs);
-    else if (name === 'testcase') openCase(attrs);
+    else if (name === 'testcase') {
+      if (current) throw new Error(`junit: a nested testcase at offset ${lt}`);
+      openCase(attrs);
+    }
     else if ((name === 'failure' || name === 'error') && current) {
       current.status = 'failed';
       if (selfClosing) current.message = firstLine(attrs.message);

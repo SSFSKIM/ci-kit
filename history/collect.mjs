@@ -249,6 +249,23 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
     }
   }
 
+  // 7. Before anything is written: a link may name only a present line this pass leaves on disk, one stored or a new
+  //    one not held back (a held-back line's key may still hold its `missing` line). A new line naming any other is
+  //    held back too, which can strand a line that names it, so this repeats until nothing changes. A relinked line
+  //    naming one is dropped; the pass that takes the held-back line links it again.
+  const names = (keys, l) => !l.previous || keys.has(lineKey({ ...l.previous, job: l.job }));
+  let present;
+  for (let changed = true; changed; ) {
+    present = new Set([...store.lines(), ...fresh.filter((l) => !unlinked.has(l))].filter((l) => l.report === 'present').map(lineKey));
+    changed = false;
+    for (const line of fresh) {
+      if (unlinked.has(line) || names(present, line)) continue;
+      unlinked.add(line);
+      changed = true;
+    }
+  }
+  const replacing = relinked.filter((l) => names(present, l));
+
   for (const line of fresh) {
     if (unlinked.has(line)) continue;
     store.add(line);
@@ -257,8 +274,8 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
     if (line.artifact) counts.artifacts += 1;
     counts.failures += line.failed?.length ?? 0;
   }
-  for (const line of relinked) store.replace(line);
-  counts.relinked = relinked.length;
+  for (const line of replacing) store.replace(line);
+  counts.relinked = replacing.length;
   counts.written = store.flush();
   return { counts, errors };
 }

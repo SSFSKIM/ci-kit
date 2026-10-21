@@ -315,7 +315,68 @@ for (const variant of ['running', 'missing']) {
   });
 }
 
-test('a failure of the machine, not the artifact, writes nothing and is tried again; a defective archive is unparseable', async (t) => {
+// The keys of the lines on disk whose previous run names no present line on disk.
+const dangling = (root) => {
+  const lines = readdirSync(join(root, REPO, 'runs')).flatMap((f) => linesOf(root, f.replace(/\.jsonl$/, '')));
+  const present = new Set(lines.filter((l) => l.report === 'present').map((l) => `${l.run}/${l.attempt}/${l.job}`));
+  return lines.filter((l) => l.previous && !present.has(`${l.previous.run}/${l.previous.attempt}/${l.job}`)).map((l) => `${l.run}/${l.attempt}/${l.job}`);
+};
+
+// A change of three runs, A < B < C by their start, each tested commit descending from the last, and a re-run of A
+// after them all. A's reports are listed only once B and C are stored (its lines `missing` till then). On the pass
+// that takes them, linking C again fails, so A is held back: B's new link to A is dropped, and A's re-run, which
+// names A, is held back with it.
+test('a line held back leaves no link to it on disk; the pass that takes it links what names it', async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  run({ id: 402, ref: 'ci/chg-aaaaaaaa', tested: c('a'), tree: 'TA', created: '2026-10-21T09:00:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-21T09:05:00Z', completed: '2026-10-21T09:12:00Z', suites: suitesA() }],
+    [{ name: 'unit', started: '2026-10-21T09:30:00Z', completed: '2026-10-21T09:40:00Z', suites: suitesA() }],
+  ] });
+  run({ id: 403, ref: 'ci/chg-bbbbbbbb', tested: c('b'), tree: 'TB', created: '2026-10-21T09:08:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-21T09:10:00Z', completed: '2026-10-21T09:20:00Z', suites: suitesA() }],
+  ] });
+  run({ id: 404, ref: 'ci/chg-cccccccc', tested: c('c'), tree: 'TC', created: '2026-10-21T09:13:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-21T09:15:00Z', completed: '2026-10-21T09:25:00Z', suites: suitesA() }],
+  ] });
+  repo.ancestors[c('b')] = [c('a')];
+  repo.ancestors[c('c')] = [c('a'), c('b')];
+  repo.changed[`${c('a')}...${c('b')}`] = [{ filename: 'src/b.ts' }];
+  repo.changed[`${c('b')}...${c('c')}`] = [{ filename: 'src/c.ts' }];
+  const reportsA = repo.artifacts.filter((a) => a.run === 402);
+  repo.artifacts = repo.artifacts.filter((a) => a.run !== 402);
+  const { pass } = passes(repo, root);
+  const link = (run, relation, paths) => ({ run, attempt: 1, relation, paths, truncated: false });
+  const previous = (key) => lineOf(root, '2026-10-21', key).previous;
+
+  const first = await pass();
+  assert.deepEqual(first.errors, []);
+  assert.deepEqual(['402/1/unit', '402/2/unit'].map((k) => lineOf(root, '2026-10-21', k).report), ['missing', 'missing']);
+  assert.deepEqual([previous('403/1/unit'), previous('404/1/unit')], [null, link(403, 'descendant', ['src/c.ts'])]);
+
+  repo.artifacts.push(...reportsA);
+  repo.failing = [`${c('b')}...${c('c')}`];
+  const second = await pass();
+  assert.deepEqual(second.errors, [`run 404 attempt 1 unit: previous run: HTTP 503 GET /repos/o/r/compare/${c('b')}...${c('c')}?per_page=1: Service Unavailable`]);
+  assert.deepEqual([second.counts.lines, second.counts.relinked], [0, 0]);
+  assert.deepEqual(dangling(root), []);
+  assert.deepEqual(['402/1/unit', '402/2/unit'].map((k) => lineOf(root, '2026-10-21', k).report), ['missing', 'missing']);
+  assert.deepEqual([previous('403/1/unit'), previous('404/1/unit')], [null, link(403, 'descendant', ['src/c.ts'])]);
+
+  repo.failing = [];
+  const third = await pass();
+  assert.deepEqual(third.errors, []);
+  assert.deepEqual([third.counts.lines, third.counts.present, third.counts.relinked], [2, 2, 1]);
+  assert.deepEqual(dangling(root), []);
+  assert.deepEqual(['402/1/unit', '402/2/unit', '403/1/unit', '404/1/unit'].map(previous), [
+    null,
+    link(402, 'same-tree', []),
+    link(402, 'descendant', ['src/b.ts']),
+    link(403, 'descendant', ['src/c.ts']),
+  ]);
+});
+
+test('a failure of the machine, not the artifact, writes nothing and is tried again; a defective archive or a report that breaks the reader is unparseable, once', async (t) => {
   const root = tempRoot(t);
   const { repo, run } = builder();
   run({ id: 501, ref: 'ci/disk-55555555', tested: c('5'), tree: 'T5', created: '2026-10-21T10:00:00Z', attempts: [
@@ -327,23 +388,29 @@ test('a failure of the machine, not the artifact, writes nothing and is tried ag
   run({ id: 503, ref: 'ci/empty-77777777', tested: c('7'), tree: 'T7', created: '2026-10-21T10:00:00Z', attempts: [
     [{ name: 'unit', started: '2026-10-21T10:05:00Z', completed: '2026-10-21T10:17:00Z', zip: zipOf({}) }],
   ] });
+  run({ id: 504, ref: 'ci/nested-88888888', tested: c('8'), tree: 'T8', created: '2026-10-21T10:00:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-21T10:05:00Z', completed: '2026-10-21T10:18:00Z', xml: '<testsuite><testcase><failure><testcase/></failure></testcase></testsuite>' }],
+  ] });
   const zip501 = repo.artifacts.find((a) => a.run === 501).zip;
+  const nested = repo.artifacts.find((a) => a.run === 504).id;
   // the disk fills while run 501's archive is written; the error's message names a path from the artifact
   const full = (zip) => {
     if (!zip.equals(zip501)) return readArtifact(zip);
     throw Object.assign(new Error("ENOSPC: no space left on device, open '/tmp/x/src/a.test.ts.xml'"), { code: 'ENOSPC', errno: -28, syscall: 'open' });
   };
-  const { pass } = passes(repo, root);
+  const { fake, pass } = passes(repo, root);
 
   const first = await pass({ readZip: full });
   assert.deepEqual(first.errors, ['run 501 attempt 1 unit: Error ENOSPC']);
-  assert.deepEqual([first.counts.lines, first.counts.unparseable], [2, 2]);
-  assert.deepEqual(linesOf(root, '2026-10-21').map((l) => `${l.run}:${l.report}`), ['502:unparseable', '503:unparseable']);
+  assert.deepEqual([first.counts.lines, first.counts.unparseable], [3, 3]);
+  assert.deepEqual(linesOf(root, '2026-10-21').map((l) => `${l.run}:${l.report}`), ['502:unparseable', '503:unparseable', '504:unparseable']);
 
+  const asked = fake.requests.length;
   const second = await pass();
   assert.deepEqual(second.errors, []);
   assert.deepEqual([second.counts.lines, second.counts.present], [1, 1]);
   assert.equal(lineOf(root, '2026-10-21', '501/1/unit').report, 'present');
+  assert.ok(!fake.requests.slice(asked).includes(`/actions/artifacts/${nested}/zip`));
 });
 
 test("unzip's statuses: a defective archive is the artifact's fault, warnings are not", () => {

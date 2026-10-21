@@ -87,7 +87,7 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), { status
 //   changed: { '<base>...<head>': [{ filename, previous_filename? }] }
 //   gone: [sha] (commits GitHub no longer has: a compare naming one is a 404)
 //   artifacts: [{ id, name, run, created_at, expired?, zip }]
-//   failing: [artifact id] (artifacts whose download fails with a 502)
+//   failing: [artifact id | '<base>...<head>'] (downloads that fail with a 502, comparisons that fail with a 503)
 // `requests` records every path asked for.
 export function fakeGitHub(repo) {
   const requests = [];
@@ -135,6 +135,7 @@ export function fakeGitHub(repo) {
     if ((m = /^\/compare\/([0-9a-f]+)\.\.\.([0-9a-f]+)$/.exec(path))) {
       const [, base, head] = m;
       if ((repo.gone ?? []).includes(base) || (repo.gone ?? []).includes(head)) return json({ message: 'Not Found' }, 404);
+      if ((repo.failing ?? []).includes(`${base}...${head}`)) return json({ message: 'Service Unavailable' }, 503);
       const ahead = (repo.ancestors?.[head] ?? []).includes(base);
       return json({ status: ahead ? 'ahead' : 'diverged', files: ahead ? (repo.changed?.[`${base}...${head}`] ?? []) : [] });
     }

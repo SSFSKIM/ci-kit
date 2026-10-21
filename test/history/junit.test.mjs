@@ -103,6 +103,12 @@ test('a report that is not well-formed is refused, not half read', () => {
   assert.throws(() => parseJUnit('<testsuites><testsuite name="s" time=1></testsuite></testsuites>'), /malformed tag/);
   assert.throws(() => parseJUnit('<html><body>not a report</body></html>'), /no <testsuites> or <testsuite>/);
   assert.throws(() => parseJUnit('<testsuites><!-- never closed'), /unterminated comment/);
+  assert.throws(() => parseJUnit('<testsuite><testcase><failure><testcase/></failure></testcase></testsuite>'), { message: 'junit: a nested testcase at offset 30' });
+});
+
+test('a fault the reader has no rule for is a junit error named by its kind, never by its message', () => {
+  const report = { length: 1, indexOf: () => { throw new RangeError('src/a.test.ts > a test name'); } };
+  assert.throws(() => parseJUnit(report), { message: 'junit: the report breaks the reader (RangeError)' });
 });
 
 test('a report the size of the real one (21k cases) parses in under two seconds', () => {
