@@ -16,7 +16,7 @@ import { createGce, accessToken } from '../../lib/gce.mjs';
 import { createAppTokens } from '../../lib/github-app.mjs';
 import { createGitHub } from '../../lib/github.mjs';
 import { parseGceConfig } from '../launcher/config.mjs';
-import { bakeRunId, bakeNames, checkInstance, checkJitRequest, refusal, CHECK, CHECK_SCOPE } from '../bake/plan.mjs';
+import { bakeRunId, bakeNames, checkInstance, checkJitRequest, refusal, ownsBakeInstance, CHECK, CHECK_SCOPE } from '../bake/plan.mjs';
 
 const POLL_MS = 2_000;
 const SAMPLE_TIMEOUT_MS = 8 * 60_000;
@@ -48,6 +48,38 @@ export function samplePlacement(cfg, { region, machine } = {}) {
   return { placement, machine: machine ?? placement.machines['4'] };
 }
 
+// Removes what one sample made, as the bake's cleanup does: its VMs found by the run's label (an insert accepted whose
+// wait failed left no zone to address it by), its run cancelled if still going, and its runner unregistered, found by
+// name when the registration's response was lost. A 404 counts as done; a runner that just finished its job is
+// refused (422) for a while, and retried.
+export async function cleanUpSample({ gce, gh, runId, runner, run, log, sleep: wait = sleep }) {
+  try {
+    for (const i of (await gce.instances('labels.ci-kit=gce-builder')).filter((x) => ownsBakeInstance(x, runId))) {
+      await gce.deleteInstance(i.zone.split('/').pop(), i.name);
+    }
+  } catch (err) {
+    log(`cleanup ${runId}: instances: ${err.message}`);
+  }
+  if (run) {
+    const state = await gh.getRun(CHECK.repo, run).catch(() => null);
+    if (state && state.status !== 'completed') await gh.cancelRun(CHECK.repo, run).catch((err) => log(`cancel ${run}: ${err.message}`));
+  }
+  const id = runner.id ?? (await gh.runners(CHECK.repo).catch(() => [])).find((r) => r.name === runner.name)?.id;
+  for (let attempt = 1; id && attempt <= 13; attempt += 1) {
+    try {
+      await gh.deleteRunner(CHECK.repo, id);
+      return;
+    } catch (err) {
+      if (err.status === 404) return;
+      if (err.status !== 422 || attempt === 13) {
+        log(`runner ${runner.name} (${id}) not unregistered: ${err.message}`);
+        return;
+      }
+      await wait(30_000);
+    }
+  }
+}
+
 class QuotaStop extends Error {}
 
 async function sample({ gce, gh, cfg, placement, project, image, machine, token, out, log }) {
@@ -55,11 +87,11 @@ async function sample({ gce, gh, cfg, placement, project, image, machine, token,
   const names = bakeNames(runId, 'sample00');
   const record = { runId, image, region: placement.region, machine, vm: names.check };
   let zone = null;
-  let runnerId = null;
+  const runner = { name: names.runner, id: null }; // named before the call: a lost response leaves no id
   let run = null;
   try {
     const jit = await gh.jitConfig(CHECK.repo, checkJitRequest(names));
-    runnerId = jit.runner.id;
+    runner.id = jit.runner.id;
     run = (await gh.dispatchWorkflow(CHECK.repo, CHECK.workflow, { ref: CHECK.ref, inputs: { bake: runId } })).workflow_run_id;
     for (const z of placement.zones) {
       try {
@@ -120,26 +152,7 @@ async function sample({ gce, gh, cfg, placement, project, image, machine, token,
     log(`${names.check} (${machine}@${zone}): ${JSON.stringify(stagesOf(record))} ${record.conclusion ?? 'unfinished'}, report ${record.report ?? 'unseen'}`);
     return record;
   } finally {
-    if (zone) await gce.deleteInstance(zone, names.check).catch((err) => log(`delete ${names.check}: ${err.message}`));
-    if (run) {
-      const state = await gh.getRun(CHECK.repo, run).catch(() => null);
-      if (state && state.status !== 'completed') await gh.cancelRun(CHECK.repo, run).catch((err) => log(`cancel ${run}: ${err.message}`));
-    }
-    if (runnerId) {
-      for (let attempt = 1; attempt <= 13; attempt += 1) {
-        try {
-          await gh.deleteRunner(CHECK.repo, runnerId);
-          break;
-        } catch (err) {
-          if (err.status === 404) break;
-          if (err.status !== 422 || attempt === 13) {
-            log(`runner ${names.runner} (${runnerId}) not unregistered: ${err.message}`);
-            break;
-          }
-          await sleep(30_000);
-        }
-      }
-    }
+    await cleanUpSample({ gce, gh, runId, runner, run, log });
   }
 }
 
