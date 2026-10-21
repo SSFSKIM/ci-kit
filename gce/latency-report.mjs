@@ -5,7 +5,8 @@
 // (default: the last 24 h, every served repo). The rows are the pool ledger's (one per VM: its creation, its RUNNING
 // time, and the job it ran with that job's queued and started times); the ticks are the launcher's `tick:` log lines
 // in Cloud Logging (each tick's start, its duration and its first insert). A row or tick without a stage's fields,
-// as those written before M3, counts in none of that stage's samples.
+// as those written before M3, counts in none of that stage's samples. The whole pool's stages come first, then each
+// machine type's VM stages, insert accepted → job started (M3's target, per VM) among them.
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -37,6 +38,8 @@ export function stages({ rows, ticks }) {
     insertToRunning: present(rows.map((r) => gap(ms(r.created), ms(r.running)))),
     runningToStarted: present(rows.map((r) => gap(ms(r.running), ms(r.job?.started)))),
     queuedToStarted: present(rows.map((r) => gap(ms(r.job?.queued), ms(r.job?.started)))),
+    // M3's target statistic, each VM's own: summing the stages' medians is not the median of the whole.
+    insertToStarted: present(rows.map((r) => gap(ms(r.created), ms(r.job?.started)))),
   };
 }
 
@@ -53,7 +56,7 @@ export const ticksOf = (entries) => entries
 
 const quantile = (sorted, q) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))];
 function summary(samples) {
-  const s = [...samples].sort((a, b) => a - b);
+  const s = [...(samples ?? [])].sort((a, b) => a - b);
   if (!s.length) return null;
   const mid = s.length / 2;
   const median = s.length % 2 ? s[Math.floor(mid)] : (s[mid - 1] + s[mid]) / 2;
@@ -66,20 +69,34 @@ const LINES = [
   ['tickToFirstInsert', 'tick start → first insert sent'],
   ['insertToRunning', 'insert accepted → RUNNING'],
   ['runningToStarted', 'RUNNING → job started'],
+  ['insertToStarted', 'insert accepted → job started'],
   ['queuedToStarted', 'queued → started'],
 ];
+// The stages one VM's row times on its own, which therefore split by machine type.
+const VM_LINES = LINES.filter(([key]) => ['insertToRunning', 'runningToStarted', 'insertToStarted', 'queuedToStarted'].includes(key));
+const sec = (v) => (v / 1000).toFixed(1);
+const line = (label, samples) => {
+  const s = summary(samples);
+  return `${label.padEnd(34)}${(s ? `${sec(s.median)} s` : '-').padEnd(10)}${(s ? `${sec(s.p10)}–${sec(s.p90)}` : '-').padEnd(14)}${s?.n ?? 0}`;
+};
 
 export function renderReport(samples, { from, to, rows, ticks }) {
-  const sec = (v) => (v / 1000).toFixed(1);
   const out = [
     `GCE pool start latency, ${new Date(from).toISOString()} → ${new Date(to).toISOString()}: ${rows} ledger rows, ${ticks} ticks`,
     `${'stage'.padEnd(34)}${'median'.padEnd(10)}${'p10–p90'.padEnd(14)}n`,
   ];
-  for (const [key, label] of LINES) {
-    const s = summary(samples[key]);
-    out.push(`${label.padEnd(34)}${(s ? `${sec(s.median)} s` : '-').padEnd(10)}${(s ? `${sec(s.p10)}–${sec(s.p90)}` : '-').padEnd(14)}${s?.n ?? 0}`);
-  }
+  for (const [key, label] of LINES) out.push(line(label, samples[key]));
   return out.join('\n');
+}
+
+// Each machine type's VM stages on their own (the c3d-highcpu-4 median beside the C4D one), machines in name order.
+export function renderByMachine(rows) {
+  const groups = new Map();
+  for (const r of rows) groups.set(r.machine ?? '(no machine)', [...(groups.get(r.machine ?? '(no machine)') ?? []), r]);
+  return [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([machine, list]) => {
+    const samples = stages({ rows: list, ticks: [] });
+    return [`${machine} (${list.length} VM${list.length === 1 ? '' : 's'})`, ...VM_LINES.map(([key, label]) => line(label, samples[key]))].join('\n');
+  }).join('\n\n');
 }
 
 // ── reading the live ledger and logs ─────────────────────────────────────────────────────────────────────────────
@@ -97,10 +114,13 @@ function readTicks(project, from, to) {
   return ticksOf(JSON.parse(out || '[]'));
 }
 
-// The rows updated since `from` on every ledger issue (a row is updated at its VM's deletion, after its job).
-async function readRows(gh, { repo, issue_title: title }, from) {
-  const issues = (await gh.openIssues(repo)).filter((i) => !i.pull_request && (i.title === title || i.title.startsWith(`${title} from `)));
+// The rows updated since `from` on every ledger issue (a row is updated at its VM's deletion, after its job): the
+// open ones, and the closed (rotated) ones updated since `from`. A closed issue was closed after its last comment
+// changed, so one holding a row of the window was itself updated in it.
+export async function readRows(gh, { repo, issue_title: title }, from) {
   const since = new Date(from).toISOString();
+  const listed = [...(await gh.openIssues(repo)), ...(await gh.closedIssuesSince(repo, since))];
+  const issues = listed.filter((i) => !i.pull_request && (i.title === title || i.title.startsWith(`${title} from `)));
   return rowsOf((await Promise.all(issues.map((i) => gh.issueComments(repo, i.number, { since })))).flat());
 }
 
@@ -125,6 +145,7 @@ async function main(argv) {
   // A row counts when its VM was created in the span; its job's times then fall in or just after it.
   const rows = all.filter((r) => (!opts.repo || r.repo === opts.repo) && ms(r.created) >= from && ms(r.created) <= to);
   console.log(renderReport(stages({ rows, ticks }), { from, to, rows: rows.length, ticks: ticks.length }));
+  console.log(`\nBy machine type\n\n${renderByMachine(rows)}`);
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
