@@ -5,7 +5,9 @@
 // and records when Compute Engine accepted the insert (creationTimestamp), when it called the VM RUNNING
 // (lastStartTimestamp) and when GitHub started the job; the VM's serial console is kept beside the result. From the
 // Mac, with gcloud's default account:
-//   node gce/tools/boot-sample.mjs --image <image name> [--machine c3d-highcpu-4] [--count 5] [--parallel 2] [--out <dir>]
+//   node gce/tools/boot-sample.mjs --image <image name> [--region <r>] [--machine <m>] [--count 5] [--parallel 2] [--out <dir>]
+// It samples one placement of gce.json: --region's (default: the first), on its zones, subnetwork and boot disk type,
+// with --machine (default: the placement's size-4 machine).
 // Every VM and runner it made is gone when it ends. A quota refusal stops it: the pool shares the quota.
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -13,6 +15,7 @@ import { pathToFileURL } from 'node:url';
 import { createGce, accessToken } from '../../lib/gce.mjs';
 import { createAppTokens } from '../../lib/github-app.mjs';
 import { createGitHub } from '../../lib/github.mjs';
+import { parseGceConfig } from '../launcher/config.mjs';
 import { bakeRunId, bakeNames, checkInstance, checkJitRequest, refusal, CHECK, CHECK_SCOPE } from '../bake/plan.mjs';
 
 const POLL_MS = 2_000;
@@ -37,12 +40,20 @@ export function summarize(samples) {
   return out;
 }
 
+// The placement a run samples and the machine it boots: opts.region's placement (default: the first), and
+// opts.machine (default: that placement's size-4 machine).
+export function samplePlacement(cfg, { region, machine } = {}) {
+  const placement = region ? cfg.placements.find((p) => p.region === region) : cfg.placements[0];
+  if (!placement) throw new Error(`no placement in ${region} in gce.json (${cfg.placements.map((p) => p.region).join(', ')})`);
+  return { placement, machine: machine ?? placement.machines['4'] };
+}
+
 class QuotaStop extends Error {}
 
-async function sample({ gce, gh, cfg, project, image, machine, token, out, log }) {
+async function sample({ gce, gh, cfg, placement, project, image, machine, token, out, log }) {
   const runId = bakeRunId(new Date());
   const names = bakeNames(runId, 'sample00');
-  const record = { runId, image, machine, vm: names.check };
+  const record = { runId, image, region: placement.region, machine, vm: names.check };
   let zone = null;
   let runnerId = null;
   let run = null;
@@ -50,11 +61,10 @@ async function sample({ gce, gh, cfg, project, image, machine, token, out, log }
     const jit = await gh.jitConfig(CHECK.repo, checkJitRequest(names));
     runnerId = jit.runner.id;
     run = (await gh.dispatchWorkflow(CHECK.repo, CHECK.workflow, { ref: CHECK.ref, inputs: { bake: runId } })).workflow_run_id;
-    const subnetwork = `regions/${cfg.region}/subnetworks/${cfg.subnetwork}`;
-    for (const z of cfg.zones) {
+    for (const z of placement.zones) {
       try {
         await gce.insertInstance(z, checkInstance({
-          name: names.check, zone: z, machine, runId, image: `projects/${project}/global/images/${image}`, diskGb: cfg.disk_gb, subnetwork, jit: jit.encoded_jit_config,
+          name: names.check, zone: z, machine, runId, image: `projects/${project}/global/images/${image}`, diskGb: cfg.disk_gb, placement, jit: jit.encoded_jit_config,
         }));
         zone = z;
         break;
@@ -134,10 +144,12 @@ async function sample({ gce, gh, cfg, project, image, machine, token, out, log }
 }
 
 function parseArgs(argv) {
-  const opts = { machine: 'c3d-highcpu-4', count: 5, parallel: 2, out: '.' };
+  const opts = { count: 5, parallel: 2, out: '.' };
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i].replace(/^--/, '');
-    if (!(key in opts || key === 'image') || argv[i + 1] === undefined) throw new Error('usage: node gce/tools/boot-sample.mjs --image <name> [--machine m] [--count n] [--parallel n] [--out dir]');
+    if (!(key in opts || ['image', 'region', 'machine'].includes(key)) || argv[i + 1] === undefined) {
+      throw new Error('usage: node gce/tools/boot-sample.mjs --image <name> [--region r] [--machine m] [--count n] [--parallel n] [--out dir]');
+    }
     opts[key] = ['count', 'parallel'].includes(key) ? Number(argv[i + 1]) : argv[i + 1];
   }
   if (!opts.image) throw new Error('--image is required');
@@ -147,7 +159,8 @@ function parseArgs(argv) {
 async function main(argv) {
   const opts = parseArgs(argv);
   const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
-  const cfg = JSON.parse(readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
+  const cfg = parseGceConfig(readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
+  const { placement, machine } = samplePlacement(cfg, opts);
   const token = accessToken();
   const gce = createGce({ project: cfg.project, token });
   const app = { appId: (await gce.secret('ci-kit-app-id')).trim(), pem: await gce.secret('ci-kit-app-key'), owner: 'SSFSKIM' };
@@ -161,7 +174,7 @@ async function main(argv) {
     while (left > 0 && !stop) {
       left -= 1;
       try {
-        samples.push(await sample({ gce, gh, cfg, project: cfg.project, image: opts.image, machine: opts.machine, token, out: opts.out, log }));
+        samples.push(await sample({ gce, gh, cfg, placement, project: cfg.project, image: opts.image, machine, token, out: opts.out, log }));
       } catch (err) {
         if (err instanceof QuotaStop) stop = err;
         log(`sample failed: ${err.message}`);
@@ -170,7 +183,7 @@ async function main(argv) {
   };
   await Promise.all(Array.from({ length: opts.parallel }, worker));
   writeFileSync(join(opts.out, 'samples.json'), `${JSON.stringify(samples, null, 2)}\n`);
-  console.log(JSON.stringify({ image: opts.image, machine: opts.machine, samples: samples.length, ...summarize(samples) }, null, 2));
+  console.log(JSON.stringify({ image: opts.image, region: placement.region, machine, samples: samples.length, ...summarize(samples) }, null, 2));
   if (stop) {
     console.error(`stopped: ${stop.message}`);
     process.exit(2);

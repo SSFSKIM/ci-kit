@@ -520,10 +520,11 @@ per allocation:
   of each stage of a job's wait: queued → next tick, tick start → insert accepted (the tick's first VM's
   creation), tick start → first insert sent, insert accepted → RUNNING, RUNNING → job started, and queued →
   started. A row or tick without a stage's fields (written before M3) is left out of that stage.
-- `node gce/tools/boot-sample.mjs --image <name> [--machine c3d-highcpu-4] [--count 5] [--parallel 2] [--out <dir>]`
+- `node gce/tools/boot-sample.mjs --image <name> [--region <r>] [--machine <m>] [--count 5] [--parallel 2] [--out <dir>]`
   times job VMs from an image through the bake's real-job path (one `bake-check` job per sample in ci-kit-sandbox,
-  on its own JIT runner): insert accepted → RUNNING → job started, each sample's console and `ci-kit/job` report
-  kept, and the median and range of each stage. It shares the pool's quota and stops at the first quota refusal;
+  on its own JIT runner) in one placement: `--region`'s (default: the first), on its zones, subnetwork and boot disk
+  type, with `--machine` (default: its size-4 machine). It reports insert accepted → RUNNING → job started, keeps each
+  sample's console and `ci-kit/job` report, and gives the median and range of each stage. It shares the pool's quota and stops at the first quota refusal;
   every VM and runner it made is gone when it ends.
 - `end`: `done` (its job ended, or its runner did), `cancelled-idle` (no job came within `idle_runner_minutes`, or
   its repo stopped being served), `preempted`, `max-run` (Compute Engine's run limit, or the launcher's overage
