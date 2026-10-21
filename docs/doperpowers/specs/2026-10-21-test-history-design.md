@@ -89,6 +89,10 @@ After this work:
   (09:5xZ) Baseline, S, S′, C's ceiling, D and I measured (Surprises); none of S, S′, D, I adopted. C's ceiling
   cleared the 10% bar, and its cold half showed most of the gain needs no delivered cache (arm C0, running); the
   delivery question went to CI-opt.
+  (10:3xZ) C0 adopted (−50 s); it is the combined commit, since no other arm was adopted. MAWS #104 opened from
+  current master, class 1a pool green 39582732641; CI-opt sends it to the architect and schedules `unit:darwin`.
+  Compiler-only numbers sent to CI-opt for the architect. CI-opt chose the master-ref delivery (Decision Log); its arm
+  CD is running, measured against C0.
 - [ ] M6 — The `ci-kit:optimize` skill.
 
 ## Design
@@ -545,6 +549,14 @@ Each is written here in full when its condition holds:
   - **A sixth arm, C0: `--fsModuleCache` on a fresh checkout, no delivered cache.** C's cold runs, which only write the
     cache, beat the baseline (Surprises). C0 is that run as the unit job's own step, three runs under the rule. Its
     gain needs no delivery, so it does not wait on the delivery decision.
+- 2026-10-21 (M5, CI-opt's decision on C's delivery): **a cache saved from master's ref, no bake.**
+  - The pool image's weekly bake is out: a delivered cache goes stale at a median of 10.8 h (Surprises), and a bake
+    change alters every repo's pool image.
+  - The delivery is `actions/cache`, saved by a job on MAWS master's ref (readable from every `ci/` ref). The job runs on
+    a push to master that changes the key's files, and daily. Pool spend is not a constraint (the owner's ruling).
+  - It is its own arm, CD, in a follow-up PR on top of C0. Its gain counts the restore inside it and is judged by the
+    same rule against C0, not the old baseline. Its proofs: a planted failure in a cached source module fails, and a
+    changed vitest config import restores nothing.
 - 2026-10-21 (M4 agreed with the MAWS architect): **the landing rule and the mark.**
   - A run marked `Selection: affected` never counts as landing evidence, even when a fallback ran the full suite; a red
     marked run counts as red.
@@ -654,6 +666,7 @@ Each is written here in full when its condition holds:
   | S, size across projects | 39568222090 | 399, red | 393.9 | none (App.test.tsx done at +234) | red: 2 desk-hub real-time suites failed |
   | S′, `-timing` first | 39571640636, 39572998936, 39574256403 | 439, 423, 418 (423, 21) | 419.2 | none | not adopted: −26 s, under the 42 s spread |
   | C, ceiling, cold → warm in one job | 39569475316, 39573317257, 39575395042 | cold 429, 403, 398; warm 390, 349, 364 (warm 364) | warm 359.7 (tests 50%, import 32%, environment 15%, transform 2%) | +7 to +8 s | cleared the 10% bar: −85 s (−19%) |
+  | C0, `--fsModuleCache`, empty cache, no delivery | 39580469603, 39580535339, 39581673554 | 399, 387, 418 (399, 31) | 394.8 (tests 44%, import 28%, transform 14%, environment 13%) | +387 → +395, +376 → +384, +406 → +414 | **adopted**: −50 s (−11%) |
   | D, `deps.optimizer.client` | 39570695200 | 455, red | 448.7 | +395 → +449 | red, no gain; stopped |
   | I, exploration (no exceptions) | 39569413560 | 411, red | 405.7 | +356 → +406 | 17 files red, 16 of them mocking suites |
   | I, mocking suites isolated | 39571997873, 39575551870, 39577464231; shuffled 39576834456 | 391, 423, 434 (423, 43); shuffled 405, green | 417.6 (tests 46%, import 23–24%) | +339 → +385, +364 → +418, +380 → +428 | not adopted: −26 s, under the 42 s spread |
@@ -675,6 +688,19 @@ Each is written here in full when its condition holds:
   - **The baseline's spread is about 10% of a run.** Five baseline runs on the same commit and VM type took 424–477 s.
     An arm must beat the median by more than the three-run spread (42 s), so a real gain of 20–40 s cannot be adopted
     from three runs. S′ and I both measured −26 s, and all six of their runs were below the baseline median.
+  - **Running the renderer suites under the compiler only** (the proposal, not an arm), on top of C0:
+    - the config change: `renderer` leaves out the suites `renderer-compiled` runs, and `renderer-timing` is dropped;
+    - runs 39581780079, 39582919173, 39582934642: test step 302, 314, 305 s (median 305; C0's was 399), so −94 s
+      (−24%); Duration median 301.2 s;
+    - 1402 files and 19,136 tests ran, against 1620 and 22,453: 218 file runs and 3,317 test executions fewer.
+      `renderer` keeps its 220 suites that render nothing;
+    - the third run was red on a desk-hub test the change does not touch.
+
+    The numbers went to CI-opt for the MAWS architect, whose coverage decision it is.
+  - **A desk-hub test flakes on the current suite.** `provisioning-sweep.test.ts > the offline sweep > binds each
+    candidate to the enrollment it read…` failed in 2 of about 33 runs: S's (interleaved order) and the third
+    compiler-only run (vitest's own order). S's red was therefore partly this flake; its other failure was
+    `session-plane.test.ts`'s lease test.
   - **D duplicated packages.** With the optimizer on for `client`, 15 files failed: the code editor's and viewer's
     suites, the sidebar's and the artifact viewers', each in both renderer projects, and `mermaid.dom.test.ts`, whose
     spy sat on a second instance of mermaid. The run took 448.7 s.
