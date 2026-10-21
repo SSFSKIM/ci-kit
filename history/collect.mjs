@@ -32,15 +32,17 @@ const jobPart = (name, reporting) => {
   return m && reporting.has(m[1]) ? { job: m[1], n: Number(m[3]) } : null;
 };
 
-// An artifact's name → { job, n, attempt } likewise, by the job's slug: `test-results-<slug>[-<k>of<n>]-<attempt>`.
+// An artifact's name → { job, k, n, attempt } likewise, by slug: `test-results-<slug>[-<k>of<n>]-<attempt>`.
 const artifactPart = (name, bySlug) => {
   const m = ARTIFACT.exec(name);
   if (!m) return null;
   const attempt = Number(m[2]);
-  if (bySlug.has(m[1])) return { job: bySlug.get(m[1]), n: null, attempt };
+  if (bySlug.has(m[1])) return { job: bySlug.get(m[1]), k: null, n: null, attempt };
   const s = SHARD_SLUG.exec(m[1]);
-  return s && bySlug.has(s[1]) ? { job: bySlug.get(s[1]), n: Number(s[3]), attempt } : null;
+  return s && bySlug.has(s[1]) ? { job: bySlug.get(s[1]), k: Number(s[2]), n: Number(s[3]), attempt } : null;
 };
+
+const mixedCounts = (forms) => new Error(`history: the attempt has the job in more than one shard count (${[...forms].map((n) => String(n ?? 'unsharded')).sort().join(', ')})`);
 
 const artifactName = (job, attempt, k = null, n = null) => `test-results-${jobSlug(job)}${n === null ? '' : `-${k}of${n}`}-${attempt}`;
 
@@ -133,9 +135,11 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
   // 1. New artifacts, newest first, down to the 8 days an artifact can live (7, and a margin). Every pass lists
   //    them all, so an artifact a pass could not take (its job still running, its download failed) is listed
   //    again by the next, however many newer ones were stored meanwhile. A shard's artifact is found with the rest
-  //    of its set (3.).
+  //    of its set (3.), and also takes again a later attempt of its run that copied the shard and is `missing` it.
+  //    One naming another shard count than its attempt's recorded line is refused.
   const items = new Map(); // lineKey → { run, attempt, job, artifact }
   const known = store.artifactIds();
+  const waiting = store.lines().filter((l) => l.report === 'missing' && l.shards);
   const cutoff = now - 8 * DAY;
   for (let page = 1; ; page += 1) {
     const { artifacts } = await gh.artifactsPage(repo, page);
@@ -143,10 +147,19 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
       const part = artifactPart(a.name, bySlug);
       if (!part || a.expired || known.has(a.id)) continue;
       const key = `${a.workflow_run.id}/${part.attempt}/${part.job}`;
-      if (store.line(key) && store.line(key).report !== 'missing') continue; // a re-upload of a job already recorded
+      const held = store.line(key);
+      if (held && held.report !== 'missing') { // a re-upload of a job already recorded
+        const recorded = held.shards?.length ?? null;
+        if (recorded !== part.n) errors.push(`run ${a.workflow_run.id} attempt ${part.attempt} ${part.job}: ${mixedCounts([recorded, part.n]).message}`);
+        continue;
+      }
       const item = items.get(key) ?? { run: a.workflow_run.id, attempt: part.attempt, job: part.job, artifact: null };
       if (part.n === null) item.artifact = a;
       items.set(key, item);
+      for (const l of waiting) {
+        if (l.run !== a.workflow_run.id || l.job !== part.job || l.attempt <= part.attempt || l.shards[part.k - 1]?.attempt !== part.attempt) continue;
+        if (!items.has(lineKey(l))) items.set(lineKey(l), { run: l.run, attempt: l.attempt, job: l.job, artifact: null });
+      }
     }
     if (artifacts.length < 100 || artifacts.some((a) => Date.parse(a.created_at) < cutoff)) break;
   }
@@ -197,7 +210,7 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
       const artifacts = await artifactsOf(item.run);
       const parts = artifacts.filter((a) => !a.expired).map((a) => artifactPart(a.name, bySlug)).filter((p) => p?.job === item.job && p.attempt === item.attempt);
       const forms = new Set([...mine.map((j) => jobPart(j.name, reporting).n), ...parts.map((p) => p.n)]);
-      if (forms.size > 1) throw new Error(`history: the attempt has the job in more than one shard count (${[...forms].map((n) => String(n ?? 'unsharded')).sort().join(', ')})`);
+      if (forms.size > 1) throw mixedCounts(forms);
       const [n] = forms;
       if (n === null) {
         const job = mine.find((j) => j.name === item.job);

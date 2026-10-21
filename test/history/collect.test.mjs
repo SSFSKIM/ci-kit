@@ -834,3 +834,89 @@ test("each shard's report is checked against its own job: one stamped outside it
   assert.deepEqual(linesOf(root, '2026-10-21').map((l) => `${l.run}:${l.report}:${l.shards.length}`), ['851:rejected:2', '852:unparseable:2']);
   assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
 });
+
+test("a copied shard's artifact listed late takes again the missing rerun that copied it", async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  const suites = shardSuites();
+  const one = { name: 'unit 1/2', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z', suites: suites[0] };
+  run({ id: 861, ref: 'ci/late-aaaaaaaa', tested: c('a'), tree: 'TA', created: '2026-10-21T07:50:00Z', attempts: [
+    [one, { name: 'unit 2/2', conclusion: 'failure', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:03:00Z', steps: [
+      { name: 'Run actions/upload-artifact@v7', conclusion: 'skipped' },
+    ] }],
+    [copied(one), { name: 'unit 2/2', started: '2026-10-21T08:31:00Z', completed: '2026-10-21T08:38:00Z', suites: suites[2] }],
+  ] });
+  const late = repo.artifacts.find((a) => a.name === 'test-results-unit-1of2-1');
+  repo.artifacts = repo.artifacts.filter((a) => a !== late);
+  const { pass } = passes(repo, root);
+
+  const first = await pass();
+  assert.deepEqual([first.errors, first.counts.missing], [[], 1]);
+  assert.equal(lineOf(root, '2026-10-21', '861/2/unit').report, 'missing');
+
+  repo.artifacts.push(late);
+  const second = await pass();
+  assert.deepEqual(second.errors, []);
+  assert.deepEqual([second.counts.lines, second.counts.present], [1, 1]);
+  assert.deepEqual(lineOf(root, '2026-10-21', '861/2/unit').shards.map((s) => [s.attempt, s.artifact.name]),
+    [[1, 'test-results-unit-1of2-1'], [2, 'test-results-unit-2of2-2']]);
+  assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
+});
+
+test("an attempt that failed to collect is retried past the sweep, though a later attempt's line copied its artifact", async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  const suites = shardSuites();
+  const one = { name: 'unit 1/2', started: '2026-10-17T08:00:00Z', completed: '2026-10-17T08:06:00Z', suites: suites[0] };
+  const two = { name: 'unit 2/2', started: '2026-10-17T08:31:00Z', completed: '2026-10-17T08:38:00Z', suites: suites[2] };
+  // four days old, so only the artifact listing finds it: shard 2 preempted, rerun alone; then shard 1 rerun alone
+  run({ id: 862, ref: 'ci/old-aaaaaaaa', tested: c('a'), tree: 'TA', created: '2026-10-17T07:50:00Z', attempts: [
+    [one, { name: 'unit 2/2', conclusion: 'failure', started: '2026-10-17T08:00:00Z', completed: '2026-10-17T08:03:00Z', steps: [
+      { name: 'Run actions/upload-artifact@v7', conclusion: 'skipped' },
+    ] }],
+    [{ ...copied(one), created: '2026-10-17T08:30:00Z' }, two],
+    [{ name: 'unit 1/2', started: '2026-10-17T09:01:00Z', completed: '2026-10-17T09:07:00Z', suites: suites[0] }, { ...copied(two), created: '2026-10-17T09:00:00Z' }],
+  ] });
+  // attempt 2's download of the shard it copied fails once; attempt 3 does not read that artifact
+  repo.failing = [repo.artifacts.find((a) => a.name === 'test-results-unit-1of2-1').id];
+  const { pass } = passes(repo, root);
+
+  const first = await pass();
+  assert.equal(first.errors.length, 1);
+  assert.match(first.errors[0], /^run 862 attempt 2 unit: HTTP 502/);
+  assert.deepEqual(linesOf(root, '2026-10-17').map((l) => `${l.attempt}:${l.report}`), ['3:present']);
+
+  repo.failing = [];
+  const second = await pass();
+  assert.deepEqual(second.errors, []);
+  assert.deepEqual(linesOf(root, '2026-10-17').map((l) => `${l.attempt}:${l.report}`), ['2:present', '3:present']);
+  assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
+});
+
+test('an artifact naming another shard count beside a recorded attempt is refused on every pass', async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  const suites = shardSuites();
+  run({ id: 863, ref: 'ci/shard-aaaaaaaa', tested: c('a'), tree: 'TA', created: '2026-10-21T07:50:00Z', attempts: [[
+    { name: 'unit 1/2', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z', suites: suites[0] },
+    { name: 'unit 2/2', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:07:00Z', suites: suites[2] },
+  ]] });
+  run({ id: 864, ref: 'ci/plain-bbbbbbbb', tested: c('b'), tree: 'TB', created: '2026-10-21T07:50:00Z', attempts: [[
+    { name: 'unit', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:07:00Z', suites: suites.flat() },
+  ]] });
+  const { pass } = passes(repo, root);
+  const first = await pass();
+  assert.deepEqual([first.errors, first.counts.present], [[], 2]);
+  const stored = readFileSync(join(root, REPO, 'runs', '2026-10-21.jsonl'));
+
+  const stray = (id, run, name) => ({ id, name, run, created_at: '2026-10-21T08:20:00Z', zip: zipOf({ 'x.xml': vitestReport({ timestamp: '2026-10-21T08:05:00.000Z', suites: suites[1] }) }) });
+  repo.artifacts.push(stray(870, 863, 'test-results-unit-1of3-1'), stray(871, 864, 'test-results-unit-1of2-1'));
+  for (let i = 0; i < 2; i += 1) {
+    const { counts, errors } = await pass();
+    assert.deepEqual([[...errors].sort(), counts], [[
+      'run 863 attempt 1 unit: history: the attempt has the job in more than one shard count (2, 3)',
+      'run 864 attempt 1 unit: history: the attempt has the job in more than one shard count (2, unsharded)',
+    ], NOTHING]);
+  }
+  assert.ok(readFileSync(join(root, REPO, 'runs', '2026-10-21.jsonl')).equals(stored));
+});
