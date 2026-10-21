@@ -86,6 +86,25 @@ if [[ $FAKE_GH_HANG == 1 ]]; then
   ${hangs(dir).replace(/\n/g, '\n  ')}
 fi
 [[ $FAKE_GH_STATUS == 0 ]] || exit "$FAKE_GH_STATUS"
+[[ " $FAKE_GH_FAIL " != *" $2 "* ]] || exit 1
+if [[ $FAKE_GH_UNRESOLVED == 1 && ($2 == comment || $2 == close) ]]; then
+  echo "GraphQL: Could not resolve to an issue or pull request with the number of \${3##*/}. (repository.issue)" >&2
+  exit 1
+fi
+if [[ $1 == api ]]; then
+  case $2 in
+    repos/*/issues/*)
+      case $FAKE_GH_ISSUE in
+        open | closed) echo "$FAKE_GH_ISSUE" ;;
+        hang)
+          ${hangs(dir).replace(/\n/g, '\n          ')}
+          ;;
+        *) echo '{"status":"'"$FAKE_GH_ISSUE"'"}'; echo "gh: Not Found (HTTP $FAKE_GH_ISSUE)" >&2; exit 1 ;;
+      esac
+      ;;
+    *) [[ $FAKE_GH_REPO == 1 ]] || { echo 'gh: Not Found (HTTP 404)' >&2; exit 1; } ;;
+  esac
+fi
 if [[ $1 == issue && $2 == create ]]; then echo https://github.com/SSFSKIM/ci-kit-sandbox/issues/42; fi`);
   const processes = file('runner');
   writeFileSync(processes, runner);
@@ -108,7 +127,11 @@ case $state in
 esac`);
 
   let last = null;
-  function run(script, output, { at, ghExit = ghStatus, ghStall = ghHang, args = [], extraEnv = {} } = {}) {
+  // A run's gh: every call exits ghExit, and the issue subcommands named in ghFail (`'close'`, `'comment close'`) exit 1.
+  // ghUnresolved fails comment and close as gh does for an issue GitHub will not resolve: one that does not exist, or one
+  // the caller cannot see. `gh api repos/…/issues/<n>` answers ghIssue: its state (open, closed), an HTTP status it
+  // fails with (404, 410), or hang. `gh api repos/<repo>` goes through unless ghRepo is false.
+  function run(script, output, { at, ghExit = ghStatus, ghFail = '', ghUnresolved = false, ghIssue = 'open', ghRepo = true, ghStall = ghHang, args = [], extraEnv = {} } = {}) {
     last = at === undefined ? (last === null ? 0 : last + 60) : at;
     writeFileSync(clock, String((now ? Date.parse(now) / 1000 : T0) + last));
     writeFileSync(front, output);
@@ -120,7 +143,7 @@ esac`);
       timeout: 60_000,
       env: {
         PATH: `${bin}:/usr/bin:/bin`, HOME: dir,
-        CI_KIT_LOG_BIN: log, CI_KIT_GH_BIN: gh, FAKE_GH_STATUS: String(ghExit), FAKE_GH_HANG: ghStall ? '1' : '0',
+        CI_KIT_LOG_BIN: log, CI_KIT_GH_BIN: gh, FAKE_GH_STATUS: String(ghExit), FAKE_GH_FAIL: ghFail, FAKE_GH_UNRESOLVED: ghUnresolved ? '1' : '0', FAKE_GH_ISSUE: ghIssue, FAKE_GH_REPO: ghRepo ? '1' : '0', FAKE_GH_HANG: ghStall ? '1' : '0',
         CI_KIT_IDLE_GAP: '0', ...job, ...env, ...extraEnv,
       },
     });

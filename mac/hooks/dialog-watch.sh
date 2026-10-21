@@ -7,7 +7,9 @@
 # - Each run reads the frontmost app, read-only (dialog.sh's lsappinfo read; no AppleScript, no GUI action).
 # - A dialog on two consecutive reads opens the machine's episode: the source is attributed once, and the alert issue
 #   is opened, unless the job hook opened it first. Three consecutive reads with no dialog close it (2026-10-17: a
-#   dismissed prompt came back within a minute, twice).
+#   dismissed prompt came back within a minute, twice), and its alert with it: a close that fails is tried again at
+#   each read until it goes through (2026-10-20: it failed while the network came up after a reboot, and the open alert
+#   held every Mac job until it was closed by hand).
 # - While the episode is open the runner is held (a marker its LaunchAgent's wrapper waits on) and stopped between
 #   jobs: when its job ends, or once it is confirmed idle. Queued jobs then go to another Mac or wait instead of each
 #   being refused here in seconds. The episode's close releases it.
@@ -39,6 +41,14 @@ watch_read() {
         [[ -n $st_name ]] || st_name=$dialog
         save_state || true
         ;;
+      closed)
+        if reopen_episode; then
+          st_at=$now_epoch
+          save_state || true
+        else
+          first_read
+        fi
+        ;;
       pending)
         if [[ $st_name == "$dialog" ]] && consecutive; then
           if start_episode "$st_since"; then
@@ -68,6 +78,7 @@ watch_read() {
           save_state || true
         fi
         ;;
+      closed) retry_close || true ;;
       pending)
         log "frontmost is $name: the $st_name seen at $st_since is gone; no episode"
         drop_state || true
@@ -78,6 +89,7 @@ watch_read() {
 }
 first_read() {
   st_phase=pending st_name=$dialog st_since=$now st_at=$now_epoch st_source='' st_issue='' st_clear=0 st_clear_since=''
+  st_cleared='' st_commented=''
   save_state || true
   log "frontmost is $name: a system dialog; the episode opens if the next read sees it too"
 }
@@ -101,7 +113,7 @@ runner_state() {
 # 60 s tick (job_end below). A stop while a worker runs cancels its job. A stop after the listener has been offered a
 # job, before its worker starts, leaves that job acquired and never run: in progress on an offline runner (09:59:18,
 # when the drain read idle in the second a job was offered; stop_idle below).
-hold() { # under the episode lock: the hold follows the episode as it stands now
+hold() { # under the episode lock: the hold follows the episode as it stands now; an alert close owed holds nothing
   load_state
   if [[ $st_phase == open ]]; then
     if [[ ! -e $drain_marker ]]; then
@@ -112,7 +124,7 @@ hold() { # under the episode lock: the hold follows the episode as it stands now
       log "drain: holding the runner while ${st_name:-a system dialog} holds the front (since $st_since)"
     fi
     held=1
-  elif [[ -z $st_phase && -e $drain_marker ]]; then
+  elif [[ (-z $st_phase || $st_phase == closed) && -e $drain_marker ]]; then
     if rm -f "$drain_marker"; then
       log "drain: released the runner: the episode closed"
     else

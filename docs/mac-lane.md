@@ -364,6 +364,20 @@ it opened, never another machine's.
 - **Closing.** The watcher closes the episode after three consecutive reads with no dialog, about three minutes: it
   comments `cleared at …` on the issue and closes it. On 2026-10-17 a dismissed prompt came back within a minute,
   twice. A dialog read from either side restarts the count.
+- **A close that fails is owed, not dropped.** On 2026-10-20 the mini closed an episode just after a reboot, before
+  its network was up. The comment and the close failed, nothing tried them again, and the open alert stopped MAWS's
+  `ci-gate.sh` from pushing Mac jobs until it was closed by hand. Now the state keeps the issue (`phase=closed`), and
+  every watcher read with no dialog tries again: the comment unless it went through, then the close. The file goes once
+  the close does; closing an issue someone already closed counts. A close that fails is settled only by what GitHub
+  says of the issue itself (`gh api repos/SSFSKIM/ci-kit-sandbox/issues/<n>`): closed, deleted (410), or 404 in a
+  repository the token can read. The sandbox is private, so a 404 alone may be a token that cannot see it. An open
+  issue, a timeout or any other error keeps the close owed, and so does `gh`'s `Could not resolve to an issue`, which
+  GitHub says too of an issue the token cannot see. The episode itself has closed, so the runner is released at once,
+  and jobs run while the close is owed.
+- **A dialog while a close is owed**, seen by the watcher or a job, tries the close first. Once it goes through, the
+  dialog starts an episode of its own, with its own first-seen time, source and alert. While it cannot, a new alert
+  could not be opened either, and the open one is right again, so the episode reopens with it: the alert keeps the
+  first dialog and time in its title, and closes when this dialog is gone.
 - **A job's clear read** ends a single pending read, but does not count towards closing: jobs come at job cadence, not
   on the watcher's clock.
 
@@ -457,7 +471,7 @@ Check by hand:
 ssh mini 'launchctl print gui/$(id -u)/com.ssfskim.ci-kit.dialog-watch | grep -E "state =|runs =|last exit code"'
 #   expect: runs = <n>, last exit code = 0 (state = not running between reads)
 ssh mini 'cat ~/Library/Logs/ci-kit/dialog-alert.state ~/Library/Logs/ci-kit/runner-drained 2>/dev/null; grep dialog-watch ~/Library/Logs/ci-kit/mac-runner-hooks.log | tail -5'
-#   expect, with no dialog: no output from the state files
+#   expect, with no dialog: no output from the state files (phase=closed is an alert close still owed; the log says why)
 gh issue list -R SSFSKIM/ci-kit-sandbox -l ci-kit-alert
 ```
 

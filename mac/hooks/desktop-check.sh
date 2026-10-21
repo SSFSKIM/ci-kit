@@ -19,13 +19,16 @@ source "$(dirname "$0")/dialog.sh"
 
 # A refused job opens the episode at once when none is open; a pending first read by the watcher lends it its time. In
 # an open episode it names the episode's time, and the episode's source when the same dialog is in front: the source
-# is read once per episode, when it opens. Its read restarts the watcher's count of clear reads. The lock wait
-# outlasts the watcher's longest hold (attribution, then gh).
+# is read once per episode, when it opens. Its read restarts the watcher's count of clear reads. A closed episode whose
+# alert's close is owed is settled as the watcher settles it (reopen_episode): the close is tried, and while it cannot
+# go through the episode reopens with its alert. The lock wait outlasts the watcher's longest hold (attribution, then
+# gh).
 refuse_dialog() {
   local since=$now opened=''
   source='source unknown' source_line=''
   if lock_state 45; then
     load_state
+    [[ $st_phase != closed ]] || reopen_episode || load_state
     if [[ $st_phase == open ]]; then
       since=$st_since
       [[ $st_name != "$dialog" ]] || source=$st_source
@@ -51,12 +54,16 @@ refuse_dialog() {
 }
 
 # A read that sees no dialog ends the watcher's pending first read. An open episode is the watcher's to close, after
-# three clear reads about a minute apart: a job's read comes at job cadence, not on that clock.
+# three clear reads about a minute apart: a job's read comes at job cadence, not on that clock. An alert close owed is
+# the watcher's to finish too. Only a pending read takes the lock, since the file is replaced whole: no job waits on a
+# watcher's gh calls for an episode it leaves alone.
 passed_dialog() {
   [[ -e $dialog_state ]] || return 0
+  load_state
+  case $st_phase in open | closed) return 0 ;; esac
   lock_state 45 || return 0
   load_state
-  [[ $st_phase == open ]] || drop_state || true
+  case $st_phase in open | closed) ;; *) drop_state || true ;; esac
   unlock_state
 }
 
