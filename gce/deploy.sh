@@ -4,8 +4,10 @@
 #   gce/deploy.sh [base] [network] [bake] [bake-schedule] [launcher] [launcher-schedule] [alert]
 #                  (no argument: all of them, in that order)
 #   base               the APIs, the service account ci-kit-launcher, and its compute role on the project
-#   network            the VPC ci-kit and its subnetwork ci-kit-us-central1, with no firewall rule: GCE's implied rules
-#                      deny all ingress and allow all egress. It then checks that no rule allows ingress into it.
+#   network            the VPC ci-kit and a subnetwork for each placement of pool/config/gce.json (gce/subnets.mjs: a new
+#                      one takes the first free /20 of 10.64.0.0/16; one that exists is left alone), with no firewall
+#                      rule: GCE's implied rules deny all ingress and allow all egress. It then checks that no rule
+#                      allows ingress into it.
 #   bake               the Cloud Run job ci-kit-bake, built from this checkout
 #   bake-schedule      the Scheduler job ci-kit-bake-weekly, which runs the bake every Sunday at 18:00 UTC
 #   launcher           the Cloud Run service ci-kit-launcher, built from this checkout: no public ingress, one
@@ -48,20 +50,29 @@ base() {
 # the internet and allow ingress inside the network (spec §3a Network: no inbound rules). Networks and firewall rules
 # take no labels; the names carry the kit's.
 NETWORK=ci-kit
-SUBNET=ci-kit-us-central1
-SUBNET_RANGE=10.64.0.0/20
 network() {
+  local subnet region taken range
   g compute networks describe "$NETWORK" > /dev/null 2>&1 ||
     g compute networks create "$NETWORK" --subnet-mode=custom \
       --description='ci-kit: pool and bake VMs (spec 3a); no ingress rules, egress by the implied rule'
-  g compute networks subnets describe "$SUBNET" --region="$REGION" > /dev/null 2>&1 ||
-    g compute networks subnets create "$SUBNET" --network="$NETWORK" --region="$REGION" --range="$SUBNET_RANGE" \
-      --description='ci-kit: pool and bake VMs'
+  # One subnetwork per placement of gce.json, in the checkout's copy. A region's subnetwork holds its instances (the
+  # project's 64-instance quota there), so a /20 each is far more than enough; ranges must not overlap in the network.
+  # (gcloud reads no stdin here: the loop's own input is the list.)
+  while read -r subnet region; do
+    g compute networks subnets describe "$subnet" --region="$region" > /dev/null 2>&1 < /dev/null && continue
+    taken=$(g compute networks subnets list --network="$NETWORK" --format='value(ipCidrRange)' < /dev/null)
+    # shellcheck disable=SC2086 # one argument per range
+    range=$(node "$KIT/gce/subnets.mjs" free $taken) || die "no free range in the network $NETWORK for $subnet"
+    g compute networks subnets create "$subnet" --network="$NETWORK" --region="$region" --range="$range" \
+      --description='ci-kit: pool and bake VMs' < /dev/null
+  done < <(node "$KIT/gce/subnets.mjs" list)
   local open
   open=$(g compute firewall-rules list --format='value(name,network.basename(),direction,disabled,allowed[].map().firewall_rule().list())' |
     awk -F'\t' -v net="$NETWORK" '$2 == net && $3 == "INGRESS" && $4 != "True" && $5 != "" { print $1 }')
   [ -z "$open" ] || die "network $NETWORK has rules allowing ingress: $open"
-  echo "deploy: network ok ($NETWORK, $SUBNET $SUBNET_RANGE; no ingress allowed)"
+  echo "deploy: network ok ($NETWORK; no ingress allowed)"
+  g compute networks subnets list --network="$NETWORK" --format='value(name,ipCidrRange)' | sed 's/^/deploy:   subnetwork /'
+
 }
 
 bake() {

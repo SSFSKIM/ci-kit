@@ -244,10 +244,12 @@ machine for every size (`machines`: 2, 4, 8, 16) and the boot `disk_type`.
 ]
 ```
 
-The order is speed first; reordering is a commit on main, read by the next tick. The launcher still reads the old
-form (`region`, `subnetwork`, `zones`, `machines`, `machine_fallback`) until main carries the new one: its machines
-as one placement on `pd-balanced`, and `machine_fallback` as a second placement in the same region
-(`gce/launcher/config.mjs`). `pool/config/gce.json` is in the old form until the us-west4 placement goes live (M2).
+The order is speed first; reordering is a commit on main, read by the next tick. `placements` is the only form: the
+old keys (`region`, `subnetwork`, `zones`, `machines`, `machine_fallback`) are refused by `gce/launcher/config.mjs`.
+E2 left the pool with them (its us-central1 quota raise was refused twice); size 2 in us-central1 runs on
+`c3d-highcpu-4`. Adding a placement is a block in this list plus `gce/deploy.sh network`, which creates its
+subnetwork. The bake reads the `gce.json` bundled at its deploy, so a change to the placements reaches it with
+`gce/deploy.sh bake`.
 
 **The launcher.** Cloud Scheduler's `ci-kit-launcher-tick` POSTs to `ci-kit-launcher` every minute with an OIDC
 token; the service has no public ingress (`--ingress=internal`, IAM-only), runs one instance at a time, one request
@@ -360,11 +362,12 @@ the label again before it acts.
   from its metadata.
 
 **The network.** Every builder, smoke VM and job VM sits on its placement's subnetwork of the VPC `ci-kit`
-(`ci-kit-us-central1`, 10.64.0.0/20; `network` and each placement's `subnetwork` in `gce.json`), with an ephemeral
-external address for outbound traffic. The VPC has no firewall rule: GCE's implied rules deny all ingress and allow
+(`network` and each placement's `subnetwork` in `gce.json`: `ci-kit-us-central1`, 10.64.0.0/20, and `ci-kit-us-west4`,
+10.64.16.0/20), with an ephemeral external address for outbound traffic. The VPC has no firewall rule: GCE's implied rules deny all ingress and allow
 all egress. The project's `default` network is never used, since its stock rules open ssh and RDP to the internet.
-`gce/deploy.sh network` creates both idempotently and fails if any rule allows ingress into `ci-kit`. Networks and
-firewall rules take no labels; the names carry the kit's. To check:
+`gce/deploy.sh network` creates the VPC and a subnetwork for each placement of `gce.json` idempotently (a new one takes
+the first free /20 of 10.64.0.0/16, `gce/subnets.mjs`; an existing one is left alone) and fails if any rule allows
+ingress into `ci-kit`. Networks and firewall rules take no labels; the names carry the kit's. To check:
 
 ```
 gcloud compute networks list --project=ssfskim-ci-kit
@@ -526,9 +529,9 @@ through Cloud Quotas:
   once until granted);
 - 2026-10-16: the first grants;
 - never granted: E2 per-family stays at its default 24 (asked 64, refused twice), so at most 12 `cpus-2` VMs run on E2
-  and the rest fall back to `c3d-highcpu-4` (`machine_fallback`; in the new form E2 leaves the pool).
+  and the rest fell back to `c3d-highcpu-4` (`machine_fallback`); E2 has since left the pool with that key.
 
-A `cpus-2` job reserves its fallback's 4 vCPUs in the launcher's count, so the C3D VMs in flight never pass 192.
+A `cpus-2` job reserves the largest machine its walk could land on (`c3d-highcpu-4`, 4 vCPUs, in us-central1) in the launcher's count, so the C3D VMs in flight never pass 192.
 `PREEMPTIBLE_CPUS` is 0, so spot VMs count against the ordinary CPU quotas. To check:
 
 ```

@@ -4,17 +4,16 @@
 // pure functions".
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { world, gceErr } from './fake-world.mjs';
 import { Launcher } from '../../gce/launcher/launcher.mjs';
 import { createGceLedger } from '../../gce/launcher/ledger-store.mjs';
 import { parseRow, launchRow, renderRow, finalRow, runningRow } from '../../gce/launcher/ledger.mjs';
-import { parseGceConfig } from '../../gce/launcher/config.mjs';
+import { WEST, CENTRAL, ONE_REGION_CFG } from './config-fixtures.mjs';
 import { allocationId, instanceName, jobInstance, jitRequest } from '../../gce/launcher/logic.mjs';
 import { GceError } from '../../lib/gce.mjs';
 
 const SBX = 'SSFSKIM/ci-kit-sandbox';
-const BASE_CFG = parseGceConfig(readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
+const BASE_CFG = ONE_REGION_CFG;
 const CFG = { ...BASE_CFG, repos: [{ repo: SBX }] };
 const T0 = Date.parse('2026-10-16T12:00:00Z');
 const MIN = 60_000;
@@ -587,14 +586,6 @@ test('ledger rotation: a launch near the cap lands on a new issue, and a job in 
 });
 
 // Placements (spec 2026-10-21, M1): the tick across regions and families, with quota memory scoped to what ran out.
-const WEST = {
-  region: 'us-west4', subnetwork: 'ci-kit-us-west4', zones: ['us-west4-a', 'us-west4-b', 'us-west4-c'],
-  machines: { 2: 'c4d-highcpu-2', 4: 'c4d-highcpu-4', 8: 'c4d-highcpu-8', 16: 'c4d-highcpu-16' }, disk_type: 'hyperdisk-balanced',
-};
-const CENTRAL = {
-  region: 'us-central1', subnetwork: 'ci-kit-us-central1', zones: ['us-central1-a', 'us-central1-b', 'us-central1-c', 'us-central1-f'],
-  machines: { 2: 'c3d-highcpu-4', 4: 'c3d-highcpu-4', 8: 'c3d-highcpu-8', 16: 'c3d-highcpu-16' }, disk_type: 'pd-balanced',
-};
 const NEW_CFG = { ...CFG, placements: [WEST, CENTRAL] };
 // As Compute Engine refuses an insert for quota: outright, its message naming the metric and the region.
 const quotaRefusal = (metric, where) => new GceError(403, `gce POST /zones/x/instances: 403 Quota '${metric}' exceeded.  Limit: 50.0 ${where}.`, ['quotaExceeded']);
