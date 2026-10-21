@@ -113,11 +113,13 @@ toward the boot alone, and below it for the jobs a warm runner covers.
     external by default.
   - [x] (2026-10-21 21:34Z) Race and counts: #84 merged (aebe86e) after three review rounds; `deploy.sh base`
     (monitoring.viewer) and launcher 00015-s2p (rollback 00013-78r).
-  - [ ] Placements: #85 merged (7292a8b): eight placements, max_vcpus 386, the CPUS_PER_VM_FAMILY scope fix, the
+  - [x] (2026-10-21 23:26Z) Placements: #85 merged (7292a8b): eight placements, max_vcpus 386, the CPUS_PER_VM_FAMILY scope fix, the
     per-family bake smoke, the 5-minute stock-out memory, `deploy.sh`'s traffic check. `deploy.sh network` and the
     boot-sample smokes from the PR's checkout (5 of 6 new placements green; C4D us-central1 stocked out); from merged
     main `deploy.sh bake`, the manual bake ci-kit-bake-4zcgz, and launcher 00016-8ct at 22:45Z (rollback 00015-s2p),
-    serving 100% by deploy.sh's own check.
+    serving 100% by deploy.sh's own check. The bake (image -224528-8ogy-7292a8b1 ready) smoked 7 placements and
+    skipped C4D us-central1 for capacity (16 tries); a sandbox walk burst ran green across us-west4, us-central1 and
+    us-east1, and missed M6's 90 s bound (Surprises: a refusal costs 6–21 s).
   Follow-up outside M6's proof (CI-opt): the tick's preparation before its first allocation, 5.1 s at 18:45 and 6.2 s
   to the first insert, brought to M3's ≤ 5 s.
 
@@ -737,10 +739,22 @@ VM's walk.
   must remember to raise (forgetting it is tonight's skew again) and a launcher that keeps its last accepted config
   until the deploy lands.
 
+- 2026-10-21 (M6, live walk on 00016-8ct): **a refusal costs 6–21 s, not ~2 s, and concurrent walks each pay it.**
+  Sandbox run 39693012581 put 20 cpus-4 jobs (80 vCPUs) into one tick. The walk did what #85 built: us-west4 filled
+  at its 8 addresses, C4D us-central1 took 3 and refused on `CPUS_PER_VM_FAMILY` for its family alone, the stocked-out
+  us-east1-b and -c were skipped the next tick for -d, and 3 races fired (all three originals created). But a refusal
+  is the insert operation's error: quota 5.5–17 s, capacity 15–21 s. Walks in flight together each paid the same one
+  (9 address refusals in us-west4, 6 family refusals in us-central1, 12 capacity refusals in us-east1 in one tick),
+  three in a row spent the tick's budget, and those walks ended on the deadline without reaching us-east4, us-east5
+  or C3D. 9 of 20 jobs started 101–163 s after queued, past M6's 90 s bound (the 163 s one also paid the new image's
+  first use in C4D us-central1, the placement the bake skipped). The Decision Log's "~2 s a refusal" premise is
+  wrong. Not rolled back: 00015-s2p on the same `gce.json` lacks the stock-out memory and the family scope.
+
 
 ## Outcomes & Retrospective
 
-(2026-10-21, written as M6's placements went to review; the day-long readings below are still to come.)
+(2026-10-21, written as M6's placements went to review and refreshed after their rollout; the day-long readings below
+are still to come.)
 
 **What the pool does now.**
 - It spans placements: C4D us-west4 first, then the M6 additions (C4D us-central1, us-east1, us-east4, us-east5; C3D
@@ -772,6 +786,12 @@ accepted → started on c3d-4 (C4D separately), and day one's unclaimed pre-laun
   calls both VMs `done`, since runner-gone took them before the preemption read. MAWS's rerun-once rule, which
   reads the job's "The operation was canceled." annotation, counted both and reran each (attempt 3 green).
 - The config-before-code skew (Surprises): pick one of its two fixes.
+- The walk's refusal cost (Surprises, the live walk): M6's 90 s bound misses on a burst past us-west4. Proposed:
+  per-placement admission from each placement's known cap (min(family vCPUs, addresses × machine size), as M6 sized
+  them), so the walk skips a full placement without paying a quota refusal (17 of the burst's 33); then one probe
+  insert per untried (zone, machine) a tick before the rest follow (12 stock-out refusals become 2, at one insert's
+  wait for the followers when the zone has room). The order is CI-opt's lever: C3D us-central1 earlier, against
+  the preemption reason for putting it later.
 
 **What did not go as designed.**
 - Cloud NAT (M6) was built, reviewed, deployed and rolled back within the hour: GitHub's runner endpoints stall

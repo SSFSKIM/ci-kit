@@ -17,7 +17,7 @@ account of the run; the spec's living sections hold the decisions and discoverie
 | M6 Cloud NAT | #82 | 1757fd7 | 00014-b8p, rolled back to 00013-78r | parked: GitHub stalls NAT bursts |
 | M6 egress switch | #83 | 1b97c25 | | external by default |
 | M6 race + counts + NAT line | #84 | aebe86e | base + launcher 00015-s2p | three review rounds; live MAWS run green |
-| M6 placements | #85 | 7292a8b | network + smoke from PR checkout; bake; launcher 00016-8ct | 5 of 6 new placements green; C4D us-central1 stocked out |
+| M6 placements | #85 | 7292a8b | network + smoke from PR checkout; bake 4zcgz; launcher 00016-8ct | bake smoked 7 of 8 (C4D us-central1 stocked out); walk burst green, 9 of 20 jobs past 90 s |
 
 ## Measurements
 
@@ -34,6 +34,8 @@ account of the run; the spec's living sections hold the decisions and discoverie
   stock-outs; insert time is Compute's (a batch reaches Compute within 0.4–0.9 s, operations take 6–25 s).
 - **Cloud NAT** (spec Surprises): boot → "Connected to GitHub" median 12.4 s on external IPs against 53.6–70.4 s on
   1, 3 or 11 NAT addresses. Zero NAT drops, at most 14 ports per VM.
+- **Live walk** (00016-8ct, sandbox 39693012581, 20 × cpus-4): queued → started 26 s to 163 s, median 53 s; quota
+  refusals 5.5–17 s, capacity 15–21 s.
 - **First image use per region**: accepted → RUNNING 10.8–145 s on the first check VM, 6–7 s warm.
 
 ## Environment friction
@@ -54,6 +56,8 @@ account of the run; the spec's living sections hold the decisions and discoverie
   cost (`gce/latency-report.mjs`), and the 20 s race trigger re-sized from the logged insert times.
 - Config before code: the launcher reads `gce.json` from main every tick but runs its revision's code, so #85's
   placements went live on 00015-s2p before 00016-8ct (spec Surprises; ci-kit #72 comment, two fixes to weigh).
+- The walk's refusal cost: a refusal costs 6–21 s and concurrent walks each pay it, so a burst past us-west4 misses
+  M6's 90 s bound (spec Surprises); per-placement admission from known caps, then a probe insert per untried zone.
 - Spot preemptions, all C3D us-central1 (10 VMs on 10-21): check after a day of #85's order whether they drop; else
   consider C3D us-central1 on demand only (spec Open items).
 - C4D us-central1 out of capacity at 22:00–22:19Z: watch its refusal counts; dropping it is a config commit.
