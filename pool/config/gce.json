@@ -3,6 +3,6 @@
  "zones":["us-central1-a","us-central1-b","us-central1-c","us-central1-f"],
  "machines":{"2":"e2-highcpu-2","4":"c3d-highcpu-4","8":"c3d-highcpu-8","16":"c3d-highcpu-16"},
  "machine_fallback":{"2":"c3d-highcpu-4"},
- "disk_gb":50,"max_run_minutes":120,"max_vcpus":64,
+ "disk_gb":50,"max_run_minutes":120,"max_vcpus":192,
  "image_family":"ci-kit-runner","idle_runner_minutes":10,
  "ledger":{"repo":"SSFSKIM/ci-kit-sandbox","issue_title":"pool ledger"}}

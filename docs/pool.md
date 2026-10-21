@@ -480,11 +480,18 @@ work there to end, then add it to the new file; jobs queued in between wait in G
 idle runners first, at once. To know the launcher runs the removal commit, read `config` in its tick log (a launcher
 that cannot read main keeps its last good copy, and its log says so).
 
-**Quotas and budget.** `max_vcpus` (64) is the launcher's soft cap on the vCPUs of its VMs in flight; the project's
-quotas are the hard cap, and a refusal is a wait. Granted on 2026-10-16 (Cloud Quotas): `CPUS-ALL-REGIONS` 96, C3D
-per-family 64 in us-central1, `IN-USE-ADDRESSES` 32, `SSD-TOTAL-GB` 2048. Not granted: E2 per-family stays at its
-default 24 (asked 64), so at most 12 `cpus-2` VMs run on E2 and the rest fall back to `c3d-highcpu-4`
-(`machine_fallback`). `INSTANCES` is 24 in us-central1: at most 24 job VMs at once, whatever `max_vcpus` says.
+**Quotas and budget.** `max_vcpus` (192) is the launcher's soft cap on the vCPUs of its VMs in flight; the project's
+quotas are the hard cap, and a refusal is a wait. Parallelism comes first: the owner ruled on 2026-10-21 that CI must
+never be the bottleneck, and that cost is not a reason to lower parallelism. So `max_vcpus` follows the quotas. Granted
+through Cloud Quotas:
+- 2026-10-21: `CPUS-ALL-REGIONS` 256, C3D per-family 192 in us-central1, `INSTANCES` 64, `SSD-TOTAL-GB` 4096;
+  `IN-USE-ADDRESSES` asked 64, still 32 when this was written (each job VM holds one external address, so 32 VMs at
+  once until granted);
+- 2026-10-16: the first grants;
+- never granted: E2 per-family stays at its default 24 (asked 64, refused twice), so at most 12 `cpus-2` VMs run on E2
+  and the rest fall back to `c3d-highcpu-4` (`machine_fallback`).
+
+A `cpus-2` job reserves its fallback's 4 vCPUs in the launcher's count, so the C3D VMs in flight never pass 192.
 `PREEMPTIBLE_CPUS` is 0, so spot VMs count against the ordinary CPU quotas. To check:
 
 ```
