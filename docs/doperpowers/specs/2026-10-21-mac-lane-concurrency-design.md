@@ -52,8 +52,10 @@ roughly twice the Mac lane's throughput without a second Mac.
   Log).
 - [x] (2026-10-21 ~10:2xZ) Third adversarial review (astra), of the lock: two P1s and one P2, all taken (Decision
   Log).
-- [ ] M1 — ci-kit: instances, admission in the hooks, per-instance identity. ci-kit #67 open (head d1f8ffa), in
-  review (reviewer-medium and reviewer-high).
+- [x] (2026-10-21 ~12:2xZ) M1 — ci-kit: instances, admission in the hooks, per-instance identity. ci-kit #67 merged
+  fcb538a (reviewer-medium, reviewer-high, and a delta review; every finding fixed; ci-gate 39594858245); `v1` moved.
+  Its reinstall on the mini, with no shared instance, waits for an idle moment after the 10-21 evening hold and #103's
+  Mac set.
 - [ ] M2 — MAWS: the shared-state fixes and the routing of proven-shared groups. MAWS #103 open (head 7554ba433,
   class 1a 39589318188 green); its Mac set runs after the 10-21 evening hold.
 - [ ] M3 — Install on the mini: one exclusive and two shared instances, shared ones disabled.
@@ -425,6 +427,22 @@ Only if M4's and M5's memory reads show room: install it, and run the three-way 
   others. Dropping it from that list is MAWS's call.
 
 ## Surprises & Discoveries
+
+- 2026-10-21, M1 (ci-kit #67), from its reviews:
+  - **A cross-instance sweep uses the caller's own `sweep.mjs`, with `--work <dir>`**, not the target instance's copy.
+    A half-installed shared directory (no hooks yet) otherwise refused every exclusive job. Each job's own sweeps still
+    find their `_work` from their own location.
+  - **The target is matched by its real path** (`realpathSync`): `lsof` reports physical paths, so a symlinked home
+    hid leftovers.
+  - **Workers are known by the kernel's executable path** (`runner-state.py --workers`, read right after the `ps`
+    snapshot; a failed read kills nothing). `ps` cannot identify a worker by its executable: it prints argv[0] and
+    unquoted command lines, so a path with a space made a live parked hook look like a leftover.
+  - **Waits:** the exclusive start waits up to 180 s for the lock, because a recovery sweep under it is bounded at
+    120 s. Shared starts retry inside their own bound.
+  - **Debt** (PR body; ci-kit #44 for the watcher):
+    - leftovers that survive a shared job's end sweep sit beside other shared jobs until the next exclusive admission;
+    - a leftover with the symlinked path only in its arguments is not matched;
+    - parked jobs poll the lock about once a second.
 
 - 2026-10-21, M2 (MAWS #103):
   - **The runner-name contract.** MAWS reads an instance's number from the trailing `-<n>` of `RUNNER_NAME`
