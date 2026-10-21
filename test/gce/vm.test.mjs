@@ -82,6 +82,18 @@ test('the job waits for the VM\'s own setup: its root grown to its disk and its 
   assert.match(script, /hostnamectl set-hostname/);
 });
 
+// The console is a job VM's only window (no ssh), and journal lines reach it through rsyslog, which runs 20 s and more
+// behind on a 115200-baud port and is cut off when the VM powers off: the VM's own units write to it directly.
+test('the VM\'s setup and its job write to the serial console directly, the setup line stamped with the uptime', () => {
+  for (const name of ['ci-kit-gce-instance.service', 'ci-kit-gce-job.service']) {
+    const unit = readFileSync(new URL(`../../gce/vm/${name}`, import.meta.url), 'utf8');
+    assert.match(unit, /^StandardOutput=journal\+console$/m, name);
+    assert.match(unit, /^StandardError=journal\+console$/m, name);
+  }
+  const script = readFileSync(new URL('../../gce/vm/instance.sh', import.meta.url), 'utf8');
+  assert.match(script, /\/proc\/uptime/);
+});
+
 test('the image boots without cloud-init: disabled, the builder\'s MAC-bound netplan replaced by one for any ethernet name', () => {
   const builder = readFileSync(new URL('../../gce/bake/builder.sh', import.meta.url), 'utf8');
   assert.match(builder, /^touch \/etc\/cloud\/cloud-init\.disabled$/m);

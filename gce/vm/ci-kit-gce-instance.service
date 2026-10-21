@@ -9,6 +9,9 @@ Before=ci-kit-gce-job.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/opt/ci-kit/gce/vm/instance.sh
+# The console is this VM's only window (no ssh); journal lines reach it late through rsyslog (spec M3, The boot).
+StandardOutput=journal+console
+StandardError=journal+console
 
 [Install]
 WantedBy=multi-user.target

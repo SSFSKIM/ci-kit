@@ -18,4 +18,4 @@ fi
 name=$(curl -sf --retry 5 --retry-connrefused --max-time 10 -H 'Metadata-Flavor: Google' \
   http://169.254.169.254/computeMetadata/v1/instance/name)
 hostnamectl set-hostname "$name"
-echo "ci-kit instance: root $(df -h --output=size / | tail -1 | tr -d ' ') on $disk, hostname $(hostname)"
+echo "ci-kit instance (up $(cut -d" " -f1 /proc/uptime) s): root $(df -h --output=size / | tail -1 | tr -d ' ') on $disk, hostname $(hostname)"

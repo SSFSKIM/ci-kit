@@ -14,6 +14,9 @@ FailureAction=poweroff-immediate
 [Service]
 Type=exec
 ExecStart=/usr/local/bin/node /opt/ci-kit/gce/vm/job.mjs
+# The console is this VM's only window (no ssh); journal lines reach it late through rsyslog (spec M3, The boot).
+StandardOutput=journal+console
+StandardError=journal+console
 
 [Install]
 WantedBy=multi-user.target
