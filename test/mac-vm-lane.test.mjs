@@ -163,6 +163,8 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/disk3s5
   };
   const host = [];
   const stderrs = new Set();
+  // Job clones a test leaves with no reservation (what a failed write leaves), until recovery reserves one.
+  const orphans = new Set();
   const m = {
     slot, home, logs, out, vms, vmHome, slotDir,
     memory({ pressure = 1, available = 60, swap = 500 } = {}) { writeFileSync(join(home, 'memory'), `${pressure} ${available} ${swap}\n`); },
@@ -194,6 +196,7 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/disk3s5
     },
     powerOff: (name) => writeFileSync(join(vms, name, 'poweroff'), ''),
     // A VM of the maintenance procedure's, as Tart lists it: running, with no tart run of this launcher's.
+    orphan(name) { orphans.add(name); m.vm(name, 'stopped'); },
     vm(name, state = 'stopped') { mkdirSync(join(vms, name), { recursive: true }); writeFileSync(join(vms, name, 'state'), `${state}\n`); },
     // A wait whose failure shows the launcher's log and stderr.
     async until(predicate, what, ms) {
@@ -204,6 +207,11 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/disk3s5
       }
     },
     async waitLog(pattern, what = String(pattern)) { await m.until(() => pattern.test(m.log()), what); },
+    // A hold, and the poll that reads it: no boot is under way once it is logged.
+    async quiet() {
+      writeFileSync(join(logs, 'vm-hold.test'), 'the test reads the lane\n');
+      await m.waitLog(/no boot: test: the test reads the lane$/m);
+    },
     // The launcher, as its LaunchAgent starts it.
     start(extra = {}) {
       const child = spawn('/bin/bash', [launcher], {
@@ -288,7 +296,8 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/disk3s5
   const monitor = setInterval(() => {
     const before = new Set(m.clones());
     const reserved = existsSync(join(logs, 'vm-reserved'));
-    const after = m.clones().filter((name) => before.has(name));
+    if (reserved) orphans.clear();
+    const after = m.clones().filter((name) => before.has(name) && !orphans.has(name));
     if (!reserved && after.length) m.violations.push(`${after.join(', ')} existed while nothing was reserved`);
   }, 20);
   cleanups.push(() => clearInterval(monitor));
@@ -348,5 +357,659 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     assert.ok(reads.some((call) => call[1] === 'repos/SSFSKIM/MAWS/actions/runs/101/jobs?filter=latest&per_page=100'));
     assert.deepEqual(m.alerts(), []);
     await finish(m, a);
+  });
+
+  // The boot rule (lane.sh's header): each condition failing alone keeps the lane down, logged once with what was read;
+  // the same lane boots once the condition holds. Every case has a ci-kit-mac-vm job queued unless it says otherwise.
+  const idleRead = (m) => m.waitLog(/recovery: no job clone and no reservation; idle/);
+  for (const { name, options = {}, before, after: afterStart, refusal, lift } of [
+    { name: '1, no queued job', options: { queue: [] }, refusal: /no boot: no queued job for the guest$/m, lift: (m) => m.queue(['ci-kit-mac-vm']) },
+    { name: '1, only jobs another runner takes', options: { queue: [['self-hosted', 'macOS', 'ARM64', 'ci-kit-mac'], ['ci-kit-mac-shared'], ['ci-kit-mac-vm-trial']] },
+      refusal: /no boot: no queued job for the guest$/m, lift: (m) => m.queue(['ci-kit-mac-shared'], ['ci-kit-mac-solo', 'ci-kit-mac-vm']) },
+    { name: '2, a solo job the idle exclusive instance takes first', options: { queue: [['ci-kit-mac-solo']] }, before: (m) => m.instance('idle'),
+      refusal: /no boot: a ci-kit-mac-solo job queued, but the host's exclusive instance is idle and takes it first$/m, lift: (m, listener) => listener.kill() },
+    { name: '3, a coordinator\'s hold', before: (m) => writeFileSync(join(m.logs, 'vm-hold.CI-opt-a45b97a3'), 'timed since 2026-10-21T12:00:00Z\n'),
+      refusal: /no boot: CI-opt-a45b97a3: timed since 2026-10-21T12:00:00Z$/m, lift: (m) => rmSync(join(m.logs, 'vm-hold.CI-opt-a45b97a3')) },
+    { name: '3, a pause in force', before: (m) => writeFileSync(join(m.logs, 'vm-pause'), 'paused\nreason=failures\nuntil=none\nwhy=three image failures\n'),
+      refusal: /no boot: paused \(failures\) until an operator removes vm-pause: three image failures$/m, lift: (m) => rmSync(join(m.logs, 'vm-pause')) },
+    { name: '3 (and 8), a live host job\'s claim', before: (m) => m.claim(),
+      refusal: /no boot: a claim holds the lane \(vm-claim\.\d+-\S+: run 7 job e2e \(worker \d+\); vm-claims exit 0\)$/m, lift: (m, claim) => claim.kill() },
+    { name: '4, a reservation', after: (m) => writeFileSync(join(m.logs, 'vm-reserved'), 'reserved since 2026-10-21T12:00:00Z: vm=maws-vm-job-x\nvm=maws-vm-job-x\n'),
+      refusal: /no boot: the reservation stands \(reserved since 2026-10-21T12:00:00Z: vm=maws-vm-job-x\)$/m, lift: (m) => rmSync(join(m.logs, 'vm-reserved')) },
+    { name: '4, a maintenance VM running', before: (m) => m.vm('maws-vm-candidate-20261021', 'running'),
+      refusal: /no boot: maws-vm-candidate-20261021 runs$/m, lift: (m) => m.vm('maws-vm-candidate-20261021', 'stopped') },
+    { name: '5, memory pressure', options: { memory: { pressure: 2 } }, refusal: /no boot: memory pressure 2, not 1 \(pressure 2, available 60%, swap 500 MB\)$/m, lift: (m) => m.memory() },
+    { name: '5, available memory under the floor', options: { memory: { available: 36 } }, refusal: /no boot: memory available 36%, under the floor of 37%$/m, lift: (m) => m.memory({ available: 37 }) },
+    { name: '5, swap growing', before: (m) => writeFileSync(join(m.home, 'swap-grow'), '500\n'), refusal: /no boot: swap grew from \d+ MB to \d+ MB in \d+ s$/m,
+      lift: (m) => rmSync(join(m.home, 'swap-grow')) },
+    { name: '5, a memory read that fails', options: { memory: { pressure: 'fail' } }, refusal: /no boot: memory unknown \(the read failed\)$/m, lift: (m) => m.memory() },
+    { name: '5, free disk under the reserve', options: { disk: 39.5 }, refusal: /no boot: 39 GB free on the volume of \S+, under the reserve of 40 GB$/m, lift: (m) => m.disk(40) },
+    { name: '5, a disk read that fails', options: { disk: 'fail' }, refusal: /no boot: the free space of \S+ cannot be read$/m, lift: (m) => m.disk(120) },
+    { name: '6, the host\'s display at @1x', options: { display: '2560x1440@1x' }, refusal: /no boot: the host's display is 2560x1440@1x, not @2x$/m, lift: (m) => m.display('2560x1440@2x') },
+    { name: '6, a display that cannot be read', options: { display: '' }, refusal: /no boot: the host's display is unreadable, not @2x$/m, lift: (m) => m.display('3008x1692@2x') },
+    { name: '7, hold-only while a host instance runs', options: { env: { CI_KIT_VM_LANE_MODE: 'hold-only' } }, before: (m) => m.instance('idle'),
+      refusal: /no boot: mode hold-only, and actions-runner-maws is not held$/m, lift: (m, listener) => listener.kill() },
+    { name: 'the lane\'s parts, a golden pointer naming no VM', before: (m) => writeFileSync(join(m.vmHome, 'golden'), 'maws-vm-golden-gone\n'),
+      refusal: /no boot: the golden image maws-vm-golden-gone is not among Tart's VMs$/m, lift: (m) => writeFileSync(join(m.vmHome, 'golden'), `${GOLDEN}\n`) },
+  ]) test(`the boot rule, ${name}: no boot while it fails alone, and a boot once it holds`, async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], ...options });
+    const held = before ? await before(m) : undefined;
+    const a = m.start();
+    if (afterStart) { await idleRead(m); afterStart(m); }
+    await m.waitLog(refusal);
+    await sleep(2500);
+    assert.equal(m.calls().filter((call) => /^(clone|run) /.test(call)).length, 0, 'nothing cloned or run');
+    assert.equal(m.log().split('\n').filter((line) => refusal.test(line)).length, 1, 'logged once, not at every poll');
+    await lift(m, held);
+    await m.waitLog(/booting maws-vm-job-\S+ from the golden image/);
+    await finish(m, a);
+  });
+
+  test('the boot rule, a pause window: nothing boots inside it', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_PAUSE_WINDOWS: '00:00-00:00,23:59-23:58' } });
+    const a = m.start();
+    await m.waitLog(/no boot: inside the pause window 23:59-23:58 \(UTC\)$/m);
+    await sleep(2000);
+    assert.equal(m.calls().filter((call) => call.startsWith('clone ')).length, 0);
+    await finish(m, a);
+  });
+
+  for (const { name, queue, host, reads } of [
+    { name: 'busy with a job', queue: [['ci-kit-mac-solo']], host: 'busy', reads: /a ci-kit-mac-solo job queued, and the host's exclusive instance is busy/ },
+    { name: 'held by the dialog watcher', queue: [['ci-kit-mac-solo']], host: 'held', reads: /a ci-kit-mac-solo job queued, and the host's exclusive instance is held/ },
+    { name: 'offline', queue: [['ci-kit-mac-solo']], host: null, reads: /a ci-kit-mac-solo job queued, and the host's exclusive instance is offline/ },
+    { name: 'idle, with two solo jobs queued', queue: [['ci-kit-mac-solo'], ['CI-KIT-MAC-SOLO']], host: 'idle', reads: /2 ci-kit-mac-solo jobs queued, more than the host's exclusive instance takes/ },
+  ]) test(`a solo job boots a clone when the host's exclusive instance is ${name}, and the boot's line says so`, async () => {
+    const m = lane({ queue });
+    if (host === 'busy' || host === 'idle') await m.instance(host);
+    if (host === 'held') writeFileSync(join(m.logs, 'runner-drained'), 'held at 2026-10-21T12:00:00Z: SecurityAgent\n');
+    const a = m.start();
+    await m.waitLog(/booting maws-vm-job-/);
+    assert.match(m.log(), new RegExp(`booting maws-vm-job-\\S+ from the golden image ${GOLDEN}: ${reads.source}`));
+    await finish(m, a);
+  });
+
+  test('a claim whose worker is gone is stale: it holds nothing, and the claims read removes it', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const claim = await m.claim();
+    await claim.kill();
+    const a = m.start();
+    await m.waitLog(/booting maws-vm-job-/);
+    assert.equal(existsSync(join(m.logs, claim.name)), false);
+    assert.doesNotMatch(m.log(), /a claim holds the lane/);
+    await finish(m, a);
+  });
+
+  // THE FENCE: the reservation, the clone and the spawn are one step under the desktop lock.
+  test('the job boot holds the desktop lock from the reservation\'s write to the spawn: a host hook taking it meanwhile gets it only after tart run is started', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    m.flag('block-clone');
+    const a = m.start();
+    await m.until(() => existsSync(join(m.home, 'tart/clone-waiting')), 'the clone under way');
+    assert.match(m.reserved(), new RegExp(`^reserved since \\S+: vm=maws-vm-job-${m.slot}-`), 'reserved before the clone exists');
+    assert.equal(m.lockFree(), false, 'the desktop lock is held');
+    // A host hook (settle raising its claim, an exclusive start) waits for the lock, and reads the process table once
+    // it has it.
+    const hook = spawn('perl', ['-MFcntl=:flock', '-e', '$| = 1; open(my $fh, ">>", shift) or die; flock($fh, LOCK_EX) or die; print `/bin/ps -axww -o command=`; print "locked\\n"; sleep 600',
+      join(m.logs, 'desktop.lock')], { stdio: ['ignore', 'pipe', 'inherit'] });
+    let seen = '';
+    hook.stdout.on('data', (chunk) => { seen += chunk; });
+    await sleep(500);
+    assert.equal(seen, '', 'the hook waits for the boot');
+    m.flag('clone-go');
+    await m.until(() => seen.includes('locked\n'), 'the hook\'s lock');
+    assert.match(seen, new RegExp(`tart run --no-graphics .* maws-vm-job-${m.slot}-\\d{8}T\\d{6}Z$`, 'm'), 'tart run was started before the lock was let go');
+    hook.kill('SIGKILL');
+    await m.booted();
+    await finish(m, a);
+  });
+
+  test('a clone that fails is released under the same lock, as an image failure, and nothing is left of it', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    m.flag('fail-clone');
+    const a = m.start();
+    await m.waitLog(/no boot: tart clone maws-vm-golden-20261020 (maws-vm-job-\S+) failed: Error: no space left on device; nothing of \1 is left, and the reservation is released/);
+    await m.quiet();
+    assert.equal(m.reserved(), null);
+    assert.deepEqual(m.clones(), []);
+    assert.equal(m.calls().filter((call) => call.startsWith('run ')).length, 0);
+    assert.match(m.log(), /failure \(image\): tart clone .* failed: .*; 1 in a row/);
+    await finish(m, a);
+  });
+
+  test('a tart run that exits at once has its stopped clone deleted, then the reservation released, under the same lock', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    m.flag('fail-run');
+    const a = m.start();
+    await m.waitLog(/no boot: tart run (maws-vm-job-\S+) exited at once \(1\); nothing of \1 is left, and the reservation is released/);
+    await m.quiet();
+    const clone = /no boot: tart run (\S+) exited/.exec(m.log())[1];
+    assert.deepEqual(m.calls().filter((call) => call.includes(clone) && !call.startsWith('list')).map((call) => call.split(' ')[0]), ['clone', 'run', 'delete']);
+    assert.equal(m.reserved(), null);
+    assert.deepEqual(m.clones(), []);
+    assert.ok(m.lockFree());
+    await finish(m, a);
+  });
+
+  test('holds have owners: two overlap, one is removed, the lane stays held; with both gone a clone boots', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    writeFileSync(join(m.logs, 'vm-hold.CI-opt-a45b97a3'), 'timed since 2026-10-21T12:00:00Z\n');
+    writeFileSync(join(m.logs, 'vm-hold.cua-bench'), 'timed since 2026-10-21T12:05:00Z\n');
+    const a = m.start();
+    await m.waitLog(/held: CI-opt-a45b97a3: timed since 2026-10-21T12:00:00Z; cua-bench: timed since 2026-10-21T12:05:00Z$/m);
+    rmSync(join(m.logs, 'vm-hold.CI-opt-a45b97a3'));
+    await m.waitLog(/held: cua-bench: timed since 2026-10-21T12:05:00Z$/m);
+    await m.waitLog(/no boot: cua-bench: timed since 2026-10-21T12:05:00Z$/m);
+    await sleep(1500);
+    assert.equal(m.calls().filter((call) => call.startsWith('clone ')).length, 0);
+    rmSync(join(m.logs, 'vm-hold.cua-bench'));
+    await m.waitLog(/no hold any more/);
+    await m.booted();
+    await finish(m, a);
+  });
+
+  test('a hold kept past its bound opens one alert per owner, closed when that owner removes it', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_HOLD_ALERT: '1' } });
+    writeFileSync(join(m.logs, 'vm-hold.CI-opt-a45b97a3'), 'timed since 2026-10-21T12:00:00Z\n');
+    const a = m.start();
+    await m.until(() => m.alerts().length === 1, 'the hold alert');
+    assert.match(m.alerts()[0], /^ci-kit alert: vm lane on mini held by CI-opt-a45b97a3 since \d{4}-\d\d-\d\dT\d\d:\d\dZ$/);
+    await sleep(1500);
+    assert.equal(m.alerts().length, 1, 'one issue, not one a poll');
+    rmSync(join(m.logs, 'vm-hold.CI-opt-a45b97a3'));
+    await m.until(() => m.closed().length === 1, 'the close');
+    assert.deepEqual(m.closed(), ['https://github.com/SSFSKIM/ci-kit-sandbox/issues/1']);
+    await m.booted();
+    await finish(m, a);
+  });
+
+  // RECOVERY, at the start only, over job clones only.
+  test('recovery touches job clones alone: a running candidate, golden and trial clone are left as they are, nothing boots while they run, and an alert follows', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_MAINTENANCE_ALERT: '1' } });
+    for (const name of ['maws-vm-candidate-20261021', 'maws-vm-golden-20261019', 'maws-vm-trial-20261021T120000Z']) m.vm(name, 'running');
+    // A job clone of this slot nothing reserved (a reservation write that failed): reserved first, then torn down.
+    const orphan = `maws-vm-job-${m.slot}-20261021T110000Z`;
+    m.orphan(orphan);
+    const a = m.start();
+    await m.waitLog(new RegExp(`recovery: ${orphan} is a job clone with no reservation; reserved it before its teardown`));
+    await m.waitLog(new RegExp(`${orphan}: deleted, and the reservation released`));
+    await m.waitLog(/recovery: no job clone and no reservation; idle/);
+    await m.waitLog(/a maws-vm-\* VM runs that this launcher did not boot \(maws-vm-candidate-20261021 maws-vm-golden-20261019 maws-vm-trial-20261021T120000Z\); nothing boots while it does/);
+    await m.until(() => m.alerts().length === 1, 'the alert');
+    assert.match(m.alerts()[0], /^ci-kit alert: vm lane on mini found maws-vm-candidate-20261021 maws-vm-golden-20261019 maws-vm-trial-20261021T120000Z running since /);
+    await sleep(1500);
+    assert.deepEqual(m.calls().filter((call) => /^(stop|delete|clone|run) /.test(call)), [`delete ${orphan}`]);
+    for (const name of ['maws-vm-candidate-20261021', 'maws-vm-golden-20261019', 'maws-vm-trial-20261021T120000Z']) assert.equal(m.state(name), 'running');
+    for (const name of ['maws-vm-candidate-20261021', 'maws-vm-golden-20261019', 'maws-vm-trial-20261021T120000Z']) m.vm(name, 'stopped');
+    await m.waitLog(/no maws-vm-\* VM runs any more/);
+    await m.until(() => m.closed().length === 1, 'the close');
+    await m.booted();
+    await finish(m, a);
+  });
+
+  // THE DEAD LAUNCHER. A measured job waits at settle (its claim live), reading the reservation as settle does.
+  const settleRead = (m) => spawnSync('/bin/bash', [join(mac, 'hooks/vm-claim.sh'), 'reservation'], { encoding: 'utf8', env: { HOME: m.home, PATH: '/usr/bin:/bin' } }).stdout.trim();
+
+  test('a launcher killed during a boot: the reservation stands and settle stays parked; the next launcher, after waiting for the lock, finds the guest running with no wrapper and stops it; settle is released only after Tart shows it stopped', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const a = m.start();
+    const clone = await m.booted();
+    const claim = await m.claim();
+    await a.kill();
+    assert.equal(m.state(clone), 'running', 'the guest outlives its launcher');
+    assert.equal(settleRead(m), 'reserved');
+    // A host hook holds the lock as the next launcher starts: its recovery waits for it.
+    const hook = await m.holdLock();
+    const b = m.start();
+    await m.waitLog(new RegExp(`starting \\(pid ${b.pid}`));
+    await sleep(1500);
+    assert.doesNotMatch(m.log().split(`starting (pid ${b.pid}`)[1], /recovery:/, 'recovery waits for the lock');
+    await hook.release();
+    await m.waitLog(new RegExp(`recovery: ${clone} runs, and its wrapper has not started; stopping it`));
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    assert.equal(settleRead(m), 'none');
+    assert.ok(m.calls().indexOf(`stop ${clone} --timeout 30`) < m.calls().indexOf(`delete ${clone}`));
+    await m.waitLog(/no boot: a claim holds the lane/);
+    await claim.kill();
+    await m.waitLog(/booting maws-vm-job-/);
+    await finish(m, b);
+  });
+
+  test('a launcher killed during a job: the reservation stands and settle stays parked; the next launcher adopts the job, never stops it, and releases only after the guest powered off and was deleted', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const a = m.start();
+    const clone = await m.booted();
+    await m.listening(clone);
+    await m.assigned(clone);
+    await m.job(clone);
+    // The measured job starts on the host while the guest runs: its claim waits on the reservation.
+    const claim = await m.claim();
+    await a.kill();
+    assert.equal(settleRead(m), 'reserved');
+    const b = m.start();
+    await m.waitLog(new RegExp(`recovery: ${clone} runs its job \\(job=9e8d7c6b at=2026-10-21T12:01:00Z by=diag\\); adopted \\(running\\), the bound counted from out/assigned`));
+    await sleep(1500);
+    assert.equal(settleRead(m), 'reserved');
+    assert.equal(m.state(clone), 'running');
+    await m.finished(clone);
+    assert.equal(settleRead(m), 'none');
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0, 'the adopted job is never stopped');
+    assert.match(m.log(), new RegExp(`${clone}: run 7 job e2e ran; the runner exited 0`));
+    await m.waitLog(/no boot: a claim holds the lane/);
+    await claim.kill();
+    await m.waitLog(/booting maws-vm-job-/);
+    await finish(m, b);
+  });
+
+  test('a launcher killed while its guest listens: the next one asks the wrapper to stop, and the stopped guest is torn down', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const a = m.start();
+    const clone = await m.booted();
+    await m.listening(clone);
+    await a.kill();
+    m.queue();
+    const b = m.start();
+    await m.waitLog(new RegExp(`recovery: ${clone} runs with no job assigned; the idle handshake`));
+    await m.until(() => existsSync(join(m.out, 'stop-request')), 'the stop request');
+    m.mark('stopped', 'at=2026-10-21T12:04:00Z');
+    m.mark('done', '0');
+    m.powerOff(clone);
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
+    await finish(m, b);
+  });
+
+  test('a delete Tart refuses keeps the reservation, is tried each poll and alerts after its bound; once Tart lets go it is released and the alert closed', async () => {
+    const m = lane({ env: { CI_KIT_VM_STOP_ALERT: '2' } });
+    const clone = `maws-vm-job-${m.slot}-20261021T120000Z`;
+    // Tart lists it stopped, but it is not (the list the test sets), so the delete is refused as on a running VM.
+    m.vm(clone, 'running');
+    writeFileSync(join(m.vms, clone, 'listed'), 'stopped\n');
+    writeFileSync(join(m.logs, 'vm-reserved'), `reserved since 2026-10-21T12:00:00Z: vm=${clone}\nvm=${clone}\n`);
+    const a = m.start();
+    await m.waitLog(new RegExp(`${clone} cannot be torn down yet \\(tart delete failed: Error: VM "${clone}" is running\\); the reservation stays`));
+    await m.until(() => m.alerts().length === 1, 'the alert');
+    assert.equal(m.alerts()[0], `ci-kit alert: vm lane on mini cannot stop ${clone} since ${/(\d{4}-\d\d-\d\dT\d\d:\d\d)/.exec(m.alerts()[0])[1]}Z`);
+    assert.ok(m.reserved());
+    assert.ok(m.calls().filter((call) => call === `delete ${clone}`).length >= 2, 'tried again');
+    m.vm(clone, 'stopped');
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    await m.until(() => m.closed().length === 1, 'the close');
+    await finish(m, a);
+  });
+
+  // THE IDLE HANDSHAKE.
+  test('idle past its bound with nothing queued, the guest is asked to stop, never forced; stopped, it powers off and is torn down with no failure', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_IDLE: '2' } });
+    const a = m.start();
+    const clone = await m.booted();
+    await m.listening(clone);
+    m.queue();
+    await m.waitLog(new RegExp(`${clone}: no job taken in \\d+ s and none queued for it; asked the wrapper to stop \\(out/stop-request\\), answer within 180 s`));
+    assert.equal(readFileSync(join(m.out, 'stop-request'), 'utf8'), '');
+    m.mark('stopped', 'at=2026-10-21T12:04:00Z');
+    await m.waitLog(new RegExp(`${clone}: the listener stopped with no job`));
+    m.mark('done', '0');
+    m.powerOff(clone);
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
+    assert.equal(m.failures().total_raced, '0');
+    assert.equal(m.failures().image_run, '0');
+    await finish(m, a);
+  });
+
+  test('idle past its bound while a job it can take is queued, the guest listens on; the stop is asked once the queue is empty', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_IDLE: '1' } });
+    const a = m.start();
+    const clone = await m.booted();
+    await m.listening(clone);
+    await m.waitLog(new RegExp(`${clone}: idle past 1 s, but 1 job\\(s\\) queued it can take; listening on`));
+    await sleep(2000);
+    assert.equal(existsSync(join(m.out, 'stop-request')), false);
+    m.queue();
+    await m.until(() => existsSync(join(m.out, 'stop-request')), 'the stop request');
+    await finish(m, a);
+  });
+
+  test('a job the listener took before the job\'s hook, older than the idle bound, is never stopped', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_IDLE: '1' } });
+    const a = m.start();
+    const clone = await m.booted();
+    await m.listening(clone);
+    await m.assigned(clone);
+    m.queue();
+    await sleep(3000);
+    assert.equal(existsSync(join(m.out, 'stop-request')), false);
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
+    await m.job(clone);
+    await m.finished(clone);
+    await finish(m, a);
+  });
+
+  test('a stop the wrapper refuses (a job taken meanwhile) moves the guest to preparing, and its job runs to its end', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_IDLE: '1' } });
+    const a = m.start();
+    const clone = await m.booted();
+    await m.listening(clone);
+    m.queue();
+    await m.until(() => existsSync(join(m.out, 'stop-request')), 'the stop request');
+    m.mark('assigned', 'job=9e8d7c6b at=2026-10-21T12:03:00Z by=diag');
+    m.mark('stop-refused', 'job=9e8d7c6b');
+    await m.waitLog(new RegExp(`${clone}: the wrapper refused the stop \\(job=9e8d7c6b\\): the listener took a job; preparing`));
+    await m.job(clone);
+    await m.finished(clone);
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
+    await finish(m, a);
+  });
+
+  test('an acceptance that raced the stop is logged, alerted with its job, and counted as raced', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_IDLE: '1' } });
+    const a = m.start();
+    const clone = await m.booted();
+    await m.listening(clone);
+    m.queue();
+    await m.until(() => existsSync(join(m.out, 'stop-request')), 'the stop request');
+    m.mark('stop-raced', 'job=9e8d7c6b');
+    await m.waitLog(new RegExp(`${clone}: a job \\(9e8d7c6b\\) was accepted as the listener stopped, and the stop cancelled it at GitHub; rerun it`));
+    await m.until(() => m.alerts().length === 1, 'the alert');
+    assert.match(m.alerts()[0], /^ci-kit alert: vm lane on mini cancelled job 9e8d7c6b at \S+ \(an acceptance raced the idle stop\)$/);
+    m.mark('done', '0');
+    m.powerOff(clone);
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    assert.equal(m.failures().total_raced, '1');
+    assert.equal(m.failures().image_run, '0');
+    await finish(m, a);
+  });
+
+  test('a stop the wrapper does not answer is bounded on the launcher\'s own clock: the guest is stopped, counted as raced and alerted', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_IDLE: '1', CI_KIT_VM_STOP_ANSWER: '2' } });
+    const a = m.start();
+    const clone = await m.booted();
+    await m.listening(clone);
+    m.queue();
+    await m.waitLog(new RegExp(`${clone}: the stop was not answered within 2 s; stopping it; teardown`));
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    assert.ok(m.calls().includes(`stop ${clone} --timeout 30`));
+    assert.equal(m.failures().total_raced, '1');
+    assert.match(m.alerts()[0], new RegExp(`^ci-kit alert: vm lane on mini stopped ${clone} with its idle stop unanswered at `));
+    await finish(m, a);
+  });
+
+  // THE MEMORY GUARD, in every state. reach brings a lane's guest to the state.
+  const states = {
+    booting: { before: (m) => m.flag('no-agent'), reach: async (m) => { await m.waitLog(/runs \(tart run, pid \d+\); waiting for its guest agent/); return m.clones()[0]; } },
+    kicking: { reach: async (m) => { const clone = await m.booted(); await m.waitLog(new RegExp(`${clone}: kickoff: `)); return clone; } },
+    session: { reach: async (m) => { const clone = await m.booted(); m.mark('session-conflict', 'at=2026-10-21T12:00:40Z'); await m.waitLog(/session recovery/); return clone; } },
+    listening: { reach: async (m) => { const clone = await m.booted(); await m.listening(clone); return clone; } },
+    preparing: { reach: async (m) => { const clone = await m.booted(); await m.listening(clone); await m.assigned(clone); return clone; } },
+    running: { reach: async (m) => { const clone = await m.booted(); await m.listening(clone); await m.assigned(clone); await m.job(clone); return clone; } },
+  };
+  for (const [name, { before, reach }] of Object.entries(states)) {
+    test(`memory warning on two samples, ${name}: ${['preparing', 'running'].includes(name) ? 'the job is left to finish, and the next boot waits the pause' : 'the guest, holding no job, is given up at once'}`, async () => {
+      const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_WARN_PAUSE: '600' } });
+      if (before) before(m);
+      const a = m.start();
+      const clone = await reach(m);
+      m.memory({ pressure: 2 });
+      if (['preparing', 'running'].includes(name)) {
+        await m.waitLog(new RegExp(`${clone}: memory pressure warned on two samples; its job is left to finish, and nothing boots for 600 s after it`));
+        await sleep(1500);
+        assert.equal(existsSync(join(m.out, 'stop-request')), false);
+        assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
+        m.memory();
+        await m.finished(clone);
+        assert.match(m.pause(), /\nreason=memory\nuntil=\d+\n/);
+        const until = Number(/until=(\d+)/.exec(m.pause())[1]);
+        assert.ok(Math.abs(until - (Date.now() / 1000 + 600)) < 60, 'the pause ends 600 s after the teardown');
+        await m.waitLog(/no boot: paused \(memory\) until \S+: memory pressure warned during/);
+        assert.equal(m.failures().total_memory ?? '0', '0');
+      } else if (['session', 'listening'].includes(name)) {
+        await m.waitLog(new RegExp(`${clone}: given up for memory; asked the wrapper to stop`));
+        assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
+        assert.equal(m.failures().total_memory, '1');
+      } else {
+        await m.waitLog(new RegExp(`${clone}: given up for memory: it holds no job; teardown`));
+        await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+        assert.ok(m.calls().includes(`stop ${clone} --timeout 30`));
+        assert.equal(m.failures().total_memory, '1');
+      }
+      assert.match(m.log(), new RegExp(`sample ${name} ${clone}: pressure 2, available 60%, swap 500 MB; free 120 GB`));
+      await finish(m, a);
+    });
+
+    test(`memory critical on one sample, ${name}: the guest is stopped, alerted, counted, and the lane pauses`, async () => {
+      const m = lane({ queue: [['ci-kit-mac-vm']] });
+      if (before) before(m);
+      const a = m.start();
+      const clone = await reach(m);
+      m.memory({ pressure: 4, available: 8 });
+      await m.waitLog(new RegExp(`${clone}: stopped for memory: memory pressure critical \\(pressure 4, available 8%, swap 500 MB\\)`));
+      await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+      assert.ok(m.calls().includes(`stop ${clone} --timeout 30`));
+      assert.match(m.alerts()[0], /^ci-kit alert: vm lane on mini stopped a job for memory at \d{4}-\d\d-\d\dT\d\d:\d\dZ$/);
+      assert.match(m.pause(), /\nreason=memory\nuntil=\d+\n/);
+      assert.equal(m.failures().total_memory, '1');
+      m.memory();
+      await m.waitLog(/no boot: paused \(memory\)/);
+      await finish(m, a);
+    });
+  }
+
+  test('the guard through recovery: an adopted job is left to finish under a warning, and stopped at critical', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const a = m.start();
+    const clone = await states.running.reach(m);
+    await a.kill();
+    const b = m.start();
+    await m.waitLog(/adopted \(running\)/);
+    m.memory({ pressure: 2 });
+    await m.waitLog(new RegExp(`sample running ${clone}: pressure 2`));
+    await m.waitLog(new RegExp(`${clone}: memory pressure warned on two samples; its job is left to finish`));
+    m.memory({ pressure: 4 });
+    await m.waitLog(new RegExp(`${clone}: stopped for memory`));
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    await finish(m, b);
+  });
+
+  // SESSION RECOVERY AND THE FAILURE KINDS.
+  test('session recovery: out/session-conflict enters it, out/listening leaves it', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const a = m.start();
+    const clone = await states.session.reach(m);
+    await m.listening(clone);
+    assert.match(m.log(), new RegExp(`${clone}: listening after \\d+ s of session recovery`));
+    await finish(m, a);
+  });
+
+  test('session failures are counted apart: three in a row pause nothing, while three image failures in a row pause the lane with one alert, until an operator removes the pause', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_SESSION: '1', CI_KIT_VM_BOOT: '1' } });
+    const a = m.start();
+    for (let n = 1; n <= 3; n++) {
+      const clone = await m.booted();
+      m.mark('session-conflict', 'at=2026-10-21T12:00:40Z');
+      await m.waitLog(new RegExp(`${clone}: the slot's session was not let go within 1 s; teardown`));
+      await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    }
+    assert.equal(m.failures().total_session, '3');
+    assert.equal(m.failures().image_run, '0');
+    assert.equal(m.pause(), null);
+    m.flag('no-agent');
+    await m.waitLog(/paused \(failures\) until an operator removes vm-pause: 3 image failures in a row, the last: its guest agent did not answer within 1 s/);
+    assert.match(m.log(), /failure \(image\): its guest agent did not answer within 1 s; 2 in a row/);
+    await m.until(() => m.alerts().length === 1, 'the alert');
+    assert.match(m.alerts()[0], /^ci-kit alert: vm lane on mini paused after 3 image failures since /);
+    await m.waitLog(/no boot: paused \(failures\)/);
+    assert.equal(m.failures().total_image, '3');
+    m.flag('no-agent', false);
+    rmSync(join(m.logs, 'vm-pause'));
+    await m.until(() => m.closed().length === 1, 'the close');
+    await m.waitLog(/booting maws-vm-job-\S+ from the golden image/);
+    await finish(m, a);
+  });
+
+  test('two refusals in a row by the guest\'s hook pause the lane with an alert naming the refusal; a job that runs ends the run of them', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const a = m.start();
+    const refusal = 'ci-kit: a system dialog (UserNotificationCenter: source unknown) holds focus in the guest mini-vm (vm=vm clone=x) — if every clone shows it, answer it in the image; rerun';
+    const job = async (refused) => {
+      const clone = await m.booted();
+      await m.listening(clone);
+      await m.assigned(clone);
+      await m.job(clone);
+      if (refused) m.mark('refused', refusal);
+      await m.finished(clone);
+      return clone;
+    };
+    const first = await job(true);
+    assert.match(m.log(), new RegExp(`${first}: the guest refused run 7 job e2e: ${escape(refusal)} \\(1 in a row; the lane pauses at 2\\)`));
+    await job(false);
+    assert.equal(m.failures().refused_run, '0');
+    await job(true);
+    await job(true);
+    await m.waitLog(/paused \(failures\) until an operator removes vm-pause: 2 refusals in a row by the guest's hook/);
+    assert.match(m.alerts()[0], /^ci-kit alert: vm lane on mini paused after 2 refusals since /);
+    assert.match(m.ghCalls().find((call) => call[1] === 'create').join(' '), new RegExp(escape(refusal)));
+    await m.waitLog(/no boot: paused \(failures\)/);
+    await finish(m, a);
+  });
+
+  // EVERY BOUND ends in a verified teardown and a counted failure.
+  for (const { name, env, before, reach, line, kind } of [
+    { name: 'the boot', env: { CI_KIT_VM_BOOT: '2' }, before: (m) => m.flag('no-agent'), reach: states.booting.reach, line: 'its guest agent did not answer within 2 s', kind: 'image' },
+    { name: 'the kickoff', env: { CI_KIT_VM_KICKOFF: '2' }, reach: states.kicking.reach, line: 'neither out/listening nor out/session-conflict within 2 s', kind: 'image' },
+    { name: 'a kickoff that fails', before: (m) => m.flag('fail-kickoff'), reach: (m) => m.booted(), line: 'kickoff.sh failed: kickoff: out/ already holds listening: every clone starts from an empty out/', kind: 'image' },
+    { name: 'session recovery', env: { CI_KIT_VM_SESSION: '2' }, reach: states.session.reach, line: 'the slot\'s session was not let go within 2 s', kind: 'session' },
+    { name: 'the running bound', env: { CI_KIT_VM_JOB_BOUND: '0.05' }, reach: states.running.reach, line: 'the job outlived the running bound (0 min from out/assigned); stopping it', kind: 'image' },
+  ]) test(`the bound of ${name} ends in a verified teardown and a counted ${kind} failure`, async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env });
+    if (before) before(m);
+    const a = m.start();
+    const clone = await reach(m);
+    await m.waitLog(new RegExp(`${clone}: ${escape(line)}; teardown`));
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    assert.ok(m.calls().includes(`stop ${clone} --timeout 30`), 'stopped');
+    assert.ok(m.calls().indexOf(`stop ${clone} --timeout 30`) < m.calls().indexOf(`delete ${clone}`));
+    assert.match(m.log(), new RegExp(`${clone}: its end is verified`));
+    assert.equal(m.failures()[`total_${kind}`], '1');
+    await finish(m, a);
+  });
+
+  test('a stop that fails keeps the reservation, is retried each poll, and alerts after its bound; the alert closes once the clone is gone', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_BOOT: '1', CI_KIT_VM_STOP_ALERT: '2' } });
+    m.flag('no-agent');
+    m.flag('fail-stop');
+    const a = m.start();
+    const clone = await states.booting.reach(m);
+    await m.waitLog(new RegExp(`${clone} cannot be torn down yet \\(tart stop failed; a tart run of ${clone} runs \\(pid \\d+\\)\\); the reservation stays`));
+    await m.until(() => m.alerts().length === 1, 'the alert');
+    assert.match(m.alerts()[0], new RegExp(`^ci-kit alert: vm lane on mini cannot stop ${clone} since `));
+    assert.ok(m.reserved());
+    assert.equal(m.state(clone), 'running');
+    m.flag('fail-stop', false);
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    await m.until(() => m.closed().length === 1, 'the close');
+    await finish(m, a);
+  });
+
+  // THE GOLDEN POINTER, read at each boot.
+  test('each boot reads the golden pointer: a promote between two jobs moves the next clone to the new golden image', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const a = m.start();
+    const first = await m.booted();
+    m.vm('maws-vm-golden-20261021', 'stopped');
+    writeFileSync(join(m.vmHome, 'golden.tmp'), 'maws-vm-golden-20261021\n');
+    renameSync(join(m.vmHome, 'golden.tmp'), join(m.vmHome, 'golden'));
+    await m.listening(first);
+    await m.assigned(first);
+    await m.job(first);
+    await m.finished(first);
+    await m.waitLog(/booting maws-vm-job-\S+ from the golden image maws-vm-golden-20261021/);
+    assert.ok(m.calls().includes(`clone ${GOLDEN} ${first}`));
+    assert.ok(m.calls().some((call) => /^clone maws-vm-golden-20261021 maws-vm-job-/.test(call)));
+    await finish(m, a);
+  });
+
+  test('a golden image that is missing while a job waits opens one alert after its bound, closed once the lane has its parts', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_GOLDEN_ALERT: '1' } });
+    rmSync(join(m.vmHome, 'golden'));
+    const a = m.start();
+    await m.waitLog(new RegExp(`no boot: no golden pointer at ${escape(join(m.vmHome, 'golden'))}$`, 'm'));
+    await m.until(() => m.alerts().length === 1, 'the alert');
+    assert.match(m.alerts()[0], /^ci-kit alert: vm lane on mini cannot boot since \S+: no golden pointer at /);
+    writeFileSync(join(m.vmHome, 'golden'), `${GOLDEN}\n`);
+    await m.booted();
+    assert.equal(m.closed().length, 1);
+    await finish(m, a);
+  });
+
+  // DISK.
+  test('free disk under half the reserve while a job runs: the job goes on, and the disk pause holds the next boot until the space is back', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const a = m.start();
+    const clone = await states.running.reach(m);
+    m.disk(15);
+    await m.waitLog(/paused \(disk\) until an operator removes vm-pause: 15 GB free on the volume of \S+, under half the reserve of 40 GB/);
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
+    await m.finished(clone);
+    await m.waitLog(/no boot: paused \(disk\)/);
+    m.disk(30);
+    await m.waitLog(/the disk pause is lifted: 30 GB free, at least half the reserve of 40 GB/);
+    await m.waitLog(/no boot: 30 GB free on the volume of \S+, under the reserve of 40 GB/);
+    m.disk(120);
+    await m.waitLog(/booting maws-vm-job-\S+ from the golden image/);
+    await finish(m, a);
+  });
+
+  test('free disk under the floor while a job runs: the guest is stopped, alerted for disk and counted', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const a = m.start();
+    const clone = await states.running.reach(m);
+    m.disk(4);
+    await m.waitLog(new RegExp(`${clone}: stopped for disk: 4 GB free on the volume of \\S+, under the floor of 5 GB`));
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    assert.ok(m.calls().includes(`stop ${clone} --timeout 30`));
+    assert.match(m.alerts()[0], /^ci-kit alert: vm lane on mini stopped a job for disk at /);
+    assert.equal(m.failures().total_disk, '1');
+    await finish(m, a);
+  });
+
+  test('a release that cannot be written leaves the lane reserved, and is tried again until it goes through', asUser, async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const a = m.start();
+    const clone = await states.running.reach(m);
+    chmodSync(m.logs, 0o555);
+    try {
+      m.mark('done', '0');
+      m.powerOff(clone);
+      await m.waitLog(new RegExp(`${clone} cannot be torn down yet \\(\\S+/vm-reserved could not be removed\\); the reservation stays`));
+      assert.ok(m.reserved());
+      assert.deepEqual(m.clones(), [], 'the clone itself is gone');
+    } finally {
+      chmodSync(m.logs, 0o755);
+    }
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    await finish(m, a);
+  });
+
+  test('a reservation write on a full volume (a small disk image mounted for the state directory) is no boot; with space back the clone boots', { skip: !existsSync('/usr/bin/hdiutil') }, async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const image = join(m.home, 'state.dmg');
+    assert.equal(spawnSync('/usr/bin/hdiutil', ['create', '-size', '2m', '-fs', 'HFS+', '-volname', 'cikitstate', '-type', 'UDIF', image], { encoding: 'utf8' }).status, 0);
+    assert.equal(spawnSync('/usr/bin/hdiutil', ['attach', image, '-nobrowse', '-mountpoint', m.logs], { encoding: 'utf8' }).status, 0);
+    cleanups.push(() => spawnSync('/usr/bin/hdiutil', ['detach', m.logs, '-force']));
+    try {
+      for (const file of ['desktop.lock', 'vm-lane.lock', 'vm-lane.log']) writeFileSync(join(m.logs, file), '');
+      spawnSync('/bin/dd', ['if=/dev/zero', `of=${join(m.logs, 'fill')}`, 'bs=4k'], { stdio: 'ignore' });
+      const a = m.start();
+      await m.until(() => /no boot: \S+\/vm-reserved could not be written/.test(a.stderr() + m.log()), 'the refused write');
+      assert.equal(m.reserved(), null);
+      assert.equal(m.calls().filter((call) => call.startsWith('clone ')).length, 0, 'nothing cloned without a reservation');
+      rmSync(join(m.logs, 'fill'));
+      await m.booted();
+      assert.ok(m.reserved());
+      await finish(m, a);
+    } finally {
+      spawnSync('/usr/bin/hdiutil', ['detach', m.logs, '-force']);
+    }
   });
 });

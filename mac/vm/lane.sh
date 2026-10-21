@@ -169,11 +169,12 @@ drain_marker=$ci_kit_logs/runner-drained
 markers='listening session-conflict assigned job refused stop-request stop-refused stop-raced stopped done'
 identity_files='.runner .credentials .credentials_rsaparams'
 
-# Logged when the text under its key changes, not at every poll.
-note() { # <key> <text>
+# Logged when what is said under its key changes, not at every poll; a read whose figures move at every poll gives
+# what stays the same as its signature.
+note() { # <key> <text> [<signature>]
   local var=noted_$1
-  [[ ${!var-} != "$2" ]] || return 0
-  printf -v "$var" '%s' "$2"
+  [[ ${!var-} != "${3:-$2}" ]] || return 0
+  printf -v "$var" '%s' "${3:-$2}"
   say "$2"
 }
 forget() { # <key>: the next note under it is logged
@@ -738,15 +739,18 @@ admit() { # <tart_vms output>
   guest=$(awk -F'\t' '$1 ~ /^maws-vm-/ && $2 != "stopped" { print $1 }' <<<"$1" | tr '\n' ' ')
   if [[ -n $guest ]]; then note boot "no boot: ${guest% } runs"; return 1; fi
   if [[ -z $m_pressure ]]; then note boot 'no boot: memory unknown (the read failed)'; return 1; fi
-  if ((m_pressure != 1)); then note boot "no boot: memory pressure $m_pressure, not 1 ($(memory_line))"; return 1; fi
-  if ((m_available < memory_floor)); then
-    note boot "no boot: memory available $m_available%, under the floor of $memory_floor%"
+  if ((m_pressure != 1)); then
+    note boot "no boot: memory pressure $m_pressure, not 1 ($(memory_line))" "pressure $m_pressure"
     return 1
   fi
-  if ! swap_steady; then note boot "no boot: $swap_why"; return 1; fi
+  if ((m_available < memory_floor)); then
+    note boot "no boot: memory available $m_available%, under the floor of $memory_floor%" 'available'
+    return 1
+  fi
+  if ! swap_steady; then note boot "no boot: $swap_why" "swap ${swap_why%% from *}"; return 1; fi
   if [[ -z $d_free_kb ]]; then note boot "no boot: the free space of $tart_home cannot be read"; return 1; fi
   if ((d_free_kb < disk_reserve * 1048576)); then
-    note boot "no boot: $d_free GB free on the volume of $tart_home, under the reserve of $disk_reserve GB"
+    note boot "no boot: $d_free GB free on the volume of $tart_home, under the reserve of $disk_reserve GB" 'reserve'
     return 1
   fi
   if ! display_admits; then note boot "no boot: the host's display is $display_seen, not @2x"; return 1; fi
