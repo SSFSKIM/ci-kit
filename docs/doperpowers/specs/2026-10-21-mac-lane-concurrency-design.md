@@ -148,13 +148,16 @@ fail rules.
 
 ### M1 — ci-kit: instances, the shared hold, per-instance hooks
 
-At the end, `mac/install.sh` installs one exclusive instance and *n* shared ones (`--shared <n>`, default 0, so an
-install without the flag is today's). The shared hold, its recovery and per-instance hooks exist. Nothing on the mini
+At the end, `mac/install.sh` installs one exclusive instance and *n* shared ones. `--shared <n>` sets the count.
+Without it, a re-run keeps the machine's installed count, and a fresh machine gets 0, so sharing is always opted into
+and a plain refresh never re-enables a shared instance. The shared hold, its recovery and per-instance hooks exist. Nothing on the mini
 changes in M1.
 - **`mac/install.sh`:**
   - shared instances at `~/actions-runner-maws-<n>`, LaunchAgent `com.ssfskim.ci-kit.mac-runner-<n>`, runner name
     `ci-kit-mac-<machine>-<n>`, labels `self-hosted,ci-kit-mac-shared` only (`--no-default-labels`);
   - `CI_KIT_SHARED_DESKTOP=1` in their `.env`;
+  - a full copy of the hooks per instance, under that instance's directory (the sweep finds its `_work` from its own
+    location);
   - `--disabled` applies per instance;
   - uninstall removes every instance.
 - **The hooks:** per-instance identity everywhere. The exclusive instance's start raises and waits on the hold; its end
