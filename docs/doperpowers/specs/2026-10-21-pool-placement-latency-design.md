@@ -105,7 +105,8 @@ toward the boot alone, and below it for the jobs a warm runner covers.
     us-central1-b insert outlasting the tick, settled next tick; started 18:22:25). `app-hook` resynced; the next
     delivery (18:24:48) verified and requested a tick.
   - Acceptance 4 (a day's median queued → started ≤ 50 s) is read from `latency-report.mjs` after a day of traffic.
-- [ ] M5 — Pre-launch of a run's gate VMs (the owner chose it 2026-10-21; no warm runner).
+- [ ] M5 — Pre-launch of a run's gate VMs (the owner chose it 2026-10-21; no warm runner). (2026-10-21) Built, reviewer-medium clean after one fix wave, ci-gate green; PR to
+  CI-opt. Deploy (`launcher` + `webhook`) on CI-opt's go; Acceptance 5 is read from the live numbers.
 
 ## Acceptance
 
@@ -464,6 +465,24 @@ reported to the owner.
   `latest` volume, which Cloud Run reads through from Secret Manager) is kept 60 s, read by one caller at a time, at
   most once per 10 s counted from each read's start, failed reads included; a mismatch re-reads only a copy at least
   10 s old, so a rotation is picked up within seconds. With no good copy a delivery gets 503 and GitHub redelivers.
+
+- 2026-10-21 (M5): **Pre-launch learns a run began from the run itself.** The receiver forwards every queued job of a
+  served repo (it keeps no state, so it cannot tell a run's first job); a run counts as begun when it is listed queued
+  or in progress, none of its jobs carries `ci-kit-pool` and none has completed, the same rule on webhook and minute
+  ticks. GitHub creates the gates only when plan ends, so a docs-only run or one sent to the Mac gets nothing once
+  its plan has ended.
+- 2026-10-21 (M5): **No double pre-launch without a new store.** The `launching` row, written before the runner is
+  minted, carries `prelaunch: {run, attempt, workflow}`; a run gets its shape less its rows for that attempt (except
+  abandoned ones). Two overlapping ticks can both pre-launch for one run: the parent spec's accepted overlap, which
+  the idle rule bounds.
+- 2026-10-21 (M5): **The shape is the median count per size over the workflow's last 10 runs** in the ledger window,
+  rounded up (one VM too many idles out; one too few is a gate waiting on a boot), counted through the job each VM
+  actually ran.
+- 2026-10-21 (M5, after reviewer-medium): **Pre-launch spends only what real jobs left.** Queued-job launches run to
+  completion first, and a tick in which any queued launch made no VM (refused, unknown outcome, JIT failure, deadline)
+  pre-launches nothing; pre-launches go oldest run first, largest size first, under `max_vcpus`. A docs-only MAWS run
+  costs at most one idle window of its shape (~$0.08 on C4D spot); the daily line reports pre-launched and unclaimed
+  VMs and their cost.
 
 ## Surprises & Discoveries
 

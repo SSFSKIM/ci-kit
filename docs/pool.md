@@ -739,8 +739,8 @@ through Cloud Quotas:
 
 A job reserves the largest machine its walk could land on in the launcher's count (a `cpus-2` job: `c3d-highcpu-4`).
 `max_vcpus` admits only; it tracks the sum of the placements' granted family quotas, and a placement's own refusal
-(family vCPUs, addresses, instances) falls through to the next one, so raise it with each grant (C4D us-west4
-re-filed at 128; addresses pending in both regions).
+(family vCPUs, addresses, instances) falls through to the next one, so raise it with each grant (C4D us-west4's
+re-filed 128 was denied 2026-10-21, so it stays 50; addresses pending in both regions).
 `PREEMPTIBLE_CPUS` is 0, so spot VMs count against the ordinary CPU quotas. To check:
 
 ```
