@@ -85,7 +85,8 @@ export function claimedInstances({ jobs, rows, reports }) {
 // runners: Map repo → Map runner name → runner, for each repo whose listing succeeded; a repo without one gets nothing.
 // claimed: claimedInstances(). complete: false when the instance listing missed a zone; nothing is admitted then,
 // since the vCPUs in flight and the coverage are unknown. A launch reserves the largest machine its walk could land
-// on (any placement's).
+// on (any placement's). inflight: the vCPUs in flight with this plan's launches, what pre-launch may add to (none
+// when the listing is incomplete).
 export function planLaunches({ queued, instances, runners, now, cfg, complete = true, claimed = new Set() }) {
   if (!complete) return { launches: [], waiting: [...queued], unservable: [] };
   const idleMs = cfg.idle_runner_minutes * MIN;
@@ -124,7 +125,7 @@ export function planLaunches({ queued, instances, runners, now, cfg, complete = 
     inflight += need;
     launches.push({ job, repo: job.repo, cpus });
   }
-  return { launches, waiting, unservable };
+  return { launches, waiting, unservable, inflight };
 }
 
 export const largestMachineCpus = (cpus, cfg) => Math.max(...cfg.placements.map((p) => machineCpus(p.machines[cpus])));

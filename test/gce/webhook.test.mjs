@@ -1,5 +1,6 @@
 // The webhook receiver ci-kit-webhook (spec 2026-10-21 M4): a delivery is verified against the secret before anything
-// else is read, and a pool job queued in a served repo publishes one tick request; nothing else does.
+// else is read, and a job queued in a served repo publishes one tick request (a pool job's, and from M5 any other's,
+// which may be its run's start); nothing else does.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -8,7 +9,6 @@ import { signatureValid, tickRequest, createReceiver, createPublisher, MAX_BODY,
 
 const SECRET = 'a3f1c9e0b7d24e6f8a1b3c5d7e9f0a2b';
 const sign = (body, secret = SECRET) => `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`;
-const MACHINES = { 2: 'c4d-highcpu-2', 4: 'c4d-highcpu-4', 8: 'c4d-highcpu-8', 16: 'c4d-highcpu-16' };
 const SERVED = new Set(['ssfskim/maws']);
 
 const queued = (over = {}) => ({
@@ -29,21 +29,26 @@ test('a signature is valid only for this body under this secret, in the sha256= 
 });
 
 test('a queued pool job of a served repo requests a tick, naming its job', () => {
-  assert.deepEqual(tickRequest({ event: 'workflow_job', payload: queued(), served: SERVED, machines: MACHINES }), {
+  assert.deepEqual(tickRequest({ event: 'workflow_job', payload: queued(), served: SERVED }), {
     request: { repo: 'SSFSKIM/MAWS', job: 119166794835, run: 18800000001, labels: ['self-hosted', 'ci-kit-pool', 'cpus-4'] },
   });
 });
 
+test('a queued job of a served repo on any other runner requests a tick too: it may be its run\'s start (M5 pre-launch)', () => {
+  const request = (labels) => tickRequest({ event: 'workflow_job', payload: queued({ labels }), served: SERVED }).request;
+  assert.deepEqual(request(['ubuntu-slim']), { repo: 'SSFSKIM/MAWS', job: 119166794835, run: 18800000001, labels: ['ubuntu-slim'] }); // MAWS's plan
+  assert.deepEqual(request(['self-hosted', 'macOS', 'ARM64']).labels, ['self-hosted', 'macOS', 'ARM64']); // its plan under GATE_RUNNER=macos
+  assert.deepEqual(request(['self-hosted', 'ci-kit-pool', 'cpus-32']).labels, ['self-hosted', 'ci-kit-pool', 'cpus-32']);
+  assert.deepEqual(tickRequest({ event: 'workflow_job', payload: queued({ labels: undefined }), served: SERVED }).request.labels, []);
+});
+
 test('nothing else requests a tick', () => {
-  const ignored = (event, payload) => tickRequest({ event, payload, served: SERVED, machines: MACHINES }).ignored;
+  const ignored = (event, payload) => tickRequest({ event, payload, served: SERVED }).ignored;
   assert.match(ignored('ping', { zen: 'x' }), /ping/);
   assert.match(ignored('push', queued()), /event push/);
   for (const action of ['in_progress', 'completed', 'waiting']) assert.match(ignored('workflow_job', { ...queued(), action }), new RegExp(action));
   assert.match(ignored('workflow_job', { ...queued(), repository: { full_name: 'SSFSKIM/ci-kit' } }), /not served/);
-  assert.match(ignored('workflow_job', queued({ labels: ['ubuntu-slim'] })), /labels/); // MAWS's plan job, until M5
-  assert.match(ignored('workflow_job', queued({ labels: ['self-hosted', 'ci-kit-pool', 'cpus-32'] })), /labels/);
-  assert.match(ignored('workflow_job', queued({ labels: ['self-hosted', 'ci-kit-pool', 'cpus-4', 'gpu'] })), /labels/);
-  assert.match(ignored('workflow_job', { action: 'queued' }), /labels|not served/);
+  assert.match(ignored('workflow_job', { action: 'queued' }), /not served/);
 });
 
 // The receiver as Cloud Run runs it, on a local port: what it answers and what it publishes.
@@ -55,7 +60,6 @@ async function receiver({ secret = async () => SECRET, publish, now } = {}) {
     now,
     publish: publish ?? (async (m) => { published.push(m); }),
     served: SERVED,
-    machines: MACHINES,
     log: (severity, message, extra) => logs.push({ severity, message, ...extra }),
   });
   const server = http.createServer(handler);

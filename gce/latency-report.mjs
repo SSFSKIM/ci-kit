@@ -6,7 +6,7 @@
 // time, and the job it ran with that job's queued and started times); the ticks are the launcher's `tick:` log lines
 // in Cloud Logging (each tick's start, its duration and its first insert). A row or tick without a stage's fields,
 // as those written before M3, counts in none of that stage's samples. The whole pool's stages come first, then each
-// machine type's VM stages, insert accepted → job started (M3's target, per VM) among them.
+// machine type's VM stages, insert accepted → job started (M3's target, per VM) among them, then pre-launch's (M5).
 import { execFileSync } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -99,6 +99,25 @@ export function renderByMachine(rows) {
   }).join('\n\n');
 }
 
+// Pre-launch (spec M5): how many VMs were launched ahead of a run's pool jobs and how many a job claimed; each claimed
+// VM's insert accepted → the queued time of its job when that job is of the run it was launched for (positive: the VM
+// was on its way before the job was queued, M5's proof); and Acceptance 5, the queued → started of the pool jobs of
+// the runs pre-launched for, beside those of every other run.
+export function renderPrelaunch(rows) {
+  const vms = rows.filter((r) => r.prelaunch && r.created);
+  if (!vms.length) return 'Pre-launch: none';
+  const claimed = vms.filter((r) => r.job);
+  const runs = new Set(vms.map((r) => r.prelaunch.run));
+  const waits = (list) => present(list.map((r) => gap(ms(r.job.queued), ms(r.job.started))));
+  const jobs = rows.filter((r) => r.job?.run);
+  return [
+    `Pre-launch: ${vms.length} VMs, ${claimed.length} claimed, ${vms.length - claimed.length} unclaimed`,
+    line('insert accepted → own job queued', present(claimed.filter((r) => r.job.run === r.prelaunch.run).map((r) => gap(ms(r.created), ms(r.job.queued))))),
+    line('queued → started (pre-launched)', waits(jobs.filter((r) => runs.has(r.job.run)))),
+    line('queued → started (other runs)', waits(jobs.filter((r) => !runs.has(r.job.run)))),
+  ].join('\n');
+}
+
 // ── reading the live ledger and logs ─────────────────────────────────────────────────────────────────────────────
 
 const LAUNCHER_LOG = (from, to) => [
@@ -146,6 +165,7 @@ async function main(argv) {
   const rows = all.filter((r) => (!opts.repo || r.repo === opts.repo) && ms(r.created) >= from && ms(r.created) <= to);
   console.log(renderReport(stages({ rows, ticks }), { from, to, rows: rows.length, ticks: ticks.length }));
   console.log(`\nBy machine type\n\n${renderByMachine(rows)}`);
+  console.log(`\n${renderPrelaunch(rows)}`);
 }
 
 // Both sides canonical: argv[1] is the path as typed, the module URL is resolved through symlinks.

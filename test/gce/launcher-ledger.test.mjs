@@ -132,6 +132,38 @@ test('the daily line totals the day\'s final rows (by deletion time), projects t
   assert.deepEqual([...dailyDays([{ body: text }, { body: 'x' }])], [day]);
 });
 
+test('a pre-launched VM\'s row names the run it was launched for, from its launch to its final state', () => {
+  const prelaunch = { run: 39647845404, attempt: 1, workflow: '.github/workflows/gate.yml' };
+  const launching = launchRow({ alloc: 'tb0abc0002', repo: SBX, cpus: 8, at: T0, config: 'abcdef0123', prelaunch });
+  assert.deepEqual(launching.prelaunch, prelaunch);
+  assert.equal('prelaunch' in launchRow({ alloc: 'tb0abc0003', repo: SBX, cpus: 8, at: T0, config: 'abcdef0123' }), false);
+  const final = finalRow(runningRow(launching, INST), { end: 'cancelled-idle', deleted: T0 + 600_000, diskGb: 50 });
+  assert.deepEqual(final.prelaunch, prelaunch);
+  assert.match(renderRow(final), /\| pre-launched for run 39647845404, unclaimed \|/);
+  const claimed = finalRow(runningRow(launching, INST), { end: 'done', deleted: T0 + 600_000, job: { id: 7, name: 'unit 1/4' }, diskGb: 50 });
+  assert.match(renderRow(claimed), /\| unit 1\/4 \(7\), pre-launched for run 39647845404 \|/);
+});
+
+test('the daily line counts the day\'s pre-launched VMs, and the unclaimed ones with their cost', () => {
+  const day = '2026-10-16';
+  const prelaunch = { run: 5, attempt: 1, workflow: '.github/workflows/gate.yml' };
+  const mk = (alloc, extra) => ({ alloc, state: 'final', deleted: new Date(T0).toISOString(), end: 'done', seconds: 600, dollars: 0.01, machine: 'c4d-highcpu-8', zone: 'us-west4-a', ...extra });
+  const rows = [
+    mk('a', { prelaunch, job: { id: 1, name: 'unit 1/4' } }),
+    mk('b', { prelaunch, end: 'cancelled-idle', dollars: 0.0123 }),
+    mk('c', { prelaunch, end: 'cancelled-idle', dollars: 0.0101 }),
+    mk('d', { prelaunch, end: 'abandoned', seconds: null, dollars: null, machine: undefined, zone: undefined }), // made no VM
+    mk('e', {}),
+  ];
+  const line = dailyLine(rows, day, 'abcdef0123');
+  assert.deepEqual(line.prelaunched, { vms: 3, unclaimed: 2, unclaimedDollars: 0.0224 });
+  assert.equal(line.vms, 4, 'they are VMs of the day like any other');
+  assert.match(renderDaily(line), / Pre-launched: 3 VMs, 2 unclaimed \(\$0\.0224\)\./);
+  // A day without pre-launches reads as before.
+  assert.equal('prelaunched' in dailyLine([mk('e', {})], day, 'abcdef0123'), false);
+  assert.doesNotMatch(renderDaily(dailyLine([mk('e', {})], day, 'abcdef0123')), /Pre-launched/);
+});
+
 // The store, against fake ledger issues. A comment without `issue` is on #7; an issue's `older` stands for comments
 // made before the test. GitHub's cap is modelled: no new comment on an issue that already has 2,500.
 const iso = (ms) => new Date(ms).toISOString();

@@ -72,8 +72,10 @@ const round4 = (n) => Math.round(n * 1e4) / 1e4;
 const iso = (ms) => new Date(ms).toISOString();
 const utc = (s) => s.slice(0, 19).replace('T', ' ');
 
-export const launchRow = ({ alloc, repo, cpus, at, config }) =>
-  ({ alloc, instance: instanceName(alloc), repo, cpus, at: iso(at), config: config.slice(0, 8), state: 'launching' });
+// prelaunch: {run, attempt, workflow} for a VM launched ahead of a run's pool jobs (spec M5, prelaunch.mjs), which the
+// row keeps to its end: it is what a later tick reads to know the run was served, and what the daily line counts.
+export const launchRow = ({ alloc, repo, cpus, at, config, prelaunch }) =>
+  ({ alloc, instance: instanceName(alloc), repo, cpus, at: iso(at), config: config.slice(0, 8), ...(prelaunch ? { prelaunch } : {}), state: 'launching' });
 
 // inst: {zone, machine, provisioning, diskType, created (ms), running (ms, when it became RUNNING; absent or null
 // before)}. A VM launched before placements carries no disk type.
@@ -105,13 +107,21 @@ export function finalRow(row, { end, deleted, job, diskGb, state = 'final' }) {
 
 const dash = (v) => (v == null ? '-' : String(v));
 
+// The job column: the job the runner held, and for a pre-launched VM the run it was launched for (unclaimed while it
+// held none).
+function jobCell(row) {
+  const job = row.job ? `${row.job.name} (${row.job.id})` : null;
+  if (!row.prelaunch) return job ?? '-';
+  return `${job ? `${job}, ` : ''}pre-launched for run ${row.prelaunch.run}${job ? '' : ', unclaimed'}`;
+}
+
 export function renderRow(row) {
   const deleted = { launching: 'launching', running: 'running', deleting: `deleting ${row.deleted && utc(row.deleted)}`, final: row.deleted && utc(row.deleted) }[row.state];
   return [
     `<!-- ${ROW_MARK} ${JSON.stringify(row)} -->`,
     '| alloc | instance | repo | job (actual) | created (UTC) | deleted (UTC) | machine@zone | spot/standard | seconds | $ | end |',
     '|---|---|---|---|---|---|---|---|---|---|---|',
-    `| ${row.alloc} | ${row.instance} | ${row.repo} | ${row.job ? `${row.job.name} (${row.job.id})` : '-'} | ${row.created ? utc(row.created) : '-'} | ` +
+    `| ${row.alloc} | ${row.instance} | ${row.repo} | ${jobCell(row)} | ${row.created ? utc(row.created) : '-'} | ` +
       `${dash(deleted)} | ${row.machine ? `${row.machine}@${row.zone}` : '-'} | ${dash(row.provisioning)} | ${dash(row.seconds)} | ` +
       `${row.dollars == null ? '-' : row.dollars.toFixed(4)} | ${dash(row.end)} |`,
   ].join('\n');
@@ -151,7 +161,8 @@ export function rowsOf(comments) {
 
 // The day's totals (UTC `day`, YYYY-MM-DD): VMs, seconds and dollars of the rows finalized that day, each end's count,
 // the month at that day's rate, the commit of the gce.json the launcher ran, and each family@region's VMs and dollars
-// (spec 2026-10-21: each placement's count and cost, so a price swing shows), with the VMs it could not price.
+// (spec 2026-10-21: each placement's count and cost, so a price swing shows), with the VMs it could not price. On a
+// day with pre-launched VMs (spec M5), `prelaunched`: how many, how many no job claimed, and what those cost.
 export function dailyLine(rows, day, config) {
   const ofDay = rows.filter((r) => r.state === 'final' && r.deleted?.startsWith(day));
   const vms = ofDay.filter((r) => r.seconds !== null && r.seconds !== undefined);
@@ -166,9 +177,14 @@ export function dailyLine(rows, day, config) {
     f.dollars = round4(f.dollars + (r.dollars ?? 0));
     if (r.dollars == null) f.unpriced = (f.unpriced ?? 0) + 1;
   }
+  const prelaunched = vms.filter((r) => r.prelaunch);
+  const unclaimed = prelaunched.filter((r) => !r.job);
   return {
     day, vms: vms.length, seconds: vms.reduce((sum, r) => sum + r.seconds, 0), dollars: spent,
     month: Math.round(spent * 30 * 100) / 100, ends, config: config.slice(0, 8), families,
+    ...(prelaunched.length ? {
+      prelaunched: { vms: prelaunched.length, unclaimed: unclaimed.length, unclaimedDollars: round4(unclaimed.reduce((sum, r) => sum + (r.dollars ?? 0), 0)) },
+    } : {}),
   };
 }
 
@@ -180,6 +196,7 @@ export function renderDaily(d) {
     `<!-- ${DAILY_MARK} ${JSON.stringify(d)} -->`,
     `**GCE pool, ${d.day} (UTC):** ${d.vms} VMs, ${d.seconds} VM-seconds, $${d.dollars.toFixed(4)}; ` +
       `projected month $${d.month.toFixed(2)} at this day's rate. Ends: ${ends}.${families ? ` By family@region: ${families}.` : ''} ` +
+      `${d.prelaunched ? `Pre-launched: ${d.prelaunched.vms} VMs, ${d.prelaunched.unclaimed} unclaimed ($${d.prelaunched.unclaimedDollars.toFixed(4)}). ` : ''}` +
       `Launcher config (gce.json) ${d.config}.`,
   ].join('\n');
 }

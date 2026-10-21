@@ -2,7 +2,7 @@
 // VM, read from ledger rows and the launcher's tick log lines, as the medians of the table in the spec's Purpose.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { stages, ticksOf, renderReport, renderByMachine, readRows } from '../../gce/latency-report.mjs';
+import { stages, ticksOf, renderReport, renderByMachine, renderPrelaunch, readRows } from '../../gce/latency-report.mjs';
 import { renderRow } from '../../gce/launcher/ledger.mjs';
 
 const t = (hms) => Date.parse(`2026-10-21T${hms}Z`);
@@ -72,6 +72,30 @@ test('the report gives each machine type\'s VM stages on their own, insert accep
   assert.match(c3d, /insert accepted → job started +31\.5 s +27\.0–36\.0 +2/);
   assert.match(c4d, /insert accepted → job started +20\.0 s/);
   assert.match(renderReport(stages({ rows, ticks }), { from: t('00:00:00'), to: t('23:59:59'), rows: 3, ticks: 2 }), /insert accepted → job started +27\.0 s/);
+});
+
+// M5's proof: a run's gate VMs inserted before its gates were queued, and Acceptance 5, its gates' queued → started.
+test('the pre-launch lines: its VMs and how many a job claimed, each insert\'s lead on its job, and the gates\' wait by run', () => {
+  const pre = (alloc, run, times, job = { run }) => {
+    const r = row(alloc, times);
+    return { ...r, prelaunch: { run, attempt: 1, workflow: '.github/workflows/gate.yml' }, job: job && { ...r.job, ...job } };
+  };
+  const rows = [
+    // Run 7, pre-launched: inserts at :05 and :06, the gates queued at :19, started at :35 and :41.
+    pre('p1', 7, { at: '10:00:03', created: '10:00:05', queued: '10:00:19', started: '10:00:35' }),
+    pre('p2', 7, { at: '10:00:03', created: '10:00:06', queued: '10:00:19', started: '10:00:41' }),
+    pre('p3', 7, { at: '10:00:03', created: '10:00:06' }, null), // unclaimed
+    // Run 7's VM went to run 8's gate: claimed, but no lead on a gate of its own run.
+    pre('p4', 7, { at: '10:00:03', created: '10:00:07', queued: '10:00:30', started: '10:00:50' }, { run: 8 }),
+    // Run 9, not pre-launched: its gate waited 50 s.
+    ((r) => ({ ...r, job: { ...r.job, run: 9 } }))(row('n1', { at: '10:10:00', created: '10:10:02', queued: '10:09:50', started: '10:10:40' })),
+  ];
+  const text = renderPrelaunch(rows);
+  assert.match(text, /^Pre-launch: 4 VMs, 3 claimed, 1 unclaimed$/m);
+  assert.match(text, /insert accepted → own job queued +13\.5 s +13\.0–14\.0 +2/);
+  assert.match(text, /queued → started \(pre-launched\) +19\.0 s +16\.0–22\.0 +2/);
+  assert.match(text, /queued → started \(other runs\) +35\.0 s +20\.0–50\.0 +2/);
+  assert.equal(renderPrelaunch([row('n2', { at: '10:00:00', created: '10:00:01' })]), 'Pre-launch: none');
 });
 
 test('a window\'s rows include those on closed (rotated) ledger issues updated in it', async () => {

@@ -1,11 +1,12 @@
 // The webhook receiver ci-kit-webhook (spec 2026-10-21 M4, The webhook): the GCE pool's one public endpoint. The
 // GitHub App ci-kit-runners delivers its workflow_job events here. A delivery whose X-Hub-Signature-256 does not verify
-// against the webhook secret is answered 401 before anything in it is read. A pool job queued in a served repo
-// publishes one tick request to Pub/Sub, whose push subscription asks the launcher for a tick; every other delivery
-// is answered and dropped. The receiver holds no state, reads no GitHub and launches nothing: a delivery lost here
-// costs at most the minute until the launcher's scheduled tick.
+// against the webhook secret is answered 401 before anything in it is read. A job queued in a served repo publishes
+// one tick request to Pub/Sub, whose push subscription asks the launcher for a tick; every other delivery is answered
+// and dropped. A pool job's tick launches its VM; any other job's may find its run just begun, whose pool jobs the
+// tick then pre-launches (spec M5): the receiver keeps no state, so it cannot tell a run's first job from a later one,
+// and the tick, which reads the run, decides. The receiver holds no state, reads no GitHub and launches nothing: a
+// delivery lost here costs at most the minute until the launcher's scheduled tick.
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { jobCpus } from '../launcher/logic.mjs';
 
 // A workflow_job payload is a few kB; GitHub caps any payload at 25 MB. A body past this is refused unverified.
 export const MAX_BODY = 1024 * 1024;
@@ -27,18 +28,16 @@ export function signatureValid(secret, body, header) {
   return given.length === expected.length && timingSafeEqual(given, expected);
 }
 
-// What a verified delivery asks for: {request: {repo, job, run, labels}} for a queued job that a GCE launch could
-// serve (launcher logic's jobCpus: ci-kit-pool, one cpus-N the placements name, no foreign label) in a served repo,
-// else {ignored: reason}. served: Set of lowercased owner/name; machines: the first placement's size → machine.
-export function tickRequest({ event, payload, served, machines }) {
+// What a verified delivery asks for: {request: {repo, job, run, labels}} for a job queued in a served repo, on any
+// runner, else {ignored: reason}. served: Set of lowercased owner/name.
+export function tickRequest({ event, payload, served }) {
   if (event === 'ping') return { ignored: 'ping' };
   if (event !== 'workflow_job') return { ignored: `event ${event}` };
   if (payload?.action !== 'queued') return { ignored: `action ${payload?.action}` };
   const repo = payload.repository?.full_name;
   if (typeof repo !== 'string' || !served.has(repo.toLowerCase())) return { ignored: `${repo} is not served` };
   const job = payload.workflow_job ?? {};
-  if (!Array.isArray(job.labels) || jobCpus(job.labels, machines) === null) return { ignored: `labels ${JSON.stringify(job.labels)} are not a pool job's` };
-  return { request: { repo, job: job.id, run: job.run_id, labels: job.labels } };
+  return { request: { repo, job: job.id, run: job.run_id, labels: Array.isArray(job.labels) ? job.labels : [] } };
 }
 
 class TooLarge extends Error {}
@@ -92,7 +91,7 @@ async function readBody(req) {
 
 // secret() → the webhook secret as stored now (kept SECRET_TTL_MS, so a rotation needs no deploy); publish(message) →
 // resolves once Pub/Sub took it; log(severity, message, fields).
-export function createReceiver({ secret, publish, served, machines, log, now = Date.now }) {
+export function createReceiver({ secret, publish, served, log, now = Date.now }) {
   const answer = (res, status, body) => res.writeHead(status, { 'content-type': 'application/json' }).end(`${JSON.stringify(body)}\n`);
   const key = createSecretKeeper({ read: secret, now });
   const refuse = (res, delivery) => {
@@ -131,7 +130,7 @@ export function createReceiver({ secret, publish, served, machines, log, now = D
     } catch {
       return answer(res, 400, { error: 'body is not JSON' });
     }
-    const { request, ignored } = tickRequest({ event: req.headers['x-github-event'], payload, served, machines });
+    const { request, ignored } = tickRequest({ event: req.headers['x-github-event'], payload, served });
     if (!request) return answer(res, 200, { ignored });
     try {
       await publish({ ...request, delivery });
