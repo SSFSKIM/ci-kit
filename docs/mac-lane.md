@@ -355,10 +355,18 @@ job-started hook, because the hook cannot tell one matrix entry from another: `G
 | `display` | `@2x` | the main display is at that scale |
 | `remote` | `none` | no Parsec viewer is connected and `screensharingd` is not running |
 | `computeruse` | `none` | no computer-use process runs |
+| `vm` | `none` | no guest of the VM lane may be running (`vm-reserved` is absent); only on a Mac with the lane installed |
 | `bound` | `15` | minutes: the job is refused once the next read would come after them |
 
 `any` leaves a condition unchecked. A malformed input fails the step with `ci-kit settle: <input> takes …` (exit 2),
 never in the refusal's shape.
+
+**On a Mac with the VM lane** (its launcher's LaunchAgent file is installed), `vm: none` also raises the measured
+claim before the first read: `vm-claim.<worker>` in `~/Library/Logs/ci-kit`, naming the job and its `Runner.Worker`,
+which keeps the lane from booting a guest until the job's job-completed hook removes it. The line names the claim, and
+each posture carries `vm=none|reserved|unknown`. A claim that cannot be raised (no `Runner.Worker` among the step's
+ancestors, the desktop lock not taken) refuses the job at once with a `ci-kit: … rerun` line. `vm: any` neither claims
+nor waits. Without the lane the input changes nothing and the line is as below.
 
 **Settled** is two reads 30 s apart that each meet every condition, so a quiet desktop releases the job 30 s in. A read
 is `desktop-posture.sh --read`: the posture line's six reads under their 1 s deadlines, printed without the line's label

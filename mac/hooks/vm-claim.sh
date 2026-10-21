@@ -74,7 +74,7 @@ raise() { # <worker pid> <what>
   file=$(claim_file "$1" "$started")
   clock
   if ! lock 180; then
-    claim_why='the desktop lock stayed taken for 180 s'
+    claim_why='the desktop lock could not be taken within 180 s'
     return 1
   fi
   if ! write_marker "$file" "$2" "$1" "$started" 2>/dev/null; then
