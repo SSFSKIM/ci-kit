@@ -107,9 +107,14 @@ toward the boot alone, and below it for the jobs a warm runner covers.
   - Acceptance 4 (a day's median queued → started ≤ 50 s) is read from `latency-report.mjs` after a day of traffic.
 - [ ] M5 — Pre-launch of a run's gate VMs (the owner chose it 2026-10-21; no warm runner). (2026-10-21) Built, reviewer-medium clean after one fix wave, ci-gate green; PR to
   CI-opt. Deploy (`launcher` + `webhook`) on CI-opt's go; Acceptance 5 is read from the live numbers.
-- [ ] M6 — Stock-out and quota resilience. Sized from the day's data (2026-10-21); approved by CI-opt 18:5xZ with
-  NAT (Decision Log). Hyperdisk raises filed. Build order: NAT, proved in us-central1 first; then the race and the
-  counts; then the placements.
+- [ ] M6 — Stock-out and quota resilience. Sized from the day's data (2026-10-21); approved by CI-opt with NAT.
+  - [x] (2026-10-21 19:46Z) NAT: #82 merged (1757fd7); `network`, `bake`, launcher 00014-b8p. Rolled back 19:58Z to
+    00013-78r: GitHub stalls NAT bursts (Surprises). NAT parked; #83 (1b97c25) makes egress a `gce.json` switch,
+    external by default.
+  - [x] (2026-10-21 21:34Z) Race and counts: #84 merged (aebe86e) after three review rounds; `deploy.sh base`
+    (monitoring.viewer) and launcher 00015-s2p (rollback 00013-78r).
+  - [ ] Placements: branch pool-placements-m6, eight placements, max_vcpus 386, the CPUS_PER_VM_FAMILY scope fix; in
+    review.
   Follow-up outside M6's proof (CI-opt): the tick's preparation before its first allocation, 5.1 s at 18:45 and 6.2 s
   to the first insert, brought to M3's ≤ 5 s.
 
@@ -696,6 +701,11 @@ VM's walk.
   `quotaInfo.dimensions.vm_family: "C4D"`. The parser matched only `<FAMILY>_CPUS`, so this refusal was remembered for
   the whole region: harmless with one family a region, wrong once C4D and C3D share us-central1, us-east1 and
   us-east4. The placements PR scopes it to (region, family).
+
+- 2026-10-21 (M6): **us-central1's regional `CPUS` quota (200) does not bind C3D or C4D.** GCE's regional CPUS quota
+  covers only the families without a quota of their own; C3D and C4D have theirs. During the 26-VM us-central1 burst
+  (19:50Z) Cloud Monitoring's quota usage showed instances 26 and cpus_all_regions 154, and no regional cpus series.
+  So us-central1's 216 family vCPUs (C4D 24 + C3D 192) count in full toward `max_vcpus`.
 
 
 ## Outcomes & Retrospective
