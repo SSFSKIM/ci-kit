@@ -33,6 +33,13 @@ warm_token() { curl -sf --max-time 10 -H 'Metadata-Flavor: Google' "$MD/attribut
 # An ephemeral VM is patched by re-baking, not by apt timers racing its boot.
 step=apt
 systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service || true
+# No job uses a snap, and snapd seeds itself on the first boot of every disk made from the image, beside the job's
+# start (spec M3, The boot). The metapackages that depend on it go with it; their dependencies stay installed. The pin
+# keeps any later install from bringing it back.
+systemctl stop snapd.socket snapd.service snapd.seeded.service || true
+apt-get purge -y snapd
+rm -rf /snap /var/snap /var/lib/snapd /var/cache/snapd
+printf 'Package: snapd\nPin: release *\nPin-Priority: -10\n' > /etc/apt/preferences.d/ci-kit-no-snapd
 apt-get update
 apt-get install -y --no-install-recommends docker.io git jq curl xz-utils ca-certificates iptables
 systemctl enable docker
@@ -53,6 +60,17 @@ systemctl daemon-reload
 # Enabled, not started: it runs on the VMs made from this disk, never on the builder.
 systemctl enable ci-kit-gce-job.service
 echo "$KIT_SHA" > /var/lib/ci-kit/kit-commit
+
+# A job VM needs cloud-init for two things: its network, which the GCE datasource renders per instance in the local
+# and network stages, and growing its root filesystem to the disk it was given. Every other module, and the config and
+# final stages whole, would run beside the job's start for nothing (spec M3, The boot).
+step=boot
+cat > /etc/cloud/cloud.cfg.d/99-ci-kit.cfg <<'CFG'
+cloud_init_modules: [growpart, resizefs]
+cloud_config_modules: []
+cloud_final_modules: []
+CFG
+systemctl mask cloud-config.service cloud-final.service
 
 step=clean
 apt-get clean

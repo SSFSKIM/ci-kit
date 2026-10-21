@@ -226,6 +226,7 @@ the two files list no repo twice fails). Ensure prints `result=gce` for a GCE re
 | the VM's job unit and smoke check | `gce/vm/` (`ci-kit-gce-job.service`, `job.mjs`, `run.mjs`, `smoke.sh`) |
 | Compute Engine and Secret Manager client | `lib/gce.mjs` |
 | deploy | `gce/deploy.sh` |
+| start latency, stage by stage | `gce/latency-report.mjs` (Reading the GCE ledger, below) |
 | config | `pool/config/gce.json` (I12; placements below) |
 
 **Placements.** `gce.json` lists where the launcher may create a VM as an ordered list, `placements` (spec
@@ -258,14 +259,24 @@ and GitHub. A tick:
 
 1. reads `gce.json` and `pool.json` from the kit's main (the newest commit that changed each; on a failed read it
    keeps the last good copy, and at a cold start without main, the copy in its own build);
-2. refuses public repos and any repo in both files;
-3. reads the ledger's last 26 h on every open ledger issue (below), then lists the `ci-kit=gce` instances and disks;
-4. lists each repo's `ci-kit-gce-*` runners, and its queued and in-progress runs and their jobs;
-5. cleans up (below), finalizes rows whose VM is gone, and records on each running row the job its runner holds;
-6. launches one VM per queued pool job not covered by an unclaimed VM (a runner registered, not busy, younger than
-   `idle_runner_minutes`; a busy one covers nothing), oldest job first, while the vCPUs in flight stay at or under
-   `max_vcpus`;
-7. once a day, in its first two hours (UTC), writes yesterday's daily line.
+2. reads, all at once: each repo's visibility (public repos, and any repo in both files, are refused), its
+   `ci-kit-gce-*` runners and then its queued and in-progress runs and their jobs; the ledger's last 26 h on every
+   open ledger issue (below) and then the `ci-kit=gce` instances and disks; the images; and, once the runners and
+   instances are in, `ci-kit/job` of each VM whose runner is not busy;
+3. launches one VM per queued pool job not covered by an unclaimed VM, oldest job first, while the vCPUs in flight
+   stay at or under `max_vcpus`. An unclaimed VM has its runner registered, not busy, younger than
+   `idle_runner_minutes`, and never having taken a job: a job VM is single-use, and its runner reads registered and
+   not busy for a while after its job ends (a job this tick read names it, its row recorded a job, or it reported
+   `ci-kit/job`). Static job 119166794835 waited 126 s on 2026-10-21 behind a VM whose job had just ended;
+4. beside the launches, cleans up (below), finalizes rows whose VM is gone, and records on each running row the job
+   its runner holds;
+5. once a day, in its first two hours (UTC), writes yesterday's daily line.
+
+The launches start as soon as the reads are in, before the cleanup, and the two run together: a VM about to be
+deleted still counts against `max_vcpus` for that tick, so launching first can only under-admit, never over-admit.
+The ledger store lives as long as the service's instance and, after its first read of an issue, asks only for the
+comments updated since its last read, less 5 min; a busy day's window is several pages, which a tick would otherwise
+read one after another before its first launch.
 
 A launch writes the `launching` row, mints the JIT config (runner name = instance name, labels `self-hosted`,
 `ci-kit-pool`, `cpus-N`, `ci-kit-gce`, work folder `/var/lib/ci-kit/cache/work/<instance>`), then creates
@@ -419,6 +430,16 @@ gcloud compute instances list --project=ssfskim-ci-kit --filter='labels.ci-kit:*
 gcloud compute disks list --project=ssfskim-ci-kit --filter='labels.ci-kit:*'
 ```
 
+**The boot** (spec M3). The builder purges snapd (no job uses a snap, and snapd seeded itself on the first boot of
+every disk made from the image, beside the job's start), pins it out, and keeps cloud-init only for what a job VM
+needs from it: its network, which the GCE datasource renders per instance (the local and network stages), and growing
+the root filesystem to the VM's disk (`growpart`, `resizefs`). Every other module goes, and `cloud-config.service` and
+`cloud-final.service` are masked (the config stage restarted chrony and cron beside the job's start). The network
+stage still gates the job: it is ordered before `sysinit.target`, which every ordinary service waits for, dockerd
+included. Since 2026-10-21 the project logs serial ports to Cloud Logging (`gce/deploy.sh base`), so a deleted VM's
+boot can be read there:
+`gcloud logging read 'logName="projects/ssfskim-ci-kit/logs/serialconsole.googleapis.com%2Fserial_port_1_output" AND resource.labels.instance_id="<id>"' --project=ssfskim-ci-kit`.
+
 **The job VM.** At boot, `ci-kit-gce-job.service` runs `gce/vm/job.mjs`: it drops the job container's TCP and UDP
 to `169.254.169.254` except port 53 (GCE's resolver lives there), runs one job container from
 `ci-kit-runner:latest` on all of the VM's vCPUs with the Hetzner container's mounts and environment and the JIT
@@ -444,7 +465,7 @@ config from metadata `ci-kit-jit`, reports `ci-kit/job=exit:<code>`, and the uni
 
 ```
 gce/deploy.sh                       # every part, in order; or name parts:
-gce/deploy.sh base network          # APIs, the service account and its compute role; the VPC
+gce/deploy.sh base network          # APIs, the service account and its compute role, serial port logging; the VPC
 gce/deploy.sh bake bake-schedule    # the Cloud Run job ci-kit-bake and its weekly Scheduler job
 gce/deploy.sh launcher launcher-schedule   # the Cloud Run service ci-kit-launcher and its one-minute tick
 gce/deploy.sh alert                 # the failed-tick metric and its alert policy, mailed to the owner
@@ -461,7 +482,8 @@ connect; a `sitecustomize.py` that filters `socket.getaddrinfo` to `AF_INET`, on
 deploy. To pause the launcher: `gcloud scheduler jobs pause ci-kit-launcher-tick --location=us-central1
 --project=ssfskim-ci-kit` (and `resume`). Its logs: `gcloud run services logs read ci-kit-launcher
 --region=us-central1 --project=ssfskim-ci-kit`; each tick logs one line with what it launched, deleted and
-finalized, the gce.json commit it ran (`config`), and its GitHub budget.
+finalized, the gce.json commit it ran (`config`), its GitHub budget, when it started (`started`, the request's
+arrival) and when it sent its first insert (`firstInsert`, null when it launched nothing).
 
 **Reading the GCE ledger.** The same issue as Hetzner's ("pool ledger" in `SSFSKIM/ci-kit-sandbox`), one comment
 per allocation:
@@ -473,7 +495,14 @@ per allocation:
 - The deleted column reads `launching` (before the VM exists), `running`, or `deleting <time>` until the row is
   final. A row never moves back.
 - `job (actual)` is the job the runner held, by name and id: a runner takes any queued job of its repo and size,
-  so it may not be the one the launch was for.
+  so it may not be the one the launch was for. Since M3 the row's JSON also keeps the job's run (`job.run`), its
+  workflow path (`job.workflow`) and GitHub's queued and started times (`job.queued`, `job.started`), and the VM's
+  RUNNING time (`running`, Compute Engine's `lastStartTimestamp`); the size is `cpus`.
+- `node gce/latency-report.mjs [--since <ISO>] [--until <ISO>] [--repo <owner/name>]` (default: the last 24 h) reads
+  the rows and the launcher's tick lines (Cloud Logging, gcloud's default account) and prints the median and p10–p90
+  of each stage of a job's wait: queued → next tick, tick start → insert accepted (the tick's first VM's
+  creation), tick start → first insert sent, insert accepted → RUNNING, RUNNING → job started, and queued →
+  started. A row or tick without a stage's fields (written before M3) is left out of that stage.
 - `end`: `done` (its job ended, or its runner did), `cancelled-idle` (no job came within `idle_runner_minutes`, or
   its repo stopped being served), `preempted`, `max-run` (Compute Engine's run limit, or the launcher's overage
   rule), `abandoned` (no VM was created: every zone refused, quota, or a crash before the insert), `orphan` (a VM
