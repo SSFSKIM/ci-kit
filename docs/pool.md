@@ -634,14 +634,18 @@ CI_KIT_COMMIT=$(git rev-parse HEAD) node gce/bake/bake.mjs     # default commit:
 3. Only on `ok` and power-off within 30 min, it images the builder's disk into the family, labelled
    `ci-kit-ready=false`, and deletes the builder.
 4. In each placement in turn it boots `ci-kit-gce-builder-<run id>-smoke-<n>` from the image on the placement's
-   subnetwork and disk type, on its `cpus-2` machine (the next size's when that is refused), so an image that does not
-   boot on a placement's family is never ready, with metadata `ci-kit-smoke=<vCPUs>` in place of a JIT config. The job
+   subnetwork and disk type, on its `cpus-2` machine (the next size's when that is refused), with metadata
+   `ci-kit-smoke=<vCPUs>` in place of a JIT config. A placement whose smoke VM no zone or machine takes (capacity or
+   quota refused every attempt; C4D us-central1 had no capacity even on demand on 2026-10-21) is skipped, logged as a
+   `warning:` naming it and listed again on the bake's last line; a smoke VM that boots and fails its checks fails the
+   bake. An image that does not boot on a machine family of `gce.json` is never ready: every family needs a passing
+   smoke in at least one of its placements, so a family whose every placement was skipped fails the bake. The job
    unit runs `gce/vm/smoke.sh` in a job container: vCPUs, user, isolation, the runner, zsh and MAWS's fonts, Node 22
    and 24, every warmed
    cache, the work directory, DNS, egress, and the metadata server refused. It reports
    `ci-kit/smoke=ok|failed:<check>` and powers off.
-5. It runs the real job on a VM booted from the image in the first placement that takes it. When every smoke VM
-   and the real job passed, the image is labelled `ci-kit-ready=true`; the launcher uses only ready images (never
+5. It runs the real job on a VM booted from the image in the first placement that takes it. When every family's
+   smoke and the real job passed, the image is labelled `ci-kit-ready=true`; the launcher uses only ready images (never
    `getFromFamily`, which would return an unready one). On any failure the bake deletes its own image.
 6. On every exit it deletes its instances, and keeps the two newest ready images (unready images of other runs
    are dropped once 4 h old). It deletes an image only while that image carries its `ci-kit-run` label: an image

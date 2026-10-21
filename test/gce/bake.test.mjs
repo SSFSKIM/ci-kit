@@ -11,7 +11,7 @@ import {
 } from '../../gce/bake/plan.mjs';
 import { parseGceConfig } from '../../gce/launcher/config.mjs';
 import { runBake } from '../../gce/bake/bake.mjs';
-import { WEST, CENTRAL, ONE_REGION_CFG } from './config-fixtures.mjs';
+import { WEST, CENTRAL, C4D_CENTRAL, ONE_REGION_CFG } from './config-fixtures.mjs';
 import { vmMode } from '../../gce/vm/run.mjs';
 import { GceError } from '../../lib/gce.mjs';
 import { fakeGce, fakeSandbox, instanceShape, imageShape, FOREIGN } from './fake-gce.mjs';
@@ -352,6 +352,52 @@ test('a smoke VM failing in any placement keeps the image unready and deletes it
   await assert.rejects(bakeNew(gce), /smoke VM in placement 2 \(us-central1\) did not pass: failed:cpus/);
   assert.deepEqual(ready(gce), []);
   assert.deepEqual(leftInstances(gce), []);
+});
+
+// Live 2026-10-21 22:00Z: C4D us-central1 had no capacity in any zone, on demand too, while C4D elsewhere booted the
+// image. A placement whose smoke VM no zone or machine would take is skipped with a warning; the image is ready when
+// every machine family of gce.json passed a smoke in at least one placement (it boots on that family's hardware).
+const FAMILIES_CFG = { ...CFG, placements: [WEST, C4D_CENTRAL, CENTRAL] };
+const C4D_CENTRAL_SMOKES = 4 * 4; // c4d-highcpu-2, -4, -8, -16 in its four zones
+const bakeFamilies = (gce, log = () => {}) => runBake(gce, { cfg: FAMILIES_CFG, sha: SHA, runId: RUN, token: 'ghs_x', gh: fakeSandbox({ run: OK_RUN }), script: '#!/bin/bash\n', ...clock(), log });
+
+test('a placement refused everywhere is skipped with a warning while another of its family passed: the image is ready', async () => {
+  const lines = [];
+  const gce = fakeGce({
+    insertErrors: ['', '', ...Array(C4D_CENTRAL_SMOKES).fill('ZONE_RESOURCE_POOL_EXHAUSTED')], scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK },
+  });
+  const { image, skipped } = await bakeFamilies(gce, (l) => lines.push(l));
+  assert.deepEqual(ready(gce), [image]);
+  assert.deepEqual(skipped, ['placement 2 (c4d@us-central1)']);
+  assert.ok(lines.some((l) => /^warning: placement 2 \(c4d@us-central1\) skipped: no zone took its smoke VM/.test(l)), lines.join('\n'));
+  const smokes = gce.calls.filter((c) => c.startsWith(`insert ci-kit-gce-builder-${RUN}-smoke`));
+  assert.equal(smokes.filter((c) => c.includes('-smoke-2 ')).length, C4D_CENTRAL_SMOKES, 'every zone and machine was asked');
+  assert.ok(smokes.some((c) => c.includes('-smoke-3 c3d-highcpu-4@us-central1-a')), 'the next placement is still smoked');
+  assert.deepEqual(leftInstances(gce), []);
+});
+
+test('quota refusing a placement\'s smoke VM skips it too', async () => {
+  const gce = fakeGce({ insertErrors: ['', '', 'QUOTA_EXCEEDED', 'QUOTA_EXCEEDED', 'QUOTA_EXCEEDED', 'QUOTA_EXCEEDED'], scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
+  const { image, skipped } = await bakeFamilies(gce);
+  assert.deepEqual(ready(gce), [image]);
+  assert.deepEqual(skipped, ['placement 2 (c4d@us-central1)']);
+});
+
+test('every placement of a family refused: no smoke proved that family, and the bake fails', async () => {
+  // C3D us-central1, the only C3D placement: c3d-highcpu-4, -8, -16 in its four zones.
+  const gce = fakeGce({ insertErrors: ['', '', '', ...Array(12).fill('ZONE_RESOURCE_POOL_EXHAUSTED')], scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
+  await assert.rejects(bakeFamilies(gce), /no smoke VM passed on c3d: placement 3 \(c3d@us-central1\) was skipped/);
+  assert.deepEqual(ready(gce), []);
+  assert.ok(!gce.state.images.some((i) => i.name.startsWith(`ci-kit-runner-${RUN}`)), 'its own image is deleted');
+  assert.deepEqual(leftInstances(gce), []);
+});
+
+test('a smoke VM that boots and fails still fails the bake, though another placement of its family passed', async () => {
+  const gce = fakeGce({ scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
+  const real = gce.guestAttribute;
+  gce.guestAttribute = async (zone, name, path) => (name.endsWith('-smoke-2') ? 'failed:cpus' : real(zone, name, path));
+  await assert.rejects(bakeFamilies(gce), /smoke VM in placement 2 \(us-central1\) did not pass: failed:cpus/);
+  assert.deepEqual(ready(gce), []);
 });
 
 test('a builder refused for quota in the first placement\'s region is built in the next placement', async () => {
