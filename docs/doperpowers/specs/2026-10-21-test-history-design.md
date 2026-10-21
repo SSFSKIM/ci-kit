@@ -594,15 +594,15 @@ Each is written here in full when its condition holds:
   (`--affected` iterations, and every run before the switch) keep `unit` and `test-results-unit-<attempt>` and read as
   before. An attempt's n shards make one line of `unit`, so bases, durations, selection and the change links run across
   the switch:
-  - its report is the union of the shards', each checked against its own shard's job;
-  - it carries the earliest start, the latest completion and the worst conclusion; `shards` holds each shard's job, id,
-    runner, times, conclusion and artifact;
+  - its report is the union of the shards', each checked against the job that ran it;
+  - it carries the earliest start, the latest completion and the worst conclusion; `shards` holds each shard's job,
+    attempt, id, runner, times, conclusion and artifact;
   - it waits while a shard runs; it is `missing` when every shard ran its tests and an artifact is absent; an attempt in
-    which a shard did not run its tests has none, since a shard from another attempt never completes a set; mixed shard
-    counts are refused.
-
-  So a run whose shard GCE preempted (ci-gate reruns that job alone) leaves no report. Completing the rerun from the
-  copied shards' earlier artifacts would recover it; that is the owner's call.
+    which a shard did not run its tests has none; mixed shard counts are refused;
+  - a shard a re-run copied into the attempt is the job it copies, the shard in the latest earlier attempt where it is
+    no copy, and its report is that attempt's artifact (CI-opt's decision). ci-gate reruns a preempted job alone, and
+    with n shards a run is n times as likely to meet a preemption, so refusing copies would lose too many runs. A copy
+    is part of its attempt's verdict; an artifact of any other attempt never stands in for a shard.
 
 ## Surprises & Discoveries
 
