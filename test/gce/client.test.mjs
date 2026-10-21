@@ -193,8 +193,8 @@ test('review 3: an aggregated listing that could not reach a zone says it is not
     ['GET /aggregated/disks?filter=labels.ci-kit%3Dgce', json(200, { items: { 'zones/a': { disks: [{ name: 'd' }] } } })],
     ['GET /aggregated/operations', json(200, { items: {}, unreachables: ['zones/c'] })],
   ]);
-  assert.deepEqual(await gce.listInstances('labels.ci-kit=gce'), { items: [{ name: 'x' }], complete: false });
-  assert.deepEqual(await gce.listDisks('labels.ci-kit=gce'), { items: [{ name: 'd' }], complete: true });
+  assert.deepEqual(await gce.listInstances('labels.ci-kit=gce'), { items: [{ name: 'x' }], complete: false, zones: new Set(['a']) });
+  assert.deepEqual(await gce.listDisks('labels.ci-kit=gce'), { items: [{ name: 'd' }], complete: true, zones: new Set(['a']) });
   await assert.rejects(gce.operations('x'), /unreachable/, 'a partial operation history is unavailable, not empty');
 });
 
@@ -211,4 +211,16 @@ test('fix wave 2: a partial-success or list-overhead warning, top-level or per s
     if (complete) await listing(body).operations('f');
     else await assert.rejects(listing(body).operations('f'), /unreachable|incomplete/);
   }
+});
+
+test('placements: a listing names the zones it read whole (every zone has a scope, an empty one too); one flagged on any page, or a whole-listing warning, vouches for none', async () => {
+  const zones = async (pages) => (await gceWith(pages).gce.listInstances('f')).zones;
+  const empty = { warning: { code: 'NO_RESULTS_ON_PAGE' } };
+  assert.deepEqual(await zones([['GET /aggregated/instances', json(200, { items: { 'zones/us-west4-a': { instances: [{ name: 'x' }] }, 'zones/us-west4-b': empty, 'regions/us-west4': empty } })]]),
+    new Set(['us-west4-a', 'us-west4-b']));
+  assert.deepEqual(await zones([
+    ['GET /aggregated/instances?filter=f&returnPartialSuccess=true&pageToken=p2', json(200, { items: { 'zones/a': { warning: { code: 'UNREACHABLE' } }, 'zones/c': empty } })],
+    ['GET /aggregated/instances', json(200, { items: { 'zones/a': { instances: [{ name: 'x' }] }, 'zones/b': empty }, unreachables: ['zones/b'], nextPageToken: 'p2' })],
+  ]), new Set(['c']));
+  assert.deepEqual(await zones([['GET /aggregated/instances', json(200, { items: { 'zones/a': { instances: [{ name: 'x' }] } }, warning: { code: 'PARTIAL_SUCCESS' } })]]), new Set());
 });

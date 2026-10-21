@@ -5,19 +5,21 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  reportOutcome, checkOutcome, ownsBakeInstance, staleBakeInstances, staleBakeRunners, imagesToPrune, placements, refusal, bakeRunId, bakeNames,
+  reportOutcome, checkOutcome, ownsBakeInstance, staleBakeInstances, staleBakeRunners, imagesToPrune, placements, smokeMachines, refusal, bakeRunId, bakeNames,
   builderInstance, smokeInstance, checkInstance, checkJitRequest, imageBody, fillBuilderScript, machineCpus, BAKE_TIMEOUT_MS, CHECK_TIMEOUT_MS,
   refusedOutright,
 } from '../../gce/bake/plan.mjs';
 import { runBake } from '../../gce/bake/bake.mjs';
+import { parseGceConfig } from '../../gce/launcher/config.mjs';
 import { vmMode } from '../../gce/vm/run.mjs';
 import { GceError } from '../../lib/gce.mjs';
 import { fakeGce, fakeSandbox, instanceShape, imageShape, FOREIGN } from './fake-gce.mjs';
 
-const CFG = JSON.parse(readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
+const CFG = parseGceConfig(readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
 const SHA = 'a'.repeat(40);
 const RUN = '20261016-094500-k3x9';
 const SUBNET = 'regions/us-central1/subnetworks/ci-kit-us-central1';
+const CENTRAL = CFG.placements[0];
 const MIN = 60_000;
 
 test('a builder is ok only once it reported ok and powered off', () => {
@@ -65,11 +67,16 @@ test('retention keeps the two newest ready images, and drops unready ones only o
   assert.deepEqual(imagesToPrune(images.slice(0, 4), { family: 'ci-kit-runner', now }), []);
 });
 
-test('placements try every zone of a machine before the next machine', () => {
-  assert.deepEqual(placements(['e2-standard-4', 'n2d-standard-4'], ['z-a', 'z-b']), [
-    { machine: 'e2-standard-4', zone: 'z-a' }, { machine: 'e2-standard-4', zone: 'z-b' },
-    { machine: 'n2d-standard-4', zone: 'z-a' }, { machine: 'n2d-standard-4', zone: 'z-b' },
+test('placements try every zone of a machine before the next machine, and each placement before the next', () => {
+  const p1 = { region: 'r1', zones: ['r1-a', 'r1-b'], machines: { 2: 'm-2', 4: 'm-4', 8: 'm-8', 16: 'm-16' } };
+  const p2 = { region: 'r2', zones: ['r2-a'], machines: { 2: 'n-4', 4: 'n-4', 8: 'n-8', 16: 'n-16' } };
+  const at = (list) => list.map((a) => `${a.machine}@${a.zone}`);
+  assert.deepEqual(at(placements([p1, p2], () => ['e2-standard-4', 'n2d-standard-4'])), [
+    'e2-standard-4@r1-a', 'e2-standard-4@r1-b', 'n2d-standard-4@r1-a', 'n2d-standard-4@r1-b', 'e2-standard-4@r2-a', 'n2d-standard-4@r2-a',
   ]);
+  assert.equal(placements([p1], () => ['x'])[0].placement, p1);
+  // A smoke or check VM: the placement's machines smallest size first, each once.
+  assert.deepEqual(at(placements([p2], smokeMachines)), ['n-4@r2-a', 'n-8@r2-a', 'n-16@r2-a']);
 });
 
 test('an insert refused for capacity moves to the next zone, one refused for quota to the next machine', () => {
@@ -100,7 +107,7 @@ test('names: the run id is UTC seconds, and builder, smoke and image names fit C
 });
 
 test('the builder has no service account, carries only a token in its metadata, and is deleted by GCE at the latest after its run limit', () => {
-  const body = builderInstance({ name: 'ci-kit-gce-builder-x', zone: 'us-central1-a', machine: 'e2-standard-4', runId: RUN, script: '#!/bin/bash\n', token: 'ghs_x', diskGb: 30, subnetwork: SUBNET });
+  const body = builderInstance({ name: 'ci-kit-gce-builder-x', zone: 'us-central1-a', machine: 'e2-standard-4', runId: RUN, script: '#!/bin/bash\n', token: 'ghs_x', diskGb: 30, placement: CENTRAL });
   assert.deepEqual(body.serviceAccounts, []);
   assert.deepEqual(body.labels, { 'ci-kit': 'gce-builder', 'ci-kit-run': RUN, 'ci-kit-role': 'builder' });
   assert.deepEqual(body.disks[0].initializeParams.labels, body.labels);
@@ -117,7 +124,7 @@ test('the builder has no service account, carries only a token in its metadata, 
 });
 
 test('the smoke VM boots the new image like a job VM, with no JIT config and the vCPUs it must see', () => {
-  const body = smokeInstance({ name: 's', zone: 'us-central1-b', machine: 'e2-highcpu-2', runId: RUN, image: 'projects/ssfskim-ci-kit/global/images/i', diskGb: 50, subnetwork: SUBNET });
+  const body = smokeInstance({ name: 's', zone: 'us-central1-b', machine: 'e2-highcpu-2', runId: RUN, image: 'projects/ssfskim-ci-kit/global/images/i', diskGb: 50, placement: CENTRAL });
   assert.deepEqual(body.serviceAccounts, []);
   assert.equal(body.labels['ci-kit-role'], 'smoke');
   assert.equal(body.disks[0].initializeParams.sourceImage, 'projects/ssfskim-ci-kit/global/images/i');
@@ -128,7 +135,7 @@ test('the smoke VM boots the new image like a job VM, with no JIT config and the
 });
 
 test('the check VM boots the new image as a job VM: its JIT config in ci-kit-jit, and the bake\'s labels, never a pool VM\'s', () => {
-  const body = checkInstance({ name: 'c', zone: 'us-central1-a', machine: 'e2-highcpu-2', runId: RUN, image: 'projects/ssfskim-ci-kit/global/images/i', diskGb: 50, subnetwork: SUBNET, jit: 'eyJj' });
+  const body = checkInstance({ name: 'c', zone: 'us-central1-a', machine: 'e2-highcpu-2', runId: RUN, image: 'projects/ssfskim-ci-kit/global/images/i', diskGb: 50, placement: CENTRAL, jit: 'eyJj' });
   assert.deepEqual(body.serviceAccounts, []);
   assert.deepEqual(body.labels, { 'ci-kit': 'gce-builder', 'ci-kit-run': RUN, 'ci-kit-role': 'check' });
   assert.deepEqual(body.disks[0].initializeParams.labels, body.labels);
@@ -274,16 +281,59 @@ test('a builder machine refused for quota falls back to the next machine; capaci
   ]);
 });
 
-test('the smoke VM uses the cpus-2 machine, and its fallback when E2 is refused', async () => {
+test('on the old form, a smoke VM per placement: the cpus-2 machine, then the next size\'s when E2 is refused; and the fallback placement\'s', async () => {
   const gce = fakeGce({ insertErrors: ['', 'QUOTA_EXCEEDED'], scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
   await bake(gce);
   const smokes = gce.calls.filter((c) => c.startsWith(`insert ci-kit-gce-builder-${RUN}-smoke`));
   assert.deepEqual(smokes, [
-    `insert ci-kit-gce-builder-${RUN}-smoke e2-highcpu-2@us-central1-a`,
-    `insert ci-kit-gce-builder-${RUN}-smoke c3d-highcpu-4@us-central1-a`,
+    `insert ci-kit-gce-builder-${RUN}-smoke-1 e2-highcpu-2@us-central1-a`,
+    `insert ci-kit-gce-builder-${RUN}-smoke-1 c3d-highcpu-4@us-central1-a`,
+    `insert ci-kit-gce-builder-${RUN}-smoke-2 c3d-highcpu-4@us-central1-a`,
   ]);
-  const body = gce.inserted.find((b) => b.name === `ci-kit-gce-builder-${RUN}-smoke`);
+  const body = gce.inserted.find((b) => b.name === `ci-kit-gce-builder-${RUN}-smoke-1`);
   assert.equal(body.metadata.items.find((i) => i.key === 'ci-kit-smoke').value, '4'); // the fallback's vCPUs
+});
+
+// The new form (spec 2026-10-21): C4D us-west4 first, C3D us-central1 second.
+const WEST = {
+  region: 'us-west4', subnetwork: 'ci-kit-us-west4', zones: ['us-west4-a', 'us-west4-b', 'us-west4-c'],
+  machines: { 2: 'c4d-highcpu-2', 4: 'c4d-highcpu-4', 8: 'c4d-highcpu-8', 16: 'c4d-highcpu-16' }, disk_type: 'hyperdisk-balanced',
+};
+const NEW_CFG = { ...CFG, placements: [WEST, { ...CENTRAL, machines: { ...CENTRAL.machines, 2: 'c3d-highcpu-4' } }] };
+const bakeNew = (gce, gh = fakeSandbox({ run: OK_RUN })) => runBake(gce, { cfg: NEW_CFG, sha: SHA, runId: RUN, token: 'ghs_x', gh, script: '#!/bin/bash\n', ...clock(), log: () => {} });
+const disk = (b) => b.disks[0].initializeParams.diskType.split('/').pop();
+
+test('across placements: one builder, a smoke VM in each placement on its own subnetwork and disk type, before the image is ready', async () => {
+  const gce = fakeGce({ scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
+  const { image } = await bakeNew(gce);
+  const vms = gce.inserted.map((b) => [b.name.replace(`ci-kit-gce-builder-${RUN}`, '…'), b.machineType.split('/').pop(), b.networkInterfaces[0].subnetwork.split('/').pop(), disk(b)]);
+  assert.deepEqual(vms, [
+    ['…', 'e2-standard-4', 'ci-kit-us-west4', 'pd-balanced'],
+    ['…-smoke-1', 'c4d-highcpu-2', 'ci-kit-us-west4', 'hyperdisk-balanced'],
+    ['…-smoke-2', 'c3d-highcpu-4', 'ci-kit-us-central1', 'pd-balanced'],
+    ['…-check', 'c4d-highcpu-2', 'ci-kit-us-west4', 'hyperdisk-balanced'],
+  ]);
+  assert.deepEqual(ready(gce), [image]);
+  assert.deepEqual(leftInstances(gce), []);
+});
+
+test('a smoke VM failing in any placement keeps the image unready and deletes it', async () => {
+  const gce = fakeGce({ scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
+  const real = gce.guestAttribute;
+  gce.guestAttribute = async (zone, name, path) => (name.endsWith('-smoke-2') ? 'failed:cpus' : real(zone, name, path));
+  await assert.rejects(bakeNew(gce), /smoke VM in placement 2 \(us-central1\) did not pass: failed:cpus/);
+  assert.deepEqual(ready(gce), []);
+  assert.deepEqual(leftInstances(gce), []);
+});
+
+test('a builder refused for quota in the first placement\'s region is built in the next placement', async () => {
+  const gce = fakeGce({ insertErrors: ['QUOTA_EXCEEDED', 'QUOTA_EXCEEDED'], scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
+  await bakeNew(gce);
+  assert.deepEqual(gce.calls.filter((c) => c.startsWith(`insert ci-kit-gce-builder-${RUN} `)), [
+    `insert ci-kit-gce-builder-${RUN} e2-standard-4@us-west4-a`,
+    `insert ci-kit-gce-builder-${RUN} n2d-standard-4@us-west4-a`,
+    `insert ci-kit-gce-builder-${RUN} e2-standard-4@us-central1-a`,
+  ]);
 });
 
 test('a builder another party relabelled is left alone', async () => {

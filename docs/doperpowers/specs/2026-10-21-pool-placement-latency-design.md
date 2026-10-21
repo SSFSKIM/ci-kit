@@ -49,7 +49,8 @@ toward the boot alone, and below it for the jobs a warm runner covers.
 
 - [x] (2026-10-21 12:2xZ) Quota preferences filed: C4D us-west4 192 (granted 0 at filing), instances us-west4 64
   (24), addresses us-west4 64 (8), Hyperdisk Balanced us-west4 4096 GB (500), all-regions CPUs 256 → 512.
-- [ ] M1 — Placements in the launcher, the bake and the ledger.
+- [ ] M1 — Placements in the launcher, the bake and the ledger. (2026-10-21) Built, reviewer-medium clean after two
+  fix waves, ci-gate green; PR open, awaiting CI-opt's merge and the go for `gce/deploy.sh launcher`.
 - [ ] M2 — us-west4 C4D placement live, measured against C3D.
 - [ ] M3 — The tick and the boot.
 - [ ] M4 — Launch on GitHub's `workflow_job` webhook.
@@ -222,7 +223,8 @@ the old-form `gce.json`, and one sandbox job served as before.
 ### M2 — us-west4 C4D placement live, measured against C3D
 
 Wait for: the critical-path measurements to finish (CI-opt says when; changing the pool during them mixes their
-arms) and the us-west4 quota grants (C4D ≥ 64 is enough to start; the walk falls through to C3D beyond it).
+arms) and the us-west4 quota grants (the granted 50 C4D vCPUs are enough to start: step 4's arm b shape is 14 vCPUs a run, and the walk falls through
+to C3D beyond 50; CI-opt re-files the raise with usage once C4D carries traffic).
 
 Steps 1 and 2 may run before the critical-path measurements end: they add a subnetwork and one VM outside the walk.
 
@@ -313,6 +315,35 @@ reported to the owner.
   needs the run's start: the plan job's own `workflow_job` event (hosted labels) reaches the receiver of M4, which
   passes it on for that purpose, and the tick sees runs in progress whose gates are not yet queued.
 
+- 2026-10-21 (plan-executor): **M1 and M3 on separate branches** (`pool-placements`, `pool-tick-boot`), each its own
+  PR merged by CI-opt; both touch `logic.mjs` and `launcher.mjs`, so M3 is rebased onto M1, which merges first.
+- 2026-10-21 (CI-opt): **M2 starts on the granted 50 C4D vCPUs.** Step 4 measures arm b's shape (static cpus-4, unit
+  cpus-8, probes cpus-2: 14 vCPUs a run), which fits; beyond 50 the walk falls through to C3D. The raise is re-filed
+  with usage once C4D carries traffic.
+- 2026-10-21 (M1): **Quota scope is read from the refusal's message** (`Quota '<METRIC>' exceeded … in region <r>`):
+  `<FAMILY>_CPUS` by (region, family); `CPUS_ALL_REGIONS` or "globally" everywhere; any other metric (`CPUS`,
+  instances, addresses, disk capacity) by region; a `PREEMPTIBLE_` metric binds spot only; a refusal naming no metric
+  counts as the machine family's, no broader than the old machine-keyed skip. "Same or more vCPUs" applies to every
+  scope, count quotas included, at the cost of at most one more refused insert per smaller size per tick. A launch
+  whose every attempt the memory already rules out mints no runner and writes no row: its job waits.
+- 2026-10-21 (M1, after review): **The listing is complete when every zone pool VMs may live in was read whole**:
+  every placement zone and the zone of every non-final ledger row, so a VM left in a zone `gce.json` no longer names
+  still counts against `max_vcpus`; while any non-final row names no zone (its running write failed after the
+  insert), every zone of the listing, the pre-M1 rule. An unreachable zone that holds none of ours no longer stops all
+  launches. reviewer-medium found both holes (a placement rolled back while its zone is unreachable over-admitted);
+  a VM with no ledger row in a zone outside every placement stays outside admission, as it was before M1.
+- 2026-10-21 (M1): **The disk type travels as a label.** The instance resource does not carry its boot disk's type,
+  so a job VM is labelled `ci-kit-disk=<type>` and its row stores `diskType`; a row without one predates placements
+  and is priced as `pd-balanced`.
+- 2026-10-21 (M1): **The bake's builder walks the placements in order** rather than staying in us-central1: no config
+  names "where it builds today", and a refused builder falls through to the next placement. Each placement's smoke VM
+  tries its machines smallest first, so the old form smokes on e2 (falling to c3d-4) and on c3d-4; the check VM walks
+  every placement. A placement refused everywhere at bake time fails the bake; the previous ready image keeps serving.
+- 2026-10-21 (M1): **Ledger rates keyed by region, then family**; C4D memory from a per-size table, priced per GB as
+  the catalog does (C3D and E2 per GiB); Hyperdisk Balanced priced with the IOPS and throughput its defaults provision
+  above the free baseline. The daily line breaks VMs and dollars down by `family@region`, stable across reorders. The
+  c3d and e2 us-central1 rates stay at their 10-16 values (today's catalog: c3d spot core 0.00679, RAM 0.000912).
+
 ## Surprises & Discoveries
 
 - 2026-10-21 (CI-opt): the first version of this spec and the owner's first standby question assumed a pool hop for
@@ -321,6 +352,16 @@ reported to the owner.
 - C4D in us-west4 had a family quota of 0 for this project when the preference was filed, though Google lists
   C4D in us-west4-a/b/c. us-central1's external addresses are still granted 32 of 64 asked (reconciling since 10-21
   09:2xZ), which caps that region at 32 VMs.
+- 2026-10-21: the C4D us-west4 preference reads granted 50 of 192 ("partially approved to 50"); CI-opt ruled 50
+  enough to start M2 (Decision Log).
+- 2026-10-21 (M1): an aggregated instance list returns a scope for every zone, empty ones too, which per-zone
+  completeness rests on. C4D's quota lives only in Cloud Quotas (`regions describe` does not list `C4D_CPUS`); the
+  message a refusal on it carries is unverified until M2's first live one (the parser falls back to (region,
+  family)). us-west4 today: CPUS 200, INSTANCES 64, IN_USE_ADDRESSES 8, DISKS_TOTAL_GB 4096; CPUS_ALL_REGIONS 512.
+- 2026-10-21 (M1): Hyperdisk Balanced's defaults for 50 GiB provision 3,300 IOPS and 215 MiB/s, 300 IOPS and
+  75 MiB/s above the free baseline, which makes a c4d boot disk about 1.9x a pd-balanced one ($0.0133/h against
+  $0.0068/h). Provisioning only the baseline would remove that and might slow the install steps; under the owner's
+  speed-first ruling the launcher keeps the defaults, and the ledger prices them.
 
 ## Outcomes & Retrospective
 

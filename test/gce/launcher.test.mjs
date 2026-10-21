@@ -189,7 +189,7 @@ test('a quota refusal is a wait: nothing left behind, the row abandoned, the job
 test('spot refused in every zone: the same machine on demand, recorded on the row', async () => {
   const { w, launcher } = setup();
   w.sim.queue(SBX, L(8));
-  for (const z of BASE_CFG.zones) w.g.insertErrors.push({ match: (zone, body) => zone === z && body.scheduling.provisioningModel === 'SPOT', error: gceErr(['ZONE_RESOURCE_POOL_EXHAUSTED']) });
+  for (const z of BASE_CFG.placements[0].zones) w.g.insertErrors.push({ match: (zone, body) => zone === z && body.scheduling.provisioningModel === 'SPOT', error: gceErr(['ZONE_RESOURCE_POOL_EXHAUSTED']) });
   await launcher.tick();
   const [name] = vms(w);
   assert.equal(w.sim.vm(name).labels['ci-kit-provisioning'], 'standard');
@@ -216,7 +216,7 @@ async function crashed({ state, runner = false, instance = null, at = T0 - 2 * M
   let row = launchRow({ alloc, repo: SBX, cpus: 4, at, config: COMMIT });
   if (runner) await w.github.jitConfig(SBX, jitRequest(alloc, 4));
   if (instance) {
-    await w.gce.insertInstance('us-central1-a', jobInstance({ alloc, zone: 'us-central1-a', machine: 'c3d-highcpu-4', provisioning: 'spot', repo: SBX, cpus: 4, image: 'i', jit: 'j', cfg: CFG, config: COMMIT }));
+    await w.gce.insertInstance('us-central1-a', jobInstance({ alloc, zone: 'us-central1-a', machine: 'c3d-highcpu-4', provisioning: 'spot', repo: SBX, cpus: 4, image: 'i', jit: 'j', placement: CFG.placements[0], cfg: CFG, config: COMMIT }));
     w.sim.vm(name).status = instance;
     w.sim.vm(name).creationTimestamp = new Date(at + 5_000).toISOString();
   }
@@ -307,7 +307,7 @@ test('a VM Compute Engine deleted at its run limit is finalized max-run', async 
 test('a ci-kit=gce instance with no row is still cleaned, and gets an orphan row; orphan disks and old builders go', async () => {
   const { w, launcher } = setup();
   const alloc = allocationId(T0 - 30 * MIN, () => 3);
-  await w.gce.insertInstance('us-central1-b', jobInstance({ alloc, zone: 'us-central1-b', machine: 'e2-highcpu-2', provisioning: 'spot', repo: SBX, cpus: 2, image: 'i', jit: 'j', cfg: CFG, config: COMMIT }));
+  await w.gce.insertInstance('us-central1-b', jobInstance({ alloc, zone: 'us-central1-b', machine: 'e2-highcpu-2', provisioning: 'spot', repo: SBX, cpus: 2, image: 'i', jit: 'j', placement: CFG.placements[0], cfg: CFG, config: COMMIT }));
   w.sim.vm(instanceName(alloc)).status = 'TERMINATED';
   w.g.disks.push({ name: 'stray', zone: 'zones/us-central1-c', users: [], labels: { 'ci-kit': 'gce' }, creationTimestamp: new Date(T0 - 20 * MIN).toISOString() });
   w.g.instances.push({ name: 'ci-kit-gce-builder-old', status: 'RUNNING', zone: 'zones/us-central1-a', labels: { 'ci-kit': 'gce-builder' }, creationTimestamp: new Date(T0 - 3 * 60 * MIN).toISOString(), machineType: 'x/e2-standard-4' });
@@ -584,4 +584,154 @@ test('ledger rotation: a launch near the cap lands on a new issue, and a job in 
   assert.deepEqual(issueOf(a), [1], 'the row stayed where it was written');
   assert.equal(parseRow(w.gh.comments.find((c) => c.issue === 1).body).state, 'final');
   assert.equal(parseRow(w.gh.comments.find((c) => c.issue === fresh.number).body).state, 'running');
+});
+
+// Placements (spec 2026-10-21, M1): the tick across regions and families, with quota memory scoped to what ran out.
+const WEST = {
+  region: 'us-west4', subnetwork: 'ci-kit-us-west4', zones: ['us-west4-a', 'us-west4-b', 'us-west4-c'],
+  machines: { 2: 'c4d-highcpu-2', 4: 'c4d-highcpu-4', 8: 'c4d-highcpu-8', 16: 'c4d-highcpu-16' }, disk_type: 'hyperdisk-balanced',
+};
+const CENTRAL = {
+  region: 'us-central1', subnetwork: 'ci-kit-us-central1', zones: ['us-central1-a', 'us-central1-b', 'us-central1-c', 'us-central1-f'],
+  machines: { 2: 'c3d-highcpu-4', 4: 'c3d-highcpu-4', 8: 'c3d-highcpu-8', 16: 'c3d-highcpu-16' }, disk_type: 'pd-balanced',
+};
+const NEW_CFG = { ...CFG, placements: [WEST, CENTRAL] };
+// As Compute Engine refuses an insert for quota: outright, its message naming the metric and the region.
+const quotaRefusal = (metric, where) => new GceError(403, `gce POST /zones/x/instances: 403 Quota '${metric}' exceeded.  Limit: 50.0 ${where}.`, ['quotaExceeded']);
+const regionOf = (zone) => zone.replace(/-[a-z]$/, '');
+// Every insert the world was asked for, refused or not: [machine, zone].
+const asked = (w) => {
+  const out = [];
+  const before = w.hooks.beforeInsert;
+  w.hooks.beforeInsert = (zone, body) => {
+    out.push([body.machineType.split('/').pop(), zone]);
+    before?.(zone, body);
+  };
+  return out;
+};
+const placed = (w) => w.g.instances.map((i) => `${i.machineType.split('/').pop()}@${regionOf(i.zone.split('/').pop())}`);
+
+test('placements: more than 16 jobs, us-west4 refusing for quota and us-central1 with room: every job launches in that one tick', async () => {
+  const { w, launcher } = setup({ cfg: NEW_CFG });
+  for (let k = 0; k < 20; k += 1) w.sim.queue(SBX, L(2));
+  const tries = asked(w);
+  w.hooks.beforeInsert = ((before) => (zone, body) => {
+    before(zone, body);
+    if (zone.startsWith('us-west4')) throw quotaRefusal('C4D_CPUS', 'in region us-west4');
+  })(w.hooks.beforeInsert);
+  const out = await launcher.tick();
+  assert.equal(out.launched.length, 20);
+  assert.equal(out.waiting, 0);
+  assert.deepEqual(new Set(placed(w)), new Set(['c3d-highcpu-4@us-central1']));
+  const west = tries.filter(([, z]) => z.startsWith('us-west4')).length;
+  assert.ok(west >= 1 && west <= 16, `us-west4 is asked only by the launches already walking when it first refused (${west})`);
+  for (const r of rows(w).values()) assert.equal(r.at(-1).diskType, 'pd-balanced');
+});
+
+test('placements: a family\'s quota refusal does not block another family in that region; the refused family is not asked again', async () => {
+  // The old form: size 2 on e2-highcpu-2, its fallback c3d-highcpu-4 in the same region.
+  const { w, launcher } = setup();
+  for (let k = 0; k < 18; k += 1) w.sim.queue(SBX, L(2));
+  w.sim.queue(SBX, L(4));
+  const tries = asked(w);
+  w.hooks.beforeInsert = ((before) => (zone, body) => {
+    before(zone, body);
+    if (body.machineType.endsWith('/e2-highcpu-2')) throw quotaRefusal('E2_CPUS', 'in region us-central1');
+  })(w.hooks.beforeInsert);
+  const out = await launcher.tick();
+  assert.equal(out.launched.length, 19, 'the 4-vCPU C3D launch is not stopped by E2\'s refusal');
+  assert.deepEqual(new Set(placed(w)), new Set(['c3d-highcpu-4@us-central1']));
+  assert.ok(w.g.instances.every((i) => i.labels['ci-kit-provisioning'] === 'spot'), 'E2\'s refusal does not push C3D to on demand');
+  assert.ok(tries.filter(([m]) => m === 'e2-highcpu-2').length <= 16, 'later launches skip E2');
+});
+
+test('placements: a 16-vCPU quota refusal does not block a 2-vCPU launch in the same family and region', async () => {
+  const { w, launcher } = setup({ cfg: { ...NEW_CFG, max_vcpus: 1000 } });
+  for (let k = 0; k < 16; k += 1) w.sim.queue(SBX, L(16));
+  w.advance(1000);
+  w.sim.queue(SBX, L(2)); // the youngest: it starts once a 16-vCPU launch has finished, after us-west4 refused
+  w.hooks.beforeInsert = (zone, body) => {
+    if (zone.startsWith('us-west4') && body.machineType.endsWith('-16')) throw quotaRefusal('C4D_CPUS', 'in region us-west4');
+  };
+  const out = await launcher.tick();
+  assert.equal(out.launched.length, 17);
+  assert.equal(placed(w).filter((p) => p === 'c3d-highcpu-16@us-central1').length, 16);
+  assert.deepEqual(placed(w).filter((p) => !p.startsWith('c3d-highcpu-16')), ['c4d-highcpu-2@us-west4']);
+  const small = w.g.instances.find((i) => i.labels['ci-kit-cpus'] === '2');
+  assert.equal(small.labels['ci-kit-disk'], 'hyperdisk-balanced');
+  const row = [...rows(w).values()].map((r) => r.at(-1)).find((r) => r.cpus === 2);
+  assert.deepEqual([row.machine, row.zone, row.diskType], ['c4d-highcpu-2', 'us-west4-a', 'hyperdisk-balanced']);
+});
+
+test('placements: quota refused in every placement stops the later launches it covers before any runner or row is made for them', async () => {
+  const { w, launcher } = setup({ cfg: NEW_CFG });
+  for (let k = 0; k < 20; k += 1) w.sim.queue(SBX, L(4));
+  w.hooks.beforeInsert = () => {
+    throw quotaRefusal('CPUS_ALL_REGIONS', 'globally');
+  };
+  const out = await launcher.tick();
+  assert.deepEqual(out.launched, []);
+  const jits = w.log.filter((l) => l.startsWith('jit ')).length;
+  assert.ok(jits >= 1 && jits <= 16, `only the launches already under way minted a runner (${jits})`);
+  assert.equal(rows(w).size, jits);
+  assert.ok([...rows(w).values()].every((r) => r.at(-1).end === 'abandoned'));
+  assert.deepEqual(leftovers(w), { instances: 0, disks: 0, runners: 0 });
+});
+
+test('placements: the listing is complete only when it read every placement\'s zone; a zone outside them does not matter', async () => {
+  const { w, launcher } = setup({ cfg: NEW_CFG });
+  w.sim.queue(SBX, L(4));
+  w.hooks.unreachable = 'us-west4-b';
+  assert.deepEqual((await launcher.tick()).launched, [], 'a placement zone missing: nothing is admitted');
+  w.hooks.unreachable = 'europe-west4-a';
+  w.advance(MIN);
+  assert.equal((await launcher.tick()).launched.length, 1);
+  assert.deepEqual(placed(w), ['c4d-highcpu-4@us-west4']);
+});
+
+test('placements (review): a zone a live row names counts toward completeness, though no placement names it any more', async () => {
+  // A busy 4-vCPU VM in us-west4; gce.json rolls back to us-central1 only; us-west4-a is unreachable.
+  const { w, launcher, make } = setup({ cfg: { ...NEW_CFG, max_vcpus: 4 } });
+  const job = w.sim.queue(SBX, L(4));
+  await launcher.tick();
+  const [name] = vms(w);
+  assert.equal(w.sim.vm(name).zone.split('/').pop(), 'us-west4-a');
+  w.sim.boot(SBX, name);
+  w.sim.take(SBX, name, job);
+  const central = make({ cfg: { ...CFG, placements: [CENTRAL], max_vcpus: 4 } });
+  w.sim.queue(SBX, L(4));
+  w.hooks.unreachable = 'us-west4-a';
+  w.advance(MIN);
+  assert.deepEqual((await central.tick()).launched, [], 'the hidden VM still counts: nothing is admitted over max_vcpus');
+  delete w.hooks.unreachable;
+  w.advance(MIN);
+  const out = await central.tick();
+  assert.deepEqual(out.launched, []);
+  assert.equal(out.waiting, 1, 'once the listing is whole, the busy VM holds the 4 vCPUs and the job waits');
+});
+
+test('placements (review): while a live row names no zone (its running write failed), any zone the listing missed blocks admission', async () => {
+  // A C4D insert succeeds but its running row is never written: the row stays launching, with no zone.
+  const { w, make } = setup({ cfg: { ...NEW_CFG, max_vcpus: 4 } });
+  const real = createGceLedger(w.github, CFG.ledger, { now: w.now });
+  const failing = { ...real, upsert: async (row, opts) => {
+    if (row.state === 'running') throw new Error('ledger write failed');
+    return real.upsert(row, opts);
+  } };
+  w.sim.queue(SBX, L(4));
+  await make({ ledger: failing }).tick();
+  const [name] = vms(w);
+  assert.equal(w.sim.vm(name).zone.split('/').pop(), 'us-west4-a');
+  assert.equal(only(rows(w)).state, 'launching');
+  // gce.json rolls back to us-central1 only, and us-west4-a is unreachable.
+  const central = make({ cfg: { ...CFG, placements: [CENTRAL], max_vcpus: 4 } });
+  w.sim.queue(SBX, L(4));
+  w.hooks.unreachable = 'us-west4-a';
+  w.advance(MIN);
+  assert.deepEqual((await central.tick()).launched, [], 'a zoneless live row: the whole listing must be read');
+  delete w.hooks.unreachable;
+  w.advance(MIN);
+  const out = await central.tick();
+  assert.deepEqual(out.launched, []);
+  assert.equal(out.waiting, 1, 'the VM, seen again, holds the 4 vCPUs');
 });

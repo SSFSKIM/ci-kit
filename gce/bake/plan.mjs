@@ -14,6 +14,7 @@ export const KEEP_READY = 2;
 // week. N2D stands in when E2 is refused (spec M10: quota requests were reconciling).
 export const BUILDER_MACHINES = ['e2-standard-4', 'n2d-standard-4'];
 export const BUILDER_DISK_GB = 30;
+const BUILDER_DISK_TYPE = 'pd-balanced'; // E2 and N2D boot from Persistent Disk, not Hyperdisk
 const UBUNTU = 'projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64';
 
 // The real job (bake step 5) runs in ci-kit-sandbox, the launcher's round-trip repo, through its dispatch-only
@@ -89,7 +90,16 @@ export function imagesToPrune(images, { family, now, keep = KEEP_READY }) {
   return [...ready.slice(keep), ...unready];
 }
 
-export const placements = (machines, zones) => machines.flatMap((machine) => zones.map((zone) => ({ machine, zone })));
+// The attempts for one bake VM: each placement in order, and in it each of its machines (machinesOf(placement),
+// repeats dropped) across its zones before the next machine.
+export const placements = (list, machinesOf) =>
+  list.flatMap((placement) => [...new Set(machinesOf(placement))].flatMap((machine) => placement.zones.map((zone) => ({ machine, zone, placement }))));
+
+// A placement's machines, smallest size first: a smoke or check VM uses the smallest the placement takes, as a cpus-2
+// job does, and the next size's when that one is refused, so a placement's family is still the one booted.
+export const smokeMachines = (placement) => ['2', '4', '8', '16'].map((size) => placement.machines[size]);
+
+export const subnetworkOf = (placement) => `regions/${placement.region}/subnetworks/${placement.subnetwork}`;
 
 // Why an insert was refused, when that refusal is definite: capacity is per zone, quota per region and family.
 export function refusal(err) {
@@ -108,7 +118,7 @@ export const bakeRunId = (date, suffix = () => randomBytes(4).readUInt32BE(0).to
 // Its runner, ci-kit-bake-<run id>, carries that name as its only label, and is outside the launcher's ci-kit-gce-*.
 export const bakeNames = (runId, sha) => ({
   builder: `ci-kit-gce-builder-${runId}`,
-  smoke: `ci-kit-gce-builder-${runId}-smoke`,
+  smoke: `ci-kit-gce-builder-${runId}-smoke`, // each placement's smoke VM adds its number: -smoke-1, -smoke-2, …
   check: `ci-kit-gce-builder-${runId}-check`,
   runner: `ci-kit-bake-${runId}`,
   image: `ci-kit-runner-${runId}-${sha.slice(0, 8)}`,
@@ -121,10 +131,10 @@ export function machineCpus(machine) {
 }
 
 // What the builder and smoke VMs share with a job VM: no service account (the metadata server hands job code no
-// credential), the kit's subnetwork (its network has no ingress rule; gce/deploy.sh network) with an ephemeral
-// external address for outbound traffic, guest attributes for reporting, and a run limit after which Compute Engine
-// deletes the VM whatever the bake is doing.
-function vm({ name, zone, machine, labels, sourceImage, diskGb, metadata, maxRunSeconds, subnetwork }) {
+// credential), the placement's subnetwork of the kit's network (it has no ingress rule; gce/deploy.sh network) with an
+// ephemeral external address for outbound traffic, guest attributes for reporting, and a run limit after which
+// Compute Engine deletes the VM whatever the bake is doing.
+function vm({ name, zone, machine, labels, sourceImage, diskGb, diskType, metadata, maxRunSeconds, placement }) {
   return {
     name,
     machineType: `zones/${zone}/machineTypes/${machine}`,
@@ -132,9 +142,9 @@ function vm({ name, zone, machine, labels, sourceImage, diskGb, metadata, maxRun
     disks: [{
       boot: true,
       autoDelete: true,
-      initializeParams: { diskName: name, sourceImage, diskSizeGb: String(diskGb), diskType: `zones/${zone}/diskTypes/pd-balanced`, labels },
+      initializeParams: { diskName: name, sourceImage, diskSizeGb: String(diskGb), diskType: `zones/${zone}/diskTypes/${diskType}`, labels },
     }],
-    networkInterfaces: [{ subnetwork, accessConfigs: [{ type: 'ONE_TO_ONE_NAT', name: 'External NAT' }] }],
+    networkInterfaces: [{ subnetwork: subnetworkOf(placement), accessConfigs: [{ type: 'ONE_TO_ONE_NAT', name: 'External NAT' }] }],
     serviceAccounts: [],
     metadata: { items: [{ key: 'enable-guest-attributes', value: 'TRUE' }, ...Object.entries(metadata).map(([key, value]) => ({ key, value }))] },
     scheduling: { provisioningModel: 'STANDARD', instanceTerminationAction: 'DELETE', maxRunDuration: { seconds: String(maxRunSeconds) }, automaticRestart: false },
@@ -145,27 +155,27 @@ const bakeLabels = (runId, role) => ({ 'ci-kit': 'gce-builder', 'ci-kit-run': St
 
 // The builder: stock Ubuntu running the builder script once, with a one-hour installation token, scoped to reading
 // MAWS's contents, in its metadata. The App key never reaches a VM.
-export const builderInstance = ({ name, zone, machine, runId, script, token, subnetwork, diskGb = BUILDER_DISK_GB }) =>
+export const builderInstance = ({ name, zone, machine, runId, script, token, placement, diskGb = BUILDER_DISK_GB }) =>
   vm({
-    name, zone, machine, diskGb, subnetwork, sourceImage: UBUNTU, labels: bakeLabels(runId, 'builder'),
+    name, zone, machine, diskGb, diskType: BUILDER_DISK_TYPE, placement, sourceImage: UBUNTU, labels: bakeLabels(runId, 'builder'),
     metadata: { 'startup-script': script, 'ci-kit-gh-token': token },
     maxRunSeconds: BAKE_TIMEOUT_MS / 1000 + 15 * 60,
   });
 
-// The smoke VM boots the new image as a job VM would, with `ci-kit-smoke` (the vCPUs it must see) in place of a JIT
-// config: the image's unit runs its checks in a job container and reports them.
-export const smokeInstance = ({ name, zone, machine, runId, image, diskGb, subnetwork }) =>
+// The smoke VM boots the new image as a job VM would, on its placement's boot disk type, with `ci-kit-smoke` (the
+// vCPUs it must see) in place of a JIT config: the image's unit runs its checks in a job container and reports them.
+export const smokeInstance = ({ name, zone, machine, runId, image, diskGb, placement }) =>
   vm({
-    name, zone, machine, diskGb, subnetwork, sourceImage: image, labels: bakeLabels(runId, 'smoke'),
+    name, zone, machine, diskGb, diskType: placement.disk_type, placement, sourceImage: image, labels: bakeLabels(runId, 'smoke'),
     metadata: { 'ci-kit-smoke': String(machineCpus(machine)) },
     maxRunSeconds: SMOKE_TIMEOUT_MS / 1000 + 5 * 60,
   });
 
 // The check VM boots the new image as a job VM does, with a JIT config in ci-kit-jit: the image's unit runs the
 // runner in a job container, and the real job dispatched to that runner's label runs on it.
-export const checkInstance = ({ name, zone, machine, runId, image, diskGb, subnetwork, jit }) =>
+export const checkInstance = ({ name, zone, machine, runId, image, diskGb, placement, jit }) =>
   vm({
-    name, zone, machine, diskGb, subnetwork, sourceImage: image, labels: bakeLabels(runId, 'check'),
+    name, zone, machine, diskGb, diskType: placement.disk_type, placement, sourceImage: image, labels: bakeLabels(runId, 'check'),
     metadata: { 'ci-kit-jit': jit },
     maxRunSeconds: CHECK_TIMEOUT_MS / 1000 + 5 * 60,
   });

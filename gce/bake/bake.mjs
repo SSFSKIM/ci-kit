@@ -3,9 +3,10 @@
 // (gce/deploy.sh), or from the Mac with gcloud's default account:
 //   node gce/bake/bake.mjs
 // No inbound network or ssh: the builder does its work through its startup script, reports through a guest
-// attribute and powers off; this script images it only on `ok`, smoke-boots the image, runs one real Actions job on a
-// VM booted from it, and marks it ready only when both pass. Every VM and runner registration the bake made is gone
-// when it ends, a failed bake deletes its own image, and the two newest ready images are kept.
+// attribute and powers off; this script images it only on `ok`, smoke-boots the image once in every placement of
+// gce.json (spec 2026-10-21: an image that does not boot on a placement's family is never ready), runs one real
+// Actions job on a VM booted from it, and marks it ready only when all of them pass. Every VM and runner registration
+// the bake made is gone when it ends, a failed bake deletes its own image, and the two newest ready images are kept.
 // Env (optional): CI_KIT_COMMIT, the kit commit to bake (default: main's head); CI_KIT_BAKE_RUN, the run id.
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
@@ -13,9 +14,10 @@ import { createGce, accessToken, GceError } from '../../lib/gce.mjs';
 import { createAppTokens } from '../../lib/github-app.mjs';
 import { createGitHub } from '../../lib/github.mjs';
 import { WARM_SCOPE } from '../../pool/bake/warm.mjs';
+import { parseGceConfig } from '../launcher/config.mjs';
 import {
   reportOutcome, checkOutcome, ownsBakeInstance, ownsBakeImage, refusedOutright, staleBakeInstances, staleBakeRunners, imagesToPrune, placements,
-  refusal, bakeRunId, bakeNames, builderInstance, smokeInstance, checkInstance, checkJitRequest, imageBody, fillBuilderScript,
+  smokeMachines, refusal, bakeRunId, bakeNames, builderInstance, smokeInstance, checkInstance, checkJitRequest, imageBody, fillBuilderScript,
   BUILDER_MACHINES, BAKE_TIMEOUT_MS, SMOKE_TIMEOUT_MS, CHECK_TIMEOUT_MS, CHECK, CHECK_SCOPE,
 } from './plan.mjs';
 
@@ -28,14 +30,16 @@ const RUNNER_RETRIES = 13;
 const RUNNER_RETRY_MS = 30_000;
 const zoneOf = (instance) => instance.zone.split('/').pop();
 
-// Creates the VM at the first placement that takes it. Capacity moves to the next zone; quota skips the machine's
-// remaining zones, since quota is per region. Anything else fails the bake.
+// Creates the VM at the first attempt (plan.mjs placements) that takes it. Capacity moves to the next zone; quota
+// skips the machine's remaining zones in that region, since quota is per region. Anything else fails the bake.
 async function createFirst(gce, options, body, log) {
   const tried = [];
-  let skip = null;
-  for (const { machine, zone } of options) {
-    if (machine === skip) continue;
-    const spec = body({ machine, zone });
+  const skip = new Set();
+  for (const attempt of options) {
+    const { machine, zone } = attempt;
+    const where = `${machine}@${attempt.placement.region}`;
+    if (skip.has(where)) continue;
+    const spec = body(attempt);
     try {
       await gce.insertInstance(zone, spec);
       log(`${spec.name}: ${machine}@${zone} created`);
@@ -44,7 +48,7 @@ async function createFirst(gce, options, body, log) {
       const why = refusal(err);
       if (!why) throw err;
       tried.push(`${machine}@${zone} (${why})`);
-      if (why === 'quota') skip = machine;
+      if (why === 'quota') skip.add(where);
     }
   }
   throw new Error(`ci-kit: no placement took the VM: ${tried.join(', ')}`);
@@ -93,7 +97,7 @@ async function deleteIfOwned(gce, vm, runId, log) {
 // Bake step 5: one real Actions job on a VM booted from the image. The bake registers the check runner, dispatches
 // bake-check.yml to its label, and boots the check VM with the runner's JIT config, as the launcher boots a job VM.
 // `check` records what exists (the runner's name and id, the run's id) for the cleanup. Returns the run's URL on a pass.
-async function realJob(gce, gh, { cfg, names, runId, image, subnetwork, machines, check, sleep, now, log }) {
+async function realJob(gce, gh, { cfg, names, runId, image, check, sleep, now, log }) {
   if ((await gh.getRepo(CHECK.repo)).private !== true) throw new Error(`ci-kit: ${CHECK.repo} is not private, and no runner is registered on a public repo`);
   check.name = names.runner; // set before the call: a registration whose response is lost has no id, but the cleanup finds it by name
   const jit = await gh.jitConfig(CHECK.repo, checkJitRequest(names));
@@ -104,8 +108,8 @@ async function realJob(gce, gh, { cfg, names, runId, image, subnetwork, machines
   if (!run?.workflow_run_id) throw new Error(`ci-kit: dispatching ${CHECK.workflow} in ${CHECK.repo} returned no run`);
   check.run = run.workflow_run_id;
   log(`real job: ${run.html_url}`);
-  const vm = await createFirst(gce, placements(machines, cfg.zones),
-    ({ machine, zone }) => checkInstance({ name: names.check, zone, machine, runId, image, diskGb: cfg.disk_gb, subnetwork, jit: jit.encoded_jit_config }), log);
+  const vm = await createFirst(gce, placements(cfg.placements, smokeMachines),
+    ({ machine, zone, placement }) => checkInstance({ name: names.check, zone, machine, runId, image, diskGb: cfg.disk_gb, placement, jit: jit.encoded_jit_config }), log);
   let report = null;
   for (;;) {
     let instance;
@@ -130,7 +134,6 @@ async function realJob(gce, gh, { cfg, names, runId, image, subnetwork, machines
 // otherwise. gh: a GitHub client for ci-kit-sandbox (CHECK_SCOPE).
 export async function runBake(gce, { cfg, sha, runId, token, gh, script, sleep, now = Date.now, log = () => {} }) {
   const names = bakeNames(runId, sha);
-  const subnetwork = `regions/${cfg.region}/subnetworks/${cfg.subnetwork}`;
   const wait = { runId, sleep, now, log };
   const check = { name: null, runner: null, run: null };
   let image = null;
@@ -146,8 +149,8 @@ export async function runBake(gce, { cfg, sha, runId, token, gh, script, sleep, 
     );
   }
   try {
-    const builder = await createFirst(gce, placements(BUILDER_MACHINES, cfg.zones),
-      ({ machine, zone }) => builderInstance({ name: names.builder, zone, machine, runId, script, token, subnetwork }), log);
+    const builder = await createFirst(gce, placements(cfg.placements, () => BUILDER_MACHINES),
+      ({ machine, zone, placement }) => builderInstance({ name: names.builder, zone, machine, runId, script, token, placement }), log);
     const built = await awaitReport(gce, builder, 'ci-kit/bake', BAKE_TIMEOUT_MS, wait);
     if (!built.ok) throw new Error(`ci-kit: the builder did not finish: ${built.reason}`);
 
@@ -166,15 +169,17 @@ export async function runBake(gce, { cfg, sha, runId, token, gh, script, sleep, 
     log(`image ${image} created (unready)`);
     await deleteIfOwned(gce, builder, runId, log);
 
-    const machines = [cfg.machines['2'], cfg.machine_fallback?.['2']].filter(Boolean);
     const source = `projects/${cfg.project}/global/images/${image}`;
-    const smoke = await createFirst(gce, placements(machines, cfg.zones),
-      ({ machine, zone }) => smokeInstance({ name: names.smoke, zone, machine, runId, image: source, diskGb: cfg.disk_gb, subnetwork }), log);
-    const checked = await awaitReport(gce, smoke, 'ci-kit/smoke', SMOKE_TIMEOUT_MS, wait);
-    if (!checked.ok) throw new Error(`ci-kit: the smoke VM did not pass: ${checked.reason}`);
-    await deleteIfOwned(gce, smoke, runId, log);
+    for (const [k, placement] of cfg.placements.entries()) {
+      const name = `${names.smoke}-${k + 1}`;
+      const smoke = await createFirst(gce, placements([placement], smokeMachines),
+        ({ machine, zone }) => smokeInstance({ name, zone, machine, runId, image: source, diskGb: cfg.disk_gb, placement }), log);
+      const checked = await awaitReport(gce, smoke, 'ci-kit/smoke', SMOKE_TIMEOUT_MS, wait);
+      if (!checked.ok) throw new Error(`ci-kit: the smoke VM in placement ${k + 1} (${placement.region}) did not pass: ${checked.reason}`);
+      await deleteIfOwned(gce, smoke, runId, log);
+    }
 
-    const url = await realJob(gce, gh, { cfg, names, runId, image: source, subnetwork, machines, check, ...wait });
+    const url = await realJob(gce, gh, { cfg, names, runId, image: source, check, ...wait });
 
     const made = (await gce.images(IMAGE_FILTER)).find((i) => i.name === image);
     await gce.setImageLabels(image, { ...made.labels, 'ci-kit-ready': 'true' });
@@ -258,7 +263,8 @@ async function mainHead() {
 
 async function main() {
   const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
-  const cfg = JSON.parse(await readFile(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
+  // The gce.json bundled at the bake job's deploy, not main's (spec 2026-10-21, The bake).
+  const cfg = parseGceConfig(await readFile(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
   const sha = process.env.CI_KIT_COMMIT || (await mainHead());
   const runId = process.env.CI_KIT_BAKE_RUN || bakeRunId(new Date());
   const gce = createGce({ project: cfg.project, token: accessToken() });
