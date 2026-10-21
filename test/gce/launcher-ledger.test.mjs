@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {
   launchRow, runningRow, withJob, jobRecord, finalRow, renderRow, parseRow, rowsOf, moreFinal, dollars, dailyLine, renderDaily, dailyDays,
 } from '../../gce/launcher/ledger.mjs';
-import { createGceLedger, ROTATE_AT, WINDOW_MS } from '../../gce/launcher/ledger-store.mjs';
+import { createGceLedger, ROTATE_AT, WINDOW_MS, FULL_READ_MS } from '../../gce/launcher/ledger-store.mjs';
 import { createLedgerStore } from '../../pool/lib/ledger-store.mjs';
 import { parseRow as parseHetznerRow } from '../../pool/lib/ledger.mjs';
 
@@ -459,4 +459,47 @@ test('rotation: the store keeps reading the issue it opened while GitHub\'s list
   f.clock.t += 60_000; // listed now
   await store.read();
   assert.deepEqual((await store.rows()).map((r) => r.alloc).sort(), ['tb0abc0001', 'tb0abc0002']);
+});
+
+// Review (M3, P2): an incremental read returns what changed, never what was deleted. Two launchers overlap on an
+// allocation with two comments: B read the second while it was running and removes it as the duplicate (its deleting
+// comment is further along); A read it after it went final. Until A drops what GitHub no longer has, rowsOf prefers
+// that final comment, and A never finalizes the allocation.
+test('a comment another writer deleted leaves this store\'s memory at its next whole read, at most FULL_READ_MS later', async () => {
+  const launching = launchRow({ alloc: 'tb0abc0001', repo: SBX, cpus: 4, at: T0, config: 'x' });
+  const running = runningRow(launching, INST);
+  const deleting = finalRow(running, { end: 'done', deleted: T0 + 60_000, diskGb: 50, state: 'deleting' });
+  const final = finalRow(running, { end: 'done', deleted: T0 + 60_000, diskGb: 50 });
+  const f = fakeIssue({ comments: [{ id: 1, body: renderRow(deleting) }, { id: 2, body: renderRow(running) }] });
+  const a = createGceLedger(f.gh, LEDGER, { now: () => f.clock.t });
+  const b = createGceLedger(f.gh, LEDGER, { now: () => f.clock.t });
+  await b.read();
+  await f.gh.updateComment(SBX, 2, renderRow(final)); // a third writer's stale finalization of the duplicate
+  await a.read();
+  assert.equal((await a.rows())[0].state, 'final');
+  f.clock.t += 60_000;
+  await b.upsert(deleting); // B keeps its deleting comment and removes the duplicate it holds as running
+  assert.ok(f.calls.includes('delete 2'));
+  f.clock.t += 60_000;
+  await a.read();
+  assert.equal((await a.rows())[0].state, 'final', 'an incremental read does not show the deletion');
+  f.clock.t += FULL_READ_MS;
+  f.calls.length = 0;
+  await a.read();
+  assert.ok(f.calls.includes(`read #7 since ${iso(f.clock.t - WINDOW_MS)}`), 'a whole read of the window');
+  assert.equal((await a.rows())[0].state, 'deleting', 'A no longer holds the deleted final comment');
+  await a.upsert(final);
+  assert.equal(parseRow(f.state.comments.find((c) => c.id === 1).body).state, 'final', 'and A finalizes the allocation');
+});
+
+test('a whole read keeps a comment this store just wrote that GitHub does not list yet', async () => {
+  const f = fakeIssue();
+  const store = createGceLedger(f.gh, LEDGER, { now: () => f.clock.t });
+  await store.read();
+  f.clock.t += FULL_READ_MS;
+  await store.upsert(launchRow({ alloc: 'tb0abc0002', repo: SBX, cpus: 2, at: f.clock.t, config: 'x' }));
+  const listing = f.gh.issueComments;
+  f.gh.issueComments = async (...args) => (await listing(...args)).filter((c) => Date.parse(c.updated_at) < f.clock.t); // listing lag
+  await store.read();
+  assert.deepEqual((await store.rows()).map((r) => r.alloc), ['tb0abc0002']);
 });
