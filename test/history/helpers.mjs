@@ -87,6 +87,7 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), { status
 //   changed: { '<base>...<head>': [{ filename, previous_filename? }] }
 //   gone: [sha] (commits GitHub no longer has: a compare naming one is a 404)
 //   artifacts: [{ id, name, run, created_at, expired?, zip }]
+//   failing: [artifact id] (artifacts whose download fails with a 502)
 // `requests` records every path asked for.
 export function fakeGitHub(repo) {
   const requests = [];
@@ -107,6 +108,7 @@ export function fakeGitHub(repo) {
     }
     if ((m = /^\/actions\/artifacts\/(\d+)\/zip$/.exec(path))) {
       const a = repo.artifacts.find((x) => x.id === Number(m[1]));
+      if (a && (repo.failing ?? []).includes(a.id)) return json({ message: 'Bad Gateway' }, 502);
       return a ? new Response(a.zip, { status: 200 }) : json({ message: 'Not Found' }, 404);
     }
     if (path === '/actions/runs') {

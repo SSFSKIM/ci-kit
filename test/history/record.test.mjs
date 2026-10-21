@@ -67,6 +67,19 @@ test('membership across two branches with different suites and a deleted test: e
   assert.deepEqual(featureLine.failed, [{ id: ['app', 'src/c.test.ts', 'c > new'], message: 'no' }]);
 });
 
+test("a project named like an object's own key keeps its counts", () => {
+  const s = summarize([parseJUnit(vitestReport({ timestamp: T, suites: [
+    { project: 'constructor', file: 'src/a.test.ts', time: 1, cases: [{ name: 'one' }, { name: 'two', status: 'failed' }] },
+    { project: '__proto__', file: 'src/a.test.ts', time: 1, cases: [{ name: 'one', status: 'skipped' }] },
+    { project: 'app', file: 'src/a.test.ts', time: 1, cases: [{ name: 'one' }] },
+  ] }))]);
+  assert.deepEqual(Object.keys(s.projects), ['__proto__', 'app', 'constructor']);
+  assert.deepEqual(s.projects.constructor, { tests: 2, failed: 1, skipped: 0 });
+  assert.deepEqual(Object.getOwnPropertyDescriptor(s.projects, '__proto__').value, { tests: 1, failed: 0, skipped: 1 });
+  // and a run line written and read back holds all three
+  assert.deepEqual(Object.keys(JSON.parse(JSON.stringify(s.projects))), ['__proto__', 'app', 'constructor']);
+});
+
 test('a base that is not the one a line was built against fails the hash check', () => {
   const main = summarize([parseJUnit(mainReport)]);
   const feature = summarize([parseJUnit(featureReport)]);
@@ -100,7 +113,7 @@ test("a report is this job's only when its timestamps fall within the job, give 
   assert.equal(reportWithinJob(at(null), job), true); // node --test stamps no suite: nothing to check
 });
 
-test('merging is idempotent by (run, attempt, job), sorted; a missing line gives way to a report, never the reverse', () => {
+test('merging is idempotent by (run, attempt, job), sorted; a missing line gives way to a report, never the reverse; a replacement takes its place', () => {
   const a = buildRunLine(prov({ run: 2 }), null, 'missing');
   const b = { ...buildRunLine(prov({ run: 1, job: 'unit:darwin' }), null, 'missing') };
   const c = buildRunLine(prov({ run: 1 }), null, 'missing');
@@ -111,4 +124,11 @@ test('merging is idempotent by (run, attempt, job), sorted; a missing line gives
   const replaced = mergeLines(merged, [present]);
   assert.equal(replaced.find((l) => l.run === 2).report, 'present');
   assert.equal(mergeLines(replaced, [a]).find((l) => l.run === 2).report, 'present');
+  // a line linked again is merged as a replacement; as an ordinary line it would leave the held one in place
+  const relinked = { ...present, previous: { run: 1, attempt: 1, relation: 'same-tree', paths: [], truncated: false } };
+  assert.equal(mergeLines(replaced, [relinked]).find((l) => l.run === 2).previous, null);
+  const again = mergeLines(replaced, [], [relinked]);
+  assert.deepEqual(again.find((l) => l.run === 2), relinked);
+  assert.deepEqual(again.map((l) => [l.run, l.job]), [[1, 'unit'], [1, 'unit:darwin'], [2, 'unit']]);
+  assert.deepEqual(mergeLines(again, [a, b, c]), again);
 });

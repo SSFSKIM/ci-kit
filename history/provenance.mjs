@@ -42,7 +42,8 @@ export async function resolveTested(gh, repo, run) {
   return { producer: 'other', label: null, gates, tested: run.head_sha, tree: head.tree.sha };
 }
 
-const before = (a, b) =>
+// Whether line a started before line b (ties broken by run, then attempt).
+export const startedBefore = (a, b) =>
   a.started < b.started || (a.started === b.started && (a.run < b.run || (a.run === b.run && a.attempt < b.attempt)));
 
 // Paths in a comparison: each file's name, and a rename's old name too.
@@ -60,8 +61,8 @@ const pathsOf = (files) => [...new Set(files.flatMap((f) => (f.previous_filename
 export async function previousRun(gh, repo, line, lines, { maxCompares = 10 } = {}) {
   if (line.label === null || line.report !== 'present') return null;
   const candidates = lines
-    .filter((c) => c.report === 'present' && c.job === line.job && c.producer === line.producer && c.label === line.label && before(c, line))
-    .sort((a, b) => (before(a, b) ? 1 : -1));
+    .filter((c) => c.report === 'present' && c.job === line.job && c.producer === line.producer && c.label === line.label && startedBefore(c, line))
+    .sort((a, b) => (startedBefore(a, b) ? 1 : -1));
   let compares = 0;
   for (const c of candidates) {
     const at = { run: c.run, attempt: c.attempt };

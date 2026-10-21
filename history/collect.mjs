@@ -5,20 +5,20 @@
 // directory: one run line per (run, attempt, job), the day's base and durations. It is idempotent by (run, attempt,
 // job). Authentication is the ci-kit GitHub App's when CI_KIT_APP_ID and CI_KIT_APP_KEY are set, else gh's token.
 // It prints one count line per repo and never a test's name, file or message: the repos it reads may be private.
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { createGitHub, ghToken, GitHubError } from '../lib/github.mjs';
 import { createAppTokens } from '../lib/github-app.mjs';
 import { parseJUnit } from './junit.mjs';
-import { previousRun, resolveTested } from './provenance.mjs';
+import { previousRun, resolveTested, startedBefore } from './provenance.mjs';
 import { buildBase, buildDurations, buildRunLine, jobSlug, lineKey, reportWithinJob, summarize } from './record.mjs';
 import { dayOf, openStore } from './store.mjs';
 
-const HOUR = 3_600_000;
-const DAY = 24 * HOUR;
+const DAY = 86_400_000;
 const ARTIFACT = /^test-results-(.+)-(\d+)$/;
 
 // The upload step runs only when the job's test step ran (spec, Transport), so its having run is how a job without
@@ -29,33 +29,54 @@ const uploadRan = (job) => (job.steps ?? []).some((s) => /upload-artifact/i.test
 // times and steps: such a job completed before it was created in this attempt, and it ran nothing here.
 const carriedOver = (job) => Boolean(job.created_at) && job.completed_at < job.created_at;
 
-// An artifact's XML files, in path order, unpacked with the system unzip into a temp dir removed afterwards.
+// The artifact's own archive is at fault: unzip's statuses for a generic or severe format error, a file that is no
+// zip, and an unexpected end of the archive.
+const DEFECTIVE = new Set([2, 3, 9, 51]);
+export class ArchiveDefect extends Error {
+  constructor(status) {
+    super(`history: unzip finds the archive defective (status ${status})`);
+    this.name = 'ArchiveDefect';
+  }
+}
+
+// An artifact's XML files, in path order, unpacked with the system unzip into a temp dir removed afterwards. Throws
+// ArchiveDefect for a defective archive; any other failure (no unzip, a full disk, unzip killed) is the machine's.
 export function readArtifact(zip) {
   const dir = mkdtempSync(join(tmpdir(), 'ci-kit-history-'));
   try {
+    const out = join(dir, 'x');
+    mkdirSync(out); // an empty archive unpacks nothing
     writeFileSync(join(dir, 'a.zip'), zip);
-    execFileSync('unzip', ['-qq', '-o', join(dir, 'a.zip'), '-d', join(dir, 'x')], { stdio: 'ignore' });
-    return readdirSync(join(dir, 'x'), { recursive: true })
+    const r = spawnSync('unzip', ['-qq', '-o', join(dir, 'a.zip'), '-d', out], { stdio: 'ignore' });
+    if (r.error?.code === 'ENOENT') throw new Error('history: the system unzip is not installed');
+    if (r.error) throw r.error;
+    if (r.signal) throw new Error(`history: unzip was killed by ${r.signal}`);
+    if (DEFECTIVE.has(r.status)) throw new ArchiveDefect(r.status);
+    if (r.status !== 0 && r.status !== 1) throw new Error(`history: unzip failed with status ${r.status}`); // 1: warnings only
+    return readdirSync(out, { recursive: true })
       .filter((p) => p.endsWith('.xml'))
       .sort()
-      .map((p) => readFileSync(join(dir, 'x', p), 'utf8'));
+      .map((p) => readFileSync(join(out, p), 'utf8'));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
 // What an error may say in a public log: GitHub's status and path, or a message this kit wrote (they name runs,
-// jobs and offsets only); any other error by its kind alone, since its message can quote the text it failed on (a
-// JSON parse error does).
-const describe = (err) =>
-  err instanceof GitHubError || /^(history|junit): /.test(err?.message ?? '') ? err.message : (err?.name ?? 'Error');
+// jobs and offsets only); any other error by its kind alone, and a system error's code (ENOSPC), since its message
+// can quote the text it failed on (a JSON parse error does) or a path (a file the artifact unpacked).
+const describe = (err) => {
+  if (err instanceof GitHubError || /^(history|junit): /.test(err?.message ?? '')) return err.message;
+  const kind = err?.name ?? 'Error';
+  return /^E[A-Z0-9]+$/.test(err?.code ?? '') ? `${kind} ${err.code}` : kind;
+};
 
 // One repo's pass. `jobs`: its reporting set, the job names that upload a report. → counts, and `errors`, one
 // line each, naming runs and jobs only. A failed item writes nothing and is tried again by the next pass.
 export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), readZip = readArtifact }) {
-  const counts = { artifacts: 0, lines: 0, present: 0, missing: 0, unparseable: 0, rejected: 0, failures: 0, written: 0 };
+  const counts = { artifacts: 0, lines: 0, present: 0, missing: 0, unparseable: 0, rejected: 0, relinked: 0, failures: 0, written: 0 };
   const errors = [];
-  const store = openStore(root, repo, { now });
+  const store = openStore(root, repo);
   const bySlug = new Map(jobs.map((j) => [jobSlug(j), j]));
   const reporting = new Set(jobs);
 
@@ -72,18 +93,21 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
   const artifactsOf = cached((id) => gh.runArtifacts(repo, id));
   const testedOf = cached((id) => runOf(id).then((run) => resolveTested(gh, repo, run)));
 
-  // 1. New artifacts, newest first, down to an hour before the newest one already stored (an upload that
-  //    finished late has that long to be listed), or the 8 days an artifact can live.
+  // 1. New artifacts, newest first, down to the 8 days an artifact can live (7, and a margin). Every pass lists
+  //    them all, so an artifact a pass could not take (its job still running, its download failed) is listed
+  //    again by the next, however many newer ones were stored meanwhile.
   const items = new Map(); // lineKey → { run, attempt, job, artifact }
   const known = store.artifactIds();
-  const cutoff = Math.max(now - 8 * DAY, store.newestArtifact() - HOUR);
+  const cutoff = now - 8 * DAY;
   for (let page = 1; ; page += 1) {
     const { artifacts } = await gh.artifactsPage(repo, page);
     for (const a of artifacts) {
       const m = ARTIFACT.exec(a.name);
       const job = m && bySlug.get(m[1]);
       if (!job || a.expired || known.has(a.id)) continue;
-      items.set(`${a.workflow_run.id}/${Number(m[2])}/${job}`, { run: a.workflow_run.id, attempt: Number(m[2]), job, artifact: a });
+      const key = `${a.workflow_run.id}/${Number(m[2])}/${job}`;
+      if (store.line(key) && store.line(key).report !== 'missing') continue; // a re-upload of a job already recorded
+      items.set(key, { run: a.workflow_run.id, attempt: Number(m[2]), job, artifact: a });
     }
     if (artifacts.length < 100 || artifacts.some((a) => Date.parse(a.created_at) < cutoff)) break;
   }
@@ -157,15 +181,23 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
       completed: job.completed_at,
     };
     if (!artifact) return buildRunLine(prov, null, 'missing');
+    // Only the artifact's own fault makes its report unparseable: a defective archive, one with no XML, XML the
+    // parser rejects. Any other failure is the item's: it writes nothing, and the next pass tries it again.
     const zip = await gh.artifactZip(repo, artifact.id);
+    let xml;
+    try {
+      xml = readZip(zip);
+    } catch (err) {
+      if (err instanceof ArchiveDefect) return buildRunLine(prov, artifact, 'unparseable');
+      throw err;
+    }
+    if (xml.length === 0) return buildRunLine(prov, artifact, 'unparseable');
     let reports;
     try {
-      reports = readZip(zip).map(parseJUnit);
-      if (reports.length === 0) throw new Error('history: no XML report in the artifact');
+      reports = xml.map(parseJUnit);
     } catch (err) {
-      // a machine without unzip is this pass's failure, not the artifact's
-      if (err.code === 'ENOENT') throw new Error('history: the system unzip is not installed');
-      return buildRunLine(prov, artifact, 'unparseable');
+      if (/^junit: /.test(err?.message ?? '')) return buildRunLine(prov, artifact, 'unparseable');
+      throw err;
     }
     if (!reportWithinJob(reports, job)) return buildRunLine(prov, artifact, 'rejected');
     const summary = summarize(reports);
@@ -186,13 +218,34 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
   // 5. Each new present line's previous run, from every line known: the store's and this pass's.
   const all = new Map(store.lines().map((l) => [lineKey(l), l]));
   for (const l of fresh) all.set(lineKey(l), l);
+  const everyLine = [...all.values()];
   const unlinked = new Set();
   for (const line of fresh) {
     try {
-      line.previous = await previousRun(gh, repo, line, [...all.values()]);
+      line.previous = await previousRun(gh, repo, line, everyLine);
     } catch (err) {
       errors.push(`run ${line.run} attempt ${line.attempt} ${line.job}: previous run: ${describe(err)}`);
       unlinked.add(line);
+    }
+  }
+
+  // 6. A run that arrives after a later run of its change was stored (it was still running, or its artifact not
+  //    yet listed) can be that later run's previous: each stored present line of a change that a new present line
+  //    started before is linked again, and replaced where its previous run changed. When that fails, the new lines
+  //    before it are held back, so the next pass collects them and links it again.
+  const change = (l) => JSON.stringify([l.job, l.producer, l.label]);
+  const arrived = fresh.filter((l) => l.report === 'present' && l.label !== null && !unlinked.has(l));
+  const relinked = [];
+  for (const line of store.lines()) {
+    if (line.report !== 'present' || line.label === null) continue;
+    const earlier = arrived.filter((f) => change(f) === change(line) && startedBefore(f, line));
+    if (earlier.length === 0) continue;
+    try {
+      const previous = await previousRun(gh, repo, line, everyLine);
+      if (!isDeepStrictEqual(previous, line.previous)) relinked.push({ ...line, previous });
+    } catch (err) {
+      errors.push(`run ${line.run} attempt ${line.attempt} ${line.job}: previous run: ${describe(err)}`);
+      for (const f of earlier) unlinked.add(f);
     }
   }
 
@@ -204,12 +257,14 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
     if (line.artifact) counts.artifacts += 1;
     counts.failures += line.failed?.length ?? 0;
   }
+  for (const line of relinked) store.replace(line);
+  counts.relinked = relinked.length;
   counts.written = store.flush();
   return { counts, errors };
 }
 
 export const formatCounts = (repo, c, errors) =>
-  `${repo}: artifacts ${c.artifacts}, lines ${c.lines} (present ${c.present}, missing ${c.missing}, unparseable ${c.unparseable}, rejected ${c.rejected}), failures ${c.failures}, errors ${errors}, files written ${c.written}`;
+  `${repo}: artifacts ${c.artifacts}, lines ${c.lines} (present ${c.present}, missing ${c.missing}, unparseable ${c.unparseable}, rejected ${c.rejected}), relinked ${c.relinked}, failures ${c.failures}, errors ${errors}, files written ${c.written}`;
 
 function tokenFor(repo) {
   const [owner, name] = repo.split('/');

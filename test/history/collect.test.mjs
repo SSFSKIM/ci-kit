@@ -1,7 +1,8 @@
 // The collector against a fake GitHub (test history spec, M2): the real client, the system unzip and a store in a
 // temp dir. One scripted repo holds the cases the spec names: two attempts of one run collected together, a fresh
 // attempt of a run older than any window, a job with no artifact, both producers' refs and a dispatch, a report
-// from outside its job, an unparseable one; and a second pass that changes nothing.
+// from outside its job, an unparseable one; and a second pass that changes nothing. Smaller repos hold what spans
+// passes: an artifact a pass could not take, a run that arrives after its successor, a predecessor weeks old.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
@@ -9,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { createGitHub } from '../../lib/github.mjs';
-import { collectRepo, formatCounts } from '../../history/collect.mjs';
+import { ArchiveDefect, collectRepo, formatCounts, readArtifact } from '../../history/collect.mjs';
 import { parseJUnit } from '../../history/junit.mjs';
 import { membershipOf, summarize } from '../../history/record.mjs';
 import { fakeGitHub, vitestReport, zipOf } from './helpers.mjs';
@@ -28,7 +29,10 @@ const suitesA = ({ twoFails = false, extra = false, dropTwo = false } = {}) => [
   ...(extra ? [{ project: 'app', file: 'src/c.test.ts', time: 0.5, cases: [{ name: 'c > new' }] }] : []),
 ];
 
-function scenario() {
+const c = (n) => n.repeat(40).slice(0, 40);
+
+// An empty scripted repo, and `run` to add a gate run to it with its attempts' jobs, reports and artifacts.
+function builder() {
   const repo = { runs: [], jobs: {}, commits: {}, ancestors: {}, changed: {}, artifacts: [] };
   const reports = new Map(); // artifact id → the report's XML
   let artifactId = 500;
@@ -47,7 +51,7 @@ function scenario() {
     repo.runs.push({ id, event, head_branch: ref, head_sha: head, path: '.github/workflows/gate.yml', run_attempt: attempts.length, created_at: created });
     attempts.forEach((jobs, i) => {
       repo.jobs[`${id}/${i + 1}`] = jobs.map((j) => {
-        const job = { id: jobId++, name: j.name, status: 'completed', conclusion: j.conclusion ?? 'success', created_at: j.created ?? j.started, started_at: j.started, completed_at: j.completed, runner_name: 'runner-1', steps: j.steps ?? upload() };
+        const job = { id: jobId++, name: j.name, status: j.status ?? 'completed', conclusion: j.conclusion ?? 'success', created_at: j.created ?? j.started, started_at: j.started, completed_at: j.completed, runner_name: 'runner-1', steps: j.steps ?? upload() };
         const xml = j.xml ?? (j.suites && vitestReport({ timestamp: j.stamp ?? at(j.completed, -60).replace('Z', '.000Z'), suites: j.suites }));
         if (xml !== undefined || j.zip) {
           const a = { id: artifactId++, name: j.artifact ?? `test-results-${j.name.replace(':', '-')}-${i + 1}`, run: id, created_at: at(j.completed, -5), expired: j.expired ?? false, zip: j.zip ?? zipOf({ [`${j.name.replace(':', '-')}.xml`]: xml }) };
@@ -58,8 +62,11 @@ function scenario() {
       });
     });
   }
-  const c = (n) => n.repeat(40).slice(0, 40);
+  return { repo, reports, run };
+}
 
+function scenario() {
+  const { repo, reports, run } = builder();
   run({ id: 101, ref: 'ci/feat-aaaaaaaa', tested: c('a'), tree: 'TA', created: '2026-10-21T07:45:00Z', attempts: [
     [{ name: 'unit', conclusion: 'failure', started: '2026-10-21T07:50:00Z', completed: '2026-10-21T08:00:00Z', suites: suitesA({ twoFails: true }) }],
     [{ name: 'unit', started: '2026-10-21T08:10:00Z', completed: '2026-10-21T08:20:00Z', suites: suitesA() }],
@@ -104,6 +111,7 @@ function scenario() {
   return { repo, reports };
 }
 
+const NOTHING = { artifacts: 0, lines: 0, present: 0, missing: 0, unparseable: 0, rejected: 0, relinked: 0, failures: 0, written: 0 };
 const readDir = (dir) => readdirSync(dir, { recursive: true }).filter((p) => /\.(jsonl|gz)$/.test(p)).sort();
 const linesOf = (root, day) => readFileSync(join(root, REPO, 'runs', `${day}.jsonl`), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
 const gz = (root, path) => JSON.parse(gunzipSync(readFileSync(join(root, REPO, path))).toString('utf8'));
@@ -117,9 +125,9 @@ test('one pass records every job that ran its tests, and a second pass changes n
 
   const first = await pass();
   assert.deepEqual(first.errors, []);
-  assert.deepEqual(first.counts, { artifacts: 10, lines: 11, present: 8, missing: 1, unparseable: 1, rejected: 1, failures: 1, written: 8 });
+  assert.deepEqual(first.counts, { artifacts: 10, lines: 11, present: 8, missing: 1, unparseable: 1, rejected: 1, relinked: 0, failures: 1, written: 8 });
   assert.equal(formatCounts(REPO, first.counts, 0),
-    'o/r: artifacts 10, lines 11 (present 8, missing 1, unparseable 1, rejected 1), failures 1, errors 0, files written 8');
+    'o/r: artifacts 10, lines 11 (present 8, missing 1, unparseable 1, rejected 1), relinked 0, failures 1, errors 0, files written 8');
   assert.deepEqual(readDir(join(root, REPO)), [
     'base/2026-10-20/unit.json.gz', 'base/2026-10-21/unit-darwin.json.gz', 'base/2026-10-21/unit.json.gz',
     'durations/2026-10-20/unit.json.gz', 'durations/2026-10-21/unit-darwin.json.gz', 'durations/2026-10-21/unit.json.gz',
@@ -175,7 +183,7 @@ test('one pass records every job that ran its tests, and a second pass changes n
   const asked = fake.requests.length;
   const second = await pass();
   assert.deepEqual(second.errors, []);
-  assert.deepEqual(second.counts, { artifacts: 0, lines: 0, present: 0, missing: 0, unparseable: 0, rejected: 0, failures: 0, written: 0 });
+  assert.deepEqual(second.counts, NOTHING);
   const later = fake.requests.slice(asked);
   assert.ok(!later.some((p) => p.endsWith('/zip') || p.startsWith('/compare')), later.join('\n'));
   for (const [p, bytes] of before) assert.ok(readFileSync(join(root, REPO, p)).equals(bytes), p);
@@ -207,4 +215,172 @@ test('a missing line gives way when its artifact turns up; an error writes nothi
   const day = keys(linesOf(root, '2026-10-21'));
   assert.ok(day.includes('103/1/unit:present') && day.includes('103/1/unit:darwin:present') && day.includes('102/1/unit:present'));
   assert.ok(!day.includes('103/1/unit:missing'));
+});
+
+const tempRoot = (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'history-store-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return root;
+};
+const passes = (repo, root) => {
+  const fake = fakeGitHub(repo);
+  const pass = (over = {}) => collectRepo({ gh: createGitHub('t', { fetchImpl: fake.fetchImpl }), repo: REPO, jobs: ['unit', 'unit:darwin'], root, now: NOW, ...over });
+  return { fake, pass };
+};
+const lineOf = (root, day, key) => linesOf(root, day).find((l) => `${l.run}/${l.attempt}/${l.job}` === key);
+
+test('an artifact a pass could not download is listed again by the next, however many newer ones were stored', async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  // a fresh attempt of a run older than the 3-day sweep
+  run({ id: 200, ref: 'ci/late-22222222', tested: c('2'), tree: 'T2', created: '2026-10-10T10:00:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-10T10:05:00Z', completed: '2026-10-10T10:15:00Z', suites: suitesA(), expired: true }],
+    [{ name: 'unit', started: '2026-10-21T00:10:00Z', completed: '2026-10-21T00:20:00Z', suites: suitesA() }],
+  ] });
+  // and 101 newer runs a minute apart: more than a page of artifacts, over more than an hour
+  for (let i = 0; i < 101; i += 1) {
+    const done = at('2026-10-21T01:00:00Z', 60 * i);
+    run({ id: 300 + i, ref: 'master', event: 'workflow_dispatch', tested: c('d'), tree: 'TD', created: at(done, -900), attempts: [
+      [{ name: 'unit', started: at(done, -600), completed: done, suites: suitesA() }],
+    ] });
+  }
+  const late = repo.artifacts.find((a) => a.run === 200 && a.name === 'test-results-unit-2');
+  repo.failing = [late.id];
+  const { pass } = passes(repo, root);
+
+  const first = await pass();
+  assert.deepEqual(first.errors, [`run 200 attempt 2 unit: HTTP 502 GET /repos/o/r/actions/artifacts/${late.id}/zip: Bad Gateway`]);
+  assert.deepEqual([first.counts.lines, first.counts.present], [101, 101]);
+  assert.equal(lineOf(root, '2026-10-21', '200/2/unit'), undefined);
+
+  repo.failing = [];
+  const second = await pass();
+  assert.deepEqual(second.errors, []);
+  assert.deepEqual([second.counts.lines, second.counts.present], [1, 1]);
+  const line = lineOf(root, '2026-10-21', '200/2/unit');
+  assert.deepEqual([line.report, line.artifact.id], ['present', late.id]);
+});
+
+// A change of two or three runs, each tested commit descending from the last: R0 (run 401, in one variant), then A
+// (402), then B (403), which starts after A and finishes first.
+for (const variant of ['running', 'missing']) {
+  test(`a run that arrives after its successor was stored (${variant} at first) becomes its previous run`, async (t) => {
+    const root = tempRoot(t);
+    const { repo, run } = builder();
+    const withR0 = variant === 'running';
+    if (withR0) run({ id: 401, ref: 'ci/chg-aaaaaaaa', tested: c('a'), tree: 'TA', created: '2026-10-21T08:00:00Z', attempts: [
+      [{ name: 'unit', started: '2026-10-21T08:05:00Z', completed: '2026-10-21T08:15:00Z', suites: suitesA() }],
+    ] });
+    run({ id: 402, ref: 'ci/chg-bbbbbbbb', tested: c('b'), tree: 'TB', created: '2026-10-21T09:00:00Z', attempts: [
+      [{ name: 'unit', started: '2026-10-21T09:05:00Z', completed: '2026-10-21T09:30:00Z', suites: suitesA() }],
+    ] });
+    run({ id: 403, ref: 'ci/chg-cccccccc', tested: c('c'), tree: 'TC', created: '2026-10-21T09:10:00Z', attempts: [
+      [{ name: 'unit', started: '2026-10-21T09:15:00Z', completed: '2026-10-21T09:25:00Z', suites: suitesA({ extra: true }) }],
+    ] });
+    repo.ancestors[c('b')] = [c('a')];
+    repo.ancestors[c('c')] = [c('a'), c('b')];
+    repo.changed[`${c('a')}...${c('b')}`] = [{ filename: 'src/b.ts' }];
+    repo.changed[`${c('a')}...${c('c')}`] = [{ filename: 'src/b.ts' }, { filename: 'src/c.ts' }];
+    repo.changed[`${c('b')}...${c('c')}`] = [{ filename: 'src/c.ts' }];
+    // at first A is still running, its report already uploaded; or it is done, and its artifact not yet listed
+    const [jobA] = repo.jobs['402/1'];
+    const artifactA = repo.artifacts.find((a) => a.run === 402);
+    if (variant === 'running') Object.assign(jobA, { status: 'in_progress', conclusion: null, completed_at: null });
+    else repo.artifacts = repo.artifacts.filter((a) => a !== artifactA);
+    const { fake, pass } = passes(repo, root);
+
+    const first = await pass();
+    assert.deepEqual(first.errors, []);
+    assert.equal(first.counts.relinked, 0);
+    assert.equal(lineOf(root, '2026-10-21', '402/1/unit')?.report, variant === 'running' ? undefined : 'missing');
+    const b1 = lineOf(root, '2026-10-21', '403/1/unit');
+    assert.deepEqual(b1.previous, withR0 ? { run: 401, attempt: 1, relation: 'descendant', paths: ['src/b.ts', 'src/c.ts'], truncated: false } : null);
+
+    if (variant === 'running') Object.assign(jobA, { status: 'completed', conclusion: 'success', completed_at: '2026-10-21T09:30:00Z' });
+    else repo.artifacts.push(artifactA);
+    const second = await pass();
+    assert.deepEqual(second.errors, []);
+    assert.deepEqual([second.counts.lines, second.counts.present, second.counts.relinked], [1, 1, 1]);
+    const a = lineOf(root, '2026-10-21', '402/1/unit');
+    assert.deepEqual([a.report, a.previous], ['present', withR0 ? { run: 401, attempt: 1, relation: 'descendant', paths: ['src/b.ts'], truncated: false } : null]);
+    const b2 = lineOf(root, '2026-10-21', '403/1/unit');
+    assert.deepEqual(b2.previous, { run: 402, attempt: 1, relation: 'descendant', paths: ['src/c.ts'], truncated: false });
+    assert.deepEqual({ ...b2, previous: null }, { ...b1, previous: null }); // only its link changed
+
+    // nothing new: nothing linked again, nothing compared, nothing written
+    const asked = fake.requests.length;
+    const third = await pass();
+    assert.deepEqual([third.errors, third.counts], [[], NOTHING]);
+    assert.ok(!fake.requests.slice(asked).some((p) => p.endsWith('/zip') || p.startsWith('/compare')));
+  });
+}
+
+test('a failure of the machine, not the artifact, writes nothing and is tried again; a defective archive is unparseable', async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  run({ id: 501, ref: 'ci/disk-55555555', tested: c('5'), tree: 'T5', created: '2026-10-21T10:00:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-21T10:05:00Z', completed: '2026-10-21T10:15:00Z', suites: suitesA() }],
+  ] });
+  run({ id: 502, ref: 'ci/nozip-66666666', tested: c('6'), tree: 'T6', created: '2026-10-21T10:00:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-21T10:05:00Z', completed: '2026-10-21T10:16:00Z', zip: Buffer.from('not a zip archive') }],
+  ] });
+  run({ id: 503, ref: 'ci/empty-77777777', tested: c('7'), tree: 'T7', created: '2026-10-21T10:00:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-21T10:05:00Z', completed: '2026-10-21T10:17:00Z', zip: zipOf({}) }],
+  ] });
+  const zip501 = repo.artifacts.find((a) => a.run === 501).zip;
+  // the disk fills while run 501's archive is written; the error's message names a path from the artifact
+  const full = (zip) => {
+    if (!zip.equals(zip501)) return readArtifact(zip);
+    throw Object.assign(new Error("ENOSPC: no space left on device, open '/tmp/x/src/a.test.ts.xml'"), { code: 'ENOSPC', errno: -28, syscall: 'open' });
+  };
+  const { pass } = passes(repo, root);
+
+  const first = await pass({ readZip: full });
+  assert.deepEqual(first.errors, ['run 501 attempt 1 unit: Error ENOSPC']);
+  assert.deepEqual([first.counts.lines, first.counts.unparseable], [2, 2]);
+  assert.deepEqual(linesOf(root, '2026-10-21').map((l) => `${l.run}:${l.report}`), ['502:unparseable', '503:unparseable']);
+
+  const second = await pass();
+  assert.deepEqual(second.errors, []);
+  assert.deepEqual([second.counts.lines, second.counts.present], [1, 1]);
+  assert.equal(lineOf(root, '2026-10-21', '501/1/unit').report, 'present');
+});
+
+test("unzip's statuses: a defective archive is the artifact's fault, warnings are not", () => {
+  assert.deepEqual(readArtifact(zipOf({ 'b.xml': 'B', 'a/a.xml': 'A', 'notes.txt': 'x' })), ['A', 'B']);
+  assert.deepEqual(readArtifact(zipOf({})), []); // status 1: an empty archive, a warning only
+  assert.throws(() => readArtifact(Buffer.from('not a zip archive')), ArchiveDefect); // 9
+  const zip = zipOf({ 'a.xml': '<testsuites/>'.repeat(50) });
+  assert.throws(() => readArtifact(zip.subarray(0, zip.length - 30)), ArchiveDefect); // cut short: 9
+  const damaged = Buffer.from(zip);
+  damaged[40] ^= 0xff;
+  assert.throws(() => readArtifact(damaged), ArchiveDefect); // a damaged entry: 2
+});
+
+test('a fresh attempt three weeks after its run finds the first attempt as its previous run', async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  run({ id: 601, ref: 'ci/resumed-88888888', tested: c('8'), tree: 'T8', created: '2026-09-30T10:00:00Z', attempts: [
+    [{ name: 'unit', started: '2026-09-30T10:05:00Z', completed: '2026-09-30T10:15:00Z', suites: suitesA() }],
+    [{ name: 'unit', started: '2026-10-21T10:05:00Z', completed: '2026-10-21T10:15:00Z', suites: suitesA() }],
+  ] });
+  // the first pass runs the day of the first attempt, before the second exists
+  const [ghRun] = repo.runs;
+  const [first, second] = repo.artifacts;
+  const jobs2 = repo.jobs['601/2'];
+  delete repo.jobs['601/2'];
+  repo.artifacts = [first];
+  ghRun.run_attempt = 1;
+  const { pass } = passes(repo, root);
+  const early = await pass({ now: Date.parse('2026-09-30T12:00:00Z') });
+  assert.deepEqual([early.errors, early.counts.present], [[], 1]);
+
+  // three weeks later the first attempt's artifact has expired, and a fresh attempt ran on the same commit
+  first.expired = true;
+  repo.artifacts.push(second);
+  repo.jobs['601/2'] = jobs2;
+  ghRun.run_attempt = 2;
+  const later = await pass();
+  assert.deepEqual([later.errors, later.counts.present], [[], 1]);
+  assert.deepEqual(lineOf(root, '2026-10-21', '601/2/unit').previous, { run: 601, attempt: 1, relation: 'same-tree', paths: [], truncated: false });
 });

@@ -39,7 +39,7 @@ export function summarize(reports) {
   const ids = [];
   const skipped = [];
   const failed = [];
-  const projects = {};
+  const projects = new Map(); // a project may be named `constructor` or `__proto__`
   const files = new Map();
   let ms = 0;
   for (const { suites, cases } of reports) {
@@ -50,7 +50,8 @@ export function summarize(reports) {
       seen.set(k, n);
       const id = n === 1 ? triple : [...triple, n];
       ids.push(id);
-      const p = (projects[c.project] ??= { tests: 0, failed: 0, skipped: 0 });
+      if (!projects.has(c.project)) projects.set(c.project, { tests: 0, failed: 0, skipped: 0 });
+      const p = projects.get(c.project);
       p.tests += 1;
       if (c.status === 'failed') {
         failed.push({ id, message: c.message ?? '' });
@@ -72,7 +73,7 @@ export function summarize(reports) {
     ids: sortIds(ids),
     skipped: sortIds(skipped),
     failed: failed.sort((a, b) => compareIds(a.id, b.id)),
-    projects: Object.fromEntries(Object.keys(projects).sort().map((p) => [p, projects[p]])),
+    projects: Object.fromEntries([...projects].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))),
     files: [...files.values()].sort(compareIds),
     ms,
   };
@@ -178,12 +179,14 @@ export const lineKey = (l) => `${l.run}/${l.attempt}/${l.job}`;
 const lineOrder = (a, b) => a.run - b.run || a.attempt - b.attempt || (a.job < b.job ? -1 : a.job > b.job ? 1 : 0);
 
 // Lines merged by (run, attempt, job), sorted by run, attempt and job. A line already held stays as it is, except
-// that a `missing` line gives way to a line with a report.
-export function mergeLines(existing, incoming) {
+// that a `missing` line gives way to a line with a report. `replacing` is the explicit way to rewrite a held line
+// (its previous run linked again): each takes the place of its key's line.
+export function mergeLines(existing, incoming, replacing = []) {
   const byKey = new Map(existing.map((l) => [lineKey(l), l]));
   for (const l of incoming) {
     const held = byKey.get(lineKey(l));
     if (!held || (held.report === 'missing' && l.report !== 'missing')) byKey.set(lineKey(l), l);
   }
+  for (const l of replacing) byKey.set(lineKey(l), l);
   return [...byKey.values()].sort(lineOrder);
 }
