@@ -691,6 +691,12 @@ VM's walk.
   edge treats concurrent NAT flows this way (a packet-level probe from a no-IP VM would tell). The git-core PPA's 503s
   that hour were Launchpad's (the Mac saw them too).
 
+- 2026-10-21 (M6): **the live C4D family-quota refusal is `CPUS_PER_VM_FAMILY`, not `C4D_CPUS`.** Its operation
+  error reads "Quota 'CPUS_PER_VM_FAMILY' exceeded.  Limit: 50.0 in region us-west4." with
+  `quotaInfo.dimensions.vm_family: "C4D"`. The parser matched only `<FAMILY>_CPUS`, so this refusal was remembered for
+  the whole region: harmless with one family a region, wrong once C4D and C3D share us-central1, us-east1 and
+  us-east4. The placements PR scopes it to (region, family).
+
 
 ## Outcomes & Retrospective
 
