@@ -659,6 +659,27 @@ VM's walk.
 - 2026-10-21 (M6): **stocked-out zones are remembered for 5 minutes** (zone, machine, provisioning), in the launcher
   process. Eight placements mean 26 spot attempts before on demand, more than a 45 s tick can try at ~2 s a refusal;
   without the memory a job could wait on spot refusals indefinitely while on demand had room.
+- 2026-10-21 (CI-opt, M6 walk): **a placement's room is known before its insert: the walk skips a full one.** The live
+  burst missed M6's 90 s bound on refusals that cost 6–21 s each and that concurrent walks each paid (Surprises). Fix 1,
+  built in this run (CI-opt: "Don't park it"): each placement's limits are read live, regions.get for
+  `IN_USE_ADDRESSES` and `INSTANCES` and Cloud Quotas' `CPUS_PER_VM_FAMILY` (region, vm_family) grant for the family's
+  vCPUs, cached 10 minutes in the process; what holds them is the tick's listing (job and bake VMs) plus its own sends,
+  and a placement a send would pass is skipped without an insert. A refusal that still happens closes that limit for the
+  rest of the tick, for every size, which also covers a limit that was wrong. Live limits, not config caps: a new
+  `gce.json` key would be refused by a launcher on older code (the config-before-code skew again), and the grants still
+  reconciling (addresses in us-central1 and us-west4, Hyperdisk Balanced) land without a commit. The cost: one IAM role
+  (`roles/cloudquotas.viewer`) and a read every 10 minutes; a failed first read means no admission, as before. The
+  alternative that lost: per-placement caps in `gce.json`, stale by construction and a skew of their own. Fix 2 (one probe
+  insert per untried zone before the rest follow) is built only if the rerun burst still misses on capacity refusals.
+  Walk order stays C4D first, C3D us-central1 after (CI-opt): a preemption costs a lost job and a rerun, 2–5 min.
+- 2026-10-21 (M6 walk): **the tick's deadline is a 45 s constant, and a launch it cuts off now gets a follow-up tick.**
+  `TICK_BUDGET_MS` = 45 s bounds when a tick starts new attempts (inserts already sent wait up to 40 s more, so a tick runs
+  up to ~90 s). It is a constant, well below Cloud Run's 300 s request timeout, Cloud Scheduler's 300 s attempt deadline
+  and Pub/Sub's 300 s ack deadline, because every request stays open for its tick's whole run (`--cpu-throttling`: a tick
+  with no open request has no CPU). Before this, a launch cut off at it was retried at once only if another webhook
+  request had arrived during the tick, else at the minute tick, up to 60 s later: part of the tail. Now a tick that cut a
+  launch off (`cut` on its summary) runs a follow-up 10 s after its start inside the same request, at most 3 in a row and
+  none starting 180 s past the first, so no request nears the 300 s deadlines.
 
 
 ## Surprises & Discoveries
