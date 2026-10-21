@@ -278,7 +278,7 @@ GitHub. A tick:
    not busy for a while after its job ends (a job this tick read names it, its row recorded a job, or it reported
    `ci-kit/job`). Static job 119166794835 waited 126 s on 2026-10-21 behind a VM whose job had just ended. Nor is a
    VM unclaimed whose runner never came online 3 minutes after the VM started: it booted but cannot reach GitHub
-   (its region's NAT missing, misconfigured or out of ports), and the launcher logs it at ERROR each tick,
+   (under `egress: "nat"`, its region's NAT missing, misconfigured or out of ports), and the launcher logs it at ERROR each tick,
    `runner never online` with its zone and region, until the idle rule removes it;
    then, with what those launches leave of `max_vcpus` and only when no queued job waits, pre-launches the VMs of
    each run that has begun before its pool jobs are queued (Pre-launch, below);
@@ -303,8 +303,8 @@ region and family, any other regional quota (`CPUS`, `INSTANCES`, `IN_USE_ADDRES
 more vCPUs is skipped, in this walk and the tick's later ones, since a smaller VM may still fit. A launch whose every
 attempt is so ruled out makes no runner or row and its job waits in GitHub's queue; no other launch stops. An insert
 whose outcome is unknown is settled through its zone operation before any other zone is tried, and if it stays
-unknown the walk stops and the cleanup rules settle it. The VM: no service account, its placement's subnetwork, the
-JIT config in metadata `ci-kit-jit`, `maxRunDuration` = `max_run_minutes` with a `DELETE` action, a boot disk of the
+unknown the walk stops and the cleanup rules settle it. The VM: no service account, its placement's subnetwork with
+the egress `gce.json` names (an ephemeral external address by default; The network, below), the JIT config in metadata `ci-kit-jit`, `maxRunDuration` = `max_run_minutes` with a `DELETE` action, a boot disk of the
 placement's `disk_type` and `disk_gb` that goes with it, labels `ci-kit=gce`, `ci-kit-alloc`,
 `ci-kit-repo=<owner>--<repo>`, `ci-kit-cpus`, `ci-kit-provisioning=spot|standard`, `ci-kit-disk=<disk type>` and
 `ci-kit-config=<gce.json commit, 8>`.
@@ -519,12 +519,22 @@ the label again before it acts.
 
 **The network.** Every builder, smoke VM and job VM sits on its placement's subnetwork of the VPC `ci-kit`
 (`network` and each placement's `subnetwork` in `gce.json`: `ci-kit-us-central1`, 10.64.0.0/20, and `ci-kit-us-west4`,
-10.64.16.0/20). No VM has a public IP: each subnetwork has Private Google Access, so Google APIs are reached
-without one, and all other egress (GitHub, apt, npm, Docker Hub) goes through the region's Cloud NAT, `ci-kit-nat` on the
-Cloud Router `ci-kit-router` (spec 2026-10-21 M6). The NAT allocates its own addresses as needed, so the region's
-`IN_USE_ADDRESSES` quota does not bound the pool; it covers every range of the region's subnetworks, gives each VM 1024
-ports to 65536 by dynamic allocation (pnpm and apt open many connections at once; provisional, sized by M6's burst
-proof), and logs dropped connections only, which `gce/deploy.sh alert` mails.
+10.64.16.0/20). How a VM reaches GitHub, apt, npm and Docker Hub is `gce.json`'s `egress`, a commit on main read by the
+next tick (the bake's, by the `gce.json` bundled at its deploy):
+- `"external"`, the default when the key is absent: each VM takes an ephemeral external IPv4, priced on its ledger
+  row. Each counts against its region's `IN_USE_ADDRESSES` quota (Quotas and budget), whose refusal is a quota
+  refusal: the walk goes on to the next placement.
+- `"nat"`: no VM has a public IP. Each subnetwork has Private Google Access, so Google APIs are reached without one,
+  and all other egress goes through the region's Cloud NAT, `ci-kit-nat` on the Cloud Router `ci-kit-router` (spec
+  2026-10-21 M6). The NAT allocates its own addresses as needed, so the address quota does not bound the pool; it
+  covers every range of the region's subnetworks, gives each VM 1024 ports to 65536 by dynamic allocation (pnpm and
+  apt open many connections at once), and logs dropped connections only, which `gce/deploy.sh alert` mails.
+
+The NAT is parked since 2026-10-21: behind it, GitHub's runner endpoints (`pipelines*.actions.githubusercontent.com`)
+refuse or stall the runners' first connections in a burst. In a 20-VM burst the median from boot to "Connected to
+GitHub" was 54–70 s behind the NAT, whether 1, 3 or 11 NAT addresses carried it, against 12 s with external
+addresses. So `gce.json` says `"egress": "external"`; the routers, NATs and Private Google Access stay deployed, so
+switching back is that one value.
 The VPC has no firewall rule: GCE's implied rules deny all ingress and allow all egress. The project's `default`
 network is never used, since its stock rules open ssh and RDP to the internet. `gce/deploy.sh network` creates the
 VPC, a subnetwork for each placement of `gce.json` (a new one takes the first free /20 of 10.64.0.0/16,
@@ -700,11 +710,12 @@ per allocation:
   hand outside the launcher).
 - `seconds` runs from the VM's creation to its deletion, `$` at the rates in `gce/launcher/ledger.mjs` by region and
   family (c3d and e2 in us-central1, 2026-10-16; c4d in us-west4, the Cloud Billing catalog on 2026-10-21, SKU ids
-  beside the table), the VM's hours of its region's Cloud NAT gateway ($0.0014 an hour; the NAT's GB processed and
-  its addresses are per region, not per VM, and go on the daily line with M6's counts) and the disk by region and
-  type included (Hyperdisk Balanced with the IOPS and throughput its defaults provision above the free baseline). A
+  beside the table), its egress (its external IPv4, $0.0025 an hour on spot and $0.005 on demand; or under `nat` its
+  hours of its region's Cloud NAT gateway, $0.0014 an hour, the NAT's GB processed and its addresses being per region,
+  not per VM, and going on the daily line with M6's counts) and the disk by region and type included (Hyperdisk Balanced with the IOPS and throughput its defaults provision above the free baseline). A
   VM in a region, family or disk type with no rate there shows `-`. The row's JSON carries the disk type (`diskType`; a row without one is from before placements,
-  on `pd-balanced`).
+  on `pd-balanced`) and the egress its VM launched with (`egress`, which prices it whatever `gce.json` says by its
+  end; a row without one is priced by the config's).
 - The daily line, `**GCE pool, <day> (UTC):** …`, totals the day's VMs, seconds and dollars, projects the month at
   that rate, gives each family@region's VMs and dollars (and how many it could not price), on a day with
   pre-launches how many VMs were pre-launched, how many no job claimed and what those cost (`Pre-launched: N VMs, M
@@ -747,15 +758,15 @@ quotas are the hard cap, and a refusal is a wait. Parallelism comes first: the o
 never be the bottleneck, and that cost is not a reason to lower parallelism. So `max_vcpus` follows the quotas. Granted
 through Cloud Quotas:
 - 2026-10-21: `CPUS-ALL-REGIONS` 256, C3D per-family 192 in us-central1, `INSTANCES` 64, `SSD-TOTAL-GB` 4096;
-  `IN-USE-ADDRESSES` asked 64, still 32 when this was written (a job VM held one external address until M6's Cloud
-  NAT; it holds none now, so this quota no longer bounds the pool);
+  `IN-USE-ADDRESSES` asked 64, still 32 when this was written (each job VM holds one external address under
+  `egress: "external"`, so 32 VMs at once in a region until granted; under `"nat"` it holds none);
 - 2026-10-16: the first grants;
 - never granted: E2 per-family stays at its default 24 (asked 64, refused twice), so at most 12 `cpus-2` VMs run on E2
   and the rest fell back to `c3d-highcpu-4` (`machine_fallback`); E2 has since left the pool with that key.
 
 A job reserves the largest machine its walk could land on in the launcher's count (a `cpus-2` job: `c3d-highcpu-4`).
 `max_vcpus` admits only; it tracks the sum of the placements' granted family quotas, and a placement's own refusal
-(family vCPUs, instances, disk capacity) falls through to the next one, so raise it with each grant (C4D us-west4's
+(family vCPUs, addresses, instances, disk capacity) falls through to the next one, so raise it with each grant (C4D us-west4's
 re-filed 128 was denied 2026-10-21, so it stays 50).
 `PREEMPTIBLE_CPUS` is 0, so spot VMs count against the ordinary CPU quotas. To check:
 

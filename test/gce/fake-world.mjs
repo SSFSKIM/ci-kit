@@ -101,6 +101,7 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
       kind: 'compute#instance', name: body.name, status: 'PROVISIONING', zone: ZONE_URL(zone),
       machineType: `${ZONE_URL(zone)}/machineTypes/${body.machineType.split('/').pop()}`,
       creationTimestamp: new Date(clock).toISOString(), labels: { ...body.labels }, scheduling: body.scheduling, metadata: body.metadata,
+      networkInterfaces: structuredClone(body.networkInterfaces),
     };
     g.instances.push(inst);
     g.disks.push({ name: body.name, zone: ZONE_URL(zone), users: [`${ZONE_URL(zone)}/instances/${body.name}`], labels: { ...body.disks[0].initializeParams.labels }, creationTimestamp: inst.creationTimestamp });

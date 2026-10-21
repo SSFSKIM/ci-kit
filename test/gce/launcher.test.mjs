@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { world, gceErr } from './fake-world.mjs';
 import { Launcher } from '../../gce/launcher/launcher.mjs';
 import { createGceLedger } from '../../gce/launcher/ledger-store.mjs';
-import { parseRow, launchRow, renderRow, finalRow, runningRow } from '../../gce/launcher/ledger.mjs';
+import { parseRow, launchRow, renderRow, finalRow, runningRow, dollars } from '../../gce/launcher/ledger.mjs';
 import { WEST, CENTRAL, ONE_REGION_CFG } from './config-fixtures.mjs';
 import { allocationId, instanceName, jobInstance, jitRequest } from '../../gce/launcher/logic.mjs';
 import { GceError } from '../../lib/gce.mjs';
@@ -84,6 +84,40 @@ test('a job\'s whole life: launch, run, power off, delete, one final row with th
   assert.equal(row.seconds, 210);
   assert.ok(row.dollars > 0);
   assert.deepEqual(leftovers(w), { instances: 0, disks: 0, runners: 0 });
+});
+
+// Egress (2026-10-21): gce.json's egress picks the VM's network path, and its row keeps the one it launched with, so a
+// change to the file between launch and the final row never reprices the VM.
+test('a VM launched under egress "nat" has no external address and its row says nat; it is priced so after gce.json returns to external', async () => {
+  const { w, make } = setup({ cfg: { ...CFG, egress: 'nat' } });
+  const job = w.sim.queue(SBX, L(4), { name: 'ci / nproc' });
+  await make().tick();
+  const [name] = vms(w);
+  assert.deepEqual(w.sim.vm(name).networkInterfaces, [{ subnetwork: 'regions/us-central1/subnetworks/ci-kit-us-central1' }]);
+  assert.equal(only(rows(w)).egress, 'nat');
+  const external = make({ cfg: CFG }); // the next commit of gce.json, read by the next tick
+  w.sim.boot(SBX, name);
+  w.sim.take(SBX, name, job);
+  w.advance(MIN);
+  await external.tick();
+  w.sim.finish(SBX, name, job);
+  await external.tick();
+  w.advance(MIN);
+  await external.tick();
+  const row = only(rows(w));
+  assert.equal(row.state, 'final');
+  const priced = (egress) => Math.round(dollars({ machine: row.machine, zone: row.zone, provisioning: row.provisioning, seconds: row.seconds, diskGb: 50, diskType: row.diskType, egress }) * 1e4) / 1e4;
+  assert.notEqual(priced('nat'), priced('external'));
+  assert.deepEqual([row.egress, row.dollars], ['nat', priced('nat')]);
+});
+
+test('a VM launched under egress "external" takes an external address, and its row says so', async () => {
+  const { w, launcher } = setup();
+  w.sim.queue(SBX, L(4));
+  await launcher.tick();
+  const [name] = vms(w);
+  assert.deepEqual(w.sim.vm(name).networkInterfaces[0].accessConfigs, [{ type: 'ONE_TO_ONE_NAT', name: 'External NAT' }]);
+  assert.equal(only(rows(w)).egress, 'external');
 });
 
 test('an idle VM (its job went elsewhere) is unregistered first, then deleted, and finalized cancelled-idle', async () => {
@@ -307,12 +341,13 @@ test('a VM Compute Engine deleted at its run limit is finalized max-run', async 
 test('a ci-kit=gce instance with no row is still cleaned, and gets an orphan row; orphan disks and old builders go', async () => {
   const { w, launcher } = setup();
   const alloc = allocationId(T0 - 30 * MIN, () => 3);
-  await w.gce.insertInstance('us-central1-b', jobInstance({ alloc, zone: 'us-central1-b', machine: 'e2-highcpu-2', provisioning: 'spot', repo: SBX, cpus: 2, image: 'i', jit: 'j', placement: CFG.placements[0], cfg: CFG, config: COMMIT }));
+  await w.gce.insertInstance('us-central1-b', jobInstance({ alloc, zone: 'us-central1-b', machine: 'e2-highcpu-2', provisioning: 'spot', repo: SBX, cpus: 2, image: 'i', jit: 'j', placement: CFG.placements[0], cfg: { ...CFG, egress: 'nat' }, config: COMMIT }));
   w.sim.vm(instanceName(alloc)).status = 'TERMINATED';
   w.g.disks.push({ name: 'stray', zone: 'zones/us-central1-c', users: [], labels: { 'ci-kit': 'gce' }, creationTimestamp: new Date(T0 - 20 * MIN).toISOString() });
   w.g.instances.push({ name: 'ci-kit-gce-builder-old', status: 'RUNNING', zone: 'zones/us-central1-a', labels: { 'ci-kit': 'gce-builder' }, creationTimestamp: new Date(T0 - 3 * 60 * MIN).toISOString(), machineType: 'x/e2-standard-4' });
   await settle(w, launcher, 2);
   assert.equal(only(rows(w)).end, 'orphan');
+  assert.equal(only(rows(w)).egress, 'nat', 'the orphan row takes the egress its VM\'s network interface shows, not the config\'s');
   assert.deepEqual(leftovers(w), { instances: 0, disks: 0, runners: 0 });
   assert.ok(!w.log.includes('delete devbox'), 'a foreign instance is never touched');
 });
@@ -784,24 +819,28 @@ const layered = (api, clock) => Object.fromEntries(Object.entries(api).map(([k, 
 
 // Spec M6 (NAT): a VM that boots but cannot reach GitHub must not hold its job for the whole idle window unseen.
 test('a VM RUNNING over 3 min whose runner never came online is reported at ERROR with its zone and region, and its job gets another VM', async () => {
-  const errors = [];
-  const { w, make } = setup();
-  const launcher = make({ error: (message, fields) => errors.push({ message, fields }) });
-  w.sim.queue(SBX, L(4));
-  assert.equal((await launcher.tick()).launched.length, 1);
-  const [name] = vms(w);
-  const vm = w.sim.vm(name);
-  vm.status = 'RUNNING'; // it starts, but its runner never connects
-  vm.lastStartTimestamp = new Date(w.now()).toISOString();
-  w.advance(2 * MIN);
-  assert.deepEqual((await launcher.tick()).launched, [], 'still within the boot allowance: its runner covers the job');
-  assert.deepEqual(errors, []);
-  w.advance(2 * MIN);
-  const out = await launcher.tick();
-  assert.equal(out.launched.length, 1, 'the job is launched again');
-  const zone = vm.zone.split('/').pop();
-  assert.deepEqual(errors.map((e) => e.fields), [{ event: 'runner-never-online', instance: name, zone, region: zone.replace(/-[a-z]$/, ''), runningSeconds: 240 }]);
-  assert.match(errors[0].message, new RegExp(`^runner never online: ${name} \\(c3d-highcpu-4@${zone}\\)`));
+  // The hint names what carries the VM's egress: its own external address, or its region's Cloud NAT.
+  for (const [egress, check] of [['external', 'its external address'], ['nat', 'the Cloud NAT of us-central1']]) {
+    const errors = [];
+    const { w, make } = setup({ cfg: { ...CFG, egress } });
+    const launcher = make({ error: (message, fields) => errors.push({ message, fields }) });
+    w.sim.queue(SBX, L(4));
+    assert.equal((await launcher.tick()).launched.length, 1);
+    const [name] = vms(w);
+    const vm = w.sim.vm(name);
+    vm.status = 'RUNNING'; // it starts, but its runner never connects
+    vm.lastStartTimestamp = new Date(w.now()).toISOString();
+    w.advance(2 * MIN);
+    assert.deepEqual((await launcher.tick()).launched, [], 'still within the boot allowance: its runner covers the job');
+    assert.deepEqual(errors, []);
+    w.advance(2 * MIN);
+    const out = await launcher.tick();
+    assert.equal(out.launched.length, 1, 'the job is launched again');
+    const zone = vm.zone.split('/').pop();
+    assert.deepEqual(errors.map((e) => e.fields), [{ event: 'runner-never-online', instance: name, zone, region: zone.replace(/-[a-z]$/, ''), runningSeconds: 240 }]);
+    assert.match(errors[0].message, new RegExp(`^runner never online: ${name} \\(c3d-highcpu-4@${zone}\\)`));
+    assert.match(errors[0].message, new RegExp(`check ${check}`), egress);
+  }
 });
 
 test('a VM whose runner came online is cover however long it has run, and nothing is reported', async () => {
