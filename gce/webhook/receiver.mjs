@@ -12,8 +12,9 @@ export const MAX_BODY = 1024 * 1024;
 const PUBLISH_TIMEOUT_MS = 5_000; // GitHub gives a delivery 10 s
 // The secret is a Cloud Run volume, which Secret Manager serves on every read: an access billed and counted against
 // the project's quota. So a delivery is refused before any read unless its signature has the right shape, and the
-// secret is kept for a minute. A mismatch re-reads it once the copy is 10 s old, so a rotation is live with the first
-// delivery GitHub signs with the new secret, and a flood of forged signatures costs at most one read per 10 s.
+// secret is kept for a minute. A mismatch asks for a re-read, so a rotation is live within 10 s of the first delivery
+// GitHub signs with the new secret. Reads start at most once per 10 s, failed ones included, and concurrent requests
+// share the one in flight: no flood of forged signatures, and no outage of the store, costs more than that.
 export const SECRET_TTL_MS = 60_000;
 export const REREAD_AFTER_MS = 10_000;
 const SIGNATURE = /^sha256=[0-9a-f]{64}$/;
@@ -41,6 +42,43 @@ export function tickRequest({ event, payload, served, machines }) {
 }
 
 class TooLarge extends Error {}
+
+// key(fresh) → the secret: the kept copy while it is younger than SECRET_TTL_MS and not `fresh` (asked after a
+// mismatch); otherwise a read, the one in flight if there is one, or a new one if none started in the last
+// REREAD_AFTER_MS. A read that fails, or none due yet, leaves the last good copy serving; with none, key throws.
+function createSecretKeeper({ read, now }) {
+  let good = null; // {key, at}: the last copy read
+  let started = -Infinity; // when the last read began, whether or not it succeeded
+  let inflight = null;
+  let failure = null;
+  const refresh = () => {
+    started = now();
+    inflight = read()
+      .then((value) => {
+        good = { key: value.trim(), at: now() };
+        failure = null;
+        return good.key;
+      })
+      .finally(() => {
+        inflight = null;
+      });
+    return inflight;
+  };
+  return async function key(fresh) {
+    if (!fresh && good && now() - good.at < SECRET_TTL_MS) return good.key;
+    if (!inflight && now() - started < REREAD_AFTER_MS) {
+      if (good) return good.key;
+      throw failure ?? new Error('no read of the secret has succeeded yet');
+    }
+    try {
+      return await (inflight ?? refresh());
+    } catch (err) {
+      failure = err;
+      if (good) return good.key;
+      throw err;
+    }
+  };
+}
 async function readBody(req) {
   const chunks = [];
   let size = 0;
@@ -56,11 +94,7 @@ async function readBody(req) {
 // resolves once Pub/Sub took it; log(severity, message, fields).
 export function createReceiver({ secret, publish, served, machines, log, now = Date.now }) {
   const answer = (res, status, body) => res.writeHead(status, { 'content-type': 'application/json' }).end(`${JSON.stringify(body)}\n`);
-  let kept = null; // {key, at}
-  const key = async (fresh) => {
-    if (fresh || !kept || now() - kept.at >= SECRET_TTL_MS) kept = { key: (await secret()).trim(), at: now() };
-    return kept.key;
-  };
+  const key = createSecretKeeper({ read: secret, now });
   const refuse = (res, delivery) => {
     log('WARNING', 'delivery refused: its signature does not verify', { delivery });
     return answer(res, 401, { error: 'bad signature' });
@@ -80,11 +114,15 @@ export function createReceiver({ secret, publish, served, machines, log, now = D
     }
     let valid;
     try {
-      valid = signatureValid(await key(false), body, signature);
-      if (!valid && now() - kept.at >= REREAD_AFTER_MS) valid = signatureValid(await key(true), body, signature);
+      const kept = await key(false);
+      valid = signatureValid(kept, body, signature);
+      if (!valid) {
+        const reread = await key(true);
+        if (reread !== kept) valid = signatureValid(reread, body, signature);
+      }
     } catch (err) {
       log('ERROR', `webhook secret unreadable: ${err.message}`, { delivery });
-      return answer(res, 500, { error: 'secret unreadable' });
+      return answer(res, 503, { error: 'secret unreadable' });
     }
     if (!valid) return refuse(res, delivery);
     let payload;

@@ -117,10 +117,10 @@ test('only POST is served, and a body over the cap is refused before its signatu
   assert.deepEqual(r.published, []);
 });
 
-test('an unreadable secret answers 500 and a failed publish 502, and both are logged', async (t) => {
+test('an unreadable secret answers 503 and a failed publish 502, and both are logged', async (t) => {
   const broken = await receiver({ secret: async () => { throw new Error('permission denied on secret'); } });
   t.after(broken.close);
-  assert.equal((await broken.post(queued())).status, 500);
+  assert.equal((await broken.post(queued())).status, 503);
   assert.match(broken.logs[0].message, /secret/);
   const down = await receiver({ publish: async () => { throw new Error('pubsub 503'); } });
   t.after(down.close);
@@ -223,4 +223,52 @@ test('a mismatch re-reads the secret once the cache is older than the re-read fl
   clock += REREAD_AFTER_MS;
   assert.equal((await r.post(null, { raw: body, signature: rotated })).status, 202);
   assert.equal(key.reads, 2);
+});
+
+test('simultaneous forged deliveries share one read of the secret', async (t) => {
+  const key = countedSecret(SECRET);
+  const slow = async () => {
+    await new Promise((r) => setTimeout(r, 100)); // every request arrives while the first read is in flight
+    return key.read();
+  };
+  const r = await receiver({ secret: slow, now: () => 1_000_000 });
+  t.after(r.close);
+  const body = Buffer.from(JSON.stringify(queued()));
+  const answers = await Promise.all(Array.from({ length: 80 }, (_, i) => r.post(null, { raw: body, signature: sign(body, `forged ${i}`) })));
+  assert.ok(answers.every((a) => a.status === 401));
+  assert.equal(key.reads, 1);
+});
+
+test('a failing secret store is read at most once per 10 s, and the last good copy serves meanwhile', async (t) => {
+  let clock = 1_000_000;
+  let reads = 0;
+  let failing = true;
+  const store = async () => {
+    reads += 1;
+    if (failing) throw new Error('RESOURCE_EXHAUSTED: quota');
+    return SECRET;
+  };
+  const r = await receiver({ secret: store, now: () => clock });
+  t.after(r.close);
+  const body = Buffer.from(JSON.stringify(queued()));
+  // No good copy yet: each delivery is 503, and the store is asked at most once per 10 s.
+  for (let i = 0; i < 20; i += 1) {
+    assert.equal((await r.post(null, { raw: body, signature: sign(body, `forged ${i}`) })).status, 503);
+    clock += 1_000;
+  }
+  assert.equal(reads, 2); // at 0 s and 10 s
+  // A good copy, then the store fails again: past the TTL, the genuine secret still verifies from that copy, and
+  // forged ones keep the reads at one per 10 s.
+  clock += REREAD_AFTER_MS;
+  failing = false;
+  assert.equal((await r.post(queued())).status, 202);
+  failing = true;
+  clock += SECRET_TTL_MS;
+  const before = reads;
+  for (let i = 0; i < 20; i += 1) {
+    assert.equal((await r.post(queued())).status, 202);
+    assert.equal((await r.post(null, { raw: body, signature: sign(body, `forged ${i}`) })).status, 401);
+    clock += 1_000;
+  }
+  assert.ok(reads - before <= 3, `${reads - before} reads in 20 s`);
 });

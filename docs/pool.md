@@ -387,8 +387,10 @@ GitHub App ci-kit-runners ──workflow_job──▶ ci-kit-webhook (public) �
 The webhook secret is `ci-kit-webhook-secret` in Secret Manager (label `ci-kit=webhook`), readable by
 `ci-kit-webhook@` only and mounted into the receiver as a file that Cloud Run reads from Secret Manager on each read,
 a billed access counted against the project's quota. So the receiver keeps it for 60 s, and a signature that does not
-verify re-reads it once the copy is 10 s old: a rotation is live within 10 s of the first delivery signed with the new
-secret, and a flood of forged signatures costs at most one read per 10 s per instance. The same value is the App's webhook secret, set with the App's URL by `gce/deploy.sh app-hook`
+verify asks for a re-read: a rotation is live within 10 s of the first delivery signed with the new secret. A read
+starts at most once per 10 s per instance, failed ones included, and concurrent deliveries share the one in flight, so
+neither a flood of forged signatures nor an outage of Secret Manager costs more. While reads fail, the last good copy
+keeps serving; with none, a delivery is answered 503 and its job waits for the minute tick. The same value is the App's webhook secret, set with the App's URL by `gce/deploy.sh app-hook`
 (`PATCH /app/hook/config` as the App; the secret is never printed). The App's subscribed events and its webhook's
 **Active** box have no API: they are on its settings page, `https://github.com/settings/apps/ci-kit-runners` (Active,
 under Webhook) and `https://github.com/settings/apps/ci-kit-runners/permissions` (Subscribe to events: **Workflow
