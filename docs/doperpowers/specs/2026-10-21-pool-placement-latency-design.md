@@ -653,6 +653,18 @@ VM's walk.
 - 2026-10-21 (M6 research): both address preferences sit at partial grants, still reconciling: us-west4 8 of
   64, us-central1 32 of 64. A default region's `HDB-TOTAL-GB` is 500 (us-west4 was raised to 4096). Every unknown
   insert of the day settled as created, after 41–121 s.
+- 2026-10-21 (follow-up, CI-opt's unit-cache data): **the 33–56 s "Cleaning up orphan processes" tails on 4 of 74
+  MAWS unit shards are not orphan cleanup.** Each job's "Complete job" step started and ended in the same second; the
+  wait came after it, in the runner's final results/log upload drain (`JobServerQueue`, files uploaded one after
+  another, no overall budget). One VM's serial log shows it (ci-kit-gce-hsd1uqp9p0, job 119388200223 of run
+  39647845404): step-log uploads begin 17:57:13, :31, :31, :49, the job log 17:57:50, "Results upload queue drained"
+  17:58:08. The others (runs 39660255689, 39660267988) lost their tails to the serial backlog at poweroff. No fix is
+  evidenced: an orphan-killing hook runs before this drain, and `RUNNER_TRACKING_ID`, `process.clean` and the
+  runner's HTTP knobs do not shorten it. Closed as "cause: the runner's result upload drain; no fix yet". The
+  instrumentation for later: `gce/vm/job.mjs` line-filters the runner's stdout to its `JobExtension`, `JobRunner`
+  and `JobServerQueue` lines before the serial sink, so the end of a job survives the 115200-baud backlog. Related:
+  the runner's "Retrieving an AAD auth token took a long time" warning appears on VMs with and without external IPs
+  (2–39 s; 11 VMs today), so it is GitHub's, not the NAT's.
 
 ## Outcomes & Retrospective
 
