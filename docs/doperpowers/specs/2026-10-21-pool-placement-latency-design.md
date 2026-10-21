@@ -110,6 +110,8 @@ toward the boot alone, and below it for the jobs a warm runner covers.
 - [ ] M6 — Stock-out and quota resilience. Sized from the day's data (2026-10-21); approved by CI-opt 18:5xZ with
   NAT (Decision Log). Hyperdisk raises filed. Build order: NAT, proved in us-central1 first; then the race and the
   counts; then the placements.
+  Follow-up outside M6's proof (CI-opt): the tick's preparation before its first allocation, 5.1 s at 18:45 and 6.2 s
+  to the first insert, brought to M3's ≤ 5 s.
 
 ## Acceptance
 
