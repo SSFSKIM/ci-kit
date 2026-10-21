@@ -436,8 +436,8 @@ needs from it: its network, which the GCE datasource renders per instance (the l
 the root filesystem to the VM's disk (`growpart`, `resizefs`). Every other module goes, and `cloud-config.service` and
 `cloud-final.service` are masked (the config stage restarted chrony and cron beside the job's start). The network
 stage still gates the job: it is ordered before `sysinit.target`, which every ordinary service waits for, dockerd
-included. Since 2026-10-21 the project logs serial ports to Cloud Logging (`gce/deploy.sh base`), so a deleted VM's
-boot can be read there:
+included. `gce/deploy.sh base` turns on the project's serial port logging to Cloud Logging, so a deleted VM's boot
+can be read there:
 `gcloud logging read 'logName="projects/ssfskim-ci-kit/logs/serialconsole.googleapis.com%2Fserial_port_1_output" AND resource.labels.instance_id="<id>"' --project=ssfskim-ci-kit`.
 
 **The job VM.** At boot, `ci-kit-gce-job.service` runs `gce/vm/job.mjs`: it drops the job container's TCP and UDP
