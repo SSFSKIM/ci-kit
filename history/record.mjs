@@ -129,7 +129,8 @@ export const lineArtifacts = (line) => [line.artifact, ...(line.shards ?? []).ma
 // One (run, attempt, job). `prov` is the provenance (collect.mjs builds it); `report` is 'present', 'missing',
 // 'unparseable' or 'rejected'; `summary` is given for a present report only, with a base when one exists. `previous`
 // starts null and is filled once every line of the pass is known (provenance.mjs, previousRun). A sharded job's line
-// has no job id, runner or artifact of its own: `shards` holds each shard's, in shard order (null when unsharded).
+// has no job id, runner or artifact of its own: `shards` holds each shard's, in shard order (null when unsharded),
+// with the attempt it ran in (an earlier one for a shard a re-run copied).
 export function buildRunLine(prov, artifact, report, summary = null, base = null) {
   const line = {
     run: prov.run,
@@ -152,7 +153,7 @@ export function buildRunLine(prov, artifact, report, summary = null, base = null
     completed: prov.completed,
     artifact: artifactRef(artifact),
     shards: prov.shards?.map((s) => ({
-      job: s.job, jobId: s.jobId, runner: s.runner, conclusion: s.conclusion, started: s.started, completed: s.completed, artifact: artifactRef(s.artifact),
+      job: s.job, attempt: s.attempt, jobId: s.jobId, runner: s.runner, conclusion: s.conclusion, started: s.started, completed: s.completed, artifact: artifactRef(s.artifact),
     })) ?? null,
     report,
     membership: null,

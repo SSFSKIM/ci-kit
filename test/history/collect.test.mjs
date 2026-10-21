@@ -618,45 +618,108 @@ test('a shard still running writes nothing yet; one that ran its tests and uploa
   assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
 });
 
-test("a shard from another attempt never completes an attempt's set: a shard re-run alone leaves its attempt without a line", async (t) => {
+// A re-run of some shards: GitHub copies the others into the new attempt, completed before it was created there.
+const copied = (job) => ({ name: job.name, created: '2026-10-21T08:30:00Z', started: job.started, completed: job.completed });
+
+test('a shard a re-run copied takes its report from the attempt it ran in: a shard preempted and rerun alone gives the rerun a full line', async (t) => {
   const root = tempRoot(t);
-  const { repo, run } = builder();
-  const [s1, s2] = [shardSuites()[0], shardSuites({ fails: true })[1]];
-  // a red shard re-run alone, green; the other shard is copied into the second attempt
-  run({ id: 821, ref: 'ci/rerun-aaaaaaaa', tested: c('a'), tree: 'TA', created: '2026-10-21T07:50:00Z', attempts: [
-    [
-      { name: 'unit 1/2', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z', suites: s1 },
-      { name: 'unit 2/2', conclusion: 'failure', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:07:00Z', suites: s2 },
-    ],
-    [
-      { name: 'unit 1/2', created: '2026-10-21T08:30:00Z', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z' },
-      { name: 'unit 2/2', started: '2026-10-21T08:31:00Z', completed: '2026-10-21T08:38:00Z', suites: shardSuites()[1] },
-    ],
-  ] });
-  // a shard preempted before its upload step, then re-run alone
+  const { repo, reports, run } = builder();
+  const suites = shardSuites();
+  const one = { name: 'unit 1/3', runner: 'vm-1', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z', suites: suites[0] };
+  const three = { name: 'unit 3/3', runner: 'vm-3', started: '2026-10-21T07:59:00Z', completed: '2026-10-21T08:05:00Z', suites: suites[2] };
+  // GCE preempts shard 2 before its upload step; ci-gate reruns it alone
   run({ id: 822, ref: 'ci/preempt-bbbbbbbb', tested: c('b'), tree: 'TB', created: '2026-10-21T07:50:00Z', attempts: [
-    [
-      { name: 'unit 1/2', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z', suites: s1 },
-      { name: 'unit 2/2', conclusion: 'failure', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:03:00Z', steps: [
-        { name: 'Run rm -rf ci-results', conclusion: 'failure' }, { name: 'Run actions/upload-artifact@v7', conclusion: 'skipped' },
-      ] },
-    ],
-    [
-      { name: 'unit 1/2', created: '2026-10-21T08:30:00Z', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z' },
-      { name: 'unit 2/2', started: '2026-10-21T08:31:00Z', completed: '2026-10-21T08:38:00Z', suites: shardSuites()[2] },
-    ],
+    [one, { name: 'unit 2/3', conclusion: 'failure', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:03:00Z', steps: [
+      { name: 'Run rm -rf ci-results', conclusion: 'failure' }, { name: 'Run actions/upload-artifact@v7', conclusion: 'skipped' },
+    ] }, three],
+    [copied(one), { name: 'unit 2/3', runner: 'vm-4', started: '2026-10-21T08:31:00Z', completed: '2026-10-21T08:38:00Z', suites: suites[1] }, copied(three)],
+  ] });
+  // a red shard re-run alone, green: both attempts are whole
+  const red = shardSuites({ fails: true });
+  const first = { name: 'unit 1/2', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z', suites: red[0] };
+  run({ id: 821, ref: 'ci/rerun-aaaaaaaa', tested: c('a'), tree: 'TA', created: '2026-10-21T07:50:00Z', attempts: [
+    [first, { name: 'unit 2/2', conclusion: 'failure', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:07:00Z', suites: red[1] }],
+    [copied(first), { name: 'unit 2/2', started: '2026-10-21T08:31:00Z', completed: '2026-10-21T08:37:00Z', suites: suites[1] }],
   ] });
   const { fake, pass } = passes(repo, root);
 
-  const first = await pass();
-  assert.deepEqual(first.errors, []);
-  assert.deepEqual(first.counts, { ...NOTHING, artifacts: 2, lines: 1, present: 1, failures: 1, written: 2 });
-  assert.deepEqual(linesOf(root, '2026-10-21').map((l) => `${l.run}/${l.attempt}/${l.job}:${l.report}`), ['821/1/unit:present']);
+  const pass1 = await pass();
+  assert.deepEqual(pass1.errors, []);
+  assert.deepEqual(linesOf(root, '2026-10-21').map((l) => `${l.run}/${l.attempt}/${l.job}:${l.report}`),
+    ['821/1/unit:present', '821/2/unit:present', '822/2/unit:present']);
+  assert.deepEqual([pass1.counts.lines, pass1.counts.present, pass1.counts.artifacts, pass1.counts.failures], [3, 3, 7, 1]);
 
-  // the incomplete attempts are looked at again, and nothing is downloaded for them
+  // the preempted run's rerun: shards 1 and 3 from attempt 1, shard 2 from attempt 2, as one full set
+  const line = lineOf(root, '2026-10-21', '822/2/unit');
+  assert.deepEqual(line.shards.map((s) => [s.job, s.attempt, s.runner, s.artifact.name]), [
+    ['unit 1/3', 1, 'vm-1', 'test-results-unit-1of3-1'],
+    ['unit 2/3', 2, 'vm-4', 'test-results-unit-2of3-2'],
+    ['unit 3/3', 1, 'vm-3', 'test-results-unit-3of3-1'],
+  ]);
+  const ran = [repo.jobs['822/1'][0], repo.jobs['822/2'][1], repo.jobs['822/1'][2]];
+  assert.deepEqual(line.shards.map((s) => s.jobId), ran.map((j) => j.id));
+  assert.deepEqual([line.started, line.completed, line.conclusion], ['2026-10-21T07:59:00Z', '2026-10-21T08:38:00Z', 'success']);
+  const base = gz(root, 'base/2026-10-21/unit.json.gz');
+  assert.deepEqual(membershipOf(line, base), unionOf(suites).ids);
+  for (const l of linesOf(root, '2026-10-21')) assert.deepEqual(membershipOf(l, base), readBack(reports, l).ids, `${l.run}/${l.attempt}`);
+  // the red attempt keeps its failure; the rerun's copied shard is the first attempt's own report
+  assert.deepEqual(lineOf(root, '2026-10-21', '821/1/unit').failed.length, 1);
+  assert.deepEqual(lineOf(root, '2026-10-21', '821/2/unit').shards.map((s) => [s.attempt, s.artifact.name]), [[1, 'test-results-unit-1of2-1'], [2, 'test-results-unit-2of2-2']]);
+
   const asked = fake.requests.length;
   assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
   assert.ok(!fake.requests.slice(asked).some((p) => p.endsWith('/zip')));
+});
+
+test("a copied shard whose own attempt's artifact is gone, expired or never uploaded, leaves the rerun missing", async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  const suites = shardSuites();
+  const preempted = { name: 'unit 2/2', conclusion: 'failure', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:03:00Z', steps: [
+    { name: 'Run actions/upload-artifact@v7', conclusion: 'skipped' },
+  ] };
+  const rerun = { name: 'unit 2/2', started: '2026-10-21T08:31:00Z', completed: '2026-10-21T08:38:00Z', suites: suites[2] };
+  // shard 1's upload ran and left nothing
+  const lost = { name: 'unit 1/2', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z' };
+  run({ id: 823, ref: 'ci/lost-aaaaaaaa', tested: c('a'), tree: 'TA', created: '2026-10-21T07:50:00Z', attempts: [[lost, preempted], [copied(lost), rerun]] });
+  // shard 1's artifact has expired
+  const old = { name: 'unit 1/2', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z', suites: suites[0], expired: true };
+  run({ id: 824, ref: 'ci/expired-bbbbbbbb', tested: c('b'), tree: 'TB', created: '2026-10-21T07:50:00Z', attempts: [[old, preempted], [copied(old), rerun]] });
+  const { pass } = passes(repo, root);
+
+  const first = await pass();
+  assert.deepEqual(first.errors, []);
+  assert.deepEqual(first.counts, { ...NOTHING, artifacts: 2, lines: 2, missing: 2, written: 1 });
+  for (const run of [823, 824]) {
+    const line = lineOf(root, '2026-10-21', `${run}/2/unit`);
+    assert.deepEqual(line.shards.map((s) => [s.attempt, s.artifact?.name ?? null]), [[1, null], [2, 'test-results-unit-2of2-2']]);
+    assert.equal(lineOf(root, '2026-10-21', `${run}/1/unit`), undefined);
+  }
+  assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
+});
+
+test("an artifact of another attempt never stands in for a shard that ran in this one", async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  const suites = shardSuites();
+  // a whole second attempt: shard 1 ran its tests again and uploaded nothing; attempt 1's report of it is a stray here
+  run({ id: 825, ref: 'ci/again-aaaaaaaa', tested: c('a'), tree: 'TA', created: '2026-10-21T07:50:00Z', attempts: [
+    [
+      { name: 'unit 1/2', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z', suites: suites[0] },
+      { name: 'unit 2/2', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:07:00Z', suites: suites[2] },
+    ],
+    [
+      { name: 'unit 1/2', started: '2026-10-21T08:30:00Z', completed: '2026-10-21T08:36:00Z' },
+      { name: 'unit 2/2', started: '2026-10-21T08:30:00Z', completed: '2026-10-21T08:37:00Z', suites: suites[2] },
+    ],
+  ] });
+  const { pass } = passes(repo, root);
+
+  const first = await pass();
+  assert.deepEqual(first.errors, []);
+  assert.deepEqual(linesOf(root, '2026-10-21').map((l) => `${l.run}/${l.attempt}:${l.report}`), ['825/1:present', '825/2:missing']);
+  assert.deepEqual(lineOf(root, '2026-10-21', '825/2/unit').shards.map((s) => [s.attempt, s.artifact?.name ?? null]), [[2, null], [2, 'test-results-unit-2of2-2']]);
+  assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
 });
 
 test('the job unsharded and sharded across runs in one store: one base, every line rebuilds, the change links across the switch', async (t) => {

@@ -183,10 +183,12 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
   }
 
   // 3. Each item's run and job, in the order the jobs completed, so a day's base is its first unselected report.
-  //    A sharded job is taken once all n shards of the attempt completed, and only when each of them ran its tests
-  //    in this attempt: a shard a re-run copied from an earlier attempt, or one that never reached its tests, leaves
-  //    the attempt without a line, as an unsharded job that did not run its tests has none. An attempt whose jobs
-  //    and unexpired artifacts in the run's own listing name more than one shard count (unsharded included) is refused.
+  //    A sharded job is taken once all n shards of the attempt completed. A shard a re-run copied into the attempt
+  //    (GitHub composes the attempt's verdict from the copy) is the job it copies: the shard in the latest earlier
+  //    attempt where it is no copy, whose report is that attempt's artifact. A shard that did not run its tests
+  //    leaves the attempt without a line, as an unsharded job that did not run its tests has none; any other
+  //    attempt's artifact never stands in for a shard. An attempt whose jobs and unexpired artifacts in the run's own
+  //    listing name more than one shard count (unsharded included) is refused.
   const work = [];
   for (const item of items.values()) {
     try {
@@ -211,13 +213,23 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
         shards.push(job);
       }
       if (shards.some((j) => j.status !== 'completed')) continue; // the next pass takes it
-      if (shards.some((j) => carriedOver(j) || !uploadRan(j))) continue;
-      const set = shards.map((job, i) => ({
+      const ran = [];
+      for (const shard of shards) {
+        let [job, attempt] = [shard, item.attempt];
+        while (job && carriedOver(job) && attempt > 1) {
+          attempt -= 1;
+          job = (await jobsOf(item.run, attempt)).find((j) => j.name === shard.name);
+        }
+        ran.push({ job, attempt });
+      }
+      if (ran.some(({ job }) => !job || carriedOver(job) || !uploadRan(job))) continue;
+      const set = ran.map(({ job, attempt }, i) => ({
         job,
-        artifact: artifacts.find((a) => a.name === artifactName(item.job, item.attempt, i + 1, n) && !a.expired) ?? null,
+        attempt,
+        artifact: artifacts.find((a) => a.name === artifactName(item.job, attempt, i + 1, n) && !a.expired) ?? null,
       }));
       if (set.some((s) => !s.artifact) && store.line(lineKey(item))) continue; // still short, and already `missing`
-      work.push({ ...item, runInfo: run, jobInfo: logicalJob(shards), shards: set });
+      work.push({ ...item, runInfo: run, jobInfo: logicalJob(set.map((s) => s.job)), shards: set });
     } catch (err) {
       errors.push(`run ${item.run} attempt ${item.attempt} ${item.job}: ${describe(err)}`);
     }
@@ -250,11 +262,11 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
       conclusion: job.conclusion,
       started: job.started_at,
       completed: job.completed_at,
-      shards: shards && shards.map(({ job: j, artifact: a }) => ({
-        job: j.name, jobId: j.id, runner: j.runner_name || null, conclusion: j.conclusion, started: j.started_at, completed: j.completed_at, artifact: a,
+      shards: shards && shards.map(({ job: j, attempt: at, artifact: a }) => ({
+        job: j.name, attempt: at, jobId: j.id, runner: j.runner_name || null, conclusion: j.conclusion, started: j.started_at, completed: j.completed_at, artifact: a,
       })),
     };
-    // The report is the union of the shards' reports, each one checked against its own shard's job; an absent
+    // The report is the union of the shards' reports, each one checked against the job that ran it; an absent
     // artifact makes the job's line `missing`, which gives way to the full set should the rest turn up.
     const parts = shards ?? [{ job, artifact }];
     if (parts.some((p) => !p.artifact)) return buildRunLine(prov, artifact, 'missing');
