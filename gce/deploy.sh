@@ -163,9 +163,10 @@ LAUNCHER=ci-kit-launcher
 # A deploy leaves a service's traffic where it was: after a rollback pinned it to an older revision
 # (update-traffic --to-revisions=<old>=100), `gcloud run deploy` creates the new revision at 0% and says so only in
 # passing. So every traffic goes to the latest ready revision, which is then checked to serve all of it. Prints it.
+# It runs in a command substitution, where errexit is off: each failure returns explicitly.
 serve_latest() {
   local service=$1 status
-  g run services update-traffic "$service" --region="$REGION" --to-latest > /dev/null
+  g run services update-traffic "$service" --region="$REGION" --to-latest > /dev/null || return
   # shellcheck disable=SC2016 # a JavaScript template literal, not the shell's
   status=$(g run services describe "$service" --region="$REGION" --format=json | node -e '
     let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
@@ -173,7 +174,7 @@ serve_latest() {
       const live = traffic.filter((t) => t.percent > 0);
       if (live.length === 1 && live[0].revisionName === latest && live[0].percent === 100) console.log(`serving ${latest}`);
       else console.log(`its latest revision ${latest} does not serve all traffic: ${live.map((t) => `${t.revisionName} ${t.percent}%`).join(", ") || "none"}`);
-    });')
+    });') || return
   [[ $status == serving\ * ]] || die "$service: $status"
   echo "${status#serving }"
 }

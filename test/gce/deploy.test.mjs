@@ -127,6 +127,17 @@ for (const [part, service] of [['launcher', 'ci-kit-launcher'], ['webhook', 'ci-
     assert.ok(verb(run.calls, 'run', 'services', 'update-traffic', service).some((c) => c.includes('--to-latest')));
   });
 
+  // Review of ca1fda2 (P2): the helper runs in a command substitution, where errexit is off; a failed update-traffic
+  // must still fail the deploy, though the read after it would show the new revision serving (traffic that follows
+  // the latest moved with the deploy).
+  test(`${part}: a failed update-traffic fails the deploy`, () => {
+    const following = (name) => ({ revisions: 1, latestReady: `${name}-00001-old`, traffic: [{ revisionName: `${name}-00001-old`, percent: 100, latestRevision: true }], trafficFails: true });
+    const run = deploy(part, { services: { 'ci-kit-launcher': following('ci-kit-launcher'), 'ci-kit-webhook': following('ci-kit-webhook') } });
+    assert.equal(run.status, 1, run.stderr);
+    assert.match(run.stderr, /update-traffic\) failed/);
+    assert.doesNotMatch(run.stdout ?? '', new RegExp(`${part} ok`));
+  });
+
   test(`${part}: a deploy whose revision does not serve fails, naming what does`, () => {
     const run = deploy(part, { services: { 'ci-kit-launcher': { ...pinned('ci-kit-launcher'), stuck: true }, 'ci-kit-webhook': { ...pinned('ci-kit-webhook'), stuck: true } } });
     assert.equal(run.status, 1);

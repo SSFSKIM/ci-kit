@@ -5,7 +5,7 @@
 // state: {network: bool, subnets: [{name, region, range, pga}], routers: [region], nats: [region], firewall: [line],
 //   metrics: [{name, description, filter}], channel: name or null, policies: [the policy files' JSON],
 //   services: {<Cloud Run service>: {revisions: n, latestReady: name, traffic: [{revisionName, percent, latestRevision}],
-//   stuck?: true (update-traffic changes nothing)}}; the webhook part's secret, topic and subscription calls succeed}
+//   stuck?: true (update-traffic succeeds and changes nothing), trafficFails?: true (update-traffic exits 1)}}; the webhook part's secret, topic and subscription calls succeed}
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 
 const args = process.argv.slice(2).filter((a) => !a.startsWith('--project=') && a !== '--quiet');
@@ -91,6 +91,10 @@ function answer() {
   }
   if (verb === 'run services update-traffic' && service()) {
     if (!has('to-latest')) return 3;
+    if (service().trafficFails) {
+      console.error('ERROR: (gcloud.run.services.update-traffic) failed');
+      return 1;
+    }
     if (service().stuck) return 0;
     return change(() => { service().traffic = [{ revisionName: service().latestReady, percent: 100, latestRevision: true }]; });
   }
