@@ -221,8 +221,8 @@ export const quotaBlocks = (memory, attempt) => memory.some((q) =>
 
 // Capacity refusals (ZONE_RESOURCE_POOL_EXHAUSTED*) remembered by zone, machine and provisioning for STOCKOUT_TTL_MS,
 // across a tick's launches and across ticks (the server keeps one for the process; a restart forgets it). With eight
-// placements a size has 26 spot attempts before its first on-demand one, at ~2 s a refusal, more than a tick's 45 s
-// budget: a walk that asked every stocked-out zone again each tick would never reach on demand. Five minutes skips a
+// placements a size has 26 spot attempts before its first on-demand one, at 15-21 s a capacity refusal (live
+// 2026-10-21; the insert operation's error), far more than a tick's 45 s budget: a walk that asked every stocked-out zone again each tick would never reach on demand. Five minutes skips a
 // zone for about five ticks, enough for the walk to reach the rest; a zone that recovers sooner costs at most that long
 // on another zone or on demand, never a wait.
 export const STOCKOUT_TTL_MS = 5 * 60_000;
@@ -303,16 +303,24 @@ export const unsettledInsert = (row) => (row.state !== 'final' && row.slow?.find
 // attempt starts at or past `deadline` (the tick's budget): the walk stops with 'deadline', having created nothing.
 // Once `raced()` (a second allocation races this one's pending insert, spec M6), the walk makes no further attempt and
 // stops with 'raced': the race carries the job, and this allocation is never moved to another zone.
+// `room` (room.mjs createRoom, the tick's, when the limits are known): an attempt whose placement is full is skipped
+// with no insert; an insert takes its share as it is sent and gives it back when refused or failed, and a quota refusal
+// closes the limit it names for the rest of the tick.
 // Returns {placement, tried, stop: 'exhausted'|'failed'|'unknown'|'deadline'|'raced' when no placement, quota: true if
 // any refused it}. Each of `tried` is the attempt with its outcome, when it was sent (`sent`, ms) and how long it took to
 // settle (`ms`), a quota refusal's `metric`, and an unsettled insert's `operation` (its link) when the API named it.
-export async function walkPlacements(list, { attempt, reconcile, now = Date.now, deadline = Infinity, quota: memory = [], stockouts = null, raced = () => false }) {
+export async function walkPlacements(list, { attempt, reconcile, now = Date.now, deadline = Infinity, quota: memory = [], stockouts = null, raced = () => false, room = null }) {
   const tried = [];
   let quota = false;
   for (const p of list) {
     if (quotaBlocks(memory, p) || stockouts?.has(p, now())) continue;
+    if (room && !room.fits(p)) {
+      room.skip(p);
+      continue;
+    }
     if (raced()) return { placement: null, tried, stop: 'raced', quota };
     if (now() >= deadline) return { placement: null, tried, stop: 'deadline', quota };
+    room?.take(p);
     const sent = now();
     let outcome;
     let error = null;
@@ -333,6 +341,7 @@ export async function walkPlacements(list, { attempt, reconcile, now = Date.now,
       ...(outcome === 'unknown' && error?.operation ? { operation: error.operation } : {}),
     });
     if (outcome === 'created') return { placement: p, tried, quota };
+    if (outcome !== 'unknown') room?.release(p);
     if (outcome === 'capacity') {
       stockouts?.add(p, now());
       continue;
@@ -340,6 +349,7 @@ export async function walkPlacements(list, { attempt, reconcile, now = Date.now,
     if (outcome === 'quota') {
       quota = true;
       memory.push(quotaScope(error, p));
+      room?.refused(p, quotaMetric(error));
       continue;
     }
     return { placement: null, tried, stop: outcome, quota };
