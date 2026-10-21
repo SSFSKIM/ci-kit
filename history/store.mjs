@@ -7,7 +7,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { gunzipSync, gzipSync } from 'node:zlib';
-import { jobSlug, lineKey, mergeLines } from './record.mjs';
+import { jobSlug, lineArtifacts, lineKey, mergeLines } from './record.mjs';
 
 const DAY = /^(\d{4}-\d\d-\d\d)\.jsonl$/;
 export const dayOf = (iso) => iso.slice(0, 10);
@@ -47,7 +47,7 @@ export function openStore(root, repo) {
   return {
     lines: () => [...held.values()],
     line: (key) => held.get(key) ?? null,
-    artifactIds: () => new Set(lines.filter((l) => l.artifact).map((l) => l.artifact.id)),
+    artifactIds: () => new Set(lines.flatMap(lineArtifacts).map((a) => a.id)),
     base: (day, job) => getGz(gzPath('base', day, job)),
     setBase: (day, job, base) => setGz(gzPath('base', day, job), base),
     durations: (day, job) => getGz(gzPath('durations', day, job)),

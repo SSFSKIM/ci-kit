@@ -121,9 +121,15 @@ function compact(ids, baseIds) {
   return Buffer.byteLength(JSON.stringify(explicit)) < Buffer.byteLength(JSON.stringify(diff)) ? explicit : diff;
 }
 
+const artifactRef = (a) => a && { id: a.id, name: a.name, created: a.created_at };
+
+// The artifacts a line was read from: its job's, or each shard's.
+export const lineArtifacts = (line) => [line.artifact, ...(line.shards ?? []).map((s) => s.artifact)].filter(Boolean);
+
 // One (run, attempt, job). `prov` is the provenance (collect.mjs builds it); `report` is 'present', 'missing',
 // 'unparseable' or 'rejected'; `summary` is given for a present report only, with a base when one exists. `previous`
-// starts null and is filled once every line of the pass is known (provenance.mjs, previousRun).
+// starts null and is filled once every line of the pass is known (provenance.mjs, previousRun). A sharded job's line
+// has no job id, runner or artifact of its own: `shards` holds each shard's, in shard order (null when unsharded).
 export function buildRunLine(prov, artifact, report, summary = null, base = null) {
   const line = {
     run: prov.run,
@@ -144,7 +150,10 @@ export function buildRunLine(prov, artifact, report, summary = null, base = null
     conclusion: prov.conclusion,
     started: prov.started,
     completed: prov.completed,
-    artifact: artifact && { id: artifact.id, name: artifact.name, created: artifact.created_at },
+    artifact: artifactRef(artifact),
+    shards: prov.shards?.map((s) => ({
+      job: s.job, jobId: s.jobId, runner: s.runner, conclusion: s.conclusion, started: s.started, completed: s.completed, artifact: artifactRef(s.artifact),
+    })) ?? null,
     report,
     membership: null,
     failed: null,
