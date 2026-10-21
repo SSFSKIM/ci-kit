@@ -163,13 +163,16 @@ public surface is a second, separate service:
 
 - **The receiver** (`ci-kit-webhook`, public) verifies `X-Hub-Signature-256` against the webhook secret before
   reading anything else and answers 401 otherwise. For a `workflow_job` `queued` event of a served repo whose labels
-  carry `ci-kit-pool`, it asks the launcher for a tick now, through a path the launcher's internal ingress admits
+  carry `ci-kit-pool` (and, from M5, the queued event of a served run's first job on any runner, which is how
+  pre-launch learns a run began), it asks the launcher for a tick now, through a path the launcher's internal ingress admits
   with an authenticated identity (a Pub/Sub push subscription, or the receiver's VPC egress; M4 chooses). It holds
   no state and launches nothing.
 - **The launcher** runs a requested tick at once, the same full tick as the scheduler's: every queued job planned
   together against a fresh observation, so coverage is counted once for all of them. Requests that arrive while a
   tick runs coalesce into one more tick after it; ticks start at least 10 s apart; and while GitHub's remaining rate
-  budget for the App is under 20%, requested ticks are dropped and the minute tick alone serves.
+  budget for the App is under 20%, requested ticks are dropped and the minute tick alone serves. For requests to
+  reach the coalescer, the service's request concurrency rises from 1 (`deploy.sh`) to admit them while a tick runs;
+  ticks, scheduled or requested, stay serialized in the process with at most one pending.
 - **No new state.** A requested tick is an ordinary tick, so a lost, duplicate or delayed delivery costs at most the
   minute until the next scheduled tick, never a job. Two launcher instances or revisions overlapping is the parent
   spec's bounded, self-healing overlap (§3a), unchanged: M4 adds no cached view and no reservation for it to break.
@@ -242,22 +245,27 @@ cover fix's test reproduces 119166794835's sequence; A13 clauses hold.
 
 ### M4 — Launch on the webhook
 
-As designed above. Proof: at the receiver, a forged signature gets 401 and starts no tick; at the launcher, an
+As designed above. Proof: a burst of webhook deliveries against the deployed services (not only the in-process
+handler) produces one coalesced tick per burst; at the receiver, a forged signature gets 401 and starts no tick; at the launcher, an
 unauthenticated POST and one with a wrong identity are refused by Cloud Run (403) before the code runs; a burst of
 same-size jobs between scheduled ticks is launched by one coalesced requested tick; a webhook dropped on purpose
 (the secret rotated mid-test) still gets its job served by the minute tick; a day's median queued → started ≤ 50 s
 from `latency-report.mjs` (Acceptance 4).
 
-### M5 — Warm runners
+### M5 — Pre-launch
 
-After the owner's answer, in the shape chosen. Proof: Acceptance 5 over a day; the warm set's cost on the ledger's
-daily line, reported to the owner.
+As designed above, after M3 (its ledger rows are the shape's input) and M4 (the receiver forwards a served run's
+first-job event). Proof: for a MAWS run whose plan runs on `ubuntu-slim`, its gate VMs' inserts are logged before its
+pool jobs are queued; Acceptance 5 over a day; unclaimed pre-launched VMs and their cost on the ledger's daily line,
+reported to the owner.
 
 ## Verification
 
 - This spec: one `doperpowers:adversarial-reviewer` round on the design and the execution section.
 - Each milestone's PR: `doperpowers:reviewer-medium`; M4 (public ingress, signature check) at `reviewer-high`.
 - Spec review round 1 (adversarial-reviewer, astra, on 5af3cd9): 3 P1 + 6 P2, all taken (Decision Log).
+- Round 2 (on 0888c21): round 1's fixes sound; 2 P2 (request concurrency for the coalescer; the receiver's filter
+  for M5's hosted first-job event), both taken in the text. Review converged.
 - Measurement rule for M2 (as the critical-path work): three green runs per arm, equal test counts, median gain larger
   than the baseline's spread.
 
