@@ -81,19 +81,29 @@ list:
    "disk_type": "hyperdisk-balanced"},
   {"region": "us-central1", "subnetwork": "ci-kit-us-central1",
    "zones": ["us-central1-a", "us-central1-b", "us-central1-c", "us-central1-f"],
-   "machines": {"2": "e2-highcpu-2", "4": "c3d-highcpu-4", "8": "c3d-highcpu-8", "16": "c3d-highcpu-16"},
+   "machines": {"2": "c3d-highcpu-4", "4": "c3d-highcpu-4", "8": "c3d-highcpu-8", "16": "c3d-highcpu-16"},
    "disk_type": "pd-balanced"}
 ]
 ```
 
-`machine_fallback` goes: the next placement is the fallback. A placement must name a machine for every size.
+`machine_fallback` goes: the next placement is the fallback. A placement must name a machine for every size. E2 leaves
+the pool: its us-central1 quota raise was refused twice, it is the slowest family, and size 2 in us-central1 runs on
+`c3d-highcpu-4`, today's fallback for it.
 
 **The walk for a size:** spot in every zone of the first placement, then spot in the next placement's zones, and so
 on; then on demand in the same order. Spot everywhere before on demand anywhere, as today. A capacity refusal moves
-to the next zone. A quota refusal (the family's, the region's CPUs, instances, addresses or disk capacity) skips the
-rest of that placement for that provisioning, and the launcher remembers it for the rest of the tick so the next
-launch does not retry it. The rule that an unknown insert outcome stops the walk is unchanged: two zones must never
-both hold one allocation's VM.
+to the next zone. A quota refusal skips the rest of that placement for that machine and provisioning. The launcher
+remembers it for the rest of the tick, scoped to what ran out (the refusal's message names the metric and region):
+a family's CPU quota by (region, family), a regional resource (instances, addresses, disk capacity) by region, the
+all-regions CPU quota everywhere; and a remembered refusal skips only later requests of the same or more vCPUs in that
+scope, since a smaller one may still fit. The rule that an unknown insert outcome stops the walk is unchanged: two
+zones must never both hold one allocation's VM.
+
+**The launch queue stops only when quota stops everything.** Today a tick stops every remaining launch as soon as any
+launch met a quota refusal (`launcher.mjs`, `if (result.quota) stop = true`), even when its walk then created the VM
+in another zone. With placements that would stop the queue at the first us-west4 refusal. A launch whose walk
+created a VM never stops the queue; one whose walk was refused for quota in every placement stops later launches of
+the same or more vCPUs, as the remembered scopes say.
 
 **Admission:** `max_vcpus` stays one number across placements. A launch reserves the largest machine its walk could
 land on, as today (every placement's machine for the size).
@@ -106,7 +116,9 @@ placement's `disk_type` for the boot disk. The image family is global and the cu
 machines (C3D needs both already); M1 proves C4D boots it with a smoke VM.
 
 **The bake** builds in one placement (where it builds today) and runs its smoke VM once per placement, so an image
-that does not boot on a placement's family is never marked ready. The image stays global.
+that does not boot on a placement's family is never marked ready. The image stays global. The bake job reads the
+`gce.json` bundled at its deploy (`bake.mjs`), not main's: it changes only through `gce/deploy.sh bake`, after main
+carries the config it should read (M2).
 
 **The ledger** keys rates by family and region: the table in `ledger.mjs` gains `c4d` with us-west4 spot and
 standard rates from the Cloud Billing catalog on the day M1 is built, and the disk price by disk type
@@ -117,8 +129,10 @@ with no rate is reported unpriced, as today.
 count and cost, so a price swing is visible; reordering is a `gce.json` commit read from main, no deploy.
 
 **Config change and deploy order.** The launcher reads `gce.json` from main every tick. The new launcher also reads
-the old form as a one-placement list, so it deploys before the config changes; the old form's reader is deleted in
-M2, once main carries the new form.
+the old form: its zones and machines as one placement, and `machine_fallback` as a second placement in the same
+region for the sizes it names, so size 2 keeps its `c3d-highcpu-4` fallback and the admission bound (the largest
+machine a walk could land on) is what it is today. It deploys before the config changes; the old form's reader is
+deleted in M2, once main carries the new form.
 
 ### The tick and the boot (M3)
 
@@ -133,24 +147,33 @@ M2, once main carries the new form.
   choice; its test replays that 10-21 sequence.
 - **The boot.** The bake purges snapd and stops cloud-init from gating dockerd (`docker.service` no longer waits on
   `cloud-final`), and keeps only the cloud-init modules the VM uses. Target: RUNNING → job started ≤ 20 s.
+- **Timing in the ledger.** Each ledger row gains the job's run id, workflow path and size, the job's queued and
+  started times (GitHub's `created_at` and `started_at`, read when the row is reviewed) and the VM's RUNNING time
+  (`lastStartTimestamp`); the tick logs its start and its first insert as structured fields. A collector in the repo
+  (`gce/latency-report.mjs`) reads a day's rows and logs and prints the stage medians of the table in Purpose: M3's and
+  M4's proofs, and the input M5's pre-launch reads.
 - **Serial console.** Project metadata `serial-port-logging-enable=TRUE`, so a VM deleted after a failed boot leaves
   its console in Cloud Logging.
 
 ### The webhook (M4)
 
-The ci-kit GitHub App already exists; its `workflow_job` event (action `queued`) is sent to the launcher's service,
-which gains a public path `/webhook`:
+The launcher stays what it is: internal ingress, no unauthenticated invocation, one instance at most, Cloud Scheduler
+authenticating with its identity. Cloud Run's ingress and invoker settings belong to a service, not a path, so the
+public surface is a second, separate service:
 
-- It verifies `X-Hub-Signature-256` with the webhook secret before reading anything else, and answers 401 otherwise.
-- For a queued job of a served repo with a pool size, it runs the same planning as a tick for that one job, against
-  the instance view of the last tick plus the launches since, and launches if no instance covers it.
-- The tick stays the reconciler, unchanged in meaning: a lost webhook costs one tick, never a job.
-- Planning and launching, from a tick or a webhook, run under one in-process lock in the service's single instance
-  (max instances 1), so two paths never launch for one job; a webhook that arrives during a tick waits for it. The
-  signature check runs outside the lock, so unsigned requests cannot hold up a tick (the service's request
-  concurrency rises above 1 for that).
+- **The receiver** (`ci-kit-webhook`, public) verifies `X-Hub-Signature-256` against the webhook secret before
+  reading anything else and answers 401 otherwise. For a `workflow_job` `queued` event of a served repo whose labels
+  carry `ci-kit-pool`, it asks the launcher for a tick now, through a path the launcher's internal ingress admits
+  with an authenticated identity (a Pub/Sub push subscription, or the receiver's VPC egress; M4 chooses). It holds
+  no state and launches nothing.
+- **The launcher** runs a requested tick at once, the same full tick as the scheduler's: every queued job planned
+  together against a fresh observation, so coverage is counted once for all of them. Requests that arrive while a
+  tick runs coalesce into one more tick after it; ticks start at least 10 s apart; and while GitHub's remaining rate
+  budget for the App is under 20%, requested ticks are dropped and the minute tick alone serves.
+- **No new state.** A requested tick is an ordinary tick, so a lost, duplicate or delayed delivery costs at most the
+  minute until the next scheduled tick, never a job. Two launcher instances or revisions overlapping is the parent
+  spec's bounded, self-healing overlap (§3a), unchanged: M4 adds no cached view and no reservation for it to break.
 
-The service's ingress becomes public for `/webhook` only; Cloud Scheduler keeps authenticating to the tick path.
 The webhook secret is created in Secret Manager by the owner (Secret Manager writes are human-only); M4 prepares the
 exact command and waits for it. The App's webhook URL and secret can be set through the App's own API
 (`PATCH /app/hook/config`, authenticated as the App); subscribing the App to `workflow_job` events may need its
@@ -164,15 +187,19 @@ A run waits only for its slowest gate VM, so a warm runner shortens the run only
 
 - **Pre-launch only (recommended).** When a served repo's run begins (its first job queued, the webhook of M4 or the
   tick), the launcher launches the VMs that run's gates will ask for, from the shape of the same workflow's recent
-  runs in the ledger (the median count per size over its last 10 runs), so they boot while plan runs (~17 s hidden).
-  A pre-launched VM no job claims within 3 minutes of the run's plan job ending is deleted. Cost: the occasional
-  unclaimed VM (a docs-only run whose plan skips the gates).
+  runs in the ledger rows M3 adds (the median count per size over its last 10 runs inside the reader's window; none
+  found, no pre-launch), so they boot while plan runs (~17 s hidden). A pre-launched VM is an ordinary job VM: one no
+  job claims is removed by the idle rule (`idle_runner_minutes`). Cost: the occasional unclaimed VM (a docs-only run
+  whose plan skips the gates).
 - **Full standby.** Warm runners for one run's long gates (static and every unit shard, ~80 vCPU at 4×16 shards)
   kept booted: about $11–16 a day; only the first of concurrent runs gains, ~20–30 s over pre-launch.
 - **None, or decide after measuring M3 and M4.** M5 waits or is dropped.
 
-A warm runner (full standby) is exempt from `idle_runner_minutes` and replaced after 6 hours; a preempted one is
-replaced at the next tick. Warm and pre-launched runners count against `max_vcpus`.
+Pre-launched VMs count against `max_vcpus`. Full standby is not designed here: a warm runner conflicts with the
+coverage window (`idle_runner_minutes`), the VM's creation-relative `max_run_minutes`, and A13's "an hour without
+demand leaves no pool resources". If the owner chooses it, it gets its own design round first: warm, claimed and
+retiring states, replenishment, unregister-before-delete rotation, a lifetime that lets a claimed job finish, and
+the A13 amendment.
 
 ## Plan of Work
 
@@ -182,7 +209,9 @@ Change `config.mjs` (schema; old form read as one placement), `logic.mjs` (`plac
 `jobInstance`, quota memory per tick), `launcher.mjs` (aggregated listing, completeness per placement zone), the bake
 (`bake.mjs`, `plan.mjs`: disk type and subnetwork from the placement), `ledger.mjs` (rates by family and region,
 disk by type), `docs/pool.md`. Tests beside each: the walk's order across two placements, quota memory, the old form,
-disk type per placement, ledger pricing of a c4d VM. `gce.json` on main is NOT changed in M1.
+disk type per placement, ledger pricing of a c4d VM, and the tick as a whole (`launcher.mjs`): more than 16 admitted
+jobs, us-west4 refusing for quota, us-central1 with room, every job launched in that tick; a family-quota refusal
+not blocking another family; a 16-vCPU refusal not blocking a 2-vCPU launch. `gce.json` on main is NOT changed in M1.
 
 Proof: `npm test` green; ci-gate green; reviewer-medium; deployed from merged main (`gce/deploy.sh launcher`) with
 the old-form `gce.json`, and one sandbox job served as before.
@@ -197,7 +226,9 @@ Steps 1 and 2 may run before the critical-path measurements end: they add a subn
 1. `gce/deploy.sh network` with the us-west4 subnetwork added (`ci-kit-us-west4`); the firewall is network-wide.
 2. A smoke VM, `c4d-highcpu-2` on `hyperdisk-balanced` in us-west4 from the current image: runner registers, a
    sandbox job passes, the VM is gone within A13's teardown bound.
-3. `gce.json` on main in the new form, C4D us-west4 first. Delete the old form's reader.
+3. `gce.json` on main in the new form, C4D us-west4 first. Delete the old form's reader. Then `gce/deploy.sh bake`
+   (the bake reads its bundled config) and one complete bake, run by hand: its log shows a smoke VM in each placement
+   before the image is marked ready.
 4. One MAWS commit (the critical-path base 21fc0732d's arm b, whose three C3D runs already exist): three more class 1a
    runs on C3D just before step 3, three on C4D just after (the pool's config is global, so the arms cannot run
    side by side): Acceptance 2.
@@ -211,9 +242,11 @@ cover fix's test reproduces 119166794835's sequence; A13 clauses hold.
 
 ### M4 — Launch on the webhook
 
-As designed above. Proof: a forged signature gets 401 and launches nothing; with the secret in place, a day's median
-queued → started ≤ 50 s (Acceptance 4); a webhook dropped on purpose (secret rotated mid-test) still gets its job
-served by the tick.
+As designed above. Proof: at the receiver, a forged signature gets 401 and starts no tick; at the launcher, an
+unauthenticated POST and one with a wrong identity are refused by Cloud Run (403) before the code runs; a burst of
+same-size jobs between scheduled ticks is launched by one coalesced requested tick; a webhook dropped on purpose
+(the secret rotated mid-test) still gets its job served by the minute tick; a day's median queued → started ≤ 50 s
+from `latency-report.mjs` (Acceptance 4).
 
 ### M5 — Warm runners
 
@@ -224,6 +257,7 @@ daily line, reported to the owner.
 
 - This spec: one `doperpowers:adversarial-reviewer` round on the design and the execution section.
 - Each milestone's PR: `doperpowers:reviewer-medium`; M4 (public ingress, signature check) at `reviewer-high`.
+- Spec review round 1 (adversarial-reviewer, astra, on 5af3cd9): 3 P1 + 6 P2, all taken (Decision Log).
 - Measurement rule for M2 (as the critical-path work): three green runs per arm, equal test counts, median gain larger
   than the baseline's spread.
 
@@ -247,6 +281,19 @@ daily line, reported to the owner.
   a lost delivery costs a minute, never a job.
 - 2026-10-21 (CI-opt): **No Cloud NAT.** It would remove the external-address quota as a ceiling, but its
   $0.045/GiB processing on each VM's ~260 MB of downloads costs as much as the VM. Addresses are requested instead.
+
+- 2026-10-21 (CI-opt), spec review round 1: **the webhook is a separate public receiver that requests a full tick**,
+  not a per-job planner in the launcher. Per-job planning counted one idle runner as cover for every job planned
+  alone (a probe of `planLaunches` launched one VM for two jobs planned together, none for the same two planned
+  apart), and a public path would have made the whole launcher public, since ingress and invoker settings are per
+  service. A requested tick reuses the tested planner and adds no state; the price is a full observation per
+  coalesced burst (rate-budget guarded). Rejected: shared pending-demand reservations (new state to keep correct
+  across restarts, duplicates and two instances).
+- 2026-10-21 (CI-opt), round 1: **quota memory scoped to what ran out, and the tick-wide quota stop removed**; the old
+  form's `machine_fallback` kept as a second same-region placement; **E2 leaves the pool**; the bake's deploy step
+  added to M2; ledger timing fields and `latency-report.mjs` added to M3 (the proofs of M3 and M4 and M5's input had
+  no producer); full standby moved to its own design round (its lifecycle conflicts with the coverage window,
+  `max_run_minutes` and A13).
 
 ## Surprises & Discoveries
 
