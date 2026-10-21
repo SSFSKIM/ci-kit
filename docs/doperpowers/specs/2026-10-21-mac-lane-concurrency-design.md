@@ -29,188 +29,215 @@ roughly twice the Mac lane's throughput without a second Mac.
 
 ## Glossary
 
-- **Instance.** One runner of the lane on a machine: its directory, LaunchAgent and runner name. The mini's first is
-  today's `ci-kit-mac-mini` in `~/actions-runner-maws`.
-- **Desktop lease.** A machine-wide reader-writer lock on the GUI session. Every lane job holds it shared. A job its
-  repo names exclusive holds it alone.
-- **Exclusive group.** A job that must run alone: measured, foreground, or not yet proven. The calling repo names
-  them.
+- **Instance.** One runner of the lane on a machine: its directory, LaunchAgent, runner name and labels.
+- **The exclusive instance.** Instance 1, today's `ci-kit-mac-<machine>` in `~/actions-runner-maws`, with today's
+  labels. Every job it runs runs alone on the desktop.
+- **A shared instance.** Instance *n* ≥ 2. It carries only `self-hosted` and `ci-kit-mac-shared`, so only a job that
+  asks for `ci-kit-mac-shared` can reach it. Shared instances run beside each other, never beside an exclusive job.
+- **The shared hold.** The marker that stops the shared instances while an exclusive job runs or waits.
+- **Proven-shared group.** A group whose trial evidence (M4) shows its results unchanged beside neighbours. Only these
+  ask for `ci-kit-mac-shared`.
 
 ## Progress
 
 - [x] (2026-10-21 09:5xZ) Read-only audit of every MAWS Mac group (local: `~/Developer/ci-analysis/mac-concurrency-audit.md`
   on the MacBook; MAWS is private, so this spec carries its conclusions, not its line references).
-- [ ] M1 — ci-kit: instances and the desktop lease.
-- [ ] M2 — MAWS: the exclusive list and the shared-state fixes.
-- [ ] M3 — Install the second instance on the mini.
-- [ ] M4 — Trial.
-- [ ] M5 — Widen the shared set.
-- [ ] M6 — A third instance (only if M4's memory reads allow).
+- [x] (2026-10-21 10:2xZ) Adversarial review of the first draft (a reader-writer lease taken in hooks): six P1s and two
+  P2s, all taken; the design below replaces it (Decision Log).
+- [ ] M1 — ci-kit: instances, the shared hold, per-instance hooks.
+- [ ] M2 — MAWS: the shared-state fixes and the routing of proven-shared groups.
+- [ ] M3 — Install on the mini: one exclusive and two shared instances, shared ones disabled.
+- [ ] M4 — Trial and the first proven-shared groups.
+- [ ] M5 — Widen the proven-shared set.
+- [ ] M6 — A third shared instance (only if memory allows).
 
 ## Design
 
-**Instances.** `mac/install.sh` takes an instance count, 2 by default (1 keeps today's install).
-- Instance 1 keeps its directory, LaunchAgent label and runner name, so a machine that installs with one instance is
-  unchanged.
-- Instance *n* ≥ 2 has:
-  - directory `~/actions-runner-maws-<n>`, with its own `_work`;
-  - LaunchAgent `com.ssfskim.ci-kit.mac-runner-<n>`;
-  - runner name `ci-kit-mac-<machine>-<n>`, with the same labels.
-- Everything else is shared: the hooks (one copy, run from each instance), the dialog watcher (one per machine), the
-  logs, and the state files.
-- What today reads one runner reads every instance:
-  - `runner-state.py`'s idle check;
-  - the dialog watcher's drain (`runner-drained` holds every instance);
-  - the sweep, which already scopes itself to its own `_work`;
-  - uninstall.
-- A hold or a drain is not complete until every instance is idle and booted out.
+**Admission is by labels, and fails closed.** Which jobs may share the desktop is decided before any runner accepts a
+job, by the labels a job asks for:
+- The exclusive instance keeps today's labels (`self-hosted`, `macOS`, `ARM64`, `ci-kit-mac`). So every job that
+  exists today reaches only it and runs alone: an old commit's workflow, a rerun, a new group nobody classified, a
+  measured or foreground group.
+- A shared instance has only `self-hosted` and `ci-kit-mac-shared`. A job reaches it only if its workflow names
+  `ci-kit-mac-shared`, which MAWS does for proven-shared groups alone (M2, M4).
+- The first draft's alternative failed review: every job took a shared lease in its hook, and exclusive groups
+  upgraded in a step. An old workflow, or a group nobody listed, then ran shared. And the runner prepares a job (its
+  workspace, action downloads) before any hook runs, so a lease taken in a hook could not keep a neighbour's
+  preparation out of a measured job.
 
-**The desktop lease.** A reader-writer lock in one machine-wide state directory under `~/Library/Application Support/ci-kit/`.
-- **Shared.** Every lane job takes the lease shared in its job-started hook, before the dialog and Terminal steps.
-  It waits while an exclusive holder or an exclusive waiter exists.
-- **Exclusive.** A job its repo names exclusive upgrades through the step `SSFSKIM/ci-kit/mac/lease@v1`. The step runs
-  first in the job, before `settle`, because the hook cannot tell one matrix entry from another (`GITHUB_JOB` is `e2e`
-  for every group). While waiting, the job gives up its shared hold, so two exclusive waiters cannot deadlock each
-  other. Exclusive waiters are granted oldest first.
-- **Release.** The job-completed hook releases the lease. A holder whose job is gone is stale and is dropped by the next
-  reader. A holder is identified by its instance and the job's `Runner.Worker` process; the instance's runner having
-  moved on, or the process being gone, makes it stale.
-- **Waits.** Any wait longer than the bound (30 min, an input) ends the job with a `ci-kit: … rerun` line, so
-  MAWS's ci-gate counts it as refused and relaunches it. Every grant, wait and release goes to the hooks log and to the
-  job's log, with who held the lease.
-- **Measured jobs.** For a measured job, `settle` now runs inside an exclusive lease, so the quiet it reads stays quiet
-  for the whole job.
-- **Mutual exclusion.** State changes take a `mkdir` mutex; macOS has no `flock(1)`.
+**An exclusive job stops the shared instances first.** The exclusive instance's job-started hook, before its desktop
+check:
+1. **Raises the shared hold.** Each shared instance's LaunchAgent wrapper (`runner-hold.sh`) waits while the hold is
+   up, and each shared instance's job-completed drain stops its runner at its job's end. This is the dialog drain's
+   existing mechanism, applied per instance: the stop lands between jobs, never inside one.
+2. **Waits until every shared instance is stopped.** Stopped means its listener is down, read the way the drain reads
+   idle. A shared instance that is idle is stopped on two matching idle reads, as the drain does today. The wait is
+   bounded (20 min, an input); past it, the hook drops the hold and refuses the job with a `ci-kit: … rerun` line.
+3. **Sweeps every shared instance's `_work`.** They are stopped, so anything left there is a crashed job's.
+4. Runs today's start: the dialog check, Terminal to the front, the cursor park, its own sweep.
 
-**What runs beside what.** The calling repo decides. MAWS lists its exclusive groups in `gate.yml`:
-- `MEASURED_E2E` and the foreground groups (`default`, `widgets`, `to-human`, `document-app`);
-- until M5, every group the audit found unsafe without a change (`tools`, `deliverables`, `dashboard`, `design`);
-- any group a trial shows to differ beside a neighbour.
+The exclusive job therefore starts on a desktop with no neighbour and no neighbour's leftovers, and none can arrive
+until it ends. Its job-completed hook first sweeps its own `_work`, then drops the hold. A measured job's `settle` now
+reads a desktop that stays as it read.
 
-`unit:darwin` is shared, but never beside a measured group (the lease guarantees that), and runs at half the cores when
-another job holds the lease.
+**Shared instances.** A shared instance's hooks are today's: the dialog check, Terminal to the front (harmless to
+proven-shared groups, which do not need key), the cursor park, and the sweep of its own `_work`. A shared job never
+waits for a lease. Two shared jobs simply run.
 
-**MAWS's shared state** (M2; the audit's hazards):
+**Per-instance identity.**
+- Every hook acts on the instance that runs it, never on a path derived from where the hook file lives. The sweep, the
+  drain and the job-end stop each take the instance's root from the runner's own environment or from a per-instance
+  copy of the hooks.
+- `runner-state.py` reads each instance by its own `bin/Runner.Worker` path and its own `_diag`.
+- Uninstall, the dialog watcher's drain (a dialog holds every instance) and a human's hold cover every instance.
+- The coordinator's scripts (`hold-now.sh` and the release command) boot out and bring back every instance.
+
+**Recovery.**
+- The shared hold and its transitions are guarded by a kernel-released lock (Perl's `flock`, as `dialog.sh` uses), so
+  a process killed mid-transition leaves no lock behind.
+- The hold names the exclusive job (run id, job id, the instance's `Runner.Worker` start time) so PID reuse or a reboot
+  cannot pass for it.
+- **A crashed exclusive job.** The dialog watcher, which already reads the runner every minute, reconciles: when the
+  hold names a job and the exclusive instance has had no `Runner.Worker` for two matching reads, it sweeps that
+  instance's `_work` and drops the hold. A hold whose sweep fails stays up, the shared instances stay stopped, and the
+  watcher logs and alerts, the lane falling back to one job at a time rather than admitting a neighbour.
+- **After a reboot.** Every wrapper starts by RunAtLoad and waits on its markers. The watcher reconciles as above.
+
+**Time budgets.** Only exclusive jobs wait (at most the 20-minute bound); a refusal comes before GitHub's timeout. MAWS
+adds that bound to its exclusive Mac jobs' `timeout-minutes` (30 → 50, measured 45 → 65). Shared jobs keep theirs.
+
+**MAWS's shared state** (M2; the audit's hazards). All of these matter only between shared jobs:
 - **The e2e build cache** becomes one directory per instance (`…/maws-e2e-build/$RUNNER_NAME`). Two jobs on one
-  variant otherwise race its restore, store and prune. The cost is one extra build per variant per instance.
-- **The clipboard lock** moves from `os.tmpdir()` to a fixed machine-wide path, so it holds across instances. The
-  dashboard steps that use the pasteboard outside it move inside it (M5).
-- **Each instance's windows open at their own origin**, so two jobs' windows do not stack exactly. A covered window's
-  child WebContentsViews stop drawing.
-- **A shared-host flag** (`MAWS_E2E_SHARED_HOST=1`, set by the lane when the lease is shared) makes the load-aware
-  latency budgets treat the host as loaded. The raw bounds the audit names go through that budget.
-- **Later (M5):**
-  - a lock around the recorded `/private/tmp` repo directories that four groups create and delete;
-  - focus calls under quiet e2e that do not activate the app;
-  - the dashboard clipboard steps.
+  variant otherwise race its restore, store and prune.
+- **The clipboard lock** moves from `os.tmpdir()` to a fixed machine-wide path, so it holds across instances.
+- **Each instance's windows open at their own origin.** A covered window's child WebContentsViews stop drawing.
+- **The shared-desktop flag.** Shared instances set `CI_KIT_SHARED_DESKTOP=1` in their runner environment, and MAWS's
+  load-aware latency budgets treat the host as loaded under it. The raw bounds the audit names go through that budget.
+- **Later, for the groups that need them (M5):**
+  - a lock around the recorded `/private/tmp` repo directories;
+  - focus calls that do not activate the app under quiet e2e;
+  - the dashboard clipboard steps inside the lock.
 
-**Memory.** The mini has 16 GB, most of it used by the owner's sessions. Two jobs fit by estimate. A sampler records
-memory pressure, swap and free memory through M4. A third instance (M6) needs M4's reads to show no pressure above
-level 1 and no swap growth.
+**Which groups become proven-shared** (M4). A group is proven-shared only with evidence, from paired runs at one sha
+whose test intervals actually overlapped (read from the job logs), each compared against solo runs of the same groups
+at that sha:
+- beside itself;
+- beside a heavy neighbour (`unit:darwin`, `terminal`'s flood);
+- beside another clipboard user, if it uses the pasteboard (for example `browser` with `panel`);
+- through its own named risk, if the audit gave one: presentations' display-sized window, connectors-direct's restore,
+  browser's occluded tab views, settings' pixel shots.
 
-**The trial.** Taken from the audit's protocol:
-- The first pair is `browser` (harness build) with `connectors` (plain build). Both are quiet; they use different build
-  variants; and together they probe the open questions: occlusion of WebContentsViews, activation by
-  `webContents.focus()`, and the cross-instance clipboard lock.
-- At least 10 paired runs at one sha, alternating which starts first, plus solo runs of each at that sha as the
-  control.
-- A 1 Hz `lsappinfo front` and load logger runs outside the jobs.
-- **The pair fails the classification on any of:**
-  - a red the solo control lacks;
-  - an action stuck waiting for stability;
-  - a stalled screenshot;
-  - a visibility read of hidden in a scene that showed its window;
-  - an Electron app frontmost;
-  - a clipboard lock timeout;
-  - a failed cache restore.
-- Then `terminal` with `code`, comparing latency annotations against solo.
-- Then the whole Mac set at one sha, serial (one instance enabled) against concurrent (two). Compare per-group results,
-  wall time and the queue's drain time.
+**What fails a pair:**
+- a red the solo control lacks;
+- an action stuck waiting for stability, or a stalled screenshot;
+- a visibility read of hidden in a scene that showed its window;
+- an Electron app frontmost in the 1 Hz `lsappinfo front` log;
+- a clipboard lock timeout;
+- a failed cache restore;
+- a timing annotation outside its solo spread.
+
+`unit:darwin` is first in line: it uses no desktop, its shared state is temporary directories, and the measured groups
+it must never meet now run only on the exclusive instance.
+
+**Memory.** The mini has 16 GB, most of it used by the owner's sessions. Two shared jobs fit by estimate. A sampler
+records memory pressure, swap and free memory through M4. A third shared instance (M6) needs no pressure above level 1
+and no swap growth in M4's reads, and its own trial: three-way overlaps of proven-shared groups, judged by the same
+fail rules.
 
 ## Plan of Work
 
-### M1 — ci-kit: instances and the desktop lease
+### M1 — ci-kit: instances, the shared hold, per-instance hooks
 
-At the end, `mac/install.sh` can install *n* instances, and the lease and its step exist. Tests prove the lease's
-states without a Mac. Nothing on the mini changes in M1.
-- `mac/install.sh`: instance count, instance paths and names; idempotent; uninstall removes every instance.
-- `mac/hooks/lease.*`: acquire shared (from `job-started.sh`, before the dialog check), upgrade to exclusive, release
-  (from `job-completed.sh`), stale detection, the log lines, the refusal line.
-- `mac/lease/action.yml`: inputs `mode` (exclusive) and `bound` (30 min).
-- `runner-state.py`, the dialog watcher's drain and `desktop-check.sh` read every instance.
-- `docs/mac-lane.md`:
-  - "Why one runner per machine" becomes the lease section;
-  - holds and drains name every instance;
-  - the Adding a Mac section gets the instance count.
-- Tests (node --test, the repo's pattern):
-  - two shared holders at once;
-  - an exclusive holder blocking a shared one;
-  - an exclusive waiter blocking new shared holders;
-  - two exclusive waiters with no deadlock, oldest first;
-  - stale holders dropped;
-  - the bound's refusal line;
-  - a hook run with one instance installed behaves exactly as today, apart from the log line.
+At the end, `mac/install.sh` installs one exclusive instance and *n* shared ones (`--shared <n>`, default 0, so an
+install without the flag is today's). The shared hold, its recovery and per-instance hooks exist. Nothing on the mini
+changes in M1.
+- **`mac/install.sh`:**
+  - shared instances at `~/actions-runner-maws-<n>`, LaunchAgent `com.ssfskim.ci-kit.mac-runner-<n>`, runner name
+    `ci-kit-mac-<machine>-<n>`, labels `self-hosted,ci-kit-mac-shared` only (`--no-default-labels`);
+  - `CI_KIT_SHARED_DESKTOP=1` in their `.env`;
+  - `--disabled` applies per instance;
+  - uninstall removes every instance.
+- **The hooks:** per-instance identity everywhere. The exclusive instance's start raises and waits on the hold; its end
+  drops it. The shared instances' wrappers and job-end drains honour it.
+- **`runner-state.py`:** reads any instance.
+- **The dialog watcher:** holds every instance on a dialog, and reconciles a crashed exclusive job's hold.
+- **`docs/mac-lane.md`:** the instances, the shared hold, the labels, and what a calling repo does to opt a group in.
+- **Tests,** with fakes as the existing hook tests do:
+  - an exclusive start waiting for a busy shared instance and admitted after its job-end stop;
+  - an idle shared instance stopped on two matching reads;
+  - the bound's refusal;
+  - two shared instances held at once;
+  - a crashed exclusive job reconciled, and a failed sweep keeping the hold;
+  - a process killed mid-transition leaving no lock;
+  - a reboot (markers on disk, wrappers started fresh);
+  - each instance's sweep killing only its own leftovers while the other instance's job runs;
+  - an install with no shared instances behaving exactly as today.
 
 Proof:
 - `npm test` and `ci-gate` green, and `doperpowers:reviewer-medium` on the PR.
 - Merge, and move `v1` by the PATCH rule.
+- Then reinstall on the mini with no shared instances, at idle, outside any hold; one Mac set there stays green. This
+  ships the new hooks before any concurrency.
 
-### M2 — MAWS: the exclusive list and the shared-state fixes
+### M2 — MAWS: the shared-state fixes and the routing
 
-At the end, MAWS's `gate.yml`:
-- names its exclusive groups;
-- runs the lease step first in each of them (before `settle` where both run);
-- gives each instance its own e2e build cache;
-- and MAWS has the fixed clipboard-lock path, the per-instance window origin and the shared-host flag.
+At the end:
+- MAWS's plan can send a named list of groups (`MAC_SHARED_E2E`, empty at first) to `[self-hosted, ci-kit-mac-shared]`,
+  and every other Mac job to today's labels;
+- exclusive Mac jobs' timeouts carry the 20-minute bound;
+- the e2e build cache is per runner, and the clipboard lock path is machine-wide;
+- windows open at a per-instance origin, and the budgets read `CI_KIT_SHARED_DESKTOP`.
 
-With one instance nothing behaves differently, because the lease is always free.
+With the list empty, nothing behaves differently.
 
-Proof:
-- class 1a on the pool green;
-- one Mac set at the head, with one instance, green, scheduled through CI-opt (never inside a hold);
-- the PR goes to the MAWS architect, who lands it.
+Proof: class 1a on the pool green; one Mac set at the head green (scheduled through CI-opt, never inside a hold); the
+PR goes to the MAWS architect, who lands it.
 
-### M3 — Install the second instance on the mini
+### M3 — Install the shared instances on the mini
 
-After M1 merges and outside any hold or measured window:
-- reinstall the lane on the mini with two instances, at idle;
-- check that both runners are online, that both instances' `$TMPDIR` is the same, and that each has its own `_work`;
-- update the coordinator's hold and release scripts (`~/Developer/ci-analysis/hold-now.sh` and the release command) to
-  boot out, and bring back, every instance;
+After M1 and M2 land, outside any hold or measured window:
+- reinstall with `--shared 2 --disabled` for the shared ones, at idle;
+- check that both shared runners register with only their two labels, that their `$TMPDIR` equals the exclusive
+  instance's, and that each has its own `_work`;
+- update the coordinator's hold and release scripts;
 - tell every session that books the mini.
 
-Until M4's verdict, instance 2 stays disabled except during trial runs.
+The shared instances are enabled only for trial runs until M4's verdict.
 
-### M4 — Trial
+### M4 — Trial and the first proven-shared groups
 
-As in Design, in a window agreed with the MAWS architect: no measured or foreground job of anyone else on the mini
-during the trial, and the quiet flag down.
-- Record every run's id, its pair partner, the front-app log, and the memory and load samples, in this spec's Surprises.
+In a window agreed with the MAWS architect, quiet flag down, nothing else of anyone's on the mini:
+1. `unit:darwin` beside itself and beside a quiet group.
+2. The audit's first pair, `browser` with `connectors`.
+3. Then the frequent quiet groups, each through Design's evidence list.
+
+Run scratch MAWS commits that put the groups under trial on `MAC_SHARED_E2E` (never merged as such).
+- Record every run's id, its partner, the overlap, the front-app log and the memory samples in Surprises.
 - **Verdict:**
-  - groups that pass go into MAWS's shared set;
-  - any that fail join the exclusive list, with the evidence;
-  - instance 2 is enabled permanently if the shared set is non-empty and memory held.
+  - a MAWS PR sets `MAC_SHARED_E2E` to the groups that passed;
+  - the shared instances are enabled for good;
+  - the rest stay on the exclusive instance, with the evidence.
 
-### M5 — Widen the shared set
+### M5 — Widen the proven-shared set
 
-MAWS fixes for the four groups the audit found unsafe without a change:
+The MAWS fixes for the groups the audit found unsafe without a change:
 - the recorded-directory lock;
 - the dashboard clipboard steps;
 - deliverables' notification focus;
-- the quiet-focus helper where the trial showed activation.
+- the quiet-focus helper where a trial showed activation.
 
-Each group leaves the exclusive list only after a paired trial like M4's.
+Each group joins `MAC_SHARED_E2E` only through M4's evidence.
 
-### M6 — A third instance
+### M6 — A third shared instance
 
-Only if M4's and M5's memory reads show room: install instance 3 and repeat a short trial at three.
+Only if M4's and M5's memory reads show room: install it, and run the three-way trial in Design.
 
 ## Verification
 
-- Spec: one `doperpowers:adversarial-reviewer` round on the design and the execution section.
-- M1: `doperpowers:reviewer-medium`, ci-gate.
+- Spec: one `doperpowers:adversarial-reviewer` round, done; a second, on this revision, before M1's PR is reviewed.
+- M1: `doperpowers:reviewer-medium`, ci-gate, and the one-instance reinstall on the mini staying green.
 - M2, M5: the MAWS architect lands each, on a green class 1a and a green Mac set.
-- M4: the trial's own pass rule, checked by the spec's owner against the run logs.
+- M4: Design's evidence and fail rules, checked by the spec's owner against the run logs.
 
 ## Decision Log
 
@@ -218,10 +245,22 @@ Only if M4's and M5's memory reads show room: install instance 3 and repeat a sh
   mini's idle CPU. A second Mac was declined on 10-21's measurement, and the Tart VM runner was put on hold by the
   owner after the spike: 1.3–1.7× slower e2e, and a display-geometry difference that failed a case. The host lease
   keeps the calibrated desktop and costs nothing new.
-- 2026-10-21: **The repo names its exclusive groups.** The lane cannot tell a measured or foreground matrix entry from
-  any other; MAWS already lists its measured groups in `gate.yml`, and the step form follows `settle`.
-- 2026-10-21: **Writer preference, and a waiting exclusive job gives up its shared hold.** Without the first,
-  shared jobs starve a measured job. Without the second, two exclusive waiters each holding shared deadlock.
+- 2026-10-21 (review of the first draft, all taken): **labels and a shared hold replace the reader-writer lease.**
+  The adversarial review (astra) found six P1s in the lease taken by hooks:
+  1. Admission was not fail-closed: old workflows and unlisted groups ran shared.
+  2. The runner prepares a job before its hook, so a hook-held lease admitted neighbours' preparation into a measured
+     job.
+  3. One shared hook copy swept the wrong instance's `_work`.
+  4. Waiters and the mutex had no crash recovery.
+  5. A dead worker's leftovers were admitted beside the next holder.
+  6. An upgraded job inherited a desktop its own start had not checked.
+
+  It also found two P2s: the trial authorized combinations it never ran, and the waits exceeded MAWS's job timeouts.
+  Labels make admission fail closed before any runner accepts a job. Stopping the shared instances' listeners keeps
+  their preparation out. Per-instance identity, sweep-before-release, a reconciling watcher, a kernel-released lock,
+  and the desktop check after the neighbours stop answer the rest. Evidence per group, and a timeout raise, answer the
+  P2s. The cost: an exclusive job waits for running shared jobs to end (bounded), and the exclusive instance serves no
+  shared job.
 - 2026-10-21: **`tool-time-heavy-live` stays exclusive** while it is in `MEASURED_E2E`, though its code is safe beside
   others. Dropping it from that list is MAWS's call.
 
