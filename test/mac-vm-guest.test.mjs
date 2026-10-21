@@ -1,7 +1,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, chmodSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, readdirSync, rmdirSync, unlinkSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,6 +23,9 @@ after(() => {
 });
 // The worker is told apart by the kernel's path of its executable (runner-state.py, libproc): macOS only.
 const macOnly = { skip: process.platform !== 'darwin' };
+// An unreadable file is unreadable only to a user other than root.
+const asUser = { skip: process.getuid?.() === 0 };
+const macUser = { skip: process.platform !== 'darwin' || process.getuid?.() === 0 };
 const executable = (path, body) => { writeFileSync(path, `#!/bin/bash\n${body}\n`); chmodSync(path, 0o755); };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until(predicate, what, ms = 20_000) {
@@ -358,6 +361,107 @@ test('the idle handshake: an acceptance that raced the stop (a job line dated af
   assert.equal(vm.out('stopped'), null);
   assert.equal(vm.out('assigned'), null);
   await until(() => vm.shutdown(), 'the power-off');
+});
+
+const diagLog = (vm) => join(vm.runner, '_diag', readdirSync(join(vm.runner, '_diag')).find((name) => name.startsWith('Runner_')));
+const wrapperSaid = (vm, text) => (vm.out('wrapper.log') ?? '').includes(text);
+
+test('a job once seen taken is never stopped, even when its diag log can no longer be read', asUser, async () => {
+  const vm = guest();
+  assert.equal(vm.kickoff().status, 0);
+  vm.send('listen');
+  vm.send('take');
+  await until(() => vm.out('assigned') !== null, 'out/assigned');
+  const log = diagLog(vm);
+  chmodSync(log, 0o000);
+  try {
+    writeFileSync(join(vm.shares, 'out/stop-request'), '');
+    await until(() => vm.out('stop-refused') !== null, 'out/stop-refused');
+    assert.equal(vm.out('stop-refused'), `job=${JOB}\n`);
+    assert.equal(existsSync(join(vm.ctl, 'listener.end')), false, 'the listener was left alone');
+    assert.equal(vm.out('stopped'), null);
+  } finally {
+    chmodSync(log, 0o644);
+  }
+  vm.send('exit 0');
+  await until(() => vm.shutdown(), 'the power-off');
+  assert.equal(vm.out('stopped'), null);
+});
+
+for (const [what, blind, restore] of [
+  ['a diag log it cannot read', (vm) => { const log = diagLog(vm); chmodSync(log, 0o000); return () => chmodSync(log, 0o644); }],
+  ['a diag directory it cannot read', (vm) => { const dir = join(vm.runner, '_diag'); chmodSync(dir, 0o000); return () => chmodSync(dir, 0o755); }],
+  ['the diag log that showed listening gone', (vm) => { unlinkSync(diagLog(vm)); return () => {}; }],
+]) {
+  test(`with ${what}, a stop is refused: the listener may hold a job`, asUser, async () => {
+    const vm = guest();
+    assert.equal(vm.kickoff().status, 0);
+    vm.send('listen');
+    await until(() => vm.out('listening') !== null, 'out/listening');
+    const undo = blind(vm);
+    try {
+      writeFileSync(join(vm.shares, 'out/stop-request'), '');
+      await until(() => vm.out('stop-refused') !== null, 'out/stop-refused');
+      assert.equal(vm.out('stop-refused'), 'job=unknown\n');
+      assert.match(vm.out('assigned'), /^job=unknown at=\S+Z by=unknown\n$/);
+      assert.equal(existsSync(join(vm.ctl, 'listener.end')), false, 'the listener was left alone');
+    } finally {
+      undo();
+    }
+    vm.send('exit 0');
+    await until(() => vm.shutdown(), 'the power-off');
+  });
+}
+
+test('stop-refused is published only after its assigned is written', async () => {
+  const vm = guest();
+  // A write that fails: the marker's temporary name is taken by a directory.
+  mkdirSync(join(vm.shares, 'out/.assigned.tmp'));
+  assert.equal(vm.kickoff().status, 0);
+  vm.send('listen');
+  vm.send('take');
+  await until(() => wrapperSaid(vm, 'could not write out/assigned'), 'the failed write');
+  writeFileSync(join(vm.shares, 'out/stop-request'), '');
+  await until(() => wrapperSaid(vm, 'stop requested'), 'the request read');
+  await sleep(500);
+  assert.equal(vm.out('stop-refused'), null, 'no refusal without its anchor');
+  rmdirSync(join(vm.shares, 'out/.assigned.tmp'));
+  await until(() => vm.out('stop-refused') !== null, 'out/stop-refused');
+  assert.equal(vm.out('stop-refused'), `job=${JOB}\n`);
+  assert.match(vm.out('assigned'), new RegExp(`^job=${JOB} `));
+  vm.send('exit 0');
+  await until(() => vm.shutdown(), 'the power-off');
+});
+
+test('a raced stop whose answer cannot be written leaves no done and no power-off: the guest stays up', macOnly, async () => {
+  const vm = guest({ worker: true });
+  mkdirSync(join(vm.shares, 'out/.stop-raced.tmp'));
+  assert.equal(vm.kickoff(undefined, { CI_KIT_VM_WRITE_WAIT: '2' }).status, 0);
+  vm.send('listen');
+  await until(() => vm.out('listening') !== null, 'out/listening');
+  writeFileSync(join(vm.ctl, 'race'), '');
+  writeFileSync(join(vm.shares, 'out/stop-request'), '');
+  await until(() => wrapperSaid(vm, 'no done, no power-off'), 'the wrapper giving up');
+  assert.equal(vm.out('stop-raced'), null);
+  assert.equal(vm.out('stopped'), null);
+  assert.equal(vm.out('done'), null);
+  assert.equal(vm.shutdown(), false);
+});
+
+test('a raced stop whose answer fails at first is retried, and recorded before done and the power-off', macOnly, async () => {
+  const vm = guest({ worker: true });
+  mkdirSync(join(vm.shares, 'out/.stop-raced.tmp'));
+  assert.equal(vm.kickoff().status, 0);
+  vm.send('listen');
+  await until(() => vm.out('listening') !== null, 'out/listening');
+  writeFileSync(join(vm.ctl, 'race'), '');
+  writeFileSync(join(vm.shares, 'out/stop-request'), '');
+  await until(() => wrapperSaid(vm, 'could not write out/stop-raced'), 'the failed write');
+  assert.equal(vm.out('done'), null);
+  assert.equal(vm.shutdown(), false);
+  rmdirSync(join(vm.shares, 'out/.stop-raced.tmp'));
+  await until(() => vm.out('done') !== null && vm.shutdown(), 'done and the power-off');
+  assert.equal(vm.out('stop-raced'), `job=${JOB}\n`);
 });
 
 test('the guest hooks: a wide @2x desktop passes, Terminal in front, the posture line names the slot and the clone; no sweep, no gh', () => {

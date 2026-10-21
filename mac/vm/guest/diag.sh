@@ -21,26 +21,38 @@
 # diag_scan <diag dir> reads every Runner_*.log there, in name order (kickoff.sh empties the directory, so all of them
 # are this clone's), and prints a line for each kind seen, at its first time: `listening <time>`, `conflict <time>`,
 # `job <time> <id>`, `update <time>`, the time as YYYY-MM-DDTHH:MM:SSZ. A job's id is the dispatch's job GUID, else the
-# acknowledged request's id, else `-`.
+# acknowledged request's id, else `-`. It prints `unreadable` when the directory or a log in it cannot be read, or the
+# scan itself fails: what it did not read may hold a job, and a reader must not take the silence for none.
 diag_scan() { # <diag dir>
-  local logs=("$1"/Runner_*.log)
+  local logs
+  [[ -e $1 ]] || return 0
+  if [[ ! -d $1 || ! -r $1 || ! -x $1 ]]; then
+    echo unreadable
+    return 0
+  fi
+  logs=("$1"/Runner_*.log)
   [[ -e ${logs[0]} ]] || return 0
-  perl -ne '
-    next unless /^\[(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)Z [A-Z]+ +[^\]]*\] (.*?)\r?$/;
-    my ($at, $m) = ("$1T$2Z", $3);
-    if ($m =~ /^WRITE LINE: .*: Listening for Jobs$/) { $first{listening} //= $at }
-    elsif ($m =~ /^(?:The session for this runner already exists\.|WRITE ERROR: A session for this runner already exists\.)$/) {
-      $first{conflict} //= $at;
+  perl -e '
+    for my $file (@ARGV) {
+      open(my $log, "<", $file) or do { $unreadable = 1; next };
+      while (<$log>) {
+        next unless /^\[(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)Z [A-Z]+ +[^\]]*\] (.*?)\r?$/;
+        my ($at, $m) = ("$1T$2Z", $3);
+        if ($m =~ /^WRITE LINE: .*: Listening for Jobs$/) { $first{listening} //= $at }
+        elsif ($m =~ /^(?:The session for this runner already exists\.|WRITE ERROR: A session for this runner already exists\.)$/) {
+          $first{conflict} //= $at;
+        }
+        elsif ($m =~ /^Acknowledging runner request \x27([^\x27]+)\x27\.$/) { $first{job} //= $at; $request //= $1 }
+        elsif ($m =~ /^Job request \d+ for plan \S+ job (\S+) received\.$/) { $first{job} //= $at; $id //= $1 }
+        elsif ($m =~ /^Received job message of length \d+ / || $m =~ /^WRITE LINE: .*: Running job: /) { $first{job} //= $at }
+        elsif ($m =~ /^Refresh message received, kick-off selfupdate background process\.$/) { $first{update} //= $at }
+      }
+      $unreadable = 1 unless close($log);
     }
-    elsif ($m =~ /^Acknowledging runner request \x27([^\x27]+)\x27\.$/) { $first{job} //= $at; $request //= $1 }
-    elsif ($m =~ /^Job request \d+ for plan \S+ job (\S+) received\.$/) { $first{job} //= $at; $id //= $1 }
-    elsif ($m =~ /^Received job message of length \d+ / || $m =~ /^WRITE LINE: .*: Running job: /) { $first{job} //= $at }
-    elsif ($m =~ /^Refresh message received, kick-off selfupdate background process\.$/) { $first{update} //= $at }
-    END {
-      print "listening $first{listening}\n" if $first{listening};
-      print "conflict $first{conflict}\n" if $first{conflict};
-      print "job $first{job} ", ($id // $request // "-"), "\n" if $first{job};
-      print "update $first{update}\n" if $first{update};
-    }
-  ' "${logs[@]}"
+    print "listening $first{listening}\n" if $first{listening};
+    print "conflict $first{conflict}\n" if $first{conflict};
+    print "job $first{job} ", ($id // $request // "-"), "\n" if $first{job};
+    print "update $first{update}\n" if $first{update};
+    print "unreadable\n" if $unreadable;
+  ' "${logs[@]}" || echo unreadable
 }
