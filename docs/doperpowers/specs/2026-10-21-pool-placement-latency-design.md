@@ -627,6 +627,14 @@ VM's walk.
   originals keep their reservation and cover; race outcomes are observed (first claim, both, neither, unresolved);
   never-online runners are an ERROR, not cover, with alerts on them and on NAT allocation failure; the 20 s trigger
   and the NAT port range are provisional, re-sized from logged insert times and the burst's peak port use.
+- 2026-10-21 (CI-opt, M6): **Cloud NAT parked; job VMs keep external IPs, and egress becomes a `gce.json` switch.**
+  Live behind the NAT (launcher 00014-b8p, 19:46–19:58Z), GitHub's runner endpoints stalled bursts: a MAWS run on C3D
+  started 84–110 s after queued, a 20-job sandbox burst 39–132 s. The launcher went back to 00013-78r. A same-hour
+  experiment (20 check VMs per point, us-central1) ruled out the per-IP ratio: spreading the burst over more NAT
+  addresses did not help (Surprises). The address raises stay the path to more VMs per region; `egress: "nat"` returns
+  it by a config commit once the cause is known. Router, NAT, Private Google Access, the never-online rule and the
+  alerts stay.
+
 
 ## Surprises & Discoveries
 
@@ -665,6 +673,14 @@ VM's walk.
   and `JobServerQueue` lines before the serial sink, so the end of a job survives the 115200-baud backlog. Related:
   the runner's "Retrieving an AAD auth token took a long time" warning appears on VMs with and without external IPs
   (2–39 s; 11 VMs today), so it is GitHub's, not the NAT's.
+- 2026-10-21 (M6, NAT): **GitHub's runner endpoints stall new connections from Cloud NAT in a burst.** Boot →
+  "Connected to GitHub", median / max, 20 c3d-4 VMs each: external IPs 12.4 / 26.7 s (2 VMs with a refused connect);
+  NAT on 1 address 57.1 / 75.8 s (12/19); 3 addresses 53.6 / 76.2 s (12/20); 11 addresses 70.4 / 107.6 s (15/20). The
+  runner's `Location.GetConnectionData` to pipelines*.actions.githubusercontent.com takes ~20 s an attempt, or is
+  reset ("Connection refused"). Zero NAT drops, at most 14 ports in use per VM; 6 VMs (us-west4) or 2 VMs through the
+  NAT connected in ~9 s. Not port exhaustion, not the per-address ratio; the cause is unproven (a packet-level probe
+  from a no-IP VM would tell). The git-core PPA's 503s that hour were Launchpad's (the Mac saw them too).
+
 
 ## Outcomes & Retrospective
 
