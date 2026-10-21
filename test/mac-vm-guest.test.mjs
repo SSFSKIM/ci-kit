@@ -213,6 +213,16 @@ test('the diag patterns: listening, a session conflict, a job taken (by its id),
   assert.equal(scan([diag.message, 'Listening for Jobs', 'INFO Runner] echo: Job request 1 for plan x job y received. (quoted)']), '');
 });
 
+test('a diag log that opens but cannot be read is unreadable, never a clean end', () => {
+  const dir = mkdtempSync(join(root, 'diag-'));
+  writeFileSync(join(dir, 'Runner_1.log'), `[2026-10-21 12:00:05Z ${diag.listening('2026-10-21 12:00:05Z')}\n`);
+  // A directory under a log's name: open(2) succeeds, read(2) fails with EISDIR.
+  mkdirSync(join(dir, 'Runner_2.log'));
+  const run = spawnSync('bash', ['-c', 'source "$1"; diag_scan "$2"', 'scan', join(guestDir, 'diag.sh'), dir], { encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stdout, 'listening 2026-10-21T12:00:05Z\nunreadable\n');
+});
+
 test('kickoff: the identity copied, the cache linked, the runner started once under the wrapper, which outlives the exec', async () => {
   const vm = guest();
   // What the image left: a cache directory of its own, and a diag log of its registration.

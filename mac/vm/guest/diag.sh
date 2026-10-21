@@ -32,9 +32,12 @@ diag_scan() { # <diag dir>
   fi
   logs=("$1"/Runner_*.log)
   [[ -e ${logs[0]} ]] || return 0
-  perl -e '
+  perl -MIO::Handle -e '
     for my $file (@ARGV) {
-      open(my $log, "<", $file) or do { $unreadable = 1; next };
+      # A log is a regular file read to its end: a read that fails (EISDIR, EIO) ends the loop as an end of file would,
+      # so the error is read from errno and the handle after it, not from close alone.
+      (-f $file && open(my $log, "<", $file)) or do { $unreadable = 1; next };
+      $! = 0;
       while (<$log>) {
         next unless /^\[(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)Z [A-Z]+ +[^\]]*\] (.*?)\r?$/;
         my ($at, $m) = ("$1T$2Z", $3);
@@ -47,6 +50,7 @@ diag_scan() { # <diag dir>
         elsif ($m =~ /^Received job message of length \d+ / || $m =~ /^WRITE LINE: .*: Running job: /) { $first{job} //= $at }
         elsif ($m =~ /^Refresh message received, kick-off selfupdate background process\.$/) { $first{update} //= $at }
       }
+      $unreadable = 1 if $! || $log->error;
       $unreadable = 1 unless close($log);
     }
     print "listening $first{listening}\n" if $first{listening};
