@@ -49,7 +49,8 @@ toward the boot alone, and below it for the jobs a warm runner covers.
 
 - [x] (2026-10-21 12:2xZ) Quota preferences filed: C4D us-west4 192 (granted 0 at filing), instances us-west4 64
   (24), addresses us-west4 64 (8), Hyperdisk Balanced us-west4 4096 GB (500), all-regions CPUs 256 → 512.
-- [ ] M1 — Placements in the launcher, the bake and the ledger.
+- [ ] M1 — Placements in the launcher, the bake and the ledger. (2026-10-21) Built, reviewer-medium clean after two
+  fix waves, ci-gate green; PR open, awaiting CI-opt's merge and the go for `gce/deploy.sh launcher`.
 - [ ] M2 — us-west4 C4D placement live, measured against C3D.
 - [ ] M3 — The tick and the boot.
 - [ ] M4 — Launch on GitHub's `workflow_job` webhook.
@@ -321,8 +322,12 @@ reported to the owner.
   counts as the machine family's, no broader than the old machine-keyed skip. "Same or more vCPUs" applies to every
   scope, count quotas included, at the cost of at most one more refused insert per smaller size per tick. A launch
   whose every attempt the memory already rules out mints no runner and writes no row: its job waits.
-- 2026-10-21 (M1): **The listing is complete when every placement zone was read whole**, not every zone of the
-  project: an unreachable zone outside the placements no longer stops all launches.
+- 2026-10-21 (M1, after review): **The listing is complete when every zone pool VMs may live in was read whole**:
+  every placement zone and the zone of every non-final ledger row, so a VM left in a zone `gce.json` no longer names
+  still counts against `max_vcpus`; while any non-final row names no zone (its running write failed after the
+  insert), every zone of the listing, the pre-M1 rule. An unreachable zone that holds none of ours no longer stops all
+  launches. reviewer-medium found both holes (a placement rolled back while its zone is unreachable over-admitted);
+  a VM with no ledger row in a zone outside every placement stays outside admission, as it was before M1.
 - 2026-10-21 (M1): **The disk type travels as a label.** The instance resource does not carry its boot disk's type,
   so a job VM is labelled `ci-kit-disk=<type>` and its row stores `diskType`; a row without one predates placements
   and is priced as `pd-balanced`.
