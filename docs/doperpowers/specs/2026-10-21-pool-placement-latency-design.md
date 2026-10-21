@@ -766,7 +766,11 @@ accepted → started on c3d-4 (C4D separately), and day one's unclaimed pre-laun
   hour. Run 39686827712's unit shards 1/4 and 4/4 failed on "runner has received a shutdown signal" at ~22:30Z
   (`compute.instances.preempted` at 22:31:24Z and 22:31:36Z, us-central1-b). #85 puts the C4D east placements ahead
   of C3D us-central1: after a day, check whether preemptions drop; if C3D us-central1 keeps being preempted,
-  consider making it on demand only.
+  consider making it on demand only. Count with care: the audit log's count is a floor. Shard 4/4's VM
+  (hsd97y0mde) shut down the way the preempted hsd97qkmmd did, 6.6 s later, and the launcher deleted it as
+  runner-gone 0.4 s before GCE's preemption event would have been stamped, so no event exists. The ledger also
+  calls both VMs `done`, since runner-gone took them before the preemption read. MAWS's rerun-once rule, which
+  reads the job's "The operation was canceled." annotation, counted both and reran each (attempt 3 green).
 - The config-before-code skew (Surprises): pick one of its two fixes.
 
 **What did not go as designed.**
