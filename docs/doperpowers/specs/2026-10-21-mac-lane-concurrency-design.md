@@ -1267,6 +1267,28 @@ hold-aware plan send them to the guest, which this spec leaves open.
      written is no boot.
   7. **Tart is read as JSON, in the C locale:** `tart list --format json` (`Name`, `State`, `Running`), never the
      table, whose columns the mini prints in Korean.
+- 2026-10-21 (late, V2a's builder): **the host side's shapes.** The lane's claim logic is its own executable,
+  `mac/hooks/vm-claim.sh` (`measured`, `exclusive-start`, `exclusive-wait`, `end`, `reservation`, `claims`; `claims` is
+  called with the desktop lock held, which is how the launcher reads condition 3). A claim file is
+  `vm-claim.<pid>-<lstart with spaces as '-'>`, its liveness read from its contents. Settle finds its worker by walking
+  its ancestors to the first `Runner.Worker` (the step's shell sits between it and `$PPID`). The exclusive hook raises
+  its claim before the shared admission, and its guest wait counts the hook's elapsed time, so one
+  `CI_KIT_EXCLUSIVE_WAIT` bounds both waits. Only contract 1 is VM-safe. The workflow read drops `GH_TOKEN` and
+  `GITHUB_TOKEN`, so the machine's own login reads it. `vm: any` neither claims nor waits. The end hook drops the claim
+  after the job's own sweep succeeds; after a failed one the claim goes stale with its worker.
+- 2026-10-21 (late, V3's builder, MAWS #110): **MAWS's side.**
+  1. Under a `Lane:` trailer a group on both lists goes to the guest, not shared (the trailer is the explicit ask);
+     measured groups stay on the exclusive instance in every case.
+  2. Foreground groups and `unit:darwin` may be on `MAC_VM_E2E`; a foreground group on both lists goes solo, never
+     shared.
+  3. A `Lane:` run with no listed job is noted in the summary, not refused; an unknown `Lane:` value is refused.
+  4. A solo job's timeout carries +10; a job sent to the guest alone carries none.
+  5. The alert reader's fold of `-<n>` (M3's prerequisite) landed here, with `-vm`, `-vm-trial` and `-vm2` as machines
+     of their own.
+  6. The contract line is the column-0 `# ci-kit-vm-contract: 1` near gate.yml's top; ci-kit's matcher accepts it.
+  Its review (reviewer-medium) found that the contract certified a workflow with a raw timing bound outside
+  `MEASURED_E2E` (`e2e:presentations`' scale-gate open, at most 1,000 ms), which the switch-based contract test missed;
+  the fix moves or gates every such bound and makes the test catch the class.
 
 ## Surprises & Discoveries
 
@@ -1331,6 +1353,12 @@ hold-aware plan send them to the guest, which this spec leaves open.
     there (`maws-vm-spike`, 43 GB, display `1920x1200`), 138 GB free; `kern.memorystatus_vm_pressure_level` (1),
     `kern.memorystatus_level` (77) and `vm.swapusage` (510 MB used) all read on macOS 27. M1's hooks are not installed
     yet (no `shared-hold.sh` there).
+  - **`GITHUB_WORKFLOW_SHA`, `GITHUB_WORKFLOW_REF` and `GITHUB_REPOSITORY` reach a job-started hook,** read from
+    the runner's source (v2.338.0: `GitHubContext.cs`'s allow-list, exported by `ScriptHandler.cs`), not yet from a
+    live job; VA9's run in V4 confirms the `vm-safe:` line, and an empty SHA reads unknown either way.
+  - **MAWS's alert check counts an online guest as a free Mac** (V3): a run may go ahead while the host has an alert,
+    and its host jobs are then refused; a `--lane vm` run during a host alert stops while the guest is offline
+    (`MAWS_GATE_IGNORE_ALERTS=1` passes it).
 
 ## Outcomes & Retrospective
 
