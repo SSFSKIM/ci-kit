@@ -17,9 +17,13 @@ spend ($1.55 that day, a $46 month at that rate against the $50 budget).
 
 After this work:
 
-- **Every gate run leaves a per-test record.** For each run there is a row naming the tests that failed, with a line of
-  why. For each day there is a snapshot of the suite: every test that existed and each file's duration. The record is
-  kept in the private sandbox repo past GitHub's log retention.
+- **Every gate run leaves a per-test record.** For each (run, attempt, job) the record holds:
+  - exactly which tests ran, failed and were skipped;
+  - which commit and tree were tested;
+  - which change the run belongs to;
+  - what changed since that change's previous run.
+
+  It is kept in the private sandbox repo past GitHub's retention of logs and artifacts.
 - **Failures are labelled from that record.** Each failure is marked flaky (the same tree passed), test-changed (only test
   files changed before it passed) or caught (source changed before it passed). "Caught" is the owner's "actual
   regression".
@@ -40,26 +44,35 @@ After this work:
 - **No MAWS test names in a public place.** The collector runs in `SSFSKIM/ci-kit-sandbox`, which is private. Its store
   is a branch there. ci-kit's public code reads and writes it, but no public log ever prints a test name. This follows
   the parent spec's rule for alerts.
-- **No new credentials.** The collector reads artifacts with the ci-kit GitHub App that the pool already uses
+- **No new credentials.** The collector reads artifacts and commits with the ci-kit GitHub App that the pool already uses
   (`CI_KIT_APP_ID` / `CI_KIT_APP_KEY`, already sandbox secrets). It writes its own repo with `GITHUB_TOKEN`.
-- **No change to how a run passes or fails.** Writing and uploading the record never turns a run red: the steps run
-  `if: !cancelled()`, and a missing report is ignored.
+- **No new way for a gate to go red.** The upload step is `continue-on-error`. It runs only when this job's own test step
+  ran. A missing report is ignored.
+  - Accepted residue: vitest writes the JUnit file inside the test command. A write failure there would fail the step,
+    but it is the same failure as the runner's workspace being unwritable, which fails the job anyway.
 
 ## Glossary
 
-- **Gate run.** One run of a repo's gate workflow, `.github/workflows/gate.yml` in MAWS. `ci-gate` pushes the tested tree
-  plus one empty commit (a "nonce" commit, whose message carries the `Gates:` trailers) to `ci/<label>-<sha8>`. So a
-  run's `head_sha` is the nonce commit and its parent is the tested commit.
+- **Gate run.** One run of a repo's gate workflow, `.github/workflows/gate.yml` in MAWS. Both producers push the tested
+  commit plus one empty commit on top (the "nonce" commit). So a run's `head_sha` is the nonce commit, and its first
+  parent is the tested commit. The producers name the ref differently:
+  - MAWS's `scripts/ci-gate.sh` pushes `ci/<label>-<sha8>`; its nonce message carries `Gates:` and `Class1a:` trailers.
+  - ci-kit's `ci-gate` pushes `ci/<label>-<sha8>-<nonce6>` (`cli/naming.mjs`); its message carries a `CI-Gates:`
+    trailer.
 - **Class 1a.** MAWS's pre-landing gate set: `static`, `unit` and `probes`, on the GCE pool.
 - **JUnit XML.** The common test-report format that vitest (`--reporter=junit`), `node --test`
-  (`--test-reporter=junit`), Playwright and pytest all write. Each `<testcase classname=… name=… time=…>` has an
-  optional `<failure>`, `<error>` or `<skipped/>`.
-- **Change.** The work one session iterates on before a landing. Its runs share a `ci-gate` label (the branch name less
-  `ci/` and the `-<sha8>` suffix), and each run's tested commit descends from the previous one's.
+  (`--test-reporter=junit`), Playwright and pytest all write. Each `<testsuite>` (one per test file) has a `time`; each
+  `<testcase classname=… name=… time=…>` has an optional `<failure>`, `<error>` or `<skipped/>`.
+- **Case id.** `(project, file, name)`. The **project** is the vitest project, and is empty for runners without
+  projects. MAWS runs the renderer's files twice, once plain and once under the React Compiler (`renderer-compiled`),
+  so the file alone does not name a case. MAWS writes the classname as `<project>:<file>` (M1).
+- **Change.** The work one session iterates on before a landing. Its runs share a producer, a label, and a line of tested
+  commits each descending from the last. A run whose change cannot be determined has none; it is never guessed.
 
 ## Progress
 
 - [x] (2026-10-21 06:3xZ) Spec written; owner's direction recorded.
+- [x] (2026-10-21 07:0xZ) Adversarial review: seven findings, all taken (Decision Log).
 - [ ] M1 — MAWS writes and uploads unit's JUnit report.
 - [ ] M2 — ci-kit's collector and the sandbox store.
 - [ ] M3 — Labels and reports (starts when the store holds ≥ 14 days).
@@ -74,54 +87,97 @@ After this work:
 repo. *Rejected:* vitest's JSON reporter. It carries more, but only for vitest, and every other runner would need its own
 parser.
 
-**Transport: one artifact per job.** A job writes its reports under `ci-results/` and uploads them as
-`test-results-<job>`, with `retention-days: 7`, `if-no-files-found: ignore`, and the step `if: ${{ !cancelled() }}`.
+**Transport: one artifact per job attempt.** A job writes its reports under `ci-results/` and uploads them as
+`test-results-<job>-<run_attempt>`. The attempt in the name is the only place an artifact says which attempt made it:
+the artifact API lists artifacts by run, not by attempt. The upload step's rules:
+- `retention-days: 7`, `if-no-files-found: ignore`, `continue-on-error: true`;
+- it runs only when this job's test step ran (its outcome is success or failure), so a job whose checkout or setup
+  failed uploads nothing;
+- the test step removes `ci-results/` first, so a self-hosted runner's persistent workspace never ships a report an
+  earlier job left. MAWS's e2e upload guards on checkout for the same reason.
+
 *Rejected:* pushing the record from the job itself. Jobs run on three kinds of runner (GCE pool, the mini, hosted), so
 every job would need write credentials, and a red job would have to push.
 
-**Store: a branch in the sandbox, kept compact.** The store is branch `test-history` of `SSFSKIM/ci-kit-sandbox`, and
-it never merges anywhere.
-- `<owner>/<repo>/runs/<YYYY-MM-DD>.jsonl` (the run's creation day, UTC) holds one line per (run, attempt, job), sorted
-  by run id then job name. A line is about 1 KB. It carries no per-test pass list; a pass is "in the day's suite, not
-  failed or skipped in that run".
-- `<owner>/<repo>/suite/<YYYY-MM-DD>.json.gz` holds one snapshot per job name per day, taken from that day's last green
-  run of the job. It lists every test id with its file, and each file's duration. These snapshots are the denominator:
-  they record which tests existed, and when.
-- MAWS's volume: about 75 unit lines a day (≈ 75 KB), plus one gzipped suite a day (≈ 300 KB). That is about 10 MB a
-  month in git.
+**Store: a branch in the sandbox, exact per run, compact by deltas.** The store is branch `test-history` of
+`SSFSKIM/ci-kit-sandbox`; it never merges anywhere. Under `<owner>/<repo>/`:
+- `runs/<YYYY-MM-DD>.jsonl`, by the job's completion day (UTC): one line per (run, attempt, job), sorted by run, attempt
+  and job. A line holds:
+  - **provenance:**
+    - run id, attempt, workflow, event, `head_branch`, `head_sha`;
+    - the tested commit and its tree;
+    - the producer (`maws-ci-gate`, `ci-kit-ci-gate`, or `other` for pushes and dispatches);
+    - the label: the ref less `ci/` and the producer's suffix, or null for `other`;
+    - the gates trailer;
+    - job id, job name, runner name, job conclusion, started and completed times;
+    - artifact id, name and creation time.
+  - **report status:** `present`, `missing` (the job ran its tests but no artifact exists) or `unparseable`.
+  - **membership:** exactly which case ids ran, as a delta from that job's base set for the day (see below): `added`
+    and `removed` ids, plus a hash of the full sorted id list so a reader can check the reconstruction.
+  - **outcomes:** failed case ids, each with the first line of its message (≤ 300 characters); skipped ids as a delta
+    from the base's skipped set; per-project counts and total time.
+  - **previous run of the change:**
+    - its run id and attempt;
+    - the relation of the two tested commits: `same-tree`, `descendant` or `unknown`;
+    - the paths changed between them (from the compare API, marked truncated past its limit).
 
-*Rejected:* full per-run reports in git (≈ 5 MB a run, 11 GB a month); a GCS bucket (new credentials in a sandbox
-workflow); the ledger issue (its comments are for the pool's ledger, and too small). A test **id** is
-`<file> > <name>`, with the JUnit classname as the file. Vitest writes the describe path into the name as `a > b > test`.
+    Computed at collection, while the refs and commits are still reachable.
+- `base/<YYYY-MM-DD>/<job>.json.gz`: that job's first complete report collected for the day. It holds the sorted case
+  ids, the skipped set, and each `(project, file)`'s duration from `<testsuite time>`. A run line's membership refers to
+  it.
+- `durations/<YYYY-MM-DD>/<job>.json.gz`: `(project, file)` durations from the day's last complete green report of the
+  job. This is the sampled cost that M3's ranking uses, labelled as sampled.
 
-**Collector: `history/` in ci-kit, run daily by the sandbox.** `history/collect.mjs` takes a repo and a window. It
-lists the repo's gate runs in the window and, for each attempt, the artifacts named `test-results-*`. It downloads and
-unzips each one, parses the JUnit, and merges the lines into the store idempotently by key. It also writes the day's
-suite snapshot. Every run collects the last 3 days, so a missed day is caught up while the artifacts are still kept
-(7 days). The sandbox workflow `test-history.yml` runs it daily at 00:40 UTC and on `workflow_dispatch`:
+Volume for MAWS: a run line is a few KB (deltas and failures are small), so ≈ 75 lines ≈ 300 KB a day. A base or
+durations file is ≈ 200 KB gzipped. In all, about 20 MB a month in git.
+
+*Rejected:*
+- one daily snapshot as the denominator (the first draft). Different branches run different suites, so a test deleted
+  on one branch would still read as passed there.
+- full per-run reports in git (≈ 5 MB a run).
+- a GCS bucket (new credentials).
+- the ledger issue.
+
+**Collector: `history/` in ci-kit, run daily by the sandbox.** `history/collect.mjs --repo <r> --store <dir>`:
+1. Lists the repo's artifacts named `test-results-*`, newest first, until the ones it has already stored. Listing by
+   artifact rather than by run creation day also finds a fresh attempt of an older run.
+2. For each new artifact, reads its run, the attempt (from the artifact name) and that attempt's jobs.
+3. Resolves the tested commit (the nonce commit's first parent) and its tree.
+4. Downloads the artifact and unzips it.
+5. Checks the report is this job's: its `<testsuite timestamp>`s fall within the job's start and end.
+6. Parses the report and writes the run line, creating the day's base if there is none.
+7. Finds the change's previous run in the store (same producer and label, latest tested commit that the compare API
+   reports as an ancestor or same tree) and records the relation and changed paths.
+
+It also lists the last 3 days' runs and gives a `missing` line to each job in the repo's reporting set
+(`history/repos.json`) that completed without a matching artifact. The collector is idempotent by (run, attempt, job).
+The sandbox workflow `test-history.yml` runs daily at 00:40 UTC and on `workflow_dispatch`:
 1. check out ci-kit `main` (public) as the code;
 2. check out the sandbox's `test-history` branch as the store, creating it on first use;
 3. mint the App token;
 4. run the collector;
 5. commit and push only when the store changed.
 
-Its log prints counts, never test names. The repos come from `history/repos.json`, which starts as `["SSFSKIM/MAWS"]`.
+Its log prints counts only, never a test name or path. The repos come from `history/repos.json`, which starts as
+`[{ "repo": "SSFSKIM/MAWS", "jobs": ["unit", "unit:darwin"] }]` (the jobs that upload a report).
 
-**Labels (M3).** For a failing test T in run R of change C: find C's next run R′ (same label, later tested commit
-descending from R's) in which T passed.
-- Same tree as R, or R′ is a re-run attempt of R → **flaky**.
-- Only test files differ between the two tested trees (paths matching the repo's test globs) → **test-changed**.
-- Any other file differs → **caught**.
-- No later passing run of C → **unresolved**, and so a failure on master or a test that was deleted is never miscounted.
+**Labels (M3).** For a failing case T in run R of change C: find C's next run R′ (after R in the change's line, or a
+later attempt of R) in which T ran and passed.
+- R′ is a later attempt of R, or R′'s relation to R is `same-tree` → **flaky**.
+- Every path changed from R to R′ matches the repo's test globs → **test-changed**.
+- Any other path changed → **caught**.
+- No such R′, or a link in the chain is `unknown` → **unresolved**. A failure on master, a test deleted before it
+  passed, and a run with no change are never counted.
 
 **Reports (M3), from ≥ 14 days.**
-- `flaky`: tests with any flaky label, with dates and runs.
-- `fail-first`: tests ordered by recent failures. A repo can feed this to its runner where the runner supports ordering
+- `flaky`: cases with any flaky label, with dates and runs.
+- `fail-first`: cases ordered by recent failures. A repo can feed this to its runner where the runner supports ordering
   (vitest `sequence`). Doing so is the repo's choice.
-- `condense`: tests that existed for the whole window and never caught anything, grouped by file and ranked by the
-  file's total time. Duplicate-mode projects are reported as projects. MAWS's `renderer-compiled` re-runs every renderer
-  suite under the React Compiler and costs 19% of unit file time, so it is the first case for the owner's question.
-  Each report is a Markdown file under `<repo>/reports/` on the store branch, and is posted to the repo's architect.
+- `condense`: cases present through the whole window that never caught anything, grouped by `(project, file)` and
+  ranked by sampled cost (the file's sampled duration × the runs that ran it). Duplicate-mode projects are reported as
+  projects. MAWS's `renderer-compiled` costs 19% of unit file time, so it is the first case for the owner's question.
+
+Each report is a Markdown file under `<repo>/reports/` on the store branch, and is posted to the repo's architect.
 
 **Selection (M4).** Its decisions are settled with the MAWS architect before M4's execution is written. The starting
 proposal:
@@ -134,10 +190,14 @@ proposal:
   can miss what the module graph cannot see: fixtures, config, JSON read at run time, build output.
 
 **Overhead (M5).** In MAWS, 56% of vitest's worker time is import, transform and environment setup, not tests (10-21:
-tests 44%, import 27%, transform 16%, environment 12%). The experiment measures the options vitest offers without
-dropping a test, each as a class 1a run on the pool against the same tree: dependency optimization for the web
-projects; `isolate: false` for node projects whose suites pass with it. An option is adopted only with a green run and
-a measured gain. The repo's architect lands it.
+tests 44%, import 27%, transform 16%, environment 12%). Vitest 5 itself prints that `renderer-compiled`'s transforms
+are "re-done on every run" and suggests `fsModuleCache`. The experiment measures the options vitest offers without
+dropping a test, each as a class 1a run on the pool against the same tree:
+- `fsModuleCache` with a cache the pool persists;
+- dependency optimization for the web projects;
+- `isolate: false` for node projects whose suites pass with it.
+
+An option is adopted only with a green run and a measured gain. The repo's architect lands it.
 
 **The skill (M6).** `skills/optimize/SKILL.md` in ci-kit's plugin. It carries the method #96 used:
 1. measure each job's time and cost;
@@ -152,50 +212,79 @@ M1–M5 proved.
 
 ### M1 — MAWS writes and uploads unit's JUnit report
 
-At the end, every MAWS gate run that runs `unit` or `unit:darwin` uploads `test-results-unit` (or
-`test-results-unit-darwin`), holding `ci-results/unit.xml` with all 22k test cases. The job log and step summary are
-unchanged.
+At the end, every MAWS gate run that runs `unit` or `unit:darwin` uploads `test-results-unit-<attempt>` (or
+`test-results-unit-darwin-<attempt>`) holding all of the run's test cases. The job log, step summary and annotations
+are as before.
 
-- `.github/workflows/gate.yml`, job `unit`, test step: run `pnpm test --maxWorkers="$cores" --reporter=default
-  --reporter=github-actions --reporter=junit --outputFile.junit=ci-results/unit.xml`. With no `--reporter`, vitest 5
-  under GitHub Actions uses exactly `default` and `github-actions`, so naming both keeps today's output and annotations.
-  Then add an upload step: `actions/upload-artifact@v7`, the same version the file uses for e2e.
-- Job `unit-darwin`: the same reporters on its `vitest run`, with artifact `test-results-unit-darwin`.
-- No other job in M1: static's and probes' runners are `node --test` (seconds, M3 can add them), and e2e's reporters
-  belong to measured groups (later, with the architect).
+- `vitest.config.ts`: when `MAWS_TEST_JUNIT` is set, `reporters` is `default`, `github-actions` (under GitHub Actions)
+  and `junit`, with:
+  - `outputFile` set to the variable;
+  - `classnameTemplate: '{displayName}:{filename}'`, which gives the project and the file;
+  - `includeConsoleOutput: false`.
 
-Proof: a class 1a run on the pool is green, and its artifacts list shows `test-results-unit`. Its `unit.xml` has as many
-`<testcase` as the log's `Tests` line counts (passed plus skipped). The unit log's last lines (`Test Files`, `Tests`)
-and annotations are as before. The PR goes to the MAWS architect, who lands it.
+  These first two are what vitest 5 picks with no reporter named, so naming them keeps today's output. Unset, the
+  config names no reporter.
+- `.github/workflows/gate.yml`, jobs `unit` and `unit-darwin`, test step:
+  - give it an `id`;
+  - set `MAWS_TEST_JUNIT=ci-results/unit.xml` (`unit-darwin.xml`);
+  - remove `ci-results/` first.
+- Then, in both jobs, the upload step as in Design (`actions/upload-artifact@v7`, the version the file uses for e2e).
+- `.gitignore`: `ci-results/`.
+- No other job in M1:
+  - static's and probes' runners are `node --test` (seconds; M3 can add them);
+  - e2e's reporters belong to measured groups (later, with the architect).
+
+Proof:
+- A class 1a run on the pool is green.
+- Its artifacts list shows `test-results-unit-1`, whose `unit.xml` has as many `<testcase` elements as the log's `Tests`
+  line counts.
+- The unit log's last lines (`Test Files`, `Tests`) are as before.
+- Fault injection on a scratch branch: an upload step pointed at an invalid artifact name fails while the job stays
+  green.
+
+The PR goes to the MAWS architect, who lands it.
 
 ### M2 — The collector and the store
 
-At the end, `node history/collect.mjs --repo SSFSKIM/MAWS --store <dir> --since <day>` fills a store directory from the
-repo's runs. The sandbox workflow runs it daily, and the `test-history` branch holds MAWS's runs from M1's landing on.
+At the end, `node history/collect.mjs --repo SSFSKIM/MAWS --store <dir>` fills a store directory from the repo's
+artifacts. The sandbox workflow runs it daily, and the `test-history` branch holds MAWS's runs from M1's landing on.
 
-- `history/junit.mjs`: `parseJUnit(xml) → { cases: [{ file, name, status: 'passed'|'failed'|'skipped', ms, message }] }`.
-  A dependency-free tag scanner: ci-kit has no runtime dependencies. It handles attributes in either quote style, the
-  XML entities, CDATA, self-closing `<testcase/>`, and `<error>` as a failure. `message` is the first line of the
-  failure's `message` attribute or body, cut to 300 characters.
-- `history/record.mjs`: `runLine({ run, attempt, job, cases }) → object` and `suiteSnapshot({ day, job, cases }) →
-  object`, plus `mergeLines(existing, incoming)`, idempotent by `run.id/attempt/job`. These are pure functions.
-- `history/collect.mjs`: the CLI. It uses `lib/github.mjs`'s client if that fits; otherwise a small fetch wrapper with
-  the token from `GH_TOKEN`. Artifact zips are unpacked with the system `unzip` into a temp dir. It prints one count line
-  per repo: runs, jobs, failures, files written.
-- `history/repos.json`: `["SSFSKIM/MAWS"]`.
+- `history/junit.mjs`: `parseJUnit(xml) → { suites: [{ project, file, ms, timestamp }], cases: [{ project, file,
+  name, status: 'passed'|'failed'|'skipped', ms, message }] }`.
+  - It is a dependency-free tag scanner: ci-kit has no runtime dependencies.
+  - It handles attributes in either quote style, the XML entities, CDATA, a self-closing `<testcase/>`, and `<error>` as
+    a failure.
+  - `project` and `file` are split from a `<project>:<file>` classname when the part before the colon is not a path;
+    otherwise the project is empty.
+- `history/record.mjs` holds the pure functions:
+  - building a run line from (run, attempt, job, artifact, provenance, parsed report, base);
+  - building a base and a durations snapshot;
+  - reconstructing a run's full membership from its line and base, checked against the stored hash;
+  - merging lines idempotently.
+- `history/provenance.mjs`:
+  - the producer and label from a ref name, for both producers' formats and `other`;
+  - the tested commit and tree;
+  - the change's previous run and the relation and paths between them, through the compare API.
+- `history/collect.mjs`: the CLI, using `lib/github.mjs` or `lib/github-app.mjs` where they fit. Artifact zips are
+  unpacked with the system `unzip` into a temp dir. It prints one count line per repo: artifacts, lines,
+  missing/unparseable, failures, files written. It prints no names.
+- `history/repos.json`: as in Design.
 - ci-kit-sandbox `.github/workflows/test-history.yml`, as in Design. It runs on `ubuntu-latest`, has `permissions:
   contents: write`, and uses `concurrency: test-history`.
 - Tests in `test/history/*.test.mjs` (node --test):
-  - JUnit fixtures from vitest 5, `node --test` and Playwright, cut from real reports, with any MAWS names replaced;
-  - the label-free record and merge functions;
-  - the collector against a fake GitHub (the pattern `test/github.test.mjs` uses), including an artifact that is
-    missing, a re-run attempt, and an idempotent second pass.
+  - JUnit fixtures from vitest 5 with two projects running the same file with opposite outcomes (from MAWS's real
+    report shape, names replaced), `node --test` and Playwright;
+  - a suite whose `<testsuite time>` is not the sum of its cases (hooks);
+  - membership reconstruction across two branches with different suites and a deleted test;
+  - a report whose timestamps fall outside the job (rejected, not ingested);
+  - against a fake GitHub (the pattern `test/github.test.mjs` uses): two attempts of one run both done before the first
+    collection; a fresh attempt of a run older than any window; a job with no artifact (`missing`); both producers'
+    ref names and a dispatch run; a second pass that changes nothing.
 
 Proof:
 - `npm test` is green, and `ci-gate` on the branch is GREEN.
-- After merge, a `workflow_dispatch` of `test-history.yml` writes the first day's files.
-- The run's log shows counts only.
-- `git show test-history:SSFSKIM/MAWS/runs/<day>.jsonl | wc -l` matches the day's unit jobs since M1 landed.
+- After merge, a `workflow_dispatch` of `test-history.yml` writes the first day's files, and its log shows counts only.
+- For one run, the reconstructed membership's size equals that job's `Tests` line (passed plus skipped).
 
 ### M3–M6
 
@@ -207,8 +296,8 @@ Each is written here in full when its condition holds:
 
 ## Verification
 
-- Spec: one adversarial review (`doperpowers:adversarial-reviewer`), run while M1 is built.
-- M1: class 1a on the pool, then the MAWS architect lands it.
+- Spec: one adversarial review (`doperpowers:adversarial-reviewer`), done (Decision Log).
+- M1: class 1a on the pool plus the fault injection, then the MAWS architect lands it.
 - M2: `doperpowers:reviewer-medium` on the PR before merge.
 - M3–M6: named when each is written.
 
@@ -216,6 +305,18 @@ Each is written here in full when its condition holds:
 
 - 2026-10-21: Order fixed by the owner: record first (M1–M2), then selection (M4), then overhead (M5), then the skill
   (M6). Labels and reports (M3) wait for data.
+- 2026-10-21: Adversarial review (astra) found seven gaps in the first draft; all were taken.
+  1. **Per-run membership.** The first draft inferred a pass from the day's last green suite, which is wrong across
+     branches. Each run now records its exact membership, as a delta from a daily base.
+  2. **Project in the case id.** Vitest's default JUnit drops the project, so `renderer` and `renderer-compiled` cases
+     merged. MAWS now writes `<project>:<file>`. Checked locally: `renderer:src/renderer/src/app/MainBuildRow.test.tsx`.
+  3. **Provenance resolved at collection.** The record now stores the tested commit, tree, producer, label and previous
+     run. Both producers' ref formats are covered; the first draft knew only MAWS's.
+  4. **No new red gate.** The upload is `continue-on-error`; report writing is accepted as residue.
+  5. **Attempts.** Artifact names carry the attempt, and discovery is by artifact, not by run creation day.
+  6. **File durations.** These are kept from `<testsuite time>`, not summed from cases.
+  7. **Report ownership.** The upload runs only after this job's test step; `ci-results/` is cleared first; ingestion
+     checks the report's timestamps.
 
 ## Surprises & Discoveries
 
