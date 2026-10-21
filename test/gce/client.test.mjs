@@ -98,9 +98,13 @@ test('a secret is read as its latest version\'s text', async () => {
   assert.equal(await gce.secret('ci-kit-app-id'), '5337915');
 });
 
+// As `gcloud config config-helper --format=json` prints it (the fields read).
+const helper = (token, expiry) => JSON.stringify({ credential: { access_token: token, token_expiry: expiry } });
+
 test('the token comes from the metadata server on Cloud Run and from gcloud elsewhere, cached', async () => {
   let gcloud = 0;
-  const local = accessToken({ env: {}, exec: async () => { gcloud += 1; return 'from-gcloud\n'; } });
+  const now = () => Date.parse('2026-10-21T13:00:00Z');
+  const local = accessToken({ env: {}, now, exec: async () => { gcloud += 1; return helper('from-gcloud', '2026-10-21T13:59:00Z'); } });
   assert.equal(await local(), 'from-gcloud');
   assert.equal(await local(), 'from-gcloud');
   assert.equal(gcloud, 1);
@@ -114,6 +118,38 @@ test('the token comes from the metadata server on Cloud Run and from gcloud else
   });
   assert.equal(await cloud(), 'from-metadata');
   assert.deepEqual(urls, ['http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token Google']);
+});
+
+// Pool M3: gcloud hands back its cached token, which may expire minutes after it is printed; a bake held it for 30 min
+// and died on a 401 (ci-kit friction tracker #68).
+test('a token is kept only until 5 min before its own expiry, from gcloud and from the metadata server', async () => {
+  let t = Date.parse('2026-10-21T13:00:00Z');
+  const now = () => t;
+  const minted = [];
+  const local = accessToken({ env: {}, now, exec: async () => {
+    minted.push(new Date(t).toISOString());
+    return helper(`tok-${minted.length}`, new Date(t + (minted.length === 1 ? 8 : 60) * 60_000).toISOString());
+  } });
+  assert.equal(await local(), 'tok-1'); // gcloud's cached token, 8 min from expiry
+  t += 2 * 60_000;
+  assert.equal(await local(), 'tok-1');
+  t += 2 * 60_000; // 4 min left
+  assert.equal(await local(), 'tok-2');
+  t += 50 * 60_000;
+  assert.equal(await local(), 'tok-2');
+  t += 6 * 60_000;
+  assert.equal(await local(), 'tok-3');
+
+  let fetched = 0;
+  const cloud = accessToken({ env: { K_SERVICE: 'ci-kit-launcher' }, now, fetchImpl: async () => {
+    fetched += 1;
+    return json(200, { access_token: `md-${fetched}`, expires_in: 400, token_type: 'Bearer' });
+  } });
+  assert.equal(await cloud(), 'md-1');
+  t += 60_000;
+  assert.equal(await cloud(), 'md-1');
+  t += 60_000; // 280 s left
+  assert.equal(await cloud(), 'md-2');
 });
 
 test('a 4xx after an insert was accepted, from its wait call or its finished operation, is marked accepted', async () => {
