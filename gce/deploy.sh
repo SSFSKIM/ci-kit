@@ -53,6 +53,9 @@ base() {
   # needs no actAs on any other.
   g projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$SA" \
     --role=roles/compute.instanceAdmin.v1 --condition=None > /dev/null
+  # Read the Cloud NAT's day (bytes processed, addresses held) for the ledger's daily line (spec M6).
+  g projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$SA" \
+    --role=roles/monitoring.viewer --condition=None > /dev/null
   # Cloud Run source deploys build as the project's default compute account (new projects since 2024), which needs
   # the builder role to read the uploaded source and push the image. No kit VM runs as that account: VMs have none.
   local number
