@@ -315,7 +315,10 @@ test('a builder machine refused for quota falls back to the next machine; capaci
 
 test('one region, two placements: a smoke VM each: the cpus-2 machine, then the next size\'s when E2 is refused; and the fallback placement\'s', async () => {
   const gce = fakeGce({ insertErrors: ['', 'QUOTA_EXCEEDED'], scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
-  await bake(gce);
+  // Only C3D booted the image: the smoke proves the family of the machine it ran on, never the rest of the map, so the
+  // image never booted on E2 and is not ready (review of 096e6f6, P2).
+  await assert.rejects(bake(gce), /no smoke VM passed on e2/);
+  assert.deepEqual(ready(gce), []);
   const smokes = gce.calls.filter((c) => c.startsWith(`insert ci-kit-gce-builder-${RUN}-smoke`));
   assert.deepEqual(smokes, [
     `insert ci-kit-gce-builder-${RUN}-smoke-1 e2-highcpu-2@us-central1-a`,
@@ -374,6 +377,12 @@ test('a placement refused everywhere is skipped with a warning while another of 
   assert.equal(smokes.filter((c) => c.includes('-smoke-2 ')).length, C4D_CENTRAL_SMOKES, 'every zone and machine was asked');
   assert.ok(smokes.some((c) => c.includes('-smoke-3 c3d-highcpu-4@us-central1-a')), 'the next placement is still smoked');
   assert.deepEqual(leftInstances(gce), []);
+});
+
+test('a smoke proves the family of the machine it booted: E2 and C3D in one map, both booted, the image is ready', async () => {
+  const gce = fakeGce({ scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
+  const { image } = await bake(gce); // E2_CENTRAL smokes e2-highcpu-2, CENTRAL c3d-highcpu-4
+  assert.deepEqual(ready(gce), [image]);
 });
 
 test('quota refusing a placement\'s smoke VM skips it too', async () => {

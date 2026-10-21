@@ -638,8 +638,9 @@ CI_KIT_COMMIT=$(git rev-parse HEAD) node gce/bake/bake.mjs     # default commit:
    `ci-kit-smoke=<vCPUs>` in place of a JIT config. A placement whose smoke VM no zone or machine takes (capacity or
    quota refused every attempt; C4D us-central1 had no capacity even on demand on 2026-10-21) is skipped, logged as a
    `warning:` naming it and listed again on the bake's last line; a smoke VM that boots and fails its checks fails the
-   bake. An image that does not boot on a machine family of `gce.json` is never ready: every family needs a passing
-   smoke in at least one of its placements, so a family whose every placement was skipped fails the bake. The job
+   bake. An image that does not boot on a machine family of `gce.json` is never ready: every family needs a smoke VM of
+   that family to pass in at least one placement (a smoke proves the machine it booted, not the rest of its
+   placement's map), so a family whose every placement was skipped fails the bake. The job
    unit runs `gce/vm/smoke.sh` in a job container: vCPUs, user, isolation, the runner, zsh and MAWS's fonts, Node 22
    and 24, every warmed
    cache, the work directory, DNS, egress, and the metadata server refused. It reports

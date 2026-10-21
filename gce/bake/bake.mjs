@@ -7,8 +7,8 @@
 // gce.json, runs one real Actions job on a VM booted from it, and marks it ready only when they pass. A placement whose
 // smoke VM no zone or machine takes (capacity or quota: a stock-out, live 2026-10-21 in C4D us-central1) is skipped
 // with a warning; a smoke VM that boots and fails fails the bake. The image is ready only when every machine family of
-// gce.json passed a smoke in at least one placement: it boots on each family's hardware, and a busy placement does not
-// hold back every image. Every VM and runner registration
+// gce.json passed a smoke (on a machine of that family) in at least one placement: it boots on each family's hardware,
+// and a busy placement does not hold back every image. Every VM and runner registration
 // the bake made is gone when it ends, a failed bake deletes its own image, and the two newest ready images are kept.
 // Env (optional): CI_KIT_COMMIT, the kit commit to bake (default: main's head); CI_KIT_BAKE_RUN, the run id.
 import { readFile } from 'node:fs/promises';
@@ -47,7 +47,7 @@ async function createFirst(gce, options, body, log) {
     try {
       await gce.insertInstance(zone, spec);
       log(`${spec.name}: ${machine}@${zone} created`);
-      return { name: spec.name, zone };
+      return { name: spec.name, zone, machine };
     } catch (err) {
       const why = refusal(err);
       if (!why) throw err;
@@ -61,8 +61,9 @@ async function createFirst(gce, options, body, log) {
 // Every attempt of createFirst was refused for capacity or quota: nothing was created.
 class Refused extends Error {}
 
-// The machine families a placement names (c4d, c3d, …).
-const familiesOf = (placement) => new Set(Object.values(placement.machines).map((m) => m.split('-')[0]));
+// A machine's family (c4d, c3d, …), and the families a placement's machines name.
+const familyOf = (machine) => machine.split('-')[0];
+const familiesOf = (placement) => new Set(Object.values(placement.machines).map(familyOf));
 
 // One look at a bake VM: the instance and its report at `path`. The report is remembered across looks, since it may
 // no longer be readable once the guest is off. A VM relabelled by someone (to keep it for debugging) is theirs from
@@ -198,12 +199,13 @@ export async function runBake(gce, { cfg, sha, runId, token, gh, script, sleep, 
       const checked = await awaitReport(gce, smoke, 'ci-kit/smoke', SMOKE_TIMEOUT_MS, wait);
       if (!checked.ok) throw new Error(`ci-kit: the smoke VM in placement ${k + 1} (${placement.region}) did not pass: ${checked.reason}`);
       await deleteIfOwned(gce, smoke, runId, log);
-      for (const f of familiesOf(placement)) proven.add(f);
+      proven.add(familyOf(smoke.machine)); // what booted, not the rest of the placement's machine map
     }
     const families = new Set(cfg.placements.flatMap((p) => [...familiesOf(p)]));
     const unproven = [...families].filter((f) => !proven.has(f));
     if (unproven.length) {
-      throw new Error(`ci-kit: no smoke VM passed on ${unproven.join(', ')}: ${skipped.join(', ')} ${skipped.length === 1 ? 'was' : 'were'} skipped`);
+      const why = skipped.length ? `: ${skipped.join(', ')} ${skipped.length === 1 ? 'was' : 'were'} skipped` : '';
+      throw new Error(`ci-kit: no smoke VM passed on ${unproven.join(', ')}${why}`);
     }
 
     const url = await realJob(gce, gh, { cfg, names, runId, image: source, check, ...wait });
