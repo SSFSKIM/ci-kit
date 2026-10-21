@@ -88,7 +88,9 @@ toward the boot alone, and below it for the jobs a warm runner covers.
   12–19 s per unit shard against 36 s (C4D, old image, 39638465062) and 52 s (C3D, 39630519998); plan → last 294 s
   against #108's 310 s (on C3D, the burst holding us-west4; one sample). The day-of-rows proofs remain.
 - [ ] M4 — Launch on GitHub's `workflow_job` webhook. (2026-10-21) Built, reviewer-high clean after two fix waves, ci-gate green; PR to
-  CI-opt. Deploy follows the merge and the owner's secret and App steps; its proofs follow the deploy.
+  CI-opt. Merged as #76 (0c71271); `deploy.sh base` 2026-10-21 (receiver's service account). A load-sensitive gce
+  test failure seen once while it was reviewed is ci-kit #77. The owner's secret and App steps, the deploy and the
+  proofs follow.
 - [ ] M5 — Pre-launch of a run's gate VMs (the owner chose it 2026-10-21; no warm runner).
 
 ## Acceptance
