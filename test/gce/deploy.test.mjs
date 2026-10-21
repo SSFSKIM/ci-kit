@@ -89,6 +89,25 @@ test('a subnetwork that has Private Google Access already is not updated', () =>
   assert.deepEqual(verb(run.calls, 'compute', 'networks', 'subnets', 'update'), []);
 });
 
+// Today's network (2026-10-21): us-central1 and us-west4 have their subnetworks, routers and NATs. The shipped
+// placements' other regions get theirs, each on its own /20 after those two; what exists is not touched.
+test('today\'s network and the shipped placements: the two subnetworks that exist kept, each new region on the next free /20', () => {
+  const today = [
+    { name: 'ci-kit-us-central1', region: 'us-central1', range: '10.64.0.0/20', pga: true },
+    { name: 'ci-kit-us-west4', region: 'us-west4', range: '10.64.16.0/20', pga: true },
+  ];
+  const run = network({ network: true, subnets: today, routers: ['us-central1', 'us-west4'], nats: ['us-central1', 'us-west4'] });
+  assert.equal(run.status, 0, run.stderr);
+  const created = verb(run.calls, 'compute', 'networks', 'subnets', 'create').map((c) => c[4]).sort();
+  assert.deepEqual(created, SHIPPED.filter((s) => !today.some((t) => t.name === s.name && t.region === s.region)).map((s) => s.name).sort());
+  assert.deepEqual(verb(run.calls, 'compute', 'networks', 'subnets', 'update'), [], 'the two that exist are left as they are');
+  assert.deepEqual(run.state.subnets.slice(0, 2), today);
+  const ranges = run.state.subnets.map((s) => s.range);
+  assert.equal(new Set(ranges).size, ranges.length, 'no two subnetworks share a range');
+  assert.deepEqual(ranges.slice(2).sort(), ['10.64.32.0/20', '10.64.48.0/20', '10.64.64.0/20']);
+  assert.deepEqual(run.state.nats.sort(), [...REGIONS].sort(), 'a router and NAT in each new region');
+});
+
 test('a rule allowing ingress into the network still stops the deploy', () => {
   const run = network({ firewall: ['ci-kit-ssh\tci-kit\tINGRESS\tFalse\ttcp:22', 'default-ssh\tdefault\tINGRESS\tFalse\ttcp:22'] });
   assert.equal(run.status, 1);

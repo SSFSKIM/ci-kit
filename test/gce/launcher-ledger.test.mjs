@@ -136,6 +136,37 @@ test('dollars: a c4d VM in us-west4 at the catalog\'s C4D rates there, on Hyperd
   assert.equal(dollars({ ...vm, diskType: 'pd-balanced', provisioning: 'spot' }), null);
 });
 
+// M6's new placements (spec 2026-10-21, Stock-out and quota resilience, item 2), at the Cloud Billing catalog's rates on
+// 2026-10-21: [vCPU, memory] an hour (C4D memory per GB, C3D per GiB), and the boot disk a month (Hyperdisk Balanced:
+// capacity per GiB, IOPS and MiB/s above the free baseline; pd-balanced: per GiB). SKU ids beside the table in ledger.mjs.
+const HDB = (gib, iops, mibps) => (50 * gib + 300 * iops + 75 * mibps) / 730;
+const PD = (gib) => 50 * gib / 730;
+const NEW_PAIRS = [
+  { machine: 'c4d-highcpu-8', zone: 'us-central1-c', spot: [0.01383, 0.00148], standard: [0.0327035, 0.003495578], diskType: 'hyperdisk-balanced', disk: HDB(0.08, 0.005, 0.04) },
+  { machine: 'c4d-highcpu-8', zone: 'us-east1-b', spot: [0.01383, 0.00148], standard: [0.0327035, 0.003495578], diskType: 'hyperdisk-balanced', disk: HDB(0.09, 0.006, 0.045) },
+  { machine: 'c4d-highcpu-8', zone: 'us-east4-a', spot: [0.01735, 0.001855], standard: [0.0327035, 0.003495578], diskType: 'hyperdisk-balanced', disk: HDB(0.08, 0.005, 0.04) },
+  { machine: 'c4d-highcpu-8', zone: 'us-east5-c', spot: [0.01362, 0.001454], standard: [0.0327035, 0.003495578], diskType: 'hyperdisk-balanced', disk: HDB(0.08, 0.005, 0.04) },
+  { machine: 'c3d-highcpu-8', zone: 'us-east1-d', spot: [0.00679, 0.000912], standard: [0.029563, 0.003959], diskType: 'pd-balanced', disk: PD(0.10) },
+  { machine: 'c3d-highcpu-8', zone: 'us-east4-b', spot: [0.01331, 0.001779], standard: [0.029563, 0.003959], diskType: 'pd-balanced', disk: PD(0.11) },
+];
+
+test('dollars: a VM in each of M6\'s new family and region pairs is priced at that region\'s rates and boot disk', () => {
+  for (const pair of NEW_PAIRS) {
+    const c4d = pair.machine.startsWith('c4d-');
+    const memory = c4d ? 15 * 1.073741824 : 16; // c4d-highcpu-8: 15 GiB, in GB; c3d-highcpu-8: 16 GiB
+    for (const [provisioning, ip] of [['spot', 0.0025], ['standard', 0.005]]) {
+      const [vcpu, mem] = pair[provisioning];
+      const got = dollars({ machine: pair.machine, zone: pair.zone, provisioning, diskType: pair.diskType, diskGb: 50, seconds: 3600 });
+      const want = 8 * vcpu + memory * mem + ip + pair.disk;
+      assert.ok(got !== null && Math.abs(got - want) < 1e-9, `${pair.machine}@${pair.zone} ${provisioning}: ${got}, not ${want}`);
+    }
+  }
+  // Size 2 of a C3D placement is c3d-highcpu-4 (8 GiB): priced there too.
+  assert.ok(dollars({ machine: 'c3d-highcpu-4', zone: 'us-east4-a', provisioning: 'spot', diskType: 'pd-balanced', diskGb: 50, seconds: 60 }) > 0);
+  // A placement's disk type is priced only where that region has it: C3D was never placed in us-east5.
+  assert.equal(dollars({ machine: 'c3d-highcpu-8', zone: 'us-east5-a', provisioning: 'spot', diskType: 'pd-balanced', diskGb: 50, seconds: 60 }), null);
+});
+
 test('a running row records its VM\'s disk type; the final row is priced with it', () => {
   const launching = launchRow({ alloc: 'tb0abc0001', repo: SBX, cpus: 8, at: T0, config: 'abcdef0123' });
   const running = runningRow(launching, { zone: 'us-west4-a', machine: 'c4d-highcpu-8', provisioning: 'spot', diskType: 'hyperdisk-balanced', created: T0 });

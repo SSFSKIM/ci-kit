@@ -251,11 +251,31 @@ machine for every size (`machines`: 2, 4, 8, 16) and the boot `disk_type`.
 ]
 ```
 
+The pool's placements (spec M6, 2026-10-21), in walk order; C4D's sizes are `c4d-highcpu-2/4/8/16` on
+`hyperdisk-balanced`, C3D's `c3d-highcpu-4/4/8/16` on `pd-balanced`. A region with two placements has one subnetwork:
+
+| # | family | region | zones | subnetwork |
+|---|---|---|---|---|
+| 1 | C4D | us-west4 | a, b, c | `ci-kit-us-west4` |
+| 2 | C4D | us-central1 | a, b, c, f | `ci-kit-us-central1` |
+| 3 | C4D | us-east1 | b, c, d | `ci-kit-us-east1` |
+| 4 | C4D | us-east4 | a, b, c | `ci-kit-us-east4` |
+| 5 | C4D | us-east5 | a, b, c | `ci-kit-us-east5` |
+| 6 | C3D | us-central1 | a, b, c, f | `ci-kit-us-central1` |
+| 7 | C3D | us-east1 | b, c, d | `ci-kit-us-east1` |
+| 8 | C3D | us-east4 | a, b, c | `ci-kit-us-east4` |
+
+Every zone named offers the placement's machines (`gcloud compute machine-types list`, 2026-10-21). us-south1 and
+us-west2 offer no C4D; us-east5 is C4D only, its C3D grant (24) left unused. How `max_vcpus` follows these
+placements is under Quotas and budget.
+
 The order is speed first; reordering is a commit on main, read by the next tick. `placements` is the only form: the
 old keys (`region`, `subnetwork`, `zones`, `machines`, `machine_fallback`) are refused by `gce/launcher/config.mjs`.
-E2 left the pool with them (its us-central1 quota raise was refused twice); size 2 in us-central1 runs on
+E2 left the pool with them (its us-central1 quota raise was refused twice); size 2 on a C3D placement runs on
 `c3d-highcpu-4`. Adding a placement is a block in this list plus `gce/deploy.sh network`, which creates its
-subnetwork. The bake reads the `gce.json` bundled at its deploy, so a change to the placements reaches it with
+subnetwork, router and NAT, and a smoke VM there, both from the change's checkout before it merges (the launcher reads
+main's list every tick, so a placement published before its region is provisioned is walked into and refused). The
+bake reads the `gce.json` bundled at its deploy, so a change to the placements reaches it with
 `gce/deploy.sh bake`.
 
 **The launcher.** Cloud Scheduler's `ci-kit-launcher-tick` POSTs to `ci-kit-launcher`'s `/tick` every minute with an
@@ -557,7 +577,9 @@ the label again before it acts.
 
 **The network.** Every builder, smoke VM and job VM sits on its placement's subnetwork of the VPC `ci-kit`
 (`network` and each placement's `subnetwork` in `gce.json`: `ci-kit-us-central1`, 10.64.0.0/20, and `ci-kit-us-west4`,
-10.64.16.0/20). How a VM reaches GitHub, apt, npm and Docker Hub is `gce.json`'s `egress`, a commit on main read by the
+10.64.16.0/20; M6's new regions take the next free /20s when `gce/deploy.sh network` runs with them, `ci-kit-us-east1`,
+`ci-kit-us-east4` and `ci-kit-us-east5` in that order, 10.64.32.0/20, 10.64.48.0/20 and 10.64.64.0/20 on today's
+network). How a VM reaches GitHub, apt, npm and Docker Hub is `gce.json`'s `egress`, a commit on main read by the
 next tick (the bake's, by the `gce.json` bundled at its deploy):
 - `"external"`, the default when the key is absent: each VM takes an ephemeral external IPv4, priced on its ledger
   row. Each counts against its region's `IN_USE_ADDRESSES` quota (Quotas and budget), whose refusal is a quota
@@ -747,8 +769,9 @@ per allocation:
   the launcher had no row for, or one that vanished before its run limit with no preemption recorded: deleted by a
   hand outside the launcher).
 - `seconds` runs from the VM's creation to its deletion, `$` at the rates in `gce/launcher/ledger.mjs` by region and
-  family (c3d and e2 in us-central1, 2026-10-16; c4d in us-west4, the Cloud Billing catalog on 2026-10-21, SKU ids
-  beside the table), its egress (its external IPv4, $0.0025 an hour on spot and $0.005 on demand; or under `nat` its
+  family (c3d and e2 in us-central1, 2026-10-16; c4d in us-west4, and M6's c4d in us-central1, us-east1, us-east4
+  and us-east5 and c3d in us-east1 and us-east4, the Cloud Billing catalog on 2026-10-21, SKU ids beside the table),
+  its egress (its external IPv4, $0.0025 an hour on spot and $0.005 on demand; or under `nat` its
   hours of its region's Cloud NAT gateway, $0.0014 an hour, the NAT's GB processed and its addresses being per region,
   not per VM, and going on the daily line with M6's counts) and the disk by region and type included (Hyperdisk Balanced with the IOPS and throughput its defaults provision above the free baseline). A
   VM in a region, family or disk type with no rate there shows `-`. The row's JSON carries the disk type (`diskType`; a row without one is from before placements,
@@ -806,11 +829,34 @@ work there to end, then add it to the new file; jobs queued in between wait in G
 idle runners first, at once. To know the launcher runs the removal commit, read `config` in its tick log (a launcher
 that cannot read main keeps its last good copy, and its log says so).
 
-**Quotas and budget.** `max_vcpus` (242: the granted C3D us-central1 192 plus C4D us-west4 50, 2026-10-21) is the
-launcher's soft cap on the vCPUs of its VMs in flight; the project's
+**Quotas and budget.** `max_vcpus` is the launcher's soft cap on the vCPUs of its VMs in flight; the project's
 quotas are the hard cap, and a refusal is a wait. Parallelism comes first: the owner ruled on 2026-10-21 that CI must
-never be the bottleneck, and that cost is not a reason to lower parallelism. So `max_vcpus` follows the quotas. Granted
-through Cloud Quotas:
+never be the bottleneck, and that cost is not a reason to lower parallelism. So `max_vcpus` follows the quotas.
+
+The sizing rule: `max_vcpus` is the sum over the placements' regions of what each region can hold at once, the lesser
+of its families' granted vCPUs (`CPUS-PER-VM-FAMILY`, summed over the region's placements) and its granted external
+addresses times 8. Under `egress: "external"` every VM holds one address, and 8 vCPUs is the pool's mean VM (a MAWS
+class 1a run is 50 vCPUs on 6 VMs), so a region of 8 addresses holds about 64 vCPUs whatever its CPU grants. On
+2026-10-21 (Cloud Quotas, read-only):
+
+| region | family vCPUs granted | addresses | addresses × 8 | holds |
+|---|---|---:|---:|---:|
+| us-west4 | C4D 50 | 8 | 64 | 50 |
+| us-central1 | C4D 24 + C3D 192 = 216 | 32 | 256 | 216 |
+| us-east1 | C4D 24 + C3D 24 = 48 | 8 | 64 | 48 |
+| us-east4 | C4D 24 + C3D 24 = 48 | 8 | 64 | 48 |
+| us-east5 | C4D 24 | 8 | 64 | 24 |
+| | | | `max_vcpus` | **386** |
+
+386 is under `CPUS-ALL-REGIONS` (512), which bounds every region together. Recompute it when a grant changes: an
+address raise lifts only the regions whose addresses bind (none today), a family raise its region up to its addresses.
+Under `egress: "nat"` no VM holds an address and the sum is of the family grants alone, the same 386 today. Each region also holds a
+Hyperdisk Balanced capacity quota (`HDB-TOTAL-GB`: 4096 in us-west4, us-central1, us-east1 and us-east5; us-east4 still
+500, ten 50 GB boot disks, above its 8 addresses) and `SSD-TOTAL-GB` for pd-balanced (500 in the east regions, ten
+disks). Granted through Cloud Quotas:
+- 2026-10-21 (M6): `CPUS-ALL-REGIONS` 512; C4D per-family 24 in us-central1, us-east1, us-east4 and us-east5 (the
+  default), C3D 24 in us-east1 and us-east4 (the default); `HDB-TOTAL-GB` 4096 as above; each east region's
+  `IN-USE-ADDRESSES` is its default 8;
 - 2026-10-21: `CPUS-ALL-REGIONS` 256, C3D per-family 192 in us-central1, `INSTANCES` 64, `SSD-TOTAL-GB` 4096;
   `IN-USE-ADDRESSES` asked 64, still 32 when this was written (each job VM holds one external address under
   `egress: "external"`, so 32 VMs at once in a region until granted; under `"nat"` it holds none);
@@ -819,13 +865,17 @@ through Cloud Quotas:
   and the rest fell back to `c3d-highcpu-4` (`machine_fallback`); E2 has since left the pool with that key.
 
 A job reserves the largest machine its walk could land on in the launcher's count (a `cpus-2` job: `c3d-highcpu-4`).
-`max_vcpus` admits only; it tracks the sum of the placements' granted family quotas, and a placement's own refusal
-(family vCPUs, addresses, instances, disk capacity) falls through to the next one, so raise it with each grant (C4D us-west4's
-re-filed 128 was denied 2026-10-21, so it stays 50).
-`PREEMPTIBLE_CPUS` is 0, so spot VMs count against the ordinary CPU quotas. To check:
+`max_vcpus` admits only; a placement's own refusal (family vCPUs, addresses, instances, disk capacity) falls through to
+the next one, so recompute it by the sizing rule with each grant (C4D us-west4's re-filed 128 was denied 2026-10-21, so
+it stays 50).
+`PREEMPTIBLE_CPUS` is 0, so spot VMs count against the ordinary CPU quotas. A family's refusal reads `Quota
+'CPUS_PER_VM_FAMILY' exceeded.  Limit: 50.0 in region us-west4.`, and the launcher skips only that family there for the
+rest of the tick. To check the regional quotas, and the family and all-regions ones (Cloud Quotas only: `regions
+describe` does not list them):
 
 ```
-gcloud compute regions describe us-central1 --project=ssfskim-ci-kit --format=json | jq '.quotas[]|select(.metric|test("^(CPUS|E2_CPUS|INSTANCES|IN_USE_ADDRESSES|SSD_TOTAL_GB)$"))'
+for r in us-west4 us-central1 us-east1 us-east4 us-east5; do gcloud compute regions describe $r --project=ssfskim-ci-kit --format=json | jq -c --arg r $r '[.quotas[]|select(.metric|test("^(INSTANCES|IN_USE_ADDRESSES|SSD_TOTAL_GB)$"))|{(.metric):.limit}]|add+{region:$r}'; done
+for q in CPUS-PER-VM-FAMILY-per-project-region HDB-TOTAL-GB-per-project-region CPUS-ALL-REGIONS-per-project; do curl -4 -s -H "Authorization: Bearer $(gcloud auth print-access-token)" -H 'x-goog-user-project: ssfskim-ci-kit' "https://cloudquotas.googleapis.com/v1/projects/ssfskim-ci-kit/locations/global/services/compute.googleapis.com/quotaInfos/$q" | jq -c '.dimensionsInfos[]|select(.details.value!=null)|{d:.dimensions,v:.details.value}' | grep -E 'us-(west4|central1|east1|east4|east5)|"d":null'; done
 ```
 
 The billing budget alert on the project ($40, mails at 50/90/100 %) is the billing admin's to create (spec,
