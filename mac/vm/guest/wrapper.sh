@@ -143,8 +143,8 @@ answer_stop() { # [ended]
   stopping=1
   say "no job taken; stopping the listener (SIGINT to $pid's group)"
   kill -INT -- "-$pid" 2>/dev/null || kill -INT "$pid" 2>/dev/null
-  local until=$((SECONDS + stop_wait))
-  while kill -0 "$pid" 2>/dev/null && ((SECONDS < until)); do sleep 0.1; done
+  local deadline=$((SECONDS + stop_wait))
+  while kill -0 "$pid" 2>/dev/null && ((SECONDS < deadline)); do sleep 0.1; done
   if kill -0 "$pid" 2>/dev/null; then
     say "the runner did not exit within $stop_wait s of SIGINT; killing it"
     kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
