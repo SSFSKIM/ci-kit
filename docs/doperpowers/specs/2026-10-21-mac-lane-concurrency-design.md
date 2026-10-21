@@ -406,9 +406,16 @@ Only if M4's and M5's memory reads show room: install it, and run the three-way 
   - Recovery runs under the lock, and every sweep spares all live workers.
   - M4 evidence for measured groups beside preparation bursts, with a stated fallback.
 
-  The alternative considered: ending a refused job at the runner level, for example by killing its own
-  `Runner.Worker`. M1's builder checks the runner source for whether that ends the job with no further steps. It is
-  adopted only on that evidence.
+- 2026-10-21 (M1's builder, from the runner source): **no runner-level abort.** The alternative was to end a refused
+  job by sending SIGKILL to its own `Runner.Worker`. The runner source (v2.338.0) shows it would work mechanically: the
+  listener reads the signalled exit as a worker crash and reports the job Failed (`JobDispatcher.cs` L543–601), it
+  keeps dispatching (`Runner.cs`), and no further step runs, since the end hook and post steps run inside the worker
+  (`JobExtension.cs` L572–581). It was rejected for two reasons:
+  - The `ci-kit: … rerun` line would likely never reach the job's log, because the worker uploads its own step logs.
+    The caller would see a worker crash, not a refusal.
+  - The end hook would never run, so a claim could be released only by staleness or the watcher's reconcile.
+
+  The contract on post-refusal steps stands.
 - 2026-10-21: **`tool-time-heavy-live` stays exclusive** while it is in `MEASURED_E2E`, though its code is safe beside
   others. Dropping it from that list is MAWS's call.
 
