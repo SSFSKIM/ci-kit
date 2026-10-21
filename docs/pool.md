@@ -458,8 +458,11 @@ served repo's run begins, the tick launches the VMs its pool jobs will ask for, 
   one idle window of its shape's VMs.
 - **Admission.** Pre-launches come after the queued jobs' launches: none while a queued job waits, each reserves the
   largest machine its walk could land on as a launch does, against what the launches left of `max_vcpus`, oldest
-  run first, and the first that does not fit stops the rest until a later tick. They walk the placements and share
-  the tick's quota memory like any launch, after the queued jobs' launches in the queue.
+  run first, and the first that does not fit stops the rest until a later tick. They start only once the queued jobs'
+  launches have ended (those mint and insert up to 16 at once, and a pre-launch beside them could take the quota a
+  job needs), and not at all in a tick where one of those launches stayed unserved (refused, unsettled or past the
+  tick's budget): that tick has no spare quota to speculate with. They walk the placements and share the tick's quota
+  memory like any launch.
 - **To check:** the launcher logs `pre-launched <instance> (<machine>, <spot|standard>, <zone>) for run <id>
   (<workflow>) in <repo>`, and its tick line lists them in `prelaunched`. The ledger's row and daily line and the
   latency report show what they did (Reading the GCE ledger, below).

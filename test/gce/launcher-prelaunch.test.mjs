@@ -10,6 +10,7 @@ import { createGceLedger } from '../../gce/launcher/ledger-store.mjs';
 import { parseRow, renderRow } from '../../gce/launcher/ledger.mjs';
 import { instanceName } from '../../gce/launcher/logic.mjs';
 import { NEW_CFG } from './config-fixtures.mjs';
+import { GceError } from '../../lib/gce.mjs';
 
 const SBX = 'SSFSKIM/ci-kit-sandbox';
 const CFG = { ...NEW_CFG, repos: [{ repo: SBX }] };
@@ -20,8 +21,9 @@ const COMMIT = 'c0ffee00aabbccddeeff00112233445566778899';
 const L = (n) => ['self-hosted', 'ci-kit-pool', `cpus-${n}`];
 const GATES = [['static', 16], ['unit 1/4', 8], ['unit 2/4', 8], ['unit 3/4', 8], ['unit 4/4', 8], ['probes', 2]];
 
-function setup({ cfg = CFG } = {}) {
-  const w = world({ start: T0 });
+// history: the repo whose earlier runs are on the ledger, and the gates each of them ran.
+function setup({ cfg = CFG, history = { repo: SBX, gates: GATES }, repos } = {}) {
+  const w = world({ start: T0, ...(repos ? { repos } : {}) });
   let seq = 0;
   const make = () => new Launcher({
     gce: w.gce, gh: w.github, ledger: createGceLedger(w.github, cfg.ledger, { now: w.now }), cfg, config: COMMIT, poolRepos: [],
@@ -30,11 +32,11 @@ function setup({ cfg = CFG } = {}) {
   // Three earlier runs of the workflow on the ledger, each a VM per gate.
   let id = 1_000_000;
   for (const run of [11, 12, 13]) {
-    for (const [name, cpus] of GATES) {
+    for (const [name, cpus] of history.gates) {
       id += 1;
       const alloc = `zz${String(id).padStart(8, '0')}`;
       const row = {
-        alloc, instance: instanceName(alloc), repo: SBX, cpus, at: new Date(T0 - 3 * 3600_000).toISOString(), config: 'c0ffee00',
+        alloc, instance: instanceName(alloc), repo: history.repo, cpus, at: new Date(T0 - 3 * 3600_000).toISOString(), config: 'c0ffee00',
         state: 'final', end: 'done', job: { id, name, run, workflow: GATE },
       };
       w.gh.comments.push({ id, issue: 1, body: renderRow(row), updated_at: new Date(T0 - 3 * 3600_000).toISOString() });
@@ -164,4 +166,51 @@ test('queued pool jobs launch first; a run\'s pre-launch takes only the vCPUs th
   w.advance(10_000);
   await launcher.tick();
   assert.deepEqual(sizes(forRun(w, plan.run_id)), [8, 8, 8, 16], 'two more 8s in the 16 freed; the third 8 waits');
+});
+
+// Review (M5, reviewer-medium P2): pre-launches shared the queued jobs' launch queue, whose 16 workers mint and insert
+// at once, so a pre-launch could take the quota a queued job needed. A queued sandbox cpus-16 gate, a MAWS run that
+// pre-launches one cpus-8, and 16 vCPUs of quota in all: the sandbox's JIT answered late, the pre-launch inserted
+// first, and the gate was refused for quota, tick after tick, while the speculative VM (another repo's) idled.
+const MAWS = 'SSFSKIM/MAWS';
+function quotaWorld({ vcpus }) {
+  const { w, make } = setup({
+    cfg: { ...NEW_CFG, repos: [{ repo: SBX }, { repo: MAWS }] },
+    history: { repo: MAWS, gates: [['unit', 8]] },
+    repos: { [SBX]: { private: true }, [MAWS]: { private: true } },
+  });
+  const used = () => w.g.instances.reduce((sum, i) => sum + Number(i.machineType.split('-').pop()), 0);
+  const insert = w.gce.insertInstance;
+  const inserts = [];
+  w.gce.insertInstance = async (zone, body, opts) => {
+    inserts.push(`${body.labels['ci-kit-repo']} ${body.labels['ci-kit-cpus']}`);
+    if (used() + Number(body.machineType.split('-').pop()) > vcpus) {
+      throw new GceError(200, `operation failed: Quota 'CPUS_ALL_REGIONS' exceeded.  Limit: ${vcpus}.0 globally.`, ['QUOTA_EXCEEDED'], { accepted: true, finished: true });
+    }
+    return insert(zone, body, opts);
+  };
+  const jit = w.github.jitConfig;
+  w.github.jitConfig = async (repo, spec) => {
+    if (repo === SBX) for (let k = 0; k < 20; k += 1) await new Promise((r) => setImmediate(r)); // GitHub answers it late
+    return jit(repo, spec);
+  };
+  w.sim.queue(SBX, L(16), { name: 'static' });
+  w.sim.queue(MAWS, ['ubuntu-slim'], { name: 'plan' });
+  return { w, launcher: make(), inserts };
+}
+const repoOf = (w, i) => (i.labels['ci-kit-repo'] === 'ssfskim--maws' ? MAWS : SBX);
+
+test('a queued job\'s launch is done before any pre-launch starts, so a pre-launch never takes its quota', async () => {
+  const { w, launcher } = quotaWorld({ vcpus: 16 });
+  const out = await launcher.tick();
+  assert.deepEqual(w.g.instances.map((i) => `${repoOf(w, i)} ${i.labels['ci-kit-cpus']}`), [`${SBX} 16`], 'the gate has its VM');
+  assert.deepEqual(out.prelaunched, [], 'the pre-launch found no quota left, and made nothing');
+});
+
+test('a tick in which a queued job stayed unserved pre-launches nothing: it has no spare quota to speculate with', async () => {
+  const { w, launcher, inserts } = quotaWorld({ vcpus: 8 });
+  const out = await launcher.tick();
+  assert.deepEqual(out.launched, []);
+  assert.deepEqual(inserts, ['ssfskim--ci-kit-sandbox 16'], 'the gate\'s insert, refused for quota; no pre-launch tried');
+  assert.ok(!w.gh.comments.some((c) => parseRow(c.body)?.prelaunch), 'no pre-launch row');
 });

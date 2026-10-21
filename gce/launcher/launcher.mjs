@@ -408,20 +408,37 @@ export class Launcher {
       return;
     }
     // A quota refusal stops no launch but the ones it covers (spec 2026-10-21, The launch queue): each launch skips
-    // what the tick's memory says is out of quota, and one with nothing left waits in GitHub's queue. The queued jobs'
-    // launches are taken first, then the pre-launches.
-    const queue = [...plan.launches, ...ahead];
+    // what the tick's memory says is out of quota, and one with nothing left waits in GitHub's queue.
+    // The queued jobs' launches run to their end before any pre-launch starts: up to 16 launches mint and insert at
+    // once, so a pre-launch beside them could take the quota a waiting job needs (review, M5). And a tick in which any
+    // of them stayed unserved (refused, unsettled, or not started by the deadline) pre-launches nothing: it has no
+    // spare quota to speculate with, and its job comes first on the next tick.
+    const served = await this.launchQueue(plan.launches, image, { seen, deadline, out });
+    if (served < plan.launches.length) {
+      if (ahead.length) this.log(`no pre-launch this tick: ${plan.launches.length - served} queued job(s) were not served`);
+      return;
+    }
+    await this.launchQueue(ahead, image, { seen, deadline, out });
+  }
+
+  // Launches `items` with up to PARALLEL_LAUNCHES at once, none started past the deadline. Returns how many made a VM.
+  async launchQueue(items, image, { seen, deadline, out }) {
+    const queue = [...items];
+    let made = 0;
     const worker = async () => {
       while (queue.length && this.now() < deadline) {
         const result = await this.launch(queue.shift(), image, { seen, deadline, out }).catch((err) => {
           this.log(`launch: ${err.message}`);
           return {};
         });
-        if (result.name) out.launched.push(result.name);
-        if (result.name && result.prelaunch) out.prelaunched.push(result.name);
+        if (!result.name) continue;
+        made += 1;
+        out.launched.push(result.name);
+        if (result.prelaunch) out.prelaunched.push(result.name);
       }
     };
     await Promise.all(Array.from({ length: Math.min(PARALLEL_LAUNCHES, queue.length) }, worker));
+    return made;
   }
 
   // One allocation (spec §3a VM lifecycle 1–2): the launching row, then the JIT config, then the walk over the
