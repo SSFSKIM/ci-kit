@@ -2,7 +2,7 @@
 // median and range.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { stagesOf, summarize, samplePlacement, cleanUpSample } from '../../gce/tools/boot-sample.mjs';
+import { stagesOf, summarize, samplePlacement, cleanUpSample, sample } from '../../gce/tools/boot-sample.mjs';
 import { NEW_CFG } from './config-fixtures.mjs';
 
 const s = (accepted, running, started) => ({ accepted: `2026-10-21T13:00:${accepted}Z`, running: `2026-10-21T13:00:${running}Z`, started });
@@ -47,4 +47,23 @@ test('a sample\'s cleanup deletes its VMs by the run\'s label and unregisters it
   };
   await cleanUpSample({ gce, gh, runId: 'r1', runner: { name: 'ci-kit-bake-r1', id: null }, run: null, log: () => {}, sleep: async () => {} });
   assert.deepEqual(calls, ['list labels.ci-kit=gce-builder', 'delete ci-kit-gce-builder-r1-sample00-check@us-west4-b', 'unregister 7']);
+});
+
+test('a sample\'s check VM takes the configured egress: no external address under egress "nat", one by default', async () => {
+  for (const [egress, external] of [['nat', false], ['external', true]]) {
+    const cfg = { ...NEW_CFG, egress };
+    let body = null;
+    const gce = {
+      insertInstance: async (_zone, b) => { body = b; throw new Error('stop after the insert'); },
+      instances: async () => [], deleteInstance: async () => {},
+    };
+    const gh = {
+      jitConfig: async () => ({ runner: { id: 7 }, encoded_jit_config: 'jit' }),
+      dispatchWorkflow: async () => ({ workflow_run_id: 9 }),
+      getRun: async () => ({ status: 'completed' }), deleteRunner: async () => {},
+    };
+    await assert.rejects(sample({ gce, gh, cfg, placement: cfg.placements[0], project: 'p', image: 'img', machine: 'c4d-highcpu-4',
+      token: async () => 't', out: '/tmp', log: () => {} }), /stop after the insert/);
+    assert.equal(Boolean(body.networkInterfaces[0].accessConfigs?.length), external, egress);
+  }
 });
