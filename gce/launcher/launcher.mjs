@@ -23,7 +23,7 @@ import {
   largestMachineCpus, raceAttempts, walkRecord, unsettledInsert, quotaMetric, RACE_AFTER_MS,
 } from './logic.mjs';
 import { planPrelaunches } from './prelaunch.mjs';
-import { launchRow, runningRow, withJob, jobRecord, finalRow, dailyLine, launchCounts } from './ledger.mjs';
+import { launchRow, runningRow, withJob, jobRecord, finalRow, dailyLine, launchCounts, natDay } from './ledger.mjs';
 
 export const TICK_BUDGET_MS = 45_000;
 const INSERT_DEADLINE_MS = 40_000;
@@ -31,6 +31,7 @@ const PARALLEL_LAUNCHES = 16; // a burst launches in one round: each insert wait
 const DAILY_WITHIN_MS = 2 * 3600_000; // the 26 h ledger window holds all of yesterday only early in the day
 const SETTLE_BUDGET_MS = 15_000; // what a tick spends learning how unsettled inserts ended; the rest wait a tick
 const SETTLE_PARALLEL = 4; // zones whose operations are read at once
+const NAT_GATEWAY = 'ci-kit-nat'; // each placement region's Cloud NAT (gce/deploy.sh network)
 const zoneOf = (r) => r.zone.split('/').pop();
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
 const iso = (ms) => new Date(ms).toISOString();
@@ -747,12 +748,32 @@ export class Launcher {
 
   // ── the daily line ─────────────────────────────────────────────────────────────────────────────────────────────
 
+  // The day's Cloud NAT use per region (ledger.mjs natDay), from Cloud Monitoring: three queries, each aggregated to one
+  // point per region for the day. A read that fails leaves it {unread: true}: the line says so rather than guess.
+  async natOf(dayIso) {
+    const start = `${dayIso}T00:00:00.000Z`;
+    const end = iso(Date.parse(start) + 24 * 3600_000);
+    const read = (metric, perSeriesAligner) => this.gce.timeSeries(
+      `metric.type="router.googleapis.com/nat/${metric}" AND resource.type="nat_gateway" AND resource.labels.gateway_name="${NAT_GATEWAY}"`,
+      { start, end, aggregation: { alignmentPeriod: '86400s', perSeriesAligner, crossSeriesReducer: 'REDUCE_SUM', groupByFields: 'resource.labels.region' } },
+    );
+    try {
+      const [sent, received, ports] = await Promise.all([read('sent_bytes_count', 'ALIGN_SUM'), read('received_bytes_count', 'ALIGN_SUM'), read('allocated_ports', 'ALIGN_COUNT')]);
+      return natDay({ sent, received, ports });
+    } catch (err) {
+      this.log(`NAT use of ${dayIso} unread: ${err.message}`);
+      return { unread: true };
+    }
+  }
+
   async daily(seen) {
     const now = this.now();
     if (now % (24 * 3600_000) >= DAILY_WITHIN_MS) return;
     const yesterday = day(now - 24 * 3600_000);
     try {
-      if (await this.ledger.postDaily(dailyLine([...seen.rowOf.values()].filter(Boolean), yesterday, this.config))) this.log(`ledger: daily line for ${yesterday}`);
+      if (this.ledger.hasDaily(yesterday)) return;
+      const nat = await this.natOf(yesterday);
+      if (await this.ledger.postDaily(dailyLine([...seen.rowOf.values()].filter(Boolean), yesterday, this.config, nat))) this.log(`ledger: daily line for ${yesterday}`);
     } catch (err) {
       this.log(`daily line: ${err.message}`);
     }

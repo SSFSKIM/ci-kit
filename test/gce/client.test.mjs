@@ -260,3 +260,21 @@ test('placements: a listing names the zones it read whole (every zone has a scop
   ]), new Set(['c']));
   assert.deepEqual(await zones([['GET /aggregated/instances', json(200, { items: { 'zones/a': { instances: [{ name: 'x' }] } }, warning: { code: 'PARTIAL_SUCCESS' } })]]), new Set());
 });
+
+test('Cloud Monitoring time series are read with the filter, interval and aggregation asked, across pages', async () => {
+  const MON = 'https://monitoring.googleapis.com/v3/projects/ssfskim-ci-kit/timeSeries?';
+  const series = (region, bytes) => ({ resource: { type: 'nat_gateway', labels: { region } }, points: [{ value: { int64Value: String(bytes) } }] });
+  const { f, gce } = gceWith([
+    [`GET ${MON}`, (key) => json(200, key.includes('pageToken=p2') ? { timeSeries: [series('us-west4', 7)] } : { timeSeries: [series('us-central1', 5)], nextPageToken: 'p2' })],
+  ]);
+  const got = await gce.timeSeries('metric.type="router.googleapis.com/nat/sent_bytes_count"', {
+    start: '2026-10-21T00:00:00Z', end: '2026-10-22T00:00:00Z', aggregation: { alignmentPeriod: '86400s', perSeriesAligner: 'ALIGN_SUM' },
+  });
+  assert.deepEqual(got.map((s) => s.resource.labels.region), ['us-central1', 'us-west4']);
+  const url = new URL(f.calls[0].key.slice('GET '.length));
+  assert.deepEqual(Object.fromEntries(url.searchParams), {
+    filter: 'metric.type="router.googleapis.com/nat/sent_bytes_count"', 'interval.startTime': '2026-10-21T00:00:00Z', 'interval.endTime': '2026-10-22T00:00:00Z',
+    'aggregation.alignmentPeriod': '86400s', 'aggregation.perSeriesAligner': 'ALIGN_SUM',
+  });
+  assert.equal(f.calls[0].auth, 'Bearer tok');
+});

@@ -8,7 +8,7 @@ import {
   placements, raceAttempts, walkPlacements, walkRecord, unsettledInsert, planLaunches, viewInstance, instanceName, repoLabel,
   RACE_AFTER_MS,
 } from '../../gce/launcher/logic.mjs';
-import { launchRow, runningRow, finalRow, launchCounts, dailyLine, renderDaily } from '../../gce/launcher/ledger.mjs';
+import { launchRow, runningRow, finalRow, launchCounts, dailyLine, renderDaily, natDay } from '../../gce/launcher/ledger.mjs';
 import { NEW_CFG } from './config-fixtures.mjs';
 
 const SBX = 'SSFSKIM/ci-kit-sandbox';
@@ -234,4 +234,36 @@ test('the daily line counts refusals, slow inserts, on-demand VMs and races by w
   const quiet = dailyLine([final('q1', {})], day, 'abcdef0123');
   for (const k of ['refusals', 'slow', 'onDemand', 'races']) assert.equal(k in quiet, false, k);
   assert.doesNotMatch(renderDaily(quiet), /Refusals|Slow|Races|On demand/);
+});
+
+// As Cloud Monitoring answers a day's NAT query aggregated to one point per region (recorded 2026-10-21).
+const natSeries = (region, value) => ({ resource: { type: 'nat_gateway', labels: { project_id: 'ssfskim-ci-kit', region } }, points: [{ value: { int64Value: String(value) } }] });
+
+test('a day of Cloud NAT: GiB processed (both ways) at $0.045 and address-hours at $0.005, per region', () => {
+  const nat = natDay({
+    sent: [natSeries('us-central1', 18328334), natSeries('us-west4', 2 ** 29)],
+    received: [natSeries('us-central1', 1302695691), natSeries('us-west4', 2 ** 29)],
+    ports: [natSeries('us-central1', 90), natSeries('us-west4', 30)], // address-minutes: one point a minute per NAT address
+  });
+  const centralGib = (18328334 + 1302695691) / 2 ** 30;
+  assert.deepEqual(nat, {
+    regions: {
+      'us-central1': { gib: Math.round(centralGib * 1000) / 1000, addressHours: 1.5, dollars: Math.round((centralGib * 0.045 + 1.5 * 0.005) * 1e4) / 1e4 },
+      'us-west4': { gib: 1, addressHours: 0.5, dollars: 0.0475 },
+    },
+    dollars: Math.round((centralGib * 0.045 + 1.5 * 0.005 + 0.0475) * 1e4) / 1e4,
+  });
+  assert.deepEqual(natDay({ sent: [], received: [], ports: [] }), { regions: {}, dollars: 0 });
+});
+
+test('the daily line carries the day\'s NAT apart from the VMs\' dollars, or says it is unread; never a guess', () => {
+  const day = '2026-10-16';
+  const vm = { alloc: 'a', state: 'final', deleted: new Date(T0).toISOString(), end: 'done', seconds: 600, dollars: 0.01, machine: 'c3d-highcpu-4', zone: 'us-central1-a' };
+  const nat = { regions: { 'us-central1': { gib: 1.224, addressHours: 1.5, dollars: 0.0626 } }, dollars: 0.0626 };
+  const line = dailyLine([vm], day, 'abcdef0123', nat);
+  assert.deepEqual([line.nat, line.dollars], [nat, 0.01]);
+  assert.match(renderDaily(line), / NAT: us-central1 1\.224 GiB, 1\.5 address-hours, \$0\.0626; \$0\.0626 in all\./);
+  assert.match(renderDaily(dailyLine([vm], day, 'abcdef0123', { unread: true })), / NAT: unread\./);
+  assert.match(renderDaily(dailyLine([vm], day, 'abcdef0123', { regions: {}, dollars: 0 })), / NAT: none\./);
+  assert.equal('nat' in dailyLine([vm], day, 'abcdef0123'), false);
 });

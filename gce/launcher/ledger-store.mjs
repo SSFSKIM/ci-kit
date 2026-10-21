@@ -158,6 +158,8 @@ export function createGceLedger(gh, { repo, issue_title: title }, { now = Date.n
         }
       }
     },
+    // Whether the day's line is already on an open ledger issue, as the store last read them.
+    hasDaily: (day) => dailyDays(comments()).has(day),
     // Posts the day's line unless one is already on any open ledger issue. Returns whether it posted.
     async postDaily(line) {
       const issue = await current();

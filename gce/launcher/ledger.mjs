@@ -41,6 +41,8 @@ const IP_HOURLY = { spot: 0.0025, standard: 0.005 };
 // overstates. The NAT's other two charges are its region's, not a VM's, and are left to the daily line: its addresses,
 // $0.005 an hour each (SKU 8515-9425-D2CE "Cloud NAT IP Usage"), and $0.045 per GiB it processes (SKU 015F-5732-FFF0).
 const NAT_GATEWAY_HOURLY = 0.0014;
+const NAT_PER_GIB = 0.045;
+const NAT_ADDRESS_HOURLY = 0.005;
 // Boot disks by region and type, $ a month: per GiB, and for Hyperdisk Balanced per IOPS and per MiB/s provisioned
 // above the 3,000 IOPS and 140 MiB/s its capacity price includes. pd-balanced us-central1: the list price of
 // 2026-10-16. hyperdisk-balanced us-west4: the catalog on 2026-10-21, capacity F704-99E9-0130, IOPS D4CA-3484-910A,
@@ -241,10 +243,10 @@ function raceCounts(rows, day) {
 // day with pre-launched VMs (spec M5), `prelaunched`: how many, how many no job claimed, and what those cost. And, each
 // only on a day that has any (spec M6): the walks' `refusals` and `slow` inserts of the day's final rows and the VMs
 // that ran `onDemand` (launchCounts), and the `races` launched that day (raceCounts, over every row given).
-// The VMs' dollars carry each one's egress: its address hours, or its NAT gateway hours; the NATs' GB processed ($0.045 per GiB) and their addresses
-// ($0.005 an hour each) are per region, read from no row: the counts step of spec M6 (step 3) adds the day's NAT GB
-// to this line, priced, from Cloud Monitoring.
-export function dailyLine(rows, day, config) {
+// The VMs' dollars carry each one's egress: its address hours, or its NAT gateway hours. The NATs' GB processed and
+// their addresses are per region and read from no row: `nat` is the day's (natDay, from Cloud Monitoring), or
+// {unread: true} when that read failed, kept apart from the VMs' dollars and month.
+export function dailyLine(rows, day, config, nat) {
   const ofDay = rows.filter((r) => r.state === 'final' && r.deleted?.startsWith(day));
   const vms = ofDay.filter((r) => r.seconds !== null && r.seconds !== undefined);
   const spent = round4(vms.reduce((sum, r) => sum + (r.dollars ?? 0), 0));
@@ -267,7 +269,45 @@ export function dailyLine(rows, day, config) {
       prelaunched: { vms: prelaunched.length, unclaimed: unclaimed.length, unclaimedDollars: round4(unclaimed.reduce((sum, r) => sum + (r.dollars ?? 0), 0)) },
     } : {}),
     ...walkCounts(rows, ofDay, day),
+    ...(nat ? { nat } : {}),
   };
+}
+
+// A day of each region's Cloud NAT (spec M6 counts), from Cloud Monitoring series aggregated to one point per region
+// (resource.labels.region): `sent` and `received` the bytes it processed (router.googleapis.com/nat/*_bytes_count,
+// summed), `ports` the count of allocated_ports points, one a minute per NAT address while it holds a VM's ports
+// (auto-allocated addresses are released when no VM needs them), so address-minutes. Priced at $0.045 per GiB
+// processed and $0.005 per address-hour (the catalog SKUs above).
+export function natDay({ sent, received, ports }) {
+  const use = new Map();
+  const add = (series, field) => {
+    for (const s of series) {
+      const region = s.resource.labels.region;
+      const u = use.get(region) ?? use.set(region, { bytes: 0, minutes: 0 }).get(region);
+      u[field] += s.points.reduce((sum, p) => sum + Number(p.value.int64Value ?? 0), 0);
+    }
+  };
+  add(sent, 'bytes');
+  add(received, 'bytes');
+  add(ports, 'minutes');
+  const regions = {};
+  let total = 0;
+  for (const [region, u] of [...use].sort(([a], [b]) => a.localeCompare(b))) {
+    const gib = u.bytes / 2 ** 30;
+    const addressHours = u.minutes / 60;
+    const cost = gib * NAT_PER_GIB + addressHours * NAT_ADDRESS_HOURLY;
+    total += cost;
+    regions[region] = { gib: Math.round(gib * 1000) / 1000, addressHours: Math.round(addressHours * 100) / 100, dollars: round4(cost) };
+  }
+  return { regions, dollars: round4(total) };
+}
+
+function renderNat(nat) {
+  if (!nat) return '';
+  if (nat.unread) return 'NAT: unread. ';
+  const regions = Object.entries(nat.regions);
+  if (!regions.length) return 'NAT: none. ';
+  return `NAT: ${regions.map(([r, u]) => `${r} ${u.gib} GiB, ${u.addressHours} address-hours, $${u.dollars.toFixed(4)}`).join('; ')}; $${nat.dollars.toFixed(4)} in all. `;
 }
 
 function walkCounts(rows, ofDay, day) {
@@ -304,7 +344,7 @@ export function renderDaily(d) {
     `**GCE pool, ${d.day} (UTC):** ${d.vms} VMs, ${d.seconds} VM-seconds, $${d.dollars.toFixed(4)}; ` +
       `projected month $${d.month.toFixed(2)} at this day's rate. Ends: ${ends}.${families ? ` By family@region: ${families}.` : ''} ` +
       `${d.prelaunched ? `Pre-launched: ${d.prelaunched.vms} VMs, ${d.prelaunched.unclaimed} unclaimed ($${d.prelaunched.unclaimedDollars.toFixed(4)}). ` : ''}` +
-      `${renderWalks(d)}Launcher config (gce.json) ${d.config}.`,
+      `${renderWalks(d)}${renderNat(d.nat)}Launcher config (gce.json) ${d.config}.`,
   ].join('\n');
 }
 

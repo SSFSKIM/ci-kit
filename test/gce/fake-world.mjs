@@ -106,6 +106,11 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
       const { body, ...op } = g.ops.find((o) => o.selfLink === link) ?? {};
       return op.name ? structuredClone(op) : null;
     },
+    // Cloud Monitoring: hooks.timeSeries(filter, opts) answers (it may throw, as a refused read); none by default.
+    timeSeries: async (filter, opts) => {
+      log.push(`time series ${/nat\/([a-z_]+)/.exec(filter)?.[1] ?? filter}`);
+      return hooks.timeSeries ? hooks.timeSeries(filter, opts) : [];
+    },
     guestAttribute: async (zone, name, path) => {
       const inst = g.instances.find((i) => i.name === name);
       if (!inst) throw new GceError(404, 'notFound', ['notFound']);

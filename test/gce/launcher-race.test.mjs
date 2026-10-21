@@ -346,3 +346,32 @@ test('learning how unsettled inserts ended reads each zone once, never holds a s
   await launcher.tick();
   for (const alloc of ['west00000a', 'west00000b']) assert.deepEqual(rowOf(w, instanceName(alloc)).slow[0], { zone: 'us-west4-a', outcome: 'created', sent: rowOf(w, instanceName(alloc)).slow[0].sent, done: ended });
 });
+
+test('the daily line reads the day\'s NAT from Cloud Monitoring once, when it is posted; a refused read says unread', async () => {
+  for (const refused of [false, true]) {
+    const start = Date.parse('2026-10-17T00:30:00Z');
+    const w = world({ start });
+    const asked = [];
+    w.hooks.timeSeries = (filter, opts) => {
+      asked.push({ filter, ...opts });
+      if (refused) throw new GceError(403, 'Permission monitoring.timeSeries.list denied', ['forbidden']);
+      const value = filter.includes('allocated_ports') ? 120 : 2 ** 30;
+      return [{ resource: { type: 'nat_gateway', labels: { region: 'us-west4' } }, points: [{ value: { int64Value: String(value) } }] }];
+    };
+    const launcher = new Launcher({
+      gce: w.gce, gh: w.github, ledger: createGceLedger(w.github, CFG.ledger, { now: w.now }), cfg: CFG, config: COMMIT, poolRepos: [],
+      now: w.now, random: () => 1, alert: async () => {}, log: (m) => w.log.push(`log ${m}`), after: w.after,
+    });
+    await launcher.tick();
+    w.advance(MIN);
+    await launcher.tick(); // the line is already posted: no second read
+    const daily = w.gh.comments.filter((c) => c.body.includes('ci-kit-gce-daily'));
+    assert.equal(daily.length, 1);
+    assert.equal(asked.length, 3, 'sent bytes, received bytes, allocated ports: once');
+    assert.ok(asked.every((a) => a.start === '2026-10-16T00:00:00.000Z' && a.end === '2026-10-17T00:00:00.000Z'
+      && /resource\.labels\.gateway_name="ci-kit-nat"/.test(a.filter) && a.aggregation.groupByFields === 'resource.labels.region'));
+    if (refused) assert.match(daily[0].body, / NAT: unread\./);
+    // 2 GiB processed (1 each way) and 2 address-hours in us-west4: $0.09 + $0.01.
+    else assert.match(daily[0].body, / NAT: us-west4 2 GiB, 2 address-hours, \$0\.1000; \$0\.1000 in all\./);
+  }
+});

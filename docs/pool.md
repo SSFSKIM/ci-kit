@@ -762,6 +762,12 @@ per allocation:
   its walk's `refused` ({kind, zone, metric}) and `slow` ({zone, outcome, sent, done}) inserts, a slow insert's `done`
   learned from its zone operation by a later tick when its own tick could not wait for it; a race's row keeps `race`
   ({of: the allocation it raced, demand: the job or run that allocation was for}), apart from the job its VM ran.
+- The day's Cloud NAT, per region, from Cloud Monitoring (`router.googleapis.com/nat/*` on `nat_gateway`
+  `ci-kit-nat`, read once, when the line is posted): GiB processed both ways at $0.045 and address-hours at $0.005
+  (`NAT: us-west4 2 GiB, 2 address-hours, $0.1000; $0.1000 in all.`), apart from the VMs' dollars and month. An
+  address-hour is counted from `allocated_ports`, one point a minute per NAT address while it holds a VM's ports:
+  auto-allocated addresses are released when no VM needs them. A read that fails shows `NAT: unread`, never a guess;
+  the launcher's account needs `monitoring.timeSeries.list` (`roles/monitoring.viewer`).
 - A writer reads a row's comment again just before updating it, and drops the write if the comment is already as
   far along; a final row is never rewritten. Issue comments have no compare-and-swap, so during an overlap of two
   ticks a row is eventually final rather than finalized once: a stale write that lands in the milliseconds after
