@@ -87,7 +87,8 @@ toward the boot alone, and below it for the jobs a warm runner covers.
   39644078413, class 1a on master 057db0320 with MAWS #109): green, unit 1/4 logs `apt: zsh already installed`, setup
   12–19 s per unit shard against 36 s (C4D, old image, 39638465062) and 52 s (C3D, 39630519998); plan → last 294 s
   against #108's 310 s (on C3D, the burst holding us-west4; one sample). The day-of-rows proofs remain.
-- [ ] M4 — Launch on GitHub's `workflow_job` webhook.
+- [ ] M4 — Launch on GitHub's `workflow_job` webhook. (2026-10-21) Built, reviewer-high clean after two fix waves, ci-gate green; PR to
+  CI-opt. Deploy follows the merge and the owner's secret and App steps; its proofs follow the deploy.
 - [ ] M5 — Pre-launch of a run's gate VMs (the owner chose it 2026-10-21; no warm runner).
 
 ## Acceptance
@@ -441,6 +442,12 @@ reported to the owner.
   later; the cost is at most a few extra requested ticks per burst, bounded by the spacing and the rate-budget rule.
   The burst proof reads accordingly (CI-opt, 2026-10-21): at most one requested tick per 10 s, none lost, every job
   queued before a tick starts served by it; "exactly one tick per burst" was never what latency depends on.
+
+- 2026-10-21 (M4, after reviewer-high): **The receiver bounds what an unsigned or forged flood can cost.** A
+  missing or malformed `X-Hub-Signature-256` gets 401 before the body or the secret is read; the secret (a mounted
+  `latest` volume, which Cloud Run reads through from Secret Manager) is kept 60 s, read by one caller at a time, at
+  most once per 10 s counted from each read's start, failed reads included; a mismatch re-reads only a copy at least
+  10 s old, so a rotation is picked up within seconds. With no good copy a delivery gets 503 and GitHub redelivers.
 
 ## Surprises & Discoveries
 
