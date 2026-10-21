@@ -7,9 +7,16 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { jobCpus } from '../launcher/logic.mjs';
 
-// A workflow_job payload is a few kB; GitHub caps any payload at 25 MB. A body past this is refused unread.
+// A workflow_job payload is a few kB; GitHub caps any payload at 25 MB. A body past this is refused unverified.
 export const MAX_BODY = 1024 * 1024;
 const PUBLISH_TIMEOUT_MS = 5_000; // GitHub gives a delivery 10 s
+// The secret is a Cloud Run volume, which Secret Manager serves on every read: an access billed and counted against
+// the project's quota. So a delivery is refused before any read unless its signature has the right shape, and the
+// secret is kept for a minute. A mismatch re-reads it once the copy is 10 s old, so a rotation is live with the first
+// delivery GitHub signs with the new secret, and a flood of forged signatures costs at most one read per 10 s.
+export const SECRET_TTL_MS = 60_000;
+export const REREAD_AFTER_MS = 10_000;
+const SIGNATURE = /^sha256=[0-9a-f]{64}$/;
 
 // True when header is `sha256=<hex HMAC-SHA256 of body under secret>`. An empty secret verifies nothing.
 export function signatureValid(secret, body, header) {
@@ -45,13 +52,24 @@ async function readBody(req) {
   return Buffer.concat(chunks);
 }
 
-// secret() → the webhook secret (read for each delivery, so a rotation needs no deploy); publish(message) → resolves
-// once Pub/Sub took it; log(severity, message, fields).
-export function createReceiver({ secret, publish, served, machines, log }) {
+// secret() → the webhook secret as stored now (kept SECRET_TTL_MS, so a rotation needs no deploy); publish(message) →
+// resolves once Pub/Sub took it; log(severity, message, fields).
+export function createReceiver({ secret, publish, served, machines, log, now = Date.now }) {
   const answer = (res, status, body) => res.writeHead(status, { 'content-type': 'application/json' }).end(`${JSON.stringify(body)}\n`);
+  let kept = null; // {key, at}
+  const key = async (fresh) => {
+    if (fresh || !kept || now() - kept.at >= SECRET_TTL_MS) kept = { key: (await secret()).trim(), at: now() };
+    return kept.key;
+  };
+  const refuse = (res, delivery) => {
+    log('WARNING', 'delivery refused: its signature does not verify', { delivery });
+    return answer(res, 401, { error: 'bad signature' });
+  };
   return async function receive(req, res) {
     if (req.method !== 'POST') return answer(res, 405, { error: 'POST only' });
     const delivery = req.headers['x-github-delivery'] ?? null;
+    const signature = req.headers['x-hub-signature-256'];
+    if (!SIGNATURE.test(signature ?? '')) return refuse(res, delivery);
     let body;
     try {
       body = await readBody(req);
@@ -60,17 +78,15 @@ export function createReceiver({ secret, publish, served, machines, log }) {
       res.setHeader('connection', 'close');
       return answer(res, 413, { error: 'body too large' });
     }
-    let key;
+    let valid;
     try {
-      key = (await secret()).trim();
+      valid = signatureValid(await key(false), body, signature);
+      if (!valid && now() - kept.at >= REREAD_AFTER_MS) valid = signatureValid(await key(true), body, signature);
     } catch (err) {
       log('ERROR', `webhook secret unreadable: ${err.message}`, { delivery });
       return answer(res, 500, { error: 'secret unreadable' });
     }
-    if (!signatureValid(key, body, req.headers['x-hub-signature-256'])) {
-      log('WARNING', 'delivery refused: its signature does not verify', { delivery });
-      return answer(res, 401, { error: 'bad signature' });
-    }
+    if (!valid) return refuse(res, delivery);
     let payload;
     try {
       payload = JSON.parse(body.toString('utf8'));

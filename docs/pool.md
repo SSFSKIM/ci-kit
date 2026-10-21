@@ -345,9 +345,10 @@ GitHub App ci-kit-runners ──workflow_job──▶ ci-kit-webhook (public) �
 ```
 
 - **The receiver** (`ci-kit-webhook`, `gce/webhook/`) is the pool's one public endpoint: ingress `all`, the invoker
-  IAM check off (the org's domain-restricted sharing refuses an `allUsers` invoker). It reads the body (1 MiB at most,
-  else 413), checks `X-Hub-Signature-256` against the webhook secret and answers 401 to anything that does not verify,
-  before it parses a byte. A `workflow_job` `queued` delivery of a served repo whose job a GCE launch could serve
+  IAM check off (the org's domain-restricted sharing refuses an `allUsers` invoker). A delivery whose
+  `X-Hub-Signature-256` is missing or not `sha256=` and 64 hex digits is answered 401 before the secret is read. Then
+  it reads the body (1 MiB at most, else 413), checks the signature against the webhook secret and answers 401 to
+  anything that does not verify, before it parses a byte. A `workflow_job` `queued` delivery of a served repo whose job a GCE launch could serve
   (`ci-kit-pool`, one `cpus-N` the placements name, no other runner label) publishes one message (repo, job, run,
   labels, delivery id) and is answered 202; every other delivery is answered 200 with why it was ignored, which
   GitHub's delivery log shows. It runs as `ci-kit-webhook@`, which may read the webhook secret and publish to the
@@ -384,8 +385,10 @@ GitHub App ci-kit-runners ──workflow_job──▶ ci-kit-webhook (public) �
   genuine delivery costs one tick, inside the 10 s spacing.
 
 The webhook secret is `ci-kit-webhook-secret` in Secret Manager (label `ci-kit=webhook`), readable by
-`ci-kit-webhook@` only and mounted into the receiver as a file that Cloud Run reads from Secret Manager on each
-delivery. The same value is the App's webhook secret, set with the App's URL by `gce/deploy.sh app-hook`
+`ci-kit-webhook@` only and mounted into the receiver as a file that Cloud Run reads from Secret Manager on each read,
+a billed access counted against the project's quota. So the receiver keeps it for 60 s, and a signature that does not
+verify re-reads it once the copy is 10 s old: a rotation is live within 10 s of the first delivery signed with the new
+secret, and a flood of forged signatures costs at most one read per 10 s per instance. The same value is the App's webhook secret, set with the App's URL by `gce/deploy.sh app-hook`
 (`PATCH /app/hook/config` as the App; the secret is never printed). The App's subscribed events and its webhook's
 **Active** box have no API: they are on its settings page, `https://github.com/settings/apps/ci-kit-runners` (Active,
 under Webhook) and `https://github.com/settings/apps/ci-kit-runners/permissions` (Subscribe to events: **Workflow
@@ -411,7 +414,8 @@ Setting it up, in order (Secret Manager writes are the owner's):
 
 To rotate the secret: the owner adds a version (`openssl rand -hex 32 | tr -d '\n' | gcloud secrets versions add
 ci-kit-webhook-secret --project=ssfskim-ci-kit --data-file=-`), then `gce/deploy.sh app-hook` at once. Deliveries in
-between fail with 401 and their jobs wait for the minute tick. To turn the webhook path off: untick **Active** on the
+between may fail with 401 (once the receiver's 60 s copy is the new secret), and their jobs wait for the minute tick;
+after `app-hook`, the receiver verifies the new signatures within 10 s (its copy is re-read on a mismatch). To turn the webhook path off: untick **Active** on the
 App's page; the minute tick serves alone, as before M4.
 
 To check: GitHub's delivery log (the App's page → Advanced) shows each delivery's answer; the receiver's logs
