@@ -287,8 +287,12 @@ reported to the owner.
 - 2026-10-21 (CI-opt): **Webhook as a fast path, tick kept.** The parent spec deferred the webhook "until A13's
   measured latency is missed"; at ~27 s of a ~100 s start, and twice per run, it is. The tick stays the reconciler so
   a lost delivery costs a minute, never a job.
-- 2026-10-21 (CI-opt): **No Cloud NAT.** It would remove the external-address quota as a ceiling, but its
-  $0.045/GiB processing on each VM's ~260 MB of downloads costs as much as the VM. Addresses are requested instead.
+- 2026-10-21 (CI-opt): **Cloud NAT only if the address quota does not keep pace.** NAT would remove the
+  external-address quota as a ceiling, but its $0.045/GiB processing on each VM's ~260 MB of downloads costs about as
+  much as the VM. Addresses are requested first (us-central1 64, still granted 32; us-west4 64, granted 8). Under the
+  owner's ruling cost is no reason to cap parallelism, so if those grants are refused or stall while the address cap
+  binds (MAWS #108 makes a class 1a run 6 VMs, so 32 addresses hold ~5 runs), Cloud NAT on the pool's subnetworks is
+  the next step, with its cost reported.
 
 - 2026-10-21 (CI-opt), spec review round 1: **the webhook is a separate public receiver that requests a full tick**,
   not a per-job planner in the launcher. Per-job planning counted one idle runner as cover for every job planned
