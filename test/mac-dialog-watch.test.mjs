@@ -129,8 +129,8 @@ test('an alert whose close fails stays owed and is tried at each read until it g
   const done = half.watch(terminal);
   assert.equal(done.status, 0, done.stderr);
   assert.equal(done.stateText, null);
-  // A failed close also lists the open alerts, which is what MAWS reads (below).
-  const tried = [['comment', alertURL], ['close', alertURL], ['list', '--repo']];
+  // A failed close also reads the issue itself (below).
+  const tried = [['comment', alertURL], ['close', alertURL], ['repos/SSFSKIM/ci-kit-sandbox/issues/42', '--jq']];
   assert.deepEqual(done.ghCalls.map((call) => call.slice(1, 3)), [['create', '--repo'], ...tried, ...tried, ...tried, ['close', alertURL]]);
   for (const call of done.ghCalls.filter((call) => call[1] === 'comment')) {
     assert.equal(argValue(call, '--body'), `cleared at ${cleared}: no dialog in front on 3 reads in a row since ${iso(T0 + 120)}`);
@@ -172,26 +172,44 @@ test('a dialog while an alert close is owed: the close is tried first; once it g
   assert.match(argValue(creates(renewed)[1], '--body'), /Opened by: a refused job \(run 123456\)\n/);
 });
 
-test('an owed close is settled only by a list of the open alerts, the ones MAWS reads, that goes through without it', () => {
-  // Deleted by hand, say, or its label taken off: MAWS no longer sees it, and owed for ever it would also take in every
-  // later dialog, which would then alert nobody.
-  const gone = owing().watch(terminal, { ghUnresolved: true, ghOpen: '17' });
-  assert.equal(gone.status, 0, gone.stderr);
-  assert.equal(gone.stateText, null);
-  const list = gone.ghCalls.at(-1);
-  assert.deepEqual(list.slice(1), ['list', '--repo', 'SSFSKIM/ci-kit-sandbox', '--label', 'ci-kit-alert', '--state', 'open', '--limit', '1000', '--json', 'number', '--jq', '.[].number']);
-  assert.ok(gone.log.includes(`dialog alert close failed, and ${alertURL} is not among the open alerts; nothing is left to close`), gone.log);
-  const fresh = owing().watch(notification, { ghUnresolved: true, ghOpen: '' });
-  assert.deepEqual([fresh.state.phase, fresh.state.name, fresh.state.since], ['pending', 'UserNotificationCenter', iso(T0 + 300)]);
-  // gh cannot resolve an issue the caller cannot see either (a token whose access changed): still listed, it stays owed.
-  const hidden = owing().watch(terminal, { ghUnresolved: true });
-  assert.deepEqual([hidden.state.phase, hidden.state.issue], ['closed', alertURL]);
-  assert.match(hidden.log, /dialog alert close failed or timed out; the alert stays open until a later read closes it/);
-  // A list that fails proves nothing either.
-  const unlisted = owing().watch(terminal, { ghUnresolved: true, ghOpen: '', ghFail: 'list' });
-  assert.deepEqual([unlisted.state.phase, unlisted.state.issue], ['closed', alertURL]);
-  const reopened = owing().watch(notification, { ghUnresolved: true, ghOpen: '', ghFail: 'list' });
+test('a failed close is settled only by what GitHub says of the issue itself: closed, deleted, or not there in a repository the token sees', () => {
+  const issue = ['api', 'repos/SSFSKIM/ci-kit-sandbox/issues/42', '--jq', '.state'];
+  const repo = ['api', 'repos/SSFSKIM/ci-kit-sandbox', '--silent'];
+  const settled = (run, why) => {
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.stateText, null, why);
+    assert.ok(run.log.includes(`dialog alert close failed, but GitHub says ${alertURL} is ${why}; nothing is left to close`), run.log);
+  };
+  const kept = (run, why) => {
+    assert.equal(run.status, 0, run.stderr);
+    assert.deepEqual([run.state.phase, run.state.issue], ['closed', alertURL], why);
+    assert.match(run.log, /dialog alert close failed or timed out; the alert stays open until a later read closes it/);
+  };
+  // Closed: by hand, or by a close whose answer gh did not live to give.
+  const closed = owing().watch(terminal, { ghFail: 'close', ghIssue: 'closed' });
+  settled(closed, 'closed');
+  assert.deepEqual(closed.ghCalls.at(-1), issue);
+  kept(owing().watch(terminal, { ghFail: 'close' }), 'open');
+  // Deleted: GitHub answers 410 only to a caller that can read the repository.
+  settled(owing().watch(terminal, { ghUnresolved: true, ghIssue: '410' }), 'deleted');
+  // 404 is not there, or not visible: only a repository the token can read tells them apart. gh says "Could not
+  // resolve to an issue" of either, so the close's own error proves nothing.
+  const missing = owing().watch(terminal, { ghUnresolved: true, ghIssue: '404' });
+  settled(missing, 'not there');
+  assert.deepEqual(missing.ghCalls.slice(-2), [issue, repo]);
+  const hidden = owing().watch(terminal, { ghUnresolved: true, ghIssue: '404', ghRepo: false });
+  kept(hidden, 'a 404 from a repository the token cannot read');
+  assert.deepEqual(hidden.ghCalls.at(-1), repo);
+  // A read that times out says nothing; a dialog then reopens the episode with the alert.
+  const slow = owing().watch(terminal, { ghFail: 'close', ghIssue: 'hang' });
+  kept(slow, 'timed out');
+  assert.deepEqual(slow.ghSurvivors, []);
+  assert.ok(slow.elapsed < 20_000, `the issue read has its deadline (${slow.elapsed} ms)`);
+  const reopened = owing().watch(notification, { ghExit: 1 });
   assert.deepEqual([reopened.state.phase, reopened.state.issue, creates(reopened).length], ['open', alertURL, 1]);
+  // Settled, a dialog after it is a new episode.
+  const fresh = owing().watch(notification, { ghUnresolved: true, ghIssue: '410' });
+  assert.deepEqual([fresh.state.phase, fresh.state.name, fresh.state.since], ['pending', 'UserNotificationCenter', iso(T0 + 300)]);
 });
 
 test('a state file the version before wrote still loads: its episode closes on the clear reads it has left, and a failed close is kept', () => {

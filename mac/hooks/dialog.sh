@@ -323,10 +323,10 @@ close_episode() {
 }
 # What the closed episode owes its alert: the clear comment, unless it went through, then the close. True, with the
 # file gone, once the close has gone through; gh's close of an issue someone has already closed goes through too. A
-# failed close is settled only when the alert is no longer open where MAWS reads it (alert_listed). A comment that
+# failed close is settled only when GitHub says the issue itself is closed or gone (alert_settled). A comment that
 # fails beside a close that goes through is not tried again: the close is what MAWS reads.
 close_alert() {
-  local owed=''
+  local owed='' why
   if [[ -n $st_issue ]]; then
     read_alert_token
     if [[ -z $st_commented ]]; then
@@ -339,11 +339,11 @@ close_alert() {
     fi
     if alert_gh issue close "$st_issue" --repo "$alert_repo" >/dev/null 2>&1; then
       :
-    elif alert_listed; then
+    elif why=$(alert_settled); then
+      log "dialog alert close failed, but GitHub says $st_issue is $why; nothing is left to close" || true
+    else
       log "dialog alert close failed or timed out; the alert stays open until a later read closes it" || true
       owed=1
-    else
-      log "dialog alert close failed, and $st_issue is not among the open alerts; nothing is left to close" || true
     fi
     if [[ -n $owed ]]; then
       save_state || true
@@ -352,18 +352,27 @@ close_alert() {
   fi
   drop_state || true
 }
-# Whether the alert may still be open where MAWS reads it: the sandbox's open ci-kit-alert issues. False only when a
-# list of them goes through without it (deleted, or its label taken off). gh's "Could not resolve to an issue" proves
-# nothing: GitHub says it too of an issue the caller cannot see, a token whose access changed for one (cli/cli#8013).
-alert_listed() {
-  local out listed=0
-  out=$(mktemp) || return 0
-  if alert_gh issue list --repo "$alert_repo" --label ci-kit-alert --state open --limit 1000 --json number --jq '.[].number' \
-    >"$out" 2>/dev/null; then
-    grep -qx "${st_issue##*/}" "$out" || listed=1
+# Whether GitHub says the alert's issue needs no close, read from the issue itself (a search, as `gh issue list
+# --label` is, may lag or come back cut short), and why: `closed` (by hand, or by a close whose answer gh did not live
+# to give), `deleted` (410, which GitHub answers only to a caller that can read the repository) or `not there` (404 in
+# a repository the token can read: the sandbox is private, so a 404 alone may be a token that cannot see it). Anything
+# else, an open issue, a timeout or another error, keeps the close owed. gh's "Could not resolve to an issue" proves
+# nothing either: GitHub says it too of an issue the caller cannot see (cli/cli#8013).
+alert_settled() {
+  local out err state why=''
+  out=$(mktemp) || return 1
+  err=$(mktemp) || { rm -f "$out"; return 1; }
+  if alert_gh api "repos/$alert_repo/issues/${st_issue##*/}" --jq .state >"$out" 2>"$err"; then
+    IFS= read -r state <"$out" || state=''
+    [[ $state != closed ]] || why=closed
+  elif grep -q '(HTTP 410)' "$err"; then
+    why=deleted
+  elif grep -q '(HTTP 404)' "$err" && alert_gh api "repos/$alert_repo" --silent >/dev/null 2>&1; then
+    why='not there'
   fi
-  rm -f "$out" || true
-  return $listed
+  rm -f "$out" "$err" || true
+  [[ -n $why ]] || return 1
+  printf '%s' "$why"
 }
 # A later read's try at an owed close (phase=closed). True, with the file gone, once it has gone through.
 retry_close() {
