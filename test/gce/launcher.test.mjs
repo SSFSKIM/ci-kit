@@ -872,3 +872,36 @@ test('a tick that cannot list the instances fails whole, launching and deleting 
   await assert.rejects(launcher.tick(), /instances listing failed/);
   assert.deepEqual(w.log.filter((l) => /^(insert|delete|unregister)/.test(l)), []);
 });
+
+// Review (M3, P2): a repo's two run snapshots are taken in order, queued then in progress. A run that starts between
+// them (another runner took its first job) is then in the second, and its still-queued pool jobs launch this tick;
+// two snapshots taken at once could each miss it.
+test('a run that starts between the queued and in-progress snapshots still has its queued jobs launched', async () => {
+  const { w, launcher } = setup();
+  const a = w.sim.queue(SBX, L(4), { name: 'a' });
+  w.sim.queue(SBX, L(2), { name: 'b', run: a.run_id });
+  const runsByStatus = w.github.runsByStatus;
+  w.github.runsByStatus = async (repo, status) => {
+    if (status === 'queued') {
+      await new Promise((r) => setImmediate(r));
+      w.gh.runs.find((r) => r.id === a.run_id).status = 'in_progress'; // it starts just before this snapshot
+    }
+    return runsByStatus(repo, status);
+  };
+  const out = await launcher.tick();
+  assert.equal(out.launched.length, 2);
+});
+
+test('a run listed both queued and in progress (it started between the two listings) is read once: no double launch', async () => {
+  const { w, launcher } = setup();
+  const a = w.sim.queue(SBX, L(4), { name: 'a' });
+  w.sim.queue(SBX, L(2), { name: 'b', run: a.run_id });
+  const runsByStatus = w.github.runsByStatus;
+  w.github.runsByStatus = async (repo, status) => {
+    const list = await runsByStatus(repo, status);
+    if (status === 'queued') w.gh.runs.find((r) => r.id === a.run_id).status = 'in_progress'; // it starts just after
+    return list;
+  };
+  const out = await launcher.tick();
+  assert.equal(out.launched.length, 2);
+});

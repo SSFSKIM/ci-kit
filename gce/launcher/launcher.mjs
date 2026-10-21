@@ -150,14 +150,17 @@ export class Launcher {
 
   // A repo's GitHub reads, started together: whether it is private, and its runners, then its queued and running
   // jobs, each with its run's workflow path. Runners are read first: a job taken between the two reads then shows as
-  // not queued, never as double demand. A failed read resolves to null (visible: to the error), logged.
+  // not queued, never as double demand. The queued runs are listed before the running ones, so a run that starts
+  // between the two listings is in the second (listed at once, each could miss it), and a run in both is read once.
+  // A failed read resolves to null (visible: to the error), logged.
   readRepo(repo) {
     const visible = this.gh.getRepo(repo).then((r) => r.private === true, (err) => err);
     const runners = this.listRunners(repo);
     const jobs = runners.then(async (mine) => {
       if (!mine) return null;
       try {
-        const runs = (await Promise.all(['queued', 'in_progress'].map((status) => this.gh.runsByStatus(repo, status)))).flat();
+        const listed = [...(await this.gh.runsByStatus(repo, 'queued')), ...(await this.gh.runsByStatus(repo, 'in_progress'))];
+        const runs = [...new Map(listed.map((run) => [run.id, run])).values()]; // one that started between is in both
         const lists = await Promise.all(runs.map(async (run) => (await this.gh.listJobs(repo, run.id)).map((j) => ({ ...j, repo, workflow: run.path }))));
         return lists.flat();
       } catch (err) {
