@@ -51,13 +51,16 @@ base() {
 # take no labels; the names carry the kit's.
 NETWORK=ci-kit
 network() {
-  local subnet region taken range
+  local subnet region taken range subnets
   g compute networks describe "$NETWORK" > /dev/null 2>&1 ||
     g compute networks create "$NETWORK" --subnet-mode=custom \
       --description='ci-kit: pool and bake VMs (spec 3a); no ingress rules, egress by the implied rule'
   # One subnetwork per placement of gce.json, in the checkout's copy. A region's subnetwork holds its instances (the
   # project's 64-instance quota there), so a /20 each is far more than enough; ranges must not overlap in the network.
-  # (gcloud reads no stdin here: the loop's own input is the list.)
+  # The list is read before the loop so that a failure stops the deploy (set -e does not see a process substitution);
+  # gcloud reads no stdin in the loop, whose own input is the list.
+  subnets=$(node "$KIT/gce/subnets.mjs" list) || die "cannot read the placements' subnetworks from pool/config/gce.json"
+  [ -n "$subnets" ] || die "pool/config/gce.json names no subnetwork"
   while read -r subnet region; do
     g compute networks subnets describe "$subnet" --region="$region" > /dev/null 2>&1 < /dev/null && continue
     taken=$(g compute networks subnets list --network="$NETWORK" --format='value(ipCidrRange)' < /dev/null)
@@ -65,7 +68,7 @@ network() {
     range=$(node "$KIT/gce/subnets.mjs" free $taken) || die "no free range in the network $NETWORK for $subnet"
     g compute networks subnets create "$subnet" --network="$NETWORK" --region="$region" --range="$range" \
       --description='ci-kit: pool and bake VMs' < /dev/null
-  done < <(node "$KIT/gce/subnets.mjs" list)
+  done <<< "$subnets"
   local open
   open=$(g compute firewall-rules list --format='value(name,network.basename(),direction,disabled,allowed[].map().firewall_rule().list())' |
     awk -F'\t' -v net="$NETWORK" '$2 == net && $3 == "INGRESS" && $4 != "True" && $5 != "" { print $1 }')

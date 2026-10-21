@@ -13,8 +13,9 @@ const POOL_RANGE = '10.64.0.0/16';
 const PREFIX = 20;
 
 export function subnetsOf(cfg) {
+  // A subnetwork is a name within a region: the same name in two regions is two.
   const seen = new Map();
-  for (const { subnetwork, region } of cfg.placements) if (!seen.has(subnetwork)) seen.set(subnetwork, { name: subnetwork, region });
+  for (const { subnetwork, region } of cfg.placements) if (!seen.has(`${region}/${subnetwork}`)) seen.set(`${region}/${subnetwork}`, { name: subnetwork, region });
   return [...seen.values()];
 }
 

@@ -13,6 +13,12 @@ test('one subnetwork per placement, named with its region, once however many pla
   assert.equal(subnetsOf(twice).length, 2);
 });
 
+test('the same subnetwork name in two regions is two subnetworks', () => {
+  const [west, central] = NEW_CFG.placements;
+  const shared = { placements: [{ ...west, subnetwork: 'ci-kit-pool' }, { ...central, subnetwork: 'ci-kit-pool' }] };
+  assert.deepEqual(subnetsOf(shared), [{ name: 'ci-kit-pool', region: 'us-west4' }, { name: 'ci-kit-pool', region: 'us-central1' }]);
+});
+
 test('the first free /20 of 10.64.0.0/16: after us-central1\'s, skipping any range that overlaps a taken one', () => {
   assert.equal(freeRange([]), '10.64.0.0/20');
   assert.equal(freeRange(['10.64.0.0/20']), '10.64.16.0/20');
