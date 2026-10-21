@@ -80,8 +80,9 @@ case $command in
     if [[ $1 == */vm/guest/kickoff.sh ]]; then
       # As kickoff.sh, it refuses an out/ that holds a marker, and otherwise opens out/wrapper.log as it starts the
       # wrapper. With block-kickoff it waits before that, with block-kickoff-return after it (the wrapper started, the
-      # exec not yet returned), until kickoff-go or its VM's run ends. kicked (its arguments) is written as it returns,
-      # so a guest marker a test writes after it comes after the wrapper's start.
+      # exec not yet returned), until kickoff-go or its VM's run ends; with fail-kickoff-late the exec then fails though
+      # the wrapper started (a gRPC error or a timeout on the way back). kicked (its arguments) is written as it
+      # returns, so a guest marker a test writes after it comes after the wrapper's start.
       kicked() { printf '%s\\n' "$@" > "$vms/$name/kicked"; }
       block() {
         [[ -e $t/$1 ]] || return 0
@@ -97,6 +98,7 @@ case $command in
       echo 'wrapper: started' >> "$out/wrapper.log"
       block block-kickoff-return
       kicked "$@"
+      [[ ! -e $t/fail-kickoff-late ]] || { echo 'Error: rpc error: code = DeadlineExceeded' >&2; exit 1; }
       echo "kickoff: $2 $3: identity copied, cache linked, wrapper 4242 started"; exit 0
     fi
     exit 1 ;;
@@ -119,7 +121,8 @@ const fakeGh = `g=$HOME/gh
 printf '%s\\0' "$@" "GH_TOKEN=\${GH_TOKEN-unset}" >> "$g/calls"; printf '\\0' >> "$g/calls"
 if [[ $1 == api ]]; then
   [[ ! -e $g/fail ]] || { echo 'gh: HTTP 502: Bad Gateway' >&2; exit 1; }
-  if [[ -e $g/slow ]]; then touch "$g/slow-waiting"; sleep 3; fi
+  # slow: each API call answers after the seconds the file names (3 when it names none).
+  if [[ -e $g/slow ]]; then touch "$g/slow-waiting"; read -r seconds < "$g/slow"; sleep "\${seconds:-3}"; fi
   case $2 in
     *'runs?status=queued'*) file=$g/runs-queued.json ;;
     *'runs?status=in_progress'*) file=$g/runs-in_progress.json ;;
@@ -196,7 +199,7 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/disk3s5
         JSON.stringify({ total_count: 1, jobs: [{ id: 9000 + i, run_id: runs[i], status: 'queued', labels }] })));
     },
     flag: (name, on = true) => on ? writeFileSync(join(home, 'tart', name), '') : rmSync(join(home, 'tart', name), { force: true }),
-    ghFlag: (name, on = true) => on ? writeFileSync(join(home, 'gh', name), '') : rmSync(join(home, 'gh', name), { force: true }),
+    ghFlag: (name, on = true) => on === false ? rmSync(join(home, 'gh', name), { force: true }) : writeFileSync(join(home, 'gh', name), on === true ? '' : `${on}\n`),
     log: () => text(join(logs, 'vm-lane.log')) ?? '',
     hooksLog: () => text(join(logs, 'mac-runner-hooks.log')) ?? '',
     calls: () => (text(join(home, 'tart/calls')) ?? '').split('\n').filter(Boolean),
@@ -833,6 +836,67 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     assert.match(log, new RegExp(`${clone}: idle past 1 s, but the queue cannot be read \\(the queue read passed its 2 s deadline\\); listening on`));
     assert.ok(log.indexOf('passed its 2 s deadline') < log.indexOf(`${clone}: stopped for memory`));
     assert.equal(existsSync(join(m.out, 'stop-request')), false);
+    m.ghFlag('slow', false);
+    m.memory();
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    await finish(m, a);
+  });
+
+  // A kickoff whose exec fails after kickoff.sh started the wrapper: out/ decides, not the exec's status.
+  test('a kickoff that fails after the wrapper took a job: the job goes on, and the clone is never stopped', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    m.flag('block-kickoff-return');
+    m.flag('fail-kickoff-late');
+    const a = m.start();
+    const clone = await m.kickoffBlocked();
+    m.mark('listening', 'at=2026-10-21T12:00:40Z');
+    m.mark('assigned', 'job=9e8d7c6b at=2026-10-21T12:01:00Z by=diag');
+    m.mark('job', 'run=7 attempt=1 job=e2e repository=SSFSKIM/MAWS at=2026-10-21T12:01:30Z');
+    m.flag('kickoff-go');
+    await m.waitLog(new RegExp(`${clone}: kickoff.sh failed: Error: rpc error: code = DeadlineExceeded, but its wrapper runs`));
+    await m.waitLog(new RegExp(`${clone} took run 7 job e2e`));
+    await sleep(1500);
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
+    assert.equal(existsSync(join(m.out, 'stop-request')), false);
+    await m.finished(clone);
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
+    assert.equal(m.failures().total_image ?? '0', '0');
+    await finish(m, a);
+  });
+
+  test('a kickoff that fails after the wrapper started, with nothing assigned: the guest is given up through the handshake, never a plain stop', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    m.flag('fail-kickoff-late');
+    const a = m.start();
+    const clone = await m.booted();
+    await m.waitLog(new RegExp(`${clone}: kickoff.sh failed: Error: rpc error: code = DeadlineExceeded, and its wrapper may run; asked the wrapper to stop`));
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
+    assert.equal(m.failures().total_image, '1');
+    m.mark('stopped', 'at=2026-10-21T12:04:00Z');
+    m.mark('done', '0');
+    m.powerOff(clone);
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
+    assert.equal(m.failures().total_image, '1');
+    assert.equal(m.failures().total_raced, '0');
+    await finish(m, a);
+  });
+
+  // The reviewer's shape: production's sample and queue bounds, a read every 9 s past an idle bound of 0, 1 s ticks, and
+  // an API that answers in 6 s, so each read is longer than the time left to the next sample. Critical pressure from the
+  // start of the first read is stopped within one sample interval plus one read bound.
+  test('slow queue reads back to back: critical pressure is stopped within one sample interval plus one read bound', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_SAMPLE: '15', CI_KIT_VM_POLL: '9', CI_KIT_VM_IDLE: '0', CI_KIT_VM_TICK: '1' } });
+    const a = m.start();
+    const clone = await m.booted();
+    m.ghFlag('slow', 6);
+    m.mark('listening', 'at=2026-10-21T12:00:40Z');
+    await m.until(() => existsSync(join(m.home, 'gh/slow-waiting')), 'the first slow read');
+    const injected = Date.now();
+    m.memory({ pressure: 4, available: 8 });
+    await m.waitLog(new RegExp(`${clone}: stopped for memory: memory pressure critical`));
+    const elapsed = (Date.now() - injected) / 1000;
+    assert.ok(elapsed <= 15 + 15, `critical pressure was stopped ${elapsed} s after it began, past 30 s`);
     m.ghFlag('slow', false);
     m.memory();
     await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));

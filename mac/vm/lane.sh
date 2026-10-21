@@ -14,7 +14,9 @@
 #               has its stopped clone deleted, then releases. Then until `tart exec <clone> true` answers, at most
 #               CI_KIT_VM_BOOT s (120)
 #   kicking     `tart exec <clone> …/kickoff.sh <slot> <clone>`, run beside the loop, then until out/listening or
-#               out/session-conflict, at most CI_KIT_VM_KICKOFF s (60) from the kickoff
+#               out/session-conflict, at most CI_KIT_VM_KICKOFF s (60) from the kickoff. An exec that fails is read
+#               against out/ first: the wrapper's markers go on as they would, a wrapper that may run with nothing
+#               assigned is given up through the handshake, and only a clone where none can run fails at once
 #   session     the listener found the slot's last session open: until out/listening, at most CI_KIT_VM_SESSION s
 #               (300); past it a `session` failure, counted apart from `image`
 #   listening   until out/assigned; past CI_KIT_VM_IDLE s (180) without it, the idle handshake (below)
@@ -87,8 +89,9 @@
 #     of CI_KIT_VM_CRITICAL_PAUSE s (600);
 #   - free disk under CI_KIT_VM_DISK_FLOOR GB (5): the same stop, for `disk`; under half the reserve, vm-pause (disk)
 #     until the space is back, in every state, idle included.
-#   Nothing the loop waits on outlasts about one sample: the kickoff runs beside it, and the queue read has an overall
-#   deadline of CI_KIT_VM_QUEUE_WAIT s (15), past which the queue reads as unknown (no boot, no stop).
+#   Nothing the loop waits on outlasts about one sample: the kickoff runs beside it, the queue read has an overall
+#   deadline of CI_KIT_VM_QUEUE_WAIT s (15), past which the queue reads as unknown (no boot, no stop), and a sample due
+#   by the end of a step is taken before the next one, so two samples are at most one interval and one read apart.
 #
 # STATE, in ~/Library/Logs/ci-kit beside the host's, each file replaced whole by a rename and written under the
 # desktop lock; a write that fails leaves the stricter state (a reservation not written is no boot, a release not done
@@ -762,16 +765,33 @@ wrapper_may_run() {
   return 1
 }
 step_kicking() {
+  local failed_kick=''
   [[ -n $kicked ]] || kickoff_start
   kickoff_poll
-  if [[ -n $kick_status && $kick_status != 0 ]]; then
-    fail image "$kick_status"
-    return
+  [[ -z $kick_status || $kick_status == 0 ]] || failed_kick=$kick_status
+  # out/ before the kickoff's status: kickoff.sh starts the wrapper before it returns, so an exec that fails or times
+  # out on the way back does not show that none runs, and what the wrapper wrote is the guest's own record.
+  if [[ -n $failed_kick ]] && { has listening || has session-conflict || has assigned || has job; }; then
+    say "$clone: $failed_kick, but its wrapper runs (out/ holds its markers); going on"
   fi
+  if has assigned || has job; then take_assigned; return; fi
   if has listening; then say "$clone: listening ($(first_line listening))"; enter listening; return; fi
   if has session-conflict; then
     say "$clone: the slot's last session is still open at GitHub; session recovery (at most $session_bound s)"
     enter session
+    return
+  fi
+  if [[ -n $failed_kick ]]; then
+    # Nothing assigned, but a wrapper that may run may yet take a job: only the handshake gives it up.
+    if wrapper_may_run; then
+      if [[ -z $failed ]]; then
+        failed=image
+        count_failure image "$failed_kick, with its wrapper perhaps started"
+      fi
+      ask_stop "$failed_kick, and its wrapper may run"
+    else
+      fail image "$failed_kick"
+    fi
     return
   fi
   if run_gone; then fail image 'tart run exited during the kickoff'; return; fi
@@ -1194,6 +1214,9 @@ next_sample=0 next_poll=0
 while :; do
   clock
   step
+  # A step may have blocked (a queue read, up to its deadline): the sample is judged on the time after it, so it is
+  # taken before the next step can block again.
+  clock
   if [[ -n $clone ]] && ((now_epoch >= next_sample)); then
     next_sample=$((now_epoch + sample_every))
     guard_sample
