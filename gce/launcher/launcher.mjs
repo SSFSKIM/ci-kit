@@ -29,6 +29,8 @@ export const TICK_BUDGET_MS = 45_000;
 const INSERT_DEADLINE_MS = 40_000;
 const PARALLEL_LAUNCHES = 16; // a burst launches in one round: each insert waits ~10–20 s for its operation
 const DAILY_WITHIN_MS = 2 * 3600_000; // the 26 h ledger window holds all of yesterday only early in the day
+// Cloud NAT's samples take up to 225 s to be readable: the day's line, which reads its NAT once, waits past that.
+const DAILY_AFTER_MS = 5 * 60_000;
 const SETTLE_BUDGET_MS = 15_000; // what a tick spends learning how unsettled inserts ended; the rest wait a tick
 const SETTLE_PARALLEL = 4; // zones whose operations are read at once
 const NAT_GATEWAY = 'ci-kit-nat'; // each placement region's Cloud NAT (gce/deploy.sh network)
@@ -285,8 +287,10 @@ export class Launcher {
   // A row whose insert never settled in its tick (spec M6: unknown outcomes settle after 41-121 s) learns when its
   // operation ended, from the zone's insert operations, so the slow insert's settle time outlives the tick (the
   // launcher's wait is not the operation's), and a refusal joins the row's `refused`. Until it is learned, a launching row
-  // whose VM is not listed keeps its vCPUs and covers its job (planLaunches). One read per zone, a few zones at once,
-  // within SETTLE_BUDGET_MS: a zone not read in it, or whose read fails, waits for the next tick.
+  // whose VM is not listed keeps its vCPUs and covers its job (planLaunches); learned refused, it is abandoned at once
+  // and its runner unregistered, since no VM will come. The reads (one per zone, a few zones at once) are bounded by
+  // SETTLE_BUDGET_MS, and a zone not read in it, or whose read fails, waits for the next tick; the writes of what was
+  // read are then all made before this returns, so no row is finalized ahead of its settlement.
   async settleInserts(seen) {
     const byZone = new Map();
     for (const observed of seen.rows) {
@@ -294,11 +298,16 @@ export class Launcher {
       if (insert) byZone.set(insert.zone, [...(byZone.get(insert.zone) ?? []), observed.alloc]);
     }
     if (!byZone.size) return;
+    const read = new Map(); // zone → its insert operations
     let expired = false;
     const budget = this.after(SETTLE_BUDGET_MS);
-    const zones = [...byZone];
+    const zones = [...byZone.keys()];
     const worker = async () => {
-      while (zones.length && !expired) await this.settleZone(seen, ...zones.shift(), () => expired);
+      while (zones.length && !expired) {
+        const zone = zones.shift();
+        const ops = await this.insertOperations(seen, zone, byZone.get(zone));
+        if (ops && !expired) read.set(zone, ops);
+      }
     };
     await Promise.race([
       Promise.all(Array.from({ length: Math.min(SETTLE_PARALLEL, zones.length) }, worker)),
@@ -306,29 +315,39 @@ export class Launcher {
     ]);
     budget.cancel();
     if (expired) this.log(`unsettled inserts: not all read in ${SETTLE_BUDGET_MS / 1000} s; the rest wait for the next tick`);
+    await Promise.all([...read].flatMap(([zone, ops]) => byZone.get(zone).map((alloc) => this.settleInsert(seen, zone, alloc, ops))));
   }
 
-  async settleZone(seen, zone, allocs, expired) {
-    const current = (alloc) => seen.rowOf.get(alloc) ?? seen.rows.find((r) => r.alloc === alloc);
-    let ops;
+  async insertOperations(seen, zone, allocs) {
+    const names = allocs.map((a) => (seen.rowOf.get(a) ?? seen.rows.find((r) => r.alloc === a)).instance);
     try {
-      ops = await this.gce.zoneOperations(zone, `targetLink eq ".*/instances/(${allocs.map((a) => current(a).instance).join('|')})"`);
+      return await this.gce.zoneOperations(zone, `targetLink eq ".*/instances/(${names.join('|')})"`);
     } catch (err) {
       this.log(`insert operations in ${zone}: ${err.message}; their rows wait for the next tick`);
-      return;
+      return null;
     }
-    for (const alloc of allocs) {
-      if (expired()) return;
-      const row = current(alloc);
-      const insert = unsettledInsert(row);
-      const op = ops.find((o) => o.operationType === 'insert' && o.targetLink.endsWith(`/instances/${row.instance}`));
-      if (!insert || op?.status !== 'DONE') continue;
-      const { outcome, error } = settledAs(op);
-      const metric = quotaMetric(error);
-      const refused = outcome === 'capacity' || outcome === 'quota' ? [...(row.refused ?? []), { kind: outcome, zone, ...(metric ? { metric } : {}) }] : row.refused;
-      const next = { ...row, ...(refused ? { refused } : {}), slow: row.slow.map((s) => (s === insert ? { ...s, outcome, done: op.endTime ?? iso(this.now()) } : s)) };
-      if (await this.write(next)) seen.rowOf.set(alloc, next);
+  }
+
+  async settleInsert(seen, zone, alloc, ops) {
+    const row = seen.rowOf.get(alloc) ?? seen.rows.find((r) => r.alloc === alloc);
+    const insert = unsettledInsert(row);
+    const op = ops.find((o) => o.operationType === 'insert' && o.targetLink.endsWith(`/instances/${row.instance}`));
+    if (!insert || op?.status !== 'DONE') return;
+    const { outcome, error } = settledAs(op);
+    const metric = quotaMetric(error);
+    const refused = outcome === 'capacity' || outcome === 'quota' ? [...(row.refused ?? []), { kind: outcome, zone, ...(metric ? { metric } : {}) }] : row.refused;
+    let next = { ...row, ...(refused ? { refused } : {}), slow: row.slow.map((s) => (s === insert ? { ...s, outcome, done: op.endTime ?? iso(this.now()) } : s)) };
+    if (outcome !== 'created' && row.state === 'launching') {
+      const runner = this.runnerOf(seen, row.repo, row.instance);
+      if (runner) {
+        await this.gh.deleteRunner(row.repo, runner.id).catch((err) => {
+          if (err.status !== 404) this.log(`unregister ${row.instance}: ${err.message}; the orphan-runner rule retries`);
+        });
+      }
+      this.log(`${row.instance}: its insert was refused (${outcome}) after its tick; abandoned`);
+      next = finalRow(next, { end: 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb });
     }
+    if (await this.write(next)) seen.rowOf.set(alloc, next);
   }
 
   // ── cleanup ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -604,7 +623,7 @@ export class Launcher {
     // before its operation did (unknown, and still running when reconciled) stays pending, and the launch waits, within
     // the tick, for its race to be decided (unsettled).
     let raced = false;
-    let marking = null; // the write of this row's pending insert, made when its race starts
+    let marking = null; // the write of this row's pending insert, made before its race starts
     let unsettled = null; // {settle, decision, fired}: the last attempt, while its outcome is unknown
     const result = await walkPlacements(attempts, {
       attempt: async (p) => {
@@ -625,10 +644,8 @@ export class Launcher {
         };
         slow?.promise.then(() => this.raceSlowInsert({
           item, row, attempt: p, sent, attempts, stillPending: () => pending && !raced,
-          start: (write) => {
-            raced = true;
-            marking = write;
-          },
+          hold: (write) => { marking = write; },
+          start: () => { raced = true; },
         }, ctx)).catch((err) => this.log(`race of ${name}: ${err.message}`)).finally(decided);
         try {
           const done = await insert;
@@ -700,7 +717,7 @@ export class Launcher {
   // races at most once, and a race never races. Before the race's own row, runner and insert, the original's row is
   // written with its pending insert, and the race's row is written before its runner and insert: a launcher that
   // restarts meanwhile counts both (planLaunches, pendingAllocation).
-  async raceSlowInsert({ item, row, attempt, sent, attempts, stillPending, start }, ctx) {
+  async raceSlowInsert({ item, row, attempt, sent, attempts, stillPending, hold, start }, ctx) {
     await ctx.firstTried;
     if (!stillPending()) return;
     const name = row.instance;
@@ -715,15 +732,23 @@ export class Launcher {
       this.log(`${unsettled}; no race (${why})`);
       return;
     }
-    const marked = this.write({ ...row, slow: [{ zone: attempt.zone, outcome: 'unknown', sent: iso(sent) }] });
-    start(marked);
+    // Reserved while the original's pending insert is written; without that row, a restarted launcher would not count
+    // the original, so no race starts.
     ctx.inflight += need;
+    const marking = this.write({ ...row, slow: [{ zone: attempt.zone, outcome: 'unknown', sent: iso(sent) }] });
+    hold(marking);
+    if (!(await marking) || !stillPending()) {
+      ctx.inflight -= need;
+      this.log(`${unsettled}; no race (${stillPending() ? 'its pending insert could not be written to the ledger' : 'it settled meanwhile'})`);
+      return;
+    }
+    start();
     this.log(`${unsettled}; a second allocation races it`);
     const demand = item.job ? { job: item.job.id } : { run: item.prelaunch.run, attempt: item.prelaunch.attempt };
     const racing = {
       repo: item.repo, cpus: item.cpus, job: item.job, prelaunch: item.prelaunch, race: { of: row.alloc, demand }, attempts: next, reserved: need,
     };
-    ctx.races.push(marked.then(() => this.launch(racing, ctx)).then((r) => {
+    ctx.races.push(this.launch(racing, ctx).then((r) => {
       if (!r.name) return;
       ctx.out.launched.push(r.name);
       ctx.out.raced.push(`${r.name} for ${name}`);
@@ -768,7 +793,8 @@ export class Launcher {
 
   async daily(seen) {
     const now = this.now();
-    if (now % (24 * 3600_000) >= DAILY_WITHIN_MS) return;
+    const into = now % (24 * 3600_000);
+    if (into < DAILY_AFTER_MS || into >= DAILY_WITHIN_MS) return;
     const yesterday = day(now - 24 * 3600_000);
     try {
       if (this.ledger.hasDaily(yesterday)) return;

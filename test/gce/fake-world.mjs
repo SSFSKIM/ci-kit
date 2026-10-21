@@ -187,7 +187,9 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
     },
     issueComments: async (_repo, n, { since } = {}) =>
       gh.comments.filter((c) => (c.issue ?? 1) === n && (!since || c.updated_at >= since)).map((c) => ({ ...c })),
+    // hooks.commentWrite(body): a promise a comment's creation or edit waits on first (it may reject: a failed write).
     createComment: async (_repo, n, body) => {
+      await hooks.commentWrite?.(body);
       if (commentCount(n) >= 2500) throw httpError(403, 'Commenting is disabled on issues with more than 2500 comments');
       const c = { id: nextId++, issue: n, body, updated_at: new Date(clock).toISOString() };
       gh.comments.push(c);
@@ -199,6 +201,7 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
       return { ...c };
     },
     updateComment: async (_repo, id, body) => {
+      await hooks.commentWrite?.(body);
       const c = gh.comments.find((x) => x.id === id);
       if (!c) throw httpError(404);
       c.body = body;

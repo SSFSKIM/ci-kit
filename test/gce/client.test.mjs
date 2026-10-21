@@ -278,3 +278,14 @@ test('Cloud Monitoring time series are read with the filter, interval and aggreg
   });
   assert.equal(f.calls[0].auth, 'Bearer tok');
 });
+
+test('a time series page that reports execution errors or unreachable projects fails the read: a partial total is no total', async () => {
+  const MON = 'https://monitoring.googleapis.com/v3/projects/ssfskim-ci-kit/timeSeries?';
+  const opts = { start: '2026-10-21T00:00:00Z', end: '2026-10-22T00:00:00Z' };
+  for (const extra of [{ executionErrors: [{ code: 4, message: 'deadline exceeded for some data' }] }, { unreachable: ['projects/ssfskim-ci-kit'] }]) {
+    const { gce } = gceWith([[`GET ${MON}`, json(200, { timeSeries: [{ points: [] }], ...extra })]]);
+    await assert.rejects(gce.timeSeries('metric.type="x"', opts), /incomplete/);
+  }
+  const { gce } = gceWith([[`GET ${MON}`, json(200, { timeSeries: [], executionErrors: [], unreachable: [] })]]);
+  assert.deepEqual(await gce.timeSeries('metric.type="x"', opts), []);
+});

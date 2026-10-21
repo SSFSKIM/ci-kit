@@ -255,8 +255,14 @@ export function walkRecord(tried) {
 }
 
 // A launching row whose VM may yet appear though none is listed: its insert never settled, or it is a race's, whose row
-// is written before its runner and insert (a launcher restarted while that insert is in flight must count it).
-export const pendingAllocation = (row) => row.state === 'launching' && Boolean(row.race || unsettledInsert(row));
+// is written before its runner and insert (a launcher restarted while that insert is in flight must count it). One whose
+// last insert is known refused will have no VM, whatever its row's state still says.
+export function pendingAllocation(row) {
+  if (row.state !== 'launching') return false;
+  const last = row.slow?.at(-1);
+  if (last?.done && last.outcome !== 'created') return false;
+  return Boolean(row.race || unsettledInsert(row));
+}
 
 // A row's insert that never settled (outcome unknown, its operation's end not yet learned), or null; none once the row
 // is final. A walk stops at an unknown outcome, so a row has at most one.

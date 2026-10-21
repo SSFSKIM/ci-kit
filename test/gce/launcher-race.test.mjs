@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { world, gceErr } from './fake-world.mjs';
 import { Launcher } from '../../gce/launcher/launcher.mjs';
 import { createGceLedger } from '../../gce/launcher/ledger-store.mjs';
-import { parseRow, renderRow, dailyLine, launchRow } from '../../gce/launcher/ledger.mjs';
+import { parseRow, renderRow, dailyLine, launchRow, runningRow } from '../../gce/launcher/ledger.mjs';
 import { allocOf, instanceName, RACE_AFTER_MS } from '../../gce/launcher/logic.mjs';
 import { NEW_CFG } from './config-fixtures.mjs';
 import { GceError } from '../../lib/gce.mjs';
@@ -193,7 +193,7 @@ test('one race per allocation and none of a race; an unsettled pair keeps its jo
   w.advance(MIN);
   await make().tick();
   assert.deepEqual([rowOf(w, first).state, rowOf(w, first).slow.at(-1)], ['running', { zone: 'us-west4-a', outcome: 'created', sent: rowOf(w, first).slow[0].sent, done }]);
-  assert.deepEqual([rowOf(w, second).state, rowOf(w, second).slow.at(-1).outcome, rowOf(w, second).slow.at(-1).done], ['launching', 'quota', done]);
+  assert.deepEqual([rowOf(w, second).state, rowOf(w, second).end, rowOf(w, second).slow.at(-1).outcome, rowOf(w, second).slow.at(-1).done], ['final', 'abandoned', 'quota', done]);
   assert.deepEqual(rowOf(w, second).refused, [{ kind: 'quota', zone: 'us-central1-a', metric: 'C3D_CPUS' }], 'the refusal learned late is counted, with its metric');
 });
 
@@ -336,10 +336,10 @@ test('learning how unsettled inserts ended reads each zone once, never holds a s
   w.hooks.zoneOperations = (zone) => (zone === 'us-west4-a' ? new Promise(() => {}) : null); // that zone's read hangs
   const ticking = launcher.tick();
   await until(() => w.log.includes(`delete ${vm}`), 'the stopped VM is deleted while a read hangs');
-  await until(() => rowOf(w, instanceName('cent00000a')).slow[0].done, 'the zone that answered is learned');
   assert.deepEqual(w.log.filter((l) => l.startsWith('read operations ')).sort(), ['read operations us-central1-a', 'read operations us-west4-a']);
-  w.advance(15_000); // the settlement's budget
+  w.advance(15_000); // the reads' budget
   await ticking;
+  assert.equal(rowOf(w, instanceName('cent00000a')).slow[0].done, ended, 'the zone that answered is learned');
   assert.equal(rowOf(w, instanceName('west00000a')).slow[0].done, undefined, 'left for the next tick');
   w.hooks.zoneOperations = null;
   w.advance(MIN);
@@ -374,4 +374,96 @@ test('the daily line reads the day\'s NAT from Cloud Monitoring once, when it is
     // 2 GiB processed (1 each way) and 2 address-hours in us-west4: $0.09 + $0.01.
     else assert.match(daily[0].body, / NAT: us-west4 2 GiB, 2 address-hours, \$0\.1000; \$0\.1000 in all\./);
   }
+});
+
+// Re-review (M6 race): a definite refusal learned late ends the allocation; a failed marker write starts no race;
+// settlement writes are joined before rows are finalized; the NAT day is read after its samples land.
+
+test('a race whose insert is learned later to have been refused is no longer pending: abandoned, runner gone, its job launched again', async () => {
+  const { w, launcher, make } = setup();
+  const job = w.sim.queue(SBX, L(4));
+  const held = hold(w, () => true);
+  const ticking = launcher.tick();
+  await until(() => held.size === 1, 'the first insert');
+  w.advance(RACE_AFTER_MS);
+  await until(() => held.size === 2, 'the race\'s insert');
+  const [first, second] = held.keys();
+  w.g.insertErrors.push(unsettled(second));
+  held.get(second)(); // the race's wait ends, its operation still running
+  w.advance(5_000);
+  w.g.insertErrors.push({ match: (zone, body) => body.name === first, error: gceErr(['ZONE_RESOURCE_POOL_EXHAUSTED']) });
+  held.get(first)(); // the original is refused: abandoned, the race carries the job
+  await ticking;
+  assert.deepEqual([rowOf(w, first).end, rowOf(w, second).state], ['abandoned', 'launching']);
+  w.hooks.holdInsert = null;
+  w.sim.completeInsert(second, { codes: ['ZONE_RESOURCE_POOL_EXHAUSTED'] });
+  w.advance(MIN);
+  const next = await make().tick();
+  assert.deepEqual([rowOf(w, second).state, rowOf(w, second).end], ['final', 'abandoned']);
+  assert.equal(w.sim.runner(SBX, second), undefined, 'its runner is unregistered');
+  w.advance(MIN);
+  const after = await make().tick();
+  assert.equal(next.launched.length + after.launched.length, 1, `the job is launched again, not left waiting on a refused allocation (${job.id})`);
+});
+
+test('a race whose original\'s pending insert cannot be written to the ledger is not started', async () => {
+  const { w, launcher } = setup();
+  w.sim.queue(SBX, L(4));
+  const held = hold(w, (zone) => zone === 'us-west4-a');
+  const ticking = launcher.tick();
+  await until(() => held.size === 1, 'the first insert');
+  const [first] = held.keys();
+  w.hooks.commentWrite = (body) => {
+    if (body.includes(`"alloc":"${allocOf(first)}"`)) throw Object.assign(new Error('Server Error'), { status: 502 });
+  };
+  w.advance(RACE_AFTER_MS);
+  await until(() => w.log.some((l) => / no race \(/.test(l)), 'the race declined');
+  w.hooks.commentWrite = null;
+  held.get(first)();
+  const out = await ticking;
+  assert.deepEqual([out.raced, races(w).length, w.log.filter((l) => l.startsWith('jit ')).length], [[], 0, 1]);
+});
+
+test('a settlement whose ledger write outlasts the read budget is written before its row is finalized', async () => {
+  const { w, launcher } = setup();
+  // A row being deleted whose insert never settled in its tick; its VM is gone, so this tick finalizes it.
+  const alloc = 'dele00000a';
+  const at = w.now() - 5 * MIN;
+  const row = {
+    ...runningRow({ ...launchRow({ alloc, repo: SBX, cpus: 4, at, config: COMMIT, reserved: 4 }), slow: [{ zone: 'us-west4-a', outcome: 'unknown', sent: new Date(at + 1_000).toISOString() }] },
+      { zone: 'us-west4-a', machine: 'c4d-highcpu-4', provisioning: 'spot', created: at + 60_000 }),
+    state: 'deleting', end: 'done', deleted: new Date(w.now() - 30_000).toISOString(),
+  };
+  w.gh.comments.push({ id: 9100, issue: 1, body: renderRow(row), updated_at: new Date(w.now()).toISOString() });
+  const target = `https://www.googleapis.com/compute/v1/projects/ssfskim-ci-kit/zones/us-west4-a/instances/${instanceName(alloc)}`;
+  const ended = new Date(at + 61_000).toISOString();
+  w.g.ops.push({ name: 'op-d', zone: 'us-west4-a', operationType: 'insert', status: 'DONE', endTime: ended, targetLink: target, selfLink: `${target}-op` });
+  let release;
+  const slowWrite = new Promise((resolve) => { release = resolve; });
+  w.hooks.commentWrite = (body) => (body.includes(ended) ? slowWrite : null);
+  const ticking = launcher.tick();
+  await until(() => release && w.log.includes('read operations us-west4-a'), 'the operation read');
+  await turns();
+  w.advance(15_000); // the read budget passes while the write is in flight
+  await turns();
+  assert.equal(rowOf(w, instanceName(alloc)).state, 'deleting', 'not finalized ahead of the settlement');
+  release();
+  await ticking;
+  const final = rowOf(w, instanceName(alloc));
+  assert.deepEqual([final.state, final.slow[0].done], ['final', ended]);
+});
+
+test('the daily line waits until 5 min past midnight UTC, when the NAT samples of the day\'s end have landed', async () => {
+  const start = Date.parse('2026-10-17T00:02:00Z');
+  const w = world({ start });
+  const launcher = new Launcher({
+    gce: w.gce, gh: w.github, ledger: createGceLedger(w.github, CFG.ledger, { now: w.now }), cfg: CFG, config: COMMIT, poolRepos: [],
+    now: w.now, random: () => 1, alert: async () => {}, log: () => {}, after: w.after,
+  });
+  const posted = () => w.gh.comments.filter((c) => c.body.includes('ci-kit-gce-daily')).length;
+  await launcher.tick();
+  assert.deepEqual([posted(), w.log.filter((l) => l.startsWith('time series')).length], [0, 0]);
+  w.advance(3 * MIN);
+  await launcher.tick();
+  assert.equal(posted(), 1);
 });

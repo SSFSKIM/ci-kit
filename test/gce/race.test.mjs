@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { GceError } from '../../lib/gce.mjs';
 import {
   placements, raceAttempts, walkPlacements, walkRecord, unsettledInsert, planLaunches, viewInstance, instanceName, repoLabel,
-  RACE_AFTER_MS,
+  RACE_AFTER_MS, pendingAllocation,
 } from '../../gce/launcher/logic.mjs';
 import { launchRow, runningRow, finalRow, launchCounts, dailyLine, renderDaily, natDay } from '../../gce/launcher/ledger.mjs';
 import { NEW_CFG } from './config-fixtures.mjs';
@@ -266,4 +266,13 @@ test('the daily line carries the day\'s NAT apart from the VMs\' dollars, or say
   assert.match(renderDaily(dailyLine([vm], day, 'abcdef0123', { unread: true })), / NAT: unread\./);
   assert.match(renderDaily(dailyLine([vm], day, 'abcdef0123', { regions: {}, dollars: 0 })), / NAT: none\./);
   assert.equal('nat' in dailyLine([vm], day, 'abcdef0123'), false);
+});
+
+test('a launching race whose insert is known refused is not pending; one whose insert is in flight or created is', () => {
+  const race = launchRow({ alloc: 'raceaaaaaa', repo: SBX, cpus: 4, at: T0, config: 'c0ffee00', race: { of: 'origaaaaaa', demand: { job: 1 } }, reserved: 4 });
+  const s = (outcome, done) => ({ zone: 'us-central1-a', outcome, sent: new Date(T0).toISOString(), ...(done ? { done: new Date(T0 + 60_000).toISOString() } : {}) });
+  assert.equal(pendingAllocation(race), true, 'its insert in flight');
+  assert.equal(pendingAllocation({ ...race, slow: [s('unknown')] }), true);
+  assert.equal(pendingAllocation({ ...race, slow: [s('created', true)] }), true, 'created: its VM is about to be listed');
+  for (const outcome of ['capacity', 'quota', 'failed']) assert.equal(pendingAllocation({ ...race, slow: [s(outcome, true)] }), false, outcome);
 });

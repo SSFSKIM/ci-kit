@@ -286,7 +286,7 @@ GitHub. A tick:
    counts as its VM would (vCPUs, and cover while its runner waits);
 4. beside the launches, cleans up (below), finalizes rows whose VM is gone, and records on each running row the job
    its runner holds;
-5. once a day, in its first two hours (UTC), writes yesterday's daily line.
+5. once a day, between 00:05 and 02:00 UTC, writes yesterday's daily line.
 
 The launches start as soon as the reads are in, before the cleanup, and the two run together: a VM about to be
 deleted still counts against `max_vcpus` for that tick, so launching first can only under-admit, never over-admit.
@@ -492,8 +492,10 @@ zones, another region first, spot before on demand.
   zone operation, such a row keeps the vCPUs its launch reserved (`reserved`, as recorded then, whatever the placements
   say now) and, while its runner waits, covers a job of its size as its VM would: the next tick, or a launcher
   restarted mid-race, neither launches nor races again for the same job. Those reads go one per zone, a few zones at
-  once, within 15 s and beside the cleanup's deletions; a zone not read waits for the next tick. A refusal learned
-  that way joins the row's `refused`. Overlapping ticks remain the accepted overlap below; there is no strict bound of
+  once, within 15 s and beside the cleanup's deletions; a zone not read waits for the next tick, and what was read is
+  written before any row is finalized. A refusal learned that way joins the row's `refused`, and a launching row so
+  refused is abandoned and its runner unregistered at once: no VM will come. A race starts only once its original's
+  pending insert is on the ledger. Overlapping ticks remain the accepted overlap below; there is no strict bound of
   two VMs per job.
 - A pre-launched VM and the race of its slow insert fill one slot of the run's shape, the race alone when the original
   is abandoned.
@@ -763,10 +765,11 @@ per allocation:
   learned from its zone operation by a later tick when its own tick could not wait for it; a race's row keeps `race`
   ({of: the allocation it raced, demand: the job or run that allocation was for}), apart from the job its VM ran.
 - The day's Cloud NAT, per region, from Cloud Monitoring (`router.googleapis.com/nat/*` on `nat_gateway`
-  `ci-kit-nat`, read once, when the line is posted): GiB processed both ways at $0.045 and address-hours at $0.005
+  `ci-kit-nat`, read once, when the line is posted, from 00:05 UTC: the NAT's samples take minutes to land): GiB processed both ways at $0.045 and address-hours at $0.005
   (`NAT: us-west4 2 GiB, 2 address-hours, $0.1000; $0.1000 in all.`), apart from the VMs' dollars and month. An
   address-hour is counted from `allocated_ports`, one point a minute per NAT address while it holds a VM's ports:
-  auto-allocated addresses are released when no VM needs them. A read that fails shows `NAT: unread`, never a guess;
+  auto-allocated addresses are released when no VM needs them. A read that fails, or that Monitoring answers only in
+  part, shows `NAT: unread`, never a guess;
   the launcher's account needs `monitoring.timeSeries.list` (`roles/monitoring.viewer`).
 - A writer reads a row's comment again just before updating it, and drops the write if the comment is already as
   far along; a final row is never rewritten. Issue comments have no compare-and-swap, so during an overlap of two
