@@ -675,10 +675,17 @@ VM's walk.
   and `JobServerQueue` lines before the serial sink, so the end of a job survives the 115200-baud backlog. Related:
   the runner's "Retrieving an AAD auth token took a long time" warning appears on VMs with and without external IPs
   (2–39 s; 11 VMs today), so it is GitHub's, not the NAT's.
-- 2026-10-21 (M6, NAT): **GitHub's runner endpoints stall new connections from Cloud NAT in a burst.** Boot →
-  "Connected to GitHub", median / max, 20 c3d-4 VMs each: external IPs 12.4 / 26.7 s (2 VMs with a refused connect);
-  NAT on 1 address 57.1 / 75.8 s (12/19); 3 addresses 53.6 / 76.2 s (12/20); 11 addresses 70.4 / 107.6 s (15/20). The
-  runner's `Location.GetConnectionData` to pipelines*.actions.githubusercontent.com takes ~20 s an attempt, or is
+- 2026-10-21 (M6, NAT): **GitHub's runner endpoints stall new connections from Cloud NAT in a burst.** 20 c3d-4
+  check VMs per point, us-central1, the same hour (serial logs, per VM):
+
+  | egress | NAT addresses | VMs with a refused connect | boot → "Connected to GitHub", median / max | → listening, median |
+  |---|---:|---:|---:|---:|
+  | external IPs | — | 2 / 20 | 12.4 / 26.7 s | 15.9 s |
+  | NAT, 1024 ports a VM | 1 | 12 / 19 | 57.1 / 75.8 s | 57.3 s |
+  | NAT, 8192 ports a VM | 3 | 12 / 20 | 53.6 / 76.2 s | 70.0 s |
+  | NAT, 32768 ports a VM | 11 | 15 / 20 | 70.4 / 107.6 s | 74.6 s |
+
+  The runner's `Location.GetConnectionData` to pipelines*.actions.githubusercontent.com takes ~20 s an attempt, or is
   reset ("Connection refused"). Zero NAT drops, at most 14 ports in use per VM; 6 VMs (us-west4) or 2 VMs through the
   NAT connected in ~9 s. Not port exhaustion, not the per-address ratio. Open question, not a task: what in GitHub's
   edge treats concurrent NAT flows this way (a packet-level probe from a no-IP VM would tell). The git-core PPA's 503s
