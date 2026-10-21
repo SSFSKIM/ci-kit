@@ -114,6 +114,26 @@ test('a rule allowing ingress into the network still stops the deploy', () => {
   assert.match(run.stderr, /network ci-kit has rules allowing ingress: ci-kit-ssh/);
 });
 
+// A manual rollback pins a service's traffic to an older revision (update-traffic --to-revisions=<old>=100); a later
+// `gcloud run deploy` then creates the new revision at 0%, and the deploy used to report ok. Each service's deploy
+// sends all traffic to its latest ready revision and checks that revision serves.
+const pinned = (name) => ({ revisions: 1, latestReady: `${name}-00001-old`, traffic: [{ revisionName: `${name}-00001-old`, percent: 100, latestRevision: false }] });
+for (const [part, service] of [['launcher', 'ci-kit-launcher'], ['webhook', 'ci-kit-webhook']]) {
+  test(`${part}: traffic pinned to an older revision moves to the one just deployed`, () => {
+    const run = deploy(part, { services: { 'ci-kit-launcher': pinned('ci-kit-launcher'), 'ci-kit-webhook': pinned('ci-kit-webhook') } });
+    assert.equal(run.status, 0, run.stderr);
+    const svc = run.state.services[service];
+    assert.deepEqual(svc.traffic, [{ revisionName: `${service}-00002-new`, percent: 100, latestRevision: true }]);
+    assert.ok(verb(run.calls, 'run', 'services', 'update-traffic', service).some((c) => c.includes('--to-latest')));
+  });
+
+  test(`${part}: a deploy whose revision does not serve fails, naming what does`, () => {
+    const run = deploy(part, { services: { 'ci-kit-launcher': { ...pinned('ci-kit-launcher'), stuck: true }, 'ci-kit-webhook': { ...pinned('ci-kit-webhook'), stuck: true } } });
+    assert.equal(run.status, 1);
+    assert.match(run.stderr, new RegExp(`${service}: its latest revision ${service}-00002-new does not serve all traffic: ${service}-00001-old 100%`));
+  });
+}
+
 test('alert: each failure the owner is mailed for has its log-based metric and a policy on it, on one channel', () => {
   const run = deploy('alert', {});
   assert.equal(run.status, 0, run.stderr);

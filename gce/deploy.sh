@@ -14,7 +14,8 @@
 #   bake               the Cloud Run job ci-kit-bake, built from this checkout
 #   bake-schedule      the Scheduler job ci-kit-bake-weekly, which runs the bake every Sunday at 18:00 UTC
 #   launcher           the Cloud Run service ci-kit-launcher, built from this checkout: no public ingress, one
-#                      instance, 300 s per request; requests are many at a time, ticks one
+#                      instance, 300 s per request; requests are many at a time, ticks one. Like webhook, it ends with
+#                      all traffic on the revision it deployed, a rollback's pin undone, and fails if that does not serve
 #   launcher-schedule  the Scheduler job ci-kit-launcher-tick, which calls the launcher every minute with an OIDC token
 #   webhook            the public Cloud Run service ci-kit-webhook (the App's webhook receiver), the Pub/Sub topic
 #                      ci-kit-tick-requests it publishes to, and the push subscription that asks the launcher for a
@@ -159,6 +160,24 @@ bake_schedule() {
 COMMIT=$(git -C "$KIT" rev-parse HEAD)
 LAUNCHER=ci-kit-launcher
 
+# A deploy leaves a service's traffic where it was: after a rollback pinned it to an older revision
+# (update-traffic --to-revisions=<old>=100), `gcloud run deploy` creates the new revision at 0% and says so only in
+# passing. So every traffic goes to the latest ready revision, which is then checked to serve all of it. Prints it.
+serve_latest() {
+  local service=$1 status
+  g run services update-traffic "$service" --region="$REGION" --to-latest > /dev/null
+  # shellcheck disable=SC2016 # a JavaScript template literal, not the shell's
+  status=$(g run services describe "$service" --region="$REGION" --format=json | node -e '
+    let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+      const { latestReadyRevisionName: latest, traffic = [] } = JSON.parse(s).status ?? {};
+      const live = traffic.filter((t) => t.percent > 0);
+      if (live.length === 1 && live[0].revisionName === latest && live[0].percent === 100) console.log(`serving ${latest}`);
+      else console.log(`its latest revision ${latest} does not serve all traffic: ${live.map((t) => `${t.revisionName} ${t.percent}%`).join(", ") || "none"}`);
+    });')
+  [[ $status == serving\ * ]] || die "$service: $status"
+  echo "${status#serving }"
+}
+
 launcher() {
   # Buildpack images keep node in their layers, off the bare PATH: the CNB `launcher` sets up the layers' environment
   # and then runs the command (the same holds for the bake job above).
@@ -174,7 +193,9 @@ launcher() {
   # Cloud Scheduler calls it as the service account, and so does Pub/Sub's push (webhook); nothing else may.
   g run services add-iam-policy-binding "$LAUNCHER" --region="$REGION" \
     --member="serviceAccount:$SA" --role=roles/run.invoker > /dev/null
-  echo "deploy: launcher ok (kit ${COMMIT:0:8})"
+  local revision
+  revision=$(serve_latest "$LAUNCHER")
+  echo "deploy: launcher ok ($revision serving; kit ${COMMIT:0:8})"
 }
 
 launcher_schedule() {
@@ -225,6 +246,8 @@ webhook() {
     --set-secrets="/secrets/webhook/secret=$WEBHOOK_SECRET:latest" \
     --ingress=all --no-invoker-iam-check --min-instances=0 --max-instances=3 --concurrency=80 \
     --timeout=30 --cpu=1 --memory=256Mi
+  local revision
+  revision=$(serve_latest "$WEBHOOK")
 
   # The launcher answers a push when the tick that serves it has ended, and a push that arrives while a tick runs is
   # served by the next one, so the ack deadline must outlive the worst case: the running tick (~100 s: launches stop
@@ -241,7 +264,7 @@ webhook() {
     g pubsub subscriptions create "$SUBSCRIPTION" --topic="$TOPIC" "${push[@]}" --labels=ci-kit=webhook > /dev/null
   fi
   hook=$(g run services describe "$WEBHOOK" --region="$REGION" --format='value(status.url)')
-  echo "deploy: webhook ok ($hook → $TOPIC → $url/request; kit ${COMMIT:0:8})"
+  echo "deploy: webhook ok ($revision serving; $hook → $TOPIC → $url/request; kit ${COMMIT:0:8})"
 }
 
 app_hook() {

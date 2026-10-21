@@ -726,7 +726,11 @@ gce/deploy.sh alert                 # log-based metrics and alert policies maile
 gce/deploy.sh app-hook              # not in "every part": the App's webhook URL and secret (The webhook, above)
 ```
 
-Every part is idempotent. `base` also gives the project's default compute account `roles/run.builder`: Cloud Run
+Every part is idempotent. `launcher` and `webhook` each end by sending all of their service's traffic to the revision
+just deployed (`update-traffic --to-latest`) and checking that it serves, and fail naming what does if not: a manual
+rollback (`gcloud run services update-traffic <service> --to-revisions=<old>=100`) pins traffic by name, and
+`gcloud run deploy` alone would then leave the new revision at 0% while the script said ok. Their `ok` line names the
+serving revision. `base` also gives the project's default compute account `roles/run.builder`: Cloud Run
 source builds run as it in a project created after 2024, and no kit VM uses it. Both Cloud Run images are
 buildpack builds, so their command is the CNB `launcher` (`launcher node <script>`), which puts the image's node on
 the PATH. If every gcloud call stalls for minutes on the MacBook, its IPv6 route to Google is down (2026-10-16:
