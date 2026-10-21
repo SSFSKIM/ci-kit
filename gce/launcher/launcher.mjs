@@ -360,7 +360,7 @@ export class Launcher {
         });
       }
       this.log(`${row.instance}: its insert was refused (${outcome}) after its tick; abandoned`);
-      next = finalRow(next, { end: 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb });
+      next = finalRow(next, { end: 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb, egress: this.cfg.egress });
     }
     if (await this.write(next)) seen.rowOf.set(alloc, next);
   }
