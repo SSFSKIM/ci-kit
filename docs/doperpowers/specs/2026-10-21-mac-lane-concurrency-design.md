@@ -52,8 +52,10 @@ roughly twice the Mac lane's throughput without a second Mac.
   Log).
 - [x] (2026-10-21 ~10:2xZ) Third adversarial review (astra), of the lock: two P1s and one P2, all taken (Decision
   Log).
-- [ ] M1 — ci-kit: instances, admission in the hooks, per-instance identity.
-- [ ] M2 — MAWS: the shared-state fixes and the routing of proven-shared groups.
+- [ ] M1 — ci-kit: instances, admission in the hooks, per-instance identity. ci-kit #67 open (head d1f8ffa), in
+  review (reviewer-medium and reviewer-high).
+- [ ] M2 — MAWS: the shared-state fixes and the routing of proven-shared groups. MAWS #103 open (head 7554ba433,
+  class 1a 39589318188 green); its Mac set runs after the 10-21 evening hold.
 - [ ] M3 — Install on the mini: one exclusive and two shared instances, shared ones disabled.
 - [ ] M4 — Trial and the first proven-shared groups.
 - [ ] M5 — Widen the proven-shared set.
@@ -292,6 +294,9 @@ After M1 and M2 land, outside any hold or measured window:
   instance's, and that each has its own `_work`;
 - update the coordinator's hold and release scripts to cover every instance and restore each shared instance's enabled
   state;
+- before enabling any shared instance: MAWS's `scripts/ci-gate-alerts.mjs` must fold the `-<n>` suffix (it reads
+  `ci-kit-mac-mini-2` as a machine `mini-2`, outside `mini`'s alert), or skip shared runners;
+- delete the orphaned `~/Library/Caches/maws-e2e-build/<sha>` entries (M2 moved the cache to `<runner name>/`);
 - tell every session that books the mini.
 
 The shared instances are enabled only for trial runs until M4's verdict.
@@ -421,7 +426,20 @@ Only if M4's and M5's memory reads show room: install it, and run the three-way 
 
 ## Surprises & Discoveries
 
-(As found.)
+- 2026-10-21, M2 (MAWS #103):
+  - **The runner-name contract.** MAWS reads an instance's number from the trailing `-<n>` of `RUNNER_NAME`
+    (`ci-kit-mac-<machine>-<n>`), and fails a launch under `CI_KIT_SHARED_DESKTOP=1` without it. M1 keeps that naming
+    and documents it.
+  - **Bounds M4 must weigh before sharing a group:**
+    - `browser-chrome`'s 34 ms "no hole" check is the product's `STILL_SETTLE_MS`, not a test bound, so it cannot go
+      through the latency budget;
+    - `scm`'s 150 ms bound tells the stage's own refresh from the watcher's 250 ms debounce, which it can no longer do
+      at the budget's 5× ceiling;
+    - `unit:darwin`'s `--maxWorkers` is not halved when shared, as the audit suggested. Decide it before trialling
+      `unit:darwin` with itself.
+  - **`packaged`'s upload** is not gated on its checkout, unlike e2e's. After a refused start it would upload the
+    previous job's reports. The contract allows it, since no desktop is used, but it is a correctness wart for MAWS's
+    tracker.
 
 ## Outcomes & Retrospective
 
