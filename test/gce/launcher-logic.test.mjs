@@ -69,9 +69,14 @@ test('viewInstance reads the fields the launcher decides on', () => {
   const v = viewInstance({ ...instance({ alloc: A(1), machine: 'e2-highcpu-2', cpus: 2 }), lastStartTimestamp: '2026-10-16T04:59:16.040-07:00' });
   assert.deepEqual({ ...v, raw: undefined }, {
     name: `ci-kit-gce-${A(1)}`, alloc: A(1), zone: 'us-central1-a', machine: 'e2-highcpu-2', vcpus: 2, status: 'RUNNING',
-    created: T0 - 2 * MIN, running: T0 - 44_000 + 40, repoLabel: 'ssfskim--ci-kit-sandbox', cpus: 2, provisioning: 'spot', config: null, diskType: null, raw: undefined,
+    created: T0 - 2 * MIN, running: T0 - 44_000 + 40, repoLabel: 'ssfskim--ci-kit-sandbox', cpus: 2, provisioning: 'spot', config: null, diskType: null, egress: null, raw: undefined,
   });
   assert.equal(viewInstance(instance({ alloc: A(2), status: 'PROVISIONING' })).running, null, 'never started yet');
+  // Its egress, from its network interface: an external address, or none (its region's Cloud NAT).
+  const subnetwork = 'regions/us-central1/subnetworks/ci-kit-us-central1';
+  const external = [{ subnetwork, accessConfigs: [{ type: 'ONE_TO_ONE_NAT', name: 'External NAT', natIP: '203.0.113.7' }] }];
+  assert.equal(viewInstance({ ...instance({ alloc: A(3) }), networkInterfaces: external }).egress, 'external');
+  assert.equal(viewInstance({ ...instance({ alloc: A(3) }), networkInterfaces: [{ subnetwork }] }).egress, 'nat');
 });
 
 // Demand and admission.
@@ -255,7 +260,7 @@ test('any other failure stops the walk as a failure', async () => {
 });
 
 // The job VM's request body.
-test('a job VM: spot with a DELETE run limit, no service account, the JIT config in metadata, I12 labels, the kit subnetwork and no external address', () => {
+test('a job VM: spot with a DELETE run limit, no service account, the JIT config in metadata, I12 labels, the kit subnetwork', () => {
   const body = jobInstance({
     alloc: A(1), zone: 'us-central1-b', machine: 'c3d-highcpu-8', provisioning: 'spot', repo: SBX, cpus: 8,
     image: 'projects/ssfskim-ci-kit/global/images/ci-kit-runner-x', jit: 'JITCONFIG', placement: CFG.placements[0], cfg: CFG, config: 'abcdef0123456789',
@@ -276,14 +281,24 @@ test('a job VM: spot with a DELETE run limit, no service account, the JIT config
   assert.equal(disk.initializeParams.diskSizeGb, '50');
   assert.equal(disk.initializeParams.sourceImage, 'projects/ssfskim-ci-kit/global/images/ci-kit-runner-x');
   assert.deepEqual(body.metadata.items, [{ key: 'enable-guest-attributes', value: 'TRUE' }, { key: 'ci-kit-jit', value: 'JITCONFIG' }]);
-  // No external address: the VM reaches GitHub, apt and npm through its region's Cloud NAT (spec M6), and the
-  // address quota is no limit on the pool.
-  assert.deepEqual(body.networkInterfaces, [{ subnetwork: 'regions/us-central1/subnetworks/ci-kit-us-central1' }]);
+  assert.equal(body.networkInterfaces[0].subnetwork, 'regions/us-central1/subnetworks/ci-kit-us-central1');
   const std = jobInstance({ alloc: A(1), zone: 'us-central1-b', machine: 'c3d-highcpu-8', provisioning: 'standard', placement: CFG.placements[0], repo: SBX, cpus: 8, image: 'i', jit: 'j', cfg: CFG, config: 'bundled' });
   assert.equal(std.scheduling.provisioningModel, 'STANDARD');
   assert.equal(std.scheduling.instanceTerminationAction, 'DELETE');
   assert.equal(std.labels['ci-kit-provisioning'], 'standard');
   assert.equal(std.labels['ci-kit-config'], 'bundled');
+});
+
+// Egress (2026-10-21): an external address by default, as before M6; with gce.json's egress "nat" none, so the VM
+// reaches GitHub, apt and npm through its region's Cloud NAT and the address quota is no limit on the pool.
+test('a job VM takes an ephemeral external address under egress "external", and none under "nat"', () => {
+  const body = (cfg) => jobInstance({
+    alloc: A(1), zone: 'us-central1-b', machine: 'c3d-highcpu-8', provisioning: 'spot', repo: SBX, cpus: 8, image: 'i', jit: 'j', placement: cfg.placements[0], cfg, config: 'c',
+  });
+  const subnetwork = 'regions/us-central1/subnetworks/ci-kit-us-central1';
+  assert.equal(CFG.egress, 'external');
+  assert.deepEqual(body(CFG).networkInterfaces, [{ subnetwork, accessConfigs: [{ type: 'ONE_TO_ONE_NAT', name: 'External NAT' }] }]);
+  assert.deepEqual(body({ ...CFG, egress: 'nat' }).networkInterfaces, [{ subnetwork }]);
 });
 
 test('the newest image labelled ready is chosen from a list; unready, foreign and other-family images never are', () => {

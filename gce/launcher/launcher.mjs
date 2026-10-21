@@ -281,13 +281,13 @@ export class Launcher {
       }
     }
     const had = seen.rowOf.get(v.alloc);
-    const base = runningRow(had ?? launchRow({ alloc: v.alloc, repo: repo ?? v.repoLabel, cpus: v.cpus, at: v.created, config: v.config ?? '-' }), v);
+    const base = runningRow(had ?? launchRow({ alloc: v.alloc, repo: repo ?? v.repoLabel, cpus: v.cpus, at: v.created, config: v.config ?? '-', egress: v.egress }), v);
     const job = had?.job ?? (await this.jobOf(seen, base));
     let end = a.end;
     if (had?.state === 'deleting') end = had.end;
     else if (!had) end = 'orphan';
     else if (job && end === 'cancelled-idle') end = 'done';
-    const deleting = finalRow(base, { end, deleted: this.now(), job, diskGb: this.cfg.disk_gb, state: 'deleting' });
+    const deleting = finalRow(base, { end, deleted: this.now(), job, diskGb: this.cfg.disk_gb, egress: this.cfg.egress, state: 'deleting' });
     if (!(await this.write(deleting, { dedupe: !had }))) return; // no row, no delete: the next tick tries again
     seen.rowOf.set(v.alloc, deleting);
     try {
@@ -336,7 +336,7 @@ export class Launcher {
       if (row.state === 'deleting') deleted = Date.parse(row.deleted);
       else if (a.end === 'preempted') deleted = preempted?.get(row.instance) ?? deleted;
       else if (a.end === 'max-run' && row.created) deleted = Math.min(deleted, Date.parse(row.created) + this.cfg.max_run_minutes * 60_000);
-      const final = finalRow(row, { end: a.end, deleted, job, diskGb: this.cfg.disk_gb });
+      const final = finalRow(row, { end: a.end, deleted, job, diskGb: this.cfg.disk_gb, egress: this.cfg.egress });
       if (await this.write(final)) {
         seen.rowOf.set(row.alloc, final);
         out.finalized.push(`${row.alloc} ${a.end}`);
@@ -393,14 +393,16 @@ export class Launcher {
   }
 
   // A VM that booted but whose runner never came online covers no job (logic.mjs neverOnline), and is logged at ERROR
-  // each tick until the idle rule removes it: its region's NAT may be missing, misconfigured or out of ports (spec M6).
+  // each tick until the idle rule removes it: its egress may be broken, behind a NAT (egress `nat`) its region's NAT
+  // missing, misconfigured or out of ports (spec M6).
   reportNeverOnline(seen) {
     const now = this.now();
     for (const v of runnersNeverOnline({ instances: seen.instances, runners: seen.runners, now, claimed: seen.claimed })) {
       const region = v.zone.replace(/-[a-z]$/, '');
       const runningSeconds = Math.round((now - v.running) / 1000);
+      const check = v.egress === 'nat' ? `the Cloud NAT of ${region}` : 'its external address and GitHub\'s status';
       this.error(`runner never online: ${v.name} (${v.machine}@${v.zone}) has run ${runningSeconds} s and its runner is offline; ` +
-        `it covers no job. Its egress may be broken: check the Cloud NAT of ${region}`,
+        `it covers no job. Its egress may be broken: check ${check}`,
       { event: 'runner-never-online', instance: v.name, zone: v.zone, region, runningSeconds });
     }
   }
@@ -474,14 +476,14 @@ export class Launcher {
     while (seen.rowOf.has(alloc)) alloc = allocationId(at, this.random); // ids are random: never reuse one in the ledger
     seen.rowOf.set(alloc, null);
     const name = instanceName(alloc);
-    const row = launchRow({ alloc, repo, cpus, at, config: this.config, prelaunch });
+    const row = launchRow({ alloc, repo, cpus, at, config: this.config, egress: this.cfg.egress, prelaunch });
     await this.ledger.upsert(row); // a launch with no row never happens: this throws, and nothing was created
     let jit;
     try {
       jit = await this.gh.jitConfig(repo, jitRequest(alloc, cpus));
     } catch (err) {
       this.log(`jit for ${what} in ${repo} (${name}): ${err.message}`);
-      await this.write(finalRow(row, { end: 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb }));
+      await this.write(finalRow(row, { end: 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb, egress: this.cfg.egress }));
       return {};
     }
     // The tick's deadline stops new attempts; an attempt already started waits for its operation up to its own
@@ -514,7 +516,7 @@ export class Launcher {
     await this.gh.deleteRunner(repo, jit.runner.id).catch((err) => {
       if (err.status !== 404) this.log(`unregister ${name}: ${err.message}; the orphan-runner rule retries`);
     });
-    await this.write(finalRow(row, { end: 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb }));
+    await this.write(finalRow(row, { end: 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb, egress: this.cfg.egress }));
     return {};
   }
 

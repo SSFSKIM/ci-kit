@@ -3,7 +3,12 @@
 // may create a VM in, with its zones, subnetwork, a machine for every size and the boot disk type.
 const REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 export const SIZES = ['2', '4', '8', '16'];
-const COMMON = ['repos', 'project', 'disk_gb', 'max_run_minutes', 'max_vcpus', 'image_family', 'idle_runner_minutes', 'network', 'ledger'];
+const COMMON = ['repos', 'project', 'disk_gb', 'max_run_minutes', 'max_vcpus', 'image_family', 'idle_runner_minutes', 'network', 'egress', 'ledger'];
+// How job and bake VMs reach the internet: `external`, each its own ephemeral external address (the default), or `nat`,
+// none, through its region's Cloud NAT (gce/deploy.sh network). The NAT is parked (docs/pool.md, The network): behind it
+// GitHub's runner endpoints stall a burst of runners' first connections.
+export const EGRESS = ['external', 'nat'];
+const DEFAULT_EGRESS = 'external';
 const PLACEMENT = ['region', 'subnetwork', 'zones', 'machines', 'disk_type'];
 
 const name = (v) => typeof v === 'string' && /^[a-z][a-z0-9-]*$/.test(v);
@@ -38,6 +43,7 @@ export function parseGceConfig(text) {
     if (typeof r?.repo !== 'string' || !REPO.test(r.repo) || Object.keys(r).length !== 1) errors.push(`repos[${i}] must be {"repo": "OWNER/NAME"}`);
   });
   for (const key of ['project', 'image_family', 'network']) if (!name(cfg[key])) errors.push(`${key} must be a resource name`);
+  if ('egress' in cfg && !EGRESS.includes(cfg.egress)) errors.push(`egress must be ${EGRESS.map((e) => `"${e}"`).join(' or ')}`);
   if (!Array.isArray(cfg.placements) || cfg.placements.length === 0) errors.push('placements must be a non-empty list');
   else cfg.placements.forEach((p, i) => checkPlacement(p, `placements[${i}]`, errors));
   for (const key of ['disk_gb', 'max_run_minutes', 'max_vcpus', 'idle_runner_minutes']) if (!positive(cfg[key])) errors.push(`${key} must be a positive integer`);
@@ -45,7 +51,7 @@ export function parseGceConfig(text) {
     errors.push('ledger must be {"repo": "OWNER/NAME", "issue_title": "…"}');
   }
   if (errors.length) throw new Error(`ci-kit: gce config: ${errors.join('; ')}`);
-  return cfg;
+  return { ...cfg, egress: cfg.egress ?? DEFAULT_EGRESS };
 }
 
 // Every zone a placement names: where the launcher creates VMs, so the zones an instance listing must cover to be

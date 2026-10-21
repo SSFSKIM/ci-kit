@@ -7,7 +7,7 @@ import { parseGceConfig } from '../../gce/launcher/config.mjs';
 export const COMMON = {
   repos: [{ repo: 'SSFSKIM/ci-kit-sandbox' }, { repo: 'SSFSKIM/MAWS' }, { repo: 'SSFSKIM/manim-master' }],
   project: 'ssfskim-ci-kit', network: 'ci-kit', disk_gb: 50, max_run_minutes: 120, max_vcpus: 192,
-  image_family: 'ci-kit-runner', idle_runner_minutes: 10, ledger: { repo: 'SSFSKIM/ci-kit-sandbox', issue_title: 'pool ledger' },
+  image_family: 'ci-kit-runner', idle_runner_minutes: 10, egress: 'external', ledger: { repo: 'SSFSKIM/ci-kit-sandbox', issue_title: 'pool ledger' },
 };
 export const WEST = {
   region: 'us-west4', subnetwork: 'ci-kit-us-west4', zones: ['us-west4-a', 'us-west4-b', 'us-west4-c'],

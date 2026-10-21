@@ -118,9 +118,12 @@ test('the builder has no service account, carries only a token in its metadata, 
   assert.equal(body.scheduling.instanceTerminationAction, 'DELETE');
   assert.ok(Number(body.scheduling.maxRunDuration.seconds) > BAKE_TIMEOUT_MS / 1000);
   assert.equal(body.machineType, 'zones/us-central1-a/machineTypes/e2-standard-4');
-  // The kit's own network, which has no ingress rules; never the project's default network. No external address: it
-  // clones and installs through the region's Cloud NAT (spec M6).
-  assert.deepEqual(body.networkInterfaces, [{ subnetwork: 'regions/us-central1/subnetworks/ci-kit-us-central1' }]);
+  // The kit's own network, which has no ingress rules; never the project's default network. An external address by
+  // default (gce.json's egress); none under egress "nat", where it clones and installs through the region's Cloud NAT.
+  const subnetwork = 'regions/us-central1/subnetworks/ci-kit-us-central1';
+  assert.deepEqual(body.networkInterfaces, [{ subnetwork, accessConfigs: [{ type: 'ONE_TO_ONE_NAT', name: 'External NAT' }] }]);
+  const behindNat = builderInstance({ name: 'b', zone: 'us-central1-a', machine: 'e2-standard-4', runId: RUN, script: '', token: 't', placement: CENTRAL, egress: 'nat' });
+  assert.deepEqual(behindNat.networkInterfaces, [{ subnetwork }]);
 });
 
 test('the smoke VM boots the new image like a job VM, with no JIT config and the vCPUs it must see', () => {
@@ -131,8 +134,12 @@ test('the smoke VM boots the new image like a job VM, with no JIT config and the
   assert.equal(body.disks[0].initializeParams.diskSizeGb, '50');
   const meta = Object.fromEntries(body.metadata.items.map((i) => [i.key, i.value]));
   assert.deepEqual(meta, { 'enable-guest-attributes': 'TRUE', 'ci-kit-smoke': '2' });
-  // As a job VM: no external address, so its egress check proves the region's NAT.
-  assert.deepEqual(body.networkInterfaces, [{ subnetwork: 'regions/us-central1/subnetworks/ci-kit-us-central1' }]);
+  // As a job VM: an external address under egress "external", none under "nat", so its egress check proves the path a
+  // job VM takes.
+  const subnetwork = 'regions/us-central1/subnetworks/ci-kit-us-central1';
+  assert.deepEqual(body.networkInterfaces, [{ subnetwork, accessConfigs: [{ type: 'ONE_TO_ONE_NAT', name: 'External NAT' }] }]);
+  const behindNat = smokeInstance({ name: 's', zone: 'us-central1-b', machine: 'e2-highcpu-2', runId: RUN, image: 'i', diskGb: 50, placement: CENTRAL, egress: 'nat' });
+  assert.deepEqual(behindNat.networkInterfaces, [{ subnetwork }]);
 });
 
 test('the check VM boots the new image as a job VM: its JIT config in ci-kit-jit, and the bake\'s labels, never a pool VM\'s', () => {
@@ -230,12 +237,22 @@ test('an ok builder and a passing smoke publish one ready image, and leave no bu
   const result = await bake(gce);
   assert.equal(result.image, `ci-kit-runner-${RUN}-aaaaaaaa`);
   assert.ok(gce.inserted.every((b) => b.networkInterfaces[0].subnetwork === SUBNET), 'every VM is on the kit\'s subnetwork, from gce.json');
-  assert.ok(gce.inserted.every((b) => b.networkInterfaces.every((n) => !n.accessConfigs)), 'no VM of the bake takes an external address');
+  assert.deepEqual(gce.inserted.map((b) => b.networkInterfaces[0].accessConfigs?.[0]?.type), gce.inserted.map(() => 'ONE_TO_ONE_NAT'),
+    'every VM of the bake takes an external address: gce.json\'s egress is "external"');
   assert.deepEqual(ready(gce), [result.image]);
   assert.deepEqual(leftInstances(gce), []);
   const i = gce.calls.indexOf(`insert image ${result.image} from ci-kit-gce-builder-${RUN}`);
   assert.ok(i > 0 && gce.calls.indexOf(`delete instance ci-kit-gce-builder-${RUN}`) > i, 'the image is taken before the builder goes');
   assert.deepEqual(gce.foreignTouched, []);
+});
+
+test('under gce.json\'s egress "nat", no VM of the bake (builder, smoke, check) takes an external address', async () => {
+  const gce = fakeGce({ scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
+  const cfg = { ...CFG, egress: 'nat' };
+  const result = await runBake(gce, { cfg, sha: SHA, runId: RUN, token: 'ghs_x', gh: fakeSandbox({ run: OK_RUN }), script: '#!/bin/bash\n', ...clock(), log: () => {} });
+  assert.equal(result.image, `ci-kit-runner-${RUN}-aaaaaaaa`);
+  assert.deepEqual([...new Set(gce.inserted.map((b) => b.labels['ci-kit-role']))].sort(), ['builder', 'check', 'smoke']);
+  assert.ok(gce.inserted.every((b) => b.networkInterfaces.every((n) => !n.accessConfigs)), 'no VM of the bake takes an external address');
 });
 
 test('a builder that reports a failed step makes no image and is deleted', async () => {

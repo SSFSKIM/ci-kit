@@ -30,7 +30,11 @@ const RATES = {
 // GiB of memory of each highcpu size (gcloud compute machine-types describe; C4D's is not a fixed ratio).
 const MEMORY_GIB = { e2: { 2: 2, 4: 4, 8: 8, 16: 16 }, c3d: { 4: 8, 8: 16, 16: 32 }, c4d: { 2: 3, 4: 7, 8: 15, 16: 30 } };
 const GB_PER_GIB = 2 ** 30 / 1e9;
-// A VM has no external address (spec 2026-10-21 M6): its region's Cloud NAT carries its traffic, and the NAT gateway
+// What a VM's egress costs an hour, by the egress it ran with (gce.json's `egress`, recorded on its row).
+// - external: its ephemeral external IPv4, $0.0025 an hour on spot and $0.005 on demand (Compute Engine's external IP
+//   address pricing, as the ledger priced it before M6).
+const IP_HOURLY = { spot: 0.0025, standard: 0.005 };
+// - nat: no external address (spec 2026-10-21 M6): its region's Cloud NAT carries its traffic, and the NAT gateway
 // bills $0.0014 for each hour of each VM it serves, spot or on demand (Cloud Billing catalog on 2026-10-21, Networking
 // E505-1604-58F8, SKU 32E2-4EFC-EF9F "Cloud Nat Gateway Uptime"; cloud.google.com/nat/pricing). That page caps a
 // gateway at $0.044 an hour from 32 VMs up, so this is the VM's share at most: past 32 VMs at once in a region it
@@ -59,8 +63,9 @@ function diskMonthly(price, gb) {
 
 const regionOf = (zone) => zone.replace(/-[a-z]$/, '');
 
-// The cost of a VM that lived `seconds` (billed for at least a minute), or null when it has no known price.
-export function dollars({ machine, zone, provisioning, seconds, diskGb, diskType }) {
+// The cost of a VM that lived `seconds` (billed for at least a minute), or null when it has no known price. egress:
+// gce.json's, `external` when absent as there.
+export function dollars({ machine, zone, provisioning, seconds, diskGb, diskType, egress }) {
   const region = regionOf(zone ?? '');
   const family = machine.split('-')[0];
   const rate = RATES[region]?.[family]?.[provisioning];
@@ -71,7 +76,8 @@ export function dollars({ machine, zone, provisioning, seconds, diskGb, diskType
   if (!gib) return null;
   const memory = rate.gib ? gib * rate.gib : gib * GB_PER_GIB * rate.gb;
   const hours = Math.max(60, seconds) / 3600;
-  return hours * (vcpus * rate.vcpu + memory + NAT_GATEWAY_HOURLY + diskMonthly(disk, diskGb) / HOURS_PER_MONTH);
+  const network = egress === 'nat' ? NAT_GATEWAY_HOURLY : IP_HOURLY[provisioning];
+  return hours * (vcpus * rate.vcpu + memory + network + diskMonthly(disk, diskGb) / HOURS_PER_MONTH);
 }
 
 const round4 = (n) => Math.round(n * 1e4) / 1e4;
@@ -80,8 +86,11 @@ const utc = (s) => s.slice(0, 19).replace('T', ' ');
 
 // prelaunch: {run, attempt, workflow} for a VM launched ahead of a run's pool jobs (spec M5, prelaunch.mjs), which the
 // row keeps to its end: it is what a later tick reads to know the run was served, and what the daily line counts.
-export const launchRow = ({ alloc, repo, cpus, at, config, prelaunch }) =>
-  ({ alloc, instance: instanceName(alloc), repo, cpus, at: iso(at), config: config.slice(0, 8), ...(prelaunch ? { prelaunch } : {}), state: 'launching' });
+// egress: gce.json's when the VM launched, which prices the row whatever the file says by the time it is final.
+export const launchRow = ({ alloc, repo, cpus, at, config, egress, prelaunch }) => ({
+  alloc, instance: instanceName(alloc), repo, cpus, at: iso(at), config: config.slice(0, 8), ...(egress ? { egress } : {}),
+  ...(prelaunch ? { prelaunch } : {}), state: 'launching',
+});
 
 // inst: {zone, machine, provisioning, diskType, created (ms), running (ms, when it became RUNNING; absent or null
 // before)}. A VM launched before placements carries no disk type.
@@ -101,10 +110,13 @@ export function jobRecord(job) {
 export const withJob = (row, job) => ({ ...row, job: jobRecord(job) });
 
 // Finalized, or about to be deleted (`state: 'deleting'`). Seconds run from the VM's creation to its deletion; an
-// allocation that never had a VM has neither. job: a jobRecord().
-export function finalRow(row, { end, deleted, job, diskGb, state = 'final' }) {
+// allocation that never had a VM has neither. job: a jobRecord(). egress: the config's, which prices a row written
+// before rows named their own.
+export function finalRow(row, { end, deleted, job, diskGb, egress, state = 'final' }) {
   const seconds = row.created ? Math.max(0, Math.round((deleted - Date.parse(row.created)) / 1000)) : null;
-  const cost = seconds === null ? null : dollars({ machine: row.machine, zone: row.zone, provisioning: row.provisioning, seconds, diskGb, diskType: row.diskType });
+  const cost = seconds === null ? null : dollars({
+    machine: row.machine, zone: row.zone, provisioning: row.provisioning, seconds, diskGb, diskType: row.diskType, egress: row.egress ?? egress,
+  });
   return {
     ...row, ...(job ? { job } : {}),
     deleted: iso(deleted), seconds, dollars: cost === null ? null : round4(cost), end, state,
@@ -169,7 +181,7 @@ export function rowsOf(comments) {
 // the month at that day's rate, the commit of the gce.json the launcher ran, and each family@region's VMs and dollars
 // (spec 2026-10-21: each placement's count and cost, so a price swing shows), with the VMs it could not price. On a
 // day with pre-launched VMs (spec M5), `prelaunched`: how many, how many no job claimed, and what those cost.
-// The VMs' dollars carry each one's NAT gateway hours; the NATs' GB processed ($0.045 per GiB) and their addresses
+// The VMs' dollars carry each one's egress: its address hours, or its NAT gateway hours; the NATs' GB processed ($0.045 per GiB) and their addresses
 // ($0.005 an hour each) are per region, read from no row: the counts step of spec M6 (step 3) adds the day's NAT GB
 // to this line, priced, from Cloud Monitoring.
 export function dailyLine(rows, day, config) {

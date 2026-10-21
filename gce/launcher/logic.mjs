@@ -1,7 +1,7 @@
 // The GCE launcher's decisions (spec §3a The launcher, VM lifecycle; I12), as pure functions over recorded Compute
 // Engine and Actions API shapes. launcher.mjs observes, decides through these, and acts. Times are epoch ms.
 import { randomBytes } from 'node:crypto';
-import { refusal, machineCpus, subnetworkOf } from '../bake/plan.mjs';
+import { refusal, machineCpus, networkInterface } from '../bake/plan.mjs';
 import { workDir } from '../../pool/agent/docker.mjs';
 
 const MIN = 60_000;
@@ -58,6 +58,7 @@ export function viewInstance(i) {
     provisioning: i.labels?.['ci-kit-provisioning'] ?? null,
     config: i.labels?.['ci-kit-config'] ?? null,
     diskType: i.labels?.['ci-kit-disk'] ?? null, // null on a VM launched before placements
+    egress: i.networkInterfaces ? (i.networkInterfaces.some((n) => n.accessConfigs?.length) ? 'external' : 'nat') : null,
     raw: i,
   };
 }
@@ -249,9 +250,9 @@ export async function walkPlacements(list, { attempt, reconcile, now = Date.now,
   return { placement: null, tried, stop: 'exhausted', quota };
 }
 
-// The job VM (spec §3a VM lifecycle step 2, I12). No service account; its placement's subnetwork and no external
-// address (spec 2026-10-21 M6: it reaches GitHub, apt and npm through its region's Cloud NAT, gce/deploy.sh network,
-// so the region's address quota does not bound the pool); the JIT config in metadata `ci-kit-jit` with guest
+// The job VM (spec §3a VM lifecycle step 2, I12). No service account; its placement's subnetwork with gce.json's egress
+// (networkInterface: an external address, or under `nat` none, the region's Cloud NAT carrying its traffic so the
+// region's address quota does not bound the pool); the JIT config in metadata `ci-kit-jit` with guest
 // attributes on; a run limit after which Compute Engine deletes the VM; a boot disk of the placement's type that goes
 // with it, named in the label `ci-kit-disk` so the ledger prices it (the instance resource does not say). `config` is
 // the commit of the gce.json the launcher runs.
@@ -271,7 +272,7 @@ export function jobInstance({ alloc, zone, machine, provisioning, placement, rep
       autoDelete: true,
       initializeParams: { diskName: name, sourceImage: image, diskSizeGb: String(cfg.disk_gb), diskType: `zones/${zone}/diskTypes/${placement.disk_type}`, labels: diskLabels },
     }],
-    networkInterfaces: [{ subnetwork: subnetworkOf(placement) }],
+    networkInterfaces: [networkInterface(placement, cfg.egress)],
     serviceAccounts: [],
     metadata: { items: [{ key: 'enable-guest-attributes', value: 'TRUE' }, { key: 'ci-kit-jit', value: jit }] },
     scheduling: provisioning === 'spot'
