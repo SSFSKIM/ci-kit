@@ -727,4 +727,40 @@ VM's walk.
 
 ## Outcomes & Retrospective
 
-(at completion)
+(2026-10-21, written as M6's placements went to review; the day-long readings below are still to come.)
+
+**What the pool does now.**
+- It spans placements: C4D us-west4 first, then the M6 additions (C4D us-central1, us-east1, us-east4, us-east5; C3D
+  us-central1, us-east1, us-east4), spot everywhere before on demand. Quota memory is scoped by what ran out, now with
+  C4D's live `CPUS_PER_VM_FAMILY` refusal scoped to (region, family), and a stocked-out zone is skipped for 5 minutes.
+  `max_vcpus` went 192 → 242 → 386, each step the grants the pool can actually use.
+- C4D against C3D on MAWS class 1a (M2): static 463 → 335 s, unit 570 → 427 s (the unit gain inside C3D's own
+  spread over the day's nine runs), insert accepted → started 48.4 → 37.4 s a VM.
+- The start: a tick is requested by GitHub's webhook (M4), launches before it cleans up (M3), and boots without
+  cloud-init (RUNNING → started 31.4 → 16.3 s on c3d-4). M5 pre-launches a run's gate VMs while its plan runs. On the
+  live gate runs since: the first pre-launched run's jobs started 26–32 s after queued (its plan's delivery lost to
+  a receiver rollout); with the race launcher live, run 39681922143's six pool jobs started 1–6 s after queued, their
+  VMs up before the gates were created. Before this work a pool job waited ~100 s.
+- A slow insert races a second allocation (M6) and every insert's timing, refusal and race outcome is counted on the
+  tick summary and the daily line, with the day's NAT.
+
+**Still to read** (a day of rows; `gce/latency-report.mjs`): Acceptance 4 (a day's median queued → started ≤ 50 s),
+Acceptance 5 (gate jobs ≤ 25 s after queued with pre-launch), M3's tick start → first insert ≤ 5 s and ≤ 26 s
+accepted → started on c3d-4 (C4D separately), and day one's unclaimed pre-launched VMs and their cost.
+
+**What did not go as designed.**
+- Cloud NAT (M6) was built, reviewed, deployed and rolled back within the hour: GitHub's runner endpoints stall
+  bursts of new connections through it, whatever the number of NAT addresses. Egress is now a `gce.json` switch,
+  external by default; the address raises and the per-region 8 addresses of new placements carry capacity instead.
+- The first M3 boot change (cloud-init trimmed) was not faster; booting without cloud-init was.
+- The day's research changed M6's premise: the tail was the old launch path and admission, not stock-outs; quota
+  never left a job waiting; the address quota, not CPUs, bound first.
+
+**Lessons.**
+- Measure the live system before designing around a prior: M6's sizing came from a day of audit logs, ledger rows
+  and job records, and moved the design from stock-out fallbacks to addresses and slow inserts.
+- A change to the network path needs a burst test at production concurrency before it carries traffic: two smoke VMs
+  through the NAT were fine; twenty were not.
+- An image's first use in a region costs up to 145 s; a bake that boots each placement absorbs it, and a bake
+  whose guarantee is per placement breaks the day one placement is stocked out.
+- A deploy that leaves traffic on an older revision looks like success: the deploy script now checks.
