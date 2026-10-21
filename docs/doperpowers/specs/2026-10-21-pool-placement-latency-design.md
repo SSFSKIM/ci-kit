@@ -642,6 +642,17 @@ VM's walk.
   Private Google Access, the never-online rule and the alerts stay. M6's placements are therefore sized per region by
   min(family vCPUs, 8 addresses × the machine size), and `max_vcpus` is the sum of those, not of the vCPU grants.
 
+- 2026-10-21 (M6, placements): **the bake's smoke guarantee is per family, not per placement.** At 22:00Z C4D
+  us-central1 had no capacity in any zone, on demand included (c4d-highcpu-2/4/8, three tries); with eight placements
+  a smoke-every-placement bake would block every image whenever one placement is stocked out. A placement refused for
+  capacity or quota in every zone is skipped with a warning; the image is ready when each family has a passing smoke;
+  a smoke VM that boots and fails still fails the bake. Cost: a skipped region's first use of a new image can fall on
+  a job once (first use measured up to 145 s accepted → RUNNING, against 6–7 s warm). Placements stay in `gce.json`
+  while stocked out: the stock-out memory (5 min) bounds what they cost a walk.
+- 2026-10-21 (M6): **stocked-out zones are remembered for 5 minutes** (zone, machine, provisioning), in the launcher
+  process. Eight placements mean 26 spot attempts before on demand, more than a 45 s tick can try at ~2 s a refusal;
+  without the memory a job could wait on spot refusals indefinitely while on demand had room.
+
 
 ## Surprises & Discoveries
 
@@ -706,6 +717,10 @@ VM's walk.
   covers only the families without a quota of their own; C3D and C4D have theirs. During the 26-VM us-central1 burst
   (19:50Z) Cloud Monitoring's quota usage showed instances 26 and cpus_all_regions 154, and no regional cpus series.
   So us-central1's 216 family vCPUs (C4D 24 + C3D 192) count in full toward `max_vcpus`.
+
+- 2026-10-21 (M6 smoke): **an image's first use in a region is slow, then warm.** Accepted → RUNNING on the first
+  check VM in each new placement: C4D us-east1 39 s, us-east4 10.8 s, us-east5 19.6 s; C3D us-east1 145 s, us-east4
+  43.5 s. A second sample in us-east1: 7.4 s (C4D), 6.1 s (C3D). The bake's per-placement smoke absorbs it.
 
 
 ## Outcomes & Retrospective
