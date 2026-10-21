@@ -17,7 +17,7 @@ account of the run; the spec's living sections hold the decisions and discoverie
 | M6 Cloud NAT | #82 | 1757fd7 | 00014-b8p, rolled back to 00013-78r | parked: GitHub stalls NAT bursts |
 | M6 egress switch | #83 | 1b97c25 | | external by default |
 | M6 race + counts + NAT line | #84 | aebe86e | base + launcher 00015-s2p | three review rounds; live MAWS run green |
-| M6 placements | #85 | (open) | network + smoke from PR checkout | 5 of 6 new placements green; C4D us-central1 stocked out |
+| M6 placements | #85 | 7292a8b | network + smoke from PR checkout; bake; launcher 00016-8ct | 5 of 6 new placements green; C4D us-central1 stocked out |
 
 ## Measurements
 
@@ -52,7 +52,10 @@ account of the run; the spec's living sections hold the decisions and discoverie
 
 - The day-long readings: Acceptance 4 and 5, M3's day-of-rows proofs, day one's unclaimed pre-launched VMs and their
   cost (`gce/latency-report.mjs`), and the 20 s race trigger re-sized from the logged insert times.
-- After #85 merges: `deploy.sh bake`, one manual bake, `deploy.sh launcher` (rollback 00015-s2p).
+- Config before code: the launcher reads `gce.json` from main every tick but runs its revision's code, so #85's
+  placements went live on 00015-s2p before 00016-8ct (spec Surprises; ci-kit #72 comment, two fixes to weigh).
+- Spot preemptions, all C3D us-central1 (10 VMs on 10-21): check after a day of #85's order whether they drop; else
+  consider C3D us-central1 on demand only (spec Open items).
 - C4D us-central1 out of capacity at 22:00–22:19Z: watch its refusal counts; dropping it is a config commit.
 - `deploy.sh alert` should create its metrics first and retry policies, not fail on propagation.
 - Tick preparation before the first allocation (~5–6 s) above M3's ≤ 5 s target.

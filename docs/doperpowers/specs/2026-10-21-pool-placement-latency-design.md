@@ -113,8 +113,11 @@ toward the boot alone, and below it for the jobs a warm runner covers.
     external by default.
   - [x] (2026-10-21 21:34Z) Race and counts: #84 merged (aebe86e) after three review rounds; `deploy.sh base`
     (monitoring.viewer) and launcher 00015-s2p (rollback 00013-78r).
-  - [ ] Placements: branch pool-placements-m6, eight placements, max_vcpus 386, the CPUS_PER_VM_FAMILY scope fix; in
-    review.
+  - [ ] Placements: #85 merged (7292a8b): eight placements, max_vcpus 386, the CPUS_PER_VM_FAMILY scope fix, the
+    per-family bake smoke, the 5-minute stock-out memory, `deploy.sh`'s traffic check. `deploy.sh network` and the
+    boot-sample smokes from the PR's checkout (5 of 6 new placements green; C4D us-central1 stocked out); from merged
+    main `deploy.sh bake`, the manual bake ci-kit-bake-4zcgz, and launcher 00016-8ct at 22:45Z (rollback 00015-s2p),
+    serving 100% by deploy.sh's own check.
   Follow-up outside M6's proof (CI-opt): the tick's preparation before its first allocation, 5.1 s at 18:45 and 6.2 s
   to the first insert, brought to M3's ≤ 5 s.
 
@@ -724,6 +727,16 @@ VM's walk.
   check VM in each new placement: C4D us-east1 39 s, us-east4 10.8 s, us-east5 19.6 s; C3D us-east1 145 s, us-east4
   43.5 s. A second sample in us-east1: 7.4 s (C4D), 6.1 s (C3D). The bake's per-placement smoke absorbs it.
 
+- 2026-10-21 (M6 rollout): **a config merge goes live before the code it needs.** The launcher reads `gce.json` from
+  main on every tick but runs its deployed revision's code. #85 changed both, so from its merge (7292a8b) until
+  launcher 00016-8ct (22:45Z) 00015-s2p walked the eight placements without the CPUS_PER_VM_FAMILY scope, the
+  stock-out memory or the east regions' rates. Debt, not this run (CI-opt; ci-kit #72). Two fixes to weigh: read
+  `gce.json` at the revision's own kit commit, which costs the one-commit config edit (dropping a stocked-out
+  placement, `max_vcpus`, the egress switch would each need a launcher deploy); or have `gce.json` declare the
+  minimum kit it needs and the launcher refuse a newer config, which costs a field every code-needing config change
+  must remember to raise (forgetting it is tonight's skew again) and a launcher that keeps its last accepted config
+  until the deploy lands.
+
 
 ## Outcomes & Retrospective
 
@@ -747,6 +760,14 @@ VM's walk.
 **Still to read** (a day of rows; `gce/latency-report.mjs`): Acceptance 4 (a day's median queued → started ≤ 50 s),
 Acceptance 5 (gate jobs ≤ 25 s after queued with pre-launch), M3's tick start → first insert ≤ 5 s and ≤ 26 s
 accepted → started on c3d-4 (C4D separately), and day one's unclaimed pre-launched VMs and their cost.
+
+**Open items** (not this run).
+- Spot preemptions, all in C3D us-central1 (CI-opt): 10 VMs on 10-21 (9 in zone a, 1 in b), 4 of them in the 22h
+  hour. Run 39686827712's unit shards 1/4 and 4/4 failed on "runner has received a shutdown signal" at ~22:30Z
+  (`compute.instances.preempted` at 22:31:24Z and 22:31:36Z, us-central1-b). #85 puts the C4D east placements ahead
+  of C3D us-central1: after a day, check whether preemptions drop; if C3D us-central1 keeps being preempted,
+  consider making it on demand only.
+- The config-before-code skew (Surprises): pick one of its two fixes.
 
 **What did not go as designed.**
 - Cloud NAT (M6) was built, reviewed, deployed and rolled back within the hour: GitHub's runner endpoints stall
