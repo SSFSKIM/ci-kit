@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { GceError } from '../../lib/gce.mjs';
 import { parseGceConfig, placementZones } from '../../gce/launcher/config.mjs';
-import { WEST, CENTRAL, COMMON, NEW_CFG, ONE_REGION_CFG as OLD_CFG } from './config-fixtures.mjs';
+import { WEST, CENTRAL, COMMON, NEW_CFG, ONE_REGION_CFG as OLD_CFG, M6_CFG } from './config-fixtures.mjs';
 import { placements, walkPlacements, quotaScope, quotaBlocks, largestMachineCpus, jobInstance, viewInstance } from '../../gce/launcher/logic.mjs';
 
 const key = (p) => `${p.machine}/${p.provisioning}@${p.zone}`;
@@ -99,9 +99,41 @@ test('a remembered refusal skips only requests of the same or more vCPUs in its 
   assert.equal(quotaBlocks(everywhere, at(4)['c3d-highcpu-4/spot@us-central1-a']), false);
 });
 
-async function walk(cpus, script, memory) {
+// The family quota as Compute Engine reported it live (an insert operation's error, us-west4, 2026-10-21 19:50Z): code
+// QUOTA_EXCEEDED, errorDetails quotaInfo {dimensions: {region, vm_family: 'C4D'}, limitName
+// 'CPUS-PER-VM-FAMILY-per-project-region'}. The operation error's message, as lib/gce.mjs settles it:
+const familyQuota = (region) => new GceError(403,
+  `gce operation operation-1: QUOTA_EXCEEDED Quota 'CPUS_PER_VM_FAMILY' exceeded.  Limit: 50.0 in region ${region}.`, ['QUOTA_EXCEEDED'], { accepted: true, finished: true });
+
+test('CPUS_PER_VM_FAMILY is the refused machine\'s family quota in its region: C4D refused never blocks C3D beside it', () => {
+  const m6 = (cpus) => Object.fromEntries(placements(cpus, M6_CFG).map((p) => [key(p), p]));
+  const c4d = m6(8)['c4d-highcpu-8/spot@us-central1-a'];
+  assert.deepEqual(quotaScope(familyQuota('us-central1'), c4d), { region: 'us-central1', family: 'c4d', vcpus: 8 });
+  assert.deepEqual(quotaScope(familyQuota('us-west4'), W8), { region: 'us-west4', family: 'c4d', vcpus: 8 }, 'the live refusal');
+  const memory = [quotaScope(familyQuota('us-central1'), c4d)];
+  assert.equal(quotaBlocks(memory, m6(8)['c3d-highcpu-8/spot@us-central1-a']), false, 'C3D in the same region');
+  assert.equal(quotaBlocks(memory, m6(16)['c3d-highcpu-16/standard@us-central1-f']), false);
+  assert.equal(quotaBlocks(memory, m6(8)['c4d-highcpu-8/spot@us-central1-b']), true, 'C4D there, same size');
+  assert.equal(quotaBlocks(memory, m6(8)['c4d-highcpu-8/spot@us-east1-b']), false, 'C4D in another region');
+  // The older per-family form keeps its meaning.
+  assert.deepEqual(quotaScope(quota('C3D_CPUS', 'in region us-central1'), m6(8)['c3d-highcpu-8/spot@us-central1-a']), { region: 'us-central1', family: 'c3d', vcpus: 8 });
+});
+
+test('C4D refused for its family quota in every region: the walk asks each C4D placement once, then lands on C3D us-central1', async () => {
+  const memory = [];
+  const { tried, result } = await walk(8, (p) => (p.machine.startsWith('c4d-') ? familyQuota(p.placement.region) : null), memory, M6_CFG);
+  assert.deepEqual(tried, [
+    'c4d-highcpu-8/spot@us-west4-a', 'c4d-highcpu-8/spot@us-central1-a', 'c4d-highcpu-8/spot@us-east1-b',
+    'c4d-highcpu-8/spot@us-east4-a', 'c4d-highcpu-8/spot@us-east5-a', 'c3d-highcpu-8/spot@us-central1-a',
+  ]);
+  assert.equal(result.placement.machine, 'c3d-highcpu-8');
+  assert.equal(memory.length, 5);
+  assert.ok(memory.every((q) => q.family === 'c4d'));
+});
+
+async function walk(cpus, script, memory, cfg = NEW_CFG) {
   const tried = [];
-  const result = await walkPlacements(placements(cpus, NEW_CFG), {
+  const result = await walkPlacements(placements(cpus, cfg), {
     attempt: async (p) => {
       tried.push(key(p));
       const err = script(p);

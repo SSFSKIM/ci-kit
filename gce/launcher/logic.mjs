@@ -190,11 +190,14 @@ export function placements(cpus, cfg) {
 
 const familyOf = (machine) => machine.split('-')[0];
 
-// What a quota refusal ran out of, from the metric and region its message names (Compute Engine words it "Quota
-// 'C4D_CPUS' exceeded.  Limit: 50.0 in region us-west4."; the all-regions quota "... globally."): a family's CPUs
-// by (region, family), any other regional quota (CPUS, instances, addresses, disk capacity) by region, the
-// all-regions CPUs everywhere. A PREEMPTIBLE_ quota binds spot requests only. A refusal that names nothing is taken
-// as the machine's family's. vcpus: the refused machine's; a request smaller than it may still fit.
+// What a quota refusal ran out of, from the metric and region its message names: a family's CPUs by (region, family),
+// any other regional quota (CPUS, instances, addresses, disk capacity) by region, the all-regions CPUs everywhere. A
+// PREEMPTIBLE_ quota binds spot requests only. A refusal that names nothing is taken as the machine's family's. vcpus:
+// the refused machine's; a request smaller than it may still fit.
+// Compute Engine names a family's quota "Quota 'CPUS_PER_VM_FAMILY' exceeded.  Limit: 50.0 in region us-west4." (an
+// insert operation's error, live 2026-10-21 on C4D; its quotaInfo's vm_family dimension is the machine's family, so
+// the attempt's machine names it), or in the older per-family form "Quota 'C3D_CPUS' exceeded. ..."; the all-regions
+// quota "... globally.".
 export function quotaScope(err, attempt) {
   const message = err?.message ?? '';
   const vcpus = machineCpus(attempt.machine);
@@ -204,8 +207,8 @@ export function quotaScope(err, attempt) {
   const spot = metric.startsWith('PREEMPTIBLE_') ? { spot: true } : {};
   const base = metric.replace(/^PREEMPTIBLE_/, '');
   if (base === 'CPUS_ALL_REGIONS' || / globally/.test(message)) return { ...spot, vcpus };
-  const family = /^([A-Z0-9]+)_CPUS$/.exec(base)?.[1];
-  return family ? { region, family: family.toLowerCase(), ...spot, vcpus } : { region, ...spot, vcpus };
+  const family = base === 'CPUS_PER_VM_FAMILY' ? familyOf(attempt.machine) : /^([A-Z0-9]+)_CPUS$/.exec(base)?.[1]?.toLowerCase();
+  return family ? { region, family, ...spot, vcpus } : { region, ...spot, vcpus };
 }
 
 // The quota a refusal's message names ('C4D_CPUS', 'IN_USE_ADDRESSES', ...), or undefined.

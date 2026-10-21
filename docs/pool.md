@@ -299,8 +299,9 @@ A launch writes the `launching` row, mints the JIT config (runner name = instanc
 `ci-kit-gce-<allocation id>` from the newest image labelled `ci-kit-ready=true`. It walks the placements: the
 size's machine as spot in each zone of the first placement, then of the next, and so on; then on demand in the same
 order (an attempt two placements share is made once). `ZONE_RESOURCE_POOL_EXHAUSTED*` moves to the next zone. A quota
-refusal is remembered for the rest of the tick, scoped to what its message names: a family's CPUs (`C4D_CPUS`) by
-region and family, any other regional quota (`CPUS`, `INSTANCES`, `IN_USE_ADDRESSES`, disk capacity) by region,
+refusal is remembered for the rest of the tick, scoped to what its message names: a family's CPUs (`CPUS_PER_VM_FAMILY`,
+the refused machine's family, or the older `C3D_CPUS` form) by region and family, so C4D refused in us-central1 leaves
+C3D there to try, any other regional quota (`CPUS`, `INSTANCES`, `IN_USE_ADDRESSES`, disk capacity) by region,
 `CPUS_ALL_REGIONS` everywhere, a `PREEMPTIBLE_` one for spot only; every later attempt in that scope of the same or
 more vCPUs is skipped, in this walk and the tick's later ones, since a smaller VM may still fit. A launch whose every
 attempt is so ruled out makes no runner or row and its job waits in GitHub's queue; no other launch stops. An insert
