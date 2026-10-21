@@ -1,0 +1,26 @@
+<testsuites id="" name="" tests="3" failures="1" skipped="1" errors="0" time="7.25">
+<testsuite name="login.spec.ts" timestamp="2026-10-21T06:20:30.000Z" hostname="chromium" tests="3" failures="1" skipped="1" time="6.9" errors="0">
+<properties>
+<property name="browser" value="chromium">
+</property>
+</properties>
+<testcase name="login › shows the form" classname="login.spec.ts" time="1.2">
+</testcase>
+<testcase name="login › rejects a bad password" classname="login.spec.ts" time="4.8">
+<failure message="login.spec.ts:12:5 rejects a bad password" type="FAILURE">
+<![CDATA[  1) [chromium] › login.spec.ts:12:5 › login › rejects a bad password ─────
+
+    Error: expect(received).toBe(expected) // <x> & </x> stay literal here
+]]>
+</failure>
+<system-out>
+<![CDATA[a log line with <angles> & ampersands
+]]>
+</system-out>
+</testcase>
+<testcase name="login › remembers the user" classname="login.spec.ts" time="0">
+<skipped>
+</skipped>
+</testcase>
+</testsuite>
+</testsuites>

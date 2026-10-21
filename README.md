@@ -24,6 +24,7 @@ Status: being built. The living spec: [docs/doperpowers/specs/2026-10-15-ci-kit-
 | `vendor/yaml/` | the planner's YAML parser (yaml 2.9.1 from npm, its `dist/*.js`, `package.json` and `LICENSE`), vendored so the planner and `ci-gate init` run from a plain checkout or the plugin cache with no install |
 | `lib/github.mjs`, `lib/github-app.mjs`, `lib/hcloud.mjs` | the small GitHub REST client (gh's login or the App's tokens) and the Hetzner client |
 | `pool/`, `pool-ensure/` | the Hetzner pool: agent and watchdog (`pool/agent/`), runner image, bake, guard, config, and the ensure action; runbook in [docs/pool.md](docs/pool.md) |
+| `history/` | the test-history collector: reads each gate job's JUnit report (`junit.mjs`), builds its run line against the day's base (`record.mjs`, `store.mjs`) with its provenance (`provenance.mjs`); run daily by ci-kit-sandbox's `test-history.yml` into that repo's `test-history` branch ([spec](docs/doperpowers/specs/2026-10-21-test-history-design.md)) |
 | `.github/workflows/pool-guard.yml`, `pool-bake.yml` | the pool's scheduled backstop and its weekly image build |
 | `.github/ci-kit.yml`, `.github/workflows/ci.yml` | the kit's own gates (it dogfoods itself) |
 | `test/` | `npm test` (`node --test`; no network) |
