@@ -278,7 +278,7 @@ token=
 # acts on the instance that runs it (the sweep finds its _work from where it sits); and the environment the runner gives
 # every job and hook. English messages: the jobs parse tool output, and the mini's locale is Korean.
 hook_files=(job-started.sh job-completed.sh desktop-check.sh desktop-posture.sh dialog.sh dialog-watch.sh runner-hold.sh
-  runner-state.py sweep.mjs strays.mjs terminate.mjs instances.sh shared-hold.sh)
+  runner-state.py sweep.mjs strays.mjs terminate.mjs instances.sh shared-hold.sh desktop-lock.sh)
 mkdir -p "$LOG_DIR" "$LAUNCH_AGENTS"
 # The compiled helpers are optional: without the cursor park jobs start with the cursor where it is, and without the
 # window list the dialog check sees a dialog only in front (dialog.sh). A failed compiler may leave output, which must

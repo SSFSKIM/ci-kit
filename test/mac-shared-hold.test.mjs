@@ -17,7 +17,7 @@ const hooks = fileURLToPath(new URL('../mac/hooks/', import.meta.url));
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'ci-kit-shared-')));
 after(() => rmSync(root, { recursive: true, force: true }));
 const hookFiles = ['job-started.sh', 'job-completed.sh', 'desktop-check.sh', 'desktop-posture.sh', 'dialog.sh', 'dialog-watch.sh',
-  'runner-hold.sh', 'runner-state.py', 'sweep.mjs', 'strays.mjs', 'terminate.mjs', 'instances.sh', 'shared-hold.sh'];
+  'runner-hold.sh', 'runner-state.py', 'sweep.mjs', 'strays.mjs', 'terminate.mjs', 'instances.sh', 'shared-hold.sh', 'desktop-lock.sh'];
 const security = asnShape('SecurityAgent', 'com.apple.SecurityAgent', 4711);
 const executable = (path, body) => { writeFileSync(path, `#!/bin/bash\n${body}\n`); chmodSync(path, 0o755); };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
