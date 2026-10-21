@@ -225,7 +225,8 @@ the two files list no repo twice fails). Ensure prints `result=gce` for a GCE re
 
 | Piece | Where |
 |---|---|
-| launcher (Cloud Run service `ci-kit-launcher`) | `gce/launcher/`: `server.mjs` (the service), `launcher.mjs` (one tick), decisions in `logic.mjs`, ledger rows in `ledger.mjs` and `ledger-store.mjs`, configs from main in `source.mjs` |
+| launcher (Cloud Run service `ci-kit-launcher`) | `gce/launcher/`: `server.mjs` (the service), `routes.mjs` (its paths), `ticker.mjs` (when ticks run), `launcher.mjs` (one tick), decisions in `logic.mjs`, ledger rows in `ledger.mjs` and `ledger-store.mjs`, configs from main in `source.mjs` |
+| webhook receiver (Cloud Run service `ci-kit-webhook`) | `gce/webhook/`: `server.mjs` (the service), `receiver.mjs` (signature, filter, publish); the App's hook config: `gce/tools/app-hook.mjs` |
 | bake (orchestrator, decisions) | `gce/bake/bake.mjs`, `gce/bake/plan.mjs` |
 | builder (startup script) | `gce/bake/builder.sh`, sharing `pool/bake/prepare.sh` with the Hetzner builder |
 | the VM's job unit and smoke check | `gce/vm/` (`ci-kit-gce-job.service`, `job.mjs`, `run.mjs`, `smoke.sh`) |
@@ -257,10 +258,12 @@ E2 left the pool with them (its us-central1 quota raise was refused twice); size
 subnetwork. The bake reads the `gce.json` bundled at its deploy, so a change to the placements reaches it with
 `gce/deploy.sh bake`.
 
-**The launcher.** Cloud Scheduler's `ci-kit-launcher-tick` POSTs to `ci-kit-launcher` every minute with an OIDC
-token; the service has no public ingress (`--ingress=internal`, IAM-only), runs one instance at a time, one request
-at a time. Each request is one reconciliation, and nothing is kept between them: state is in GCE labels, the ledger
-and GitHub. A tick:
+**The launcher.** Cloud Scheduler's `ci-kit-launcher-tick` POSTs to `ci-kit-launcher`'s `/tick` every minute with an
+OIDC token, and the webhook's Pub/Sub push POSTs to its `/request` when a pool job is queued (The webhook, below).
+The service has no public ingress (`--ingress=internal`, IAM-only: `ci-kit-launcher@` is its one invoker), runs one
+instance at a time and admits many requests at once, but runs one tick at a time (`ticker.mjs`). Every tick is the
+same full reconciliation, whoever asked, and nothing is kept between ticks: state is in GCE labels, the ledger and
+GitHub. A tick:
 
 1. reads `gce.json` and `pool.json` from the kit's main (the newest commit that changed each; on a failed read it
    keeps the last good copy, and at a cold start without main, the copy in its own build);
@@ -333,6 +336,74 @@ on something being absent (finalizing a vanished VM's row, unregistering a runne
 history cannot be read, a vanished VM's row waits rather than being called `orphan`. Runners are listed for every repo
 with a row in the ledger's window, so a repo that has left `gce.json` is still cleaned until its last runner is gone.
 
+**The webhook.** A job queued between two minute ticks would wait for the next one (27 s median, up to a minute), so
+GitHub's `workflow_job` events ask for a tick at once:
+
+```
+GitHub App ci-kit-runners ──workflow_job──▶ ci-kit-webhook (public) ──publish──▶ Pub/Sub ci-kit-tick-requests
+    ──push subscription ci-kit-tick-requests-launcher, OIDC as ci-kit-launcher@──▶ ci-kit-launcher /request
+```
+
+- **The receiver** (`ci-kit-webhook`, `gce/webhook/`) is the pool's one public endpoint: ingress `all`, the invoker
+  IAM check off (the org's domain-restricted sharing refuses an `allUsers` invoker). It reads the body (1 MiB at most,
+  else 413), checks `X-Hub-Signature-256` against the webhook secret and answers 401 to anything that does not verify,
+  before it parses a byte. A `workflow_job` `queued` delivery of a served repo whose job a GCE launch could serve
+  (`ci-kit-pool`, one `cpus-N` the placements name, no other runner label) publishes one message (repo, job, run,
+  labels, delivery id) and is answered 202; every other delivery is answered 200 with why it was ignored, which
+  GitHub's delivery log shows. It runs as `ci-kit-webhook@`, which may read the webhook secret and publish to the
+  topic, and nothing else: it cannot invoke the launcher. Which repos are served is read from the `gce.json` and
+  `pool.json` bundled at its deploy, so a repo added on main reaches the webhook path at the receiver's next
+  `gce/deploy.sh webhook` (until then its jobs wait for the minute tick, as before).
+- **The path to the launcher.** Cloud Run's internal ingress admits a Pub/Sub push subscription of the same project
+  calling the service's `run.app` URL; Cloud Run then checks the push's OIDC token (`ci-kit-launcher@`, audience the
+  launcher's URL) like the scheduler's. A message older than 10 min is dropped; a failed push is retried after 10–60 s.
+- **The launcher** answers a push 202 at once and runs the tick it asked for: at once when idle; when a tick is
+  running, every request arriving meanwhile, scheduled or pushed, is served by one more tick after it (at most one
+  pending); ticks start at least 10 s apart; and while the App's remaining GitHub budget is under 20% of its limit, a
+  tick that only pushes asked for is dropped (logged `requested tick dropped`), so the minute tick alone serves. Since
+  the tick runs after its push is answered, the service has CPU always allocated (instance-based billing, about $1.64
+  a day; it fit in the free tier before). A scheduled request waits for the tick that serves it, so a failed tick
+  still fails Cloud Scheduler's execution and the alert.
+- **Nothing new to keep correct.** A requested tick is an ordinary tick. A lost, duplicated, forged-and-refused or
+  late delivery, or a dropped request, costs at most the minute until the scheduled tick, never a job; a replayed
+  genuine delivery costs one tick, inside the 10 s spacing.
+
+The webhook secret is `ci-kit-webhook-secret` in Secret Manager (label `ci-kit=webhook`), readable by
+`ci-kit-webhook@` only and mounted into the receiver as a file that Cloud Run reads from Secret Manager on each
+delivery. The same value is the App's webhook secret, set with the App's URL by `gce/deploy.sh app-hook`
+(`PATCH /app/hook/config` as the App; the secret is never printed). The App's subscribed events and its webhook's
+**Active** box have no API: they are on its settings page, `https://github.com/settings/apps/ci-kit-runners` (Active,
+under Webhook) and `https://github.com/settings/apps/ci-kit-runners/permissions` (Subscribe to events: **Workflow
+job**, which the App's Actions permission allows; no installation has to approve it).
+
+Setting it up, in order (Secret Manager writes are the owner's):
+
+1. `gce/deploy.sh base`, which creates `ci-kit-webhook@` (and turns on the Pub/Sub API).
+2. The owner creates the secret, its value generated in the pipe so that it lands in no file and no shell history,
+   and lets the receiver read it:
+   ```
+   openssl rand -hex 32 | tr -d '\n' | gcloud secrets create ci-kit-webhook-secret --project=ssfskim-ci-kit \
+     --replication-policy=automatic --labels=ci-kit=webhook --data-file=-
+   gcloud secrets add-iam-policy-binding ci-kit-webhook-secret --project=ssfskim-ci-kit \
+     --member=serviceAccount:ci-kit-webhook@ssfskim-ci-kit.iam.gserviceaccount.com \
+     --role=roles/secretmanager.secretAccessor
+   ```
+3. `gce/deploy.sh launcher webhook`: the launcher with `/request`, then the receiver, the topic and the push
+   subscription.
+4. `gce/deploy.sh app-hook`: the App's webhook URL and secret.
+5. The owner, on the App's settings page: tick **Active** under Webhook (the URL is already the receiver's; leave the
+   secret field as it is) and save; then Permissions & events → Subscribe to events → **Workflow job** → Save.
+
+To rotate the secret: the owner adds a version (`openssl rand -hex 32 | tr -d '\n' | gcloud secrets versions add
+ci-kit-webhook-secret --project=ssfskim-ci-kit --data-file=-`), then `gce/deploy.sh app-hook` at once. Deliveries in
+between fail with 401 and their jobs wait for the minute tick. To turn the webhook path off: untick **Active** on the
+App's page; the minute tick serves alone, as before M4.
+
+To check: GitHub's delivery log (the App's page → Advanced) shows each delivery's answer; the receiver's logs
+(`gcloud run services logs read ci-kit-webhook --region=us-central1 --project=ssfskim-ci-kit`) a line per published
+request (`tick requested: <repo> job <id>`) or refused signature; the launcher's a `tick request:` line per push and a
+`tick:` line per tick with its `trigger` (`scheduled` or `requested`) and `requests` (how many requests it served).
+
 **Overlap.** Two ticks can run at once (Cloud Run can briefly exceed one instance; a deploy overlaps two revisions).
 Nothing depends on it never happening: deletes and unregisters treat 404 as done, rows are keyed by allocation and
 only move forward, two comments for one allocation converge on the most final, and an over-launch leaves idle runners
@@ -373,6 +444,9 @@ the label again before it acts.
   page, then, with the `.pem` in a 0600 file under `mktemp -d`,
   `gcloud secrets versions add ci-kit-app-key --project=ssfskim-ci-kit --data-file=<file>`, remove the file, run a
   bake, and delete the old GCE key on the App's page.
+- The webhook secret, `ci-kit-webhook-secret` (label `ci-kit=webhook`), is readable only by
+  `ci-kit-webhook@ssfskim-ci-kit.iam.gserviceaccount.com`; creating and rotating it are the owner's (The webhook,
+  above).
 - No VM gets a service account or a key. The builder gets a one-hour installation token, narrowed to reading
   MAWS's contents (`WARM_SCOPE` in `pool/bake/warm.mjs`), in its metadata; the image is made from its disk, never
   from its metadata.
@@ -491,7 +565,9 @@ gce/deploy.sh                       # every part, in order; or name parts:
 gce/deploy.sh base network          # APIs, the service account and its compute role, serial port logging; the VPC
 gce/deploy.sh bake bake-schedule    # the Cloud Run job ci-kit-bake and its weekly Scheduler job
 gce/deploy.sh launcher launcher-schedule   # the Cloud Run service ci-kit-launcher and its one-minute tick
+gce/deploy.sh webhook               # the receiver ci-kit-webhook, its Pub/Sub topic and push subscription
 gce/deploy.sh alert                 # the failed-tick metric and its alert policy, mailed to the owner
+gce/deploy.sh app-hook              # not in "every part": the App's webhook URL and secret (The webhook, above)
 ```
 
 Every part is idempotent. `base` also gives the project's default compute account `roles/run.builder`: Cloud Run
@@ -505,8 +581,9 @@ connect; a `sitecustomize.py` that filters `socket.getaddrinfo` to `AF_INET`, on
 deploy. To pause the launcher: `gcloud scheduler jobs pause ci-kit-launcher-tick --location=us-central1
 --project=ssfskim-ci-kit` (and `resume`). Its logs: `gcloud run services logs read ci-kit-launcher
 --region=us-central1 --project=ssfskim-ci-kit`; each tick logs one line with what it launched, deleted and
-finalized, the gce.json commit it ran (`config`), its GitHub budget, when it started (`started`, the request's
-arrival) and when it sent its first insert (`firstInsert`, null when it launched nothing).
+finalized, the gce.json commit it ran (`config`), its GitHub budget, when it started (`started`) and when it sent its
+first insert (`firstInsert`, null when it launched nothing), what asked for it (`trigger`: `scheduled` when the
+minute tick is among its requests, else `requested`) and how many requests it served (`requests`).
 
 **Reading the GCE ledger.** The same issue as Hetzner's ("pool ledger" in `SSFSKIM/ci-kit-sandbox`), one comment
 per allocation:

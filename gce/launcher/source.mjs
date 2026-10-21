@@ -9,7 +9,7 @@ const GCE_PATH = 'pool/config/gce.json';
 const POOL_PATH = 'pool/config/pool.json';
 
 // pool.json's repo names, read apart from its operational schema (the Hetzner agent's parser owns that).
-function poolRepos(text) {
+export function poolRepos(text) {
   const repos = JSON.parse(text).repos;
   if (!Array.isArray(repos) || !repos.every((r) => typeof r?.repo === 'string')) throw new Error('pool.json has no readable repos list');
   return repos.map((r) => r.repo);
