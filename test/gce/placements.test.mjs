@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { GceError } from '../../lib/gce.mjs';
 import { parseGceConfig, placementZones } from '../../gce/launcher/config.mjs';
 import { WEST, CENTRAL, COMMON, NEW_CFG, ONE_REGION_CFG as OLD_CFG, M6_CFG, M6_PLACEMENTS } from './config-fixtures.mjs';
-import { placements, walkPlacements, quotaScope, quotaBlocks, largestMachineCpus, jobInstance, viewInstance } from '../../gce/launcher/logic.mjs';
+import { placements, walkPlacements, quotaScope, quotaBlocks, largestMachineCpus, jobInstance, viewInstance, stockoutMemory, STOCKOUT_TTL_MS } from '../../gce/launcher/logic.mjs';
 
 const key = (p) => `${p.machine}/${p.provisioning}@${p.zone}`;
 
@@ -155,7 +155,7 @@ test('C4D refused for its family quota in every region: the walk asks each C4D p
   assert.ok(memory.every((q) => q.family === 'c4d'));
 });
 
-async function walk(cpus, script, memory, cfg = NEW_CFG) {
+async function walk(cpus, script, memory, cfg = NEW_CFG, { stockouts, now } = {}) {
   const tried = [];
   const result = await walkPlacements(placements(cpus, cfg), {
     attempt: async (p) => {
@@ -165,6 +165,8 @@ async function walk(cpus, script, memory, cfg = NEW_CFG) {
     },
     reconcile: async () => 'unknown',
     quota: memory,
+    stockouts,
+    ...(now ? { now } : {}),
   });
   return { tried, result };
 }
@@ -185,6 +187,33 @@ test('a capacity refusal moves zone by zone, across placements, before any on-de
   const cap = new GceError(200, 'op', ['ZONE_RESOURCE_POOL_EXHAUSTED'], { accepted: true, finished: true });
   const { tried, result } = await walk(4, (p) => (p.provisioning === 'spot' ? cap : null), []);
   assert.deepEqual(tried, [...placements(4, NEW_CFG).filter((p) => p.provisioning === 'spot').map(key), 'c4d-highcpu-4/standard@us-west4-a']);
+  assert.equal(result.placement.provisioning, 'standard');
+});
+
+// Review (M6 placements, P2): eight placements are 26 spot attempts before the first on-demand one, ~2 s each when
+// refused, more than a tick's 45 s; a walk restarted from the first zone every tick would never reach on demand. A
+// capacity refusal is remembered (zone, machine, provisioning) for STOCKOUT_TTL_MS across launches and ticks.
+const stockedOut = () => new GceError(200, 'op', ['ZONE_RESOURCE_POOL_EXHAUSTED'], { accepted: true, finished: true });
+
+test('a capacity refusal is remembered for its zone, machine and provisioning until its TTL ends', async () => {
+  let t = 0;
+  const now = () => t;
+  const stockouts = stockoutMemory();
+  const first = await walk(8, (p) => (p.zone === 'us-west4-a' && p.provisioning === 'spot' ? stockedOut() : null), [], NEW_CFG, { stockouts, now });
+  assert.deepEqual(first.tried, ['c4d-highcpu-8/spot@us-west4-a', 'c4d-highcpu-8/spot@us-west4-b']);
+  t += STOCKOUT_TTL_MS - 1;
+  assert.deepEqual((await walk(8, () => null, [], NEW_CFG, { stockouts, now })).tried, ['c4d-highcpu-8/spot@us-west4-b'], 'skipped while remembered');
+  assert.deepEqual((await walk(4, () => null, [], NEW_CFG, { stockouts, now })).tried, ['c4d-highcpu-4/spot@us-west4-a'], 'another machine is asked');
+  t += 1;
+  assert.deepEqual((await walk(8, () => null, [], NEW_CFG, { stockouts, now })).tried, ['c4d-highcpu-8/spot@us-west4-a'], 'asked again once its TTL ends');
+  assert.ok(STOCKOUT_TTL_MS >= 60_000 && STOCKOUT_TTL_MS <= 10 * 60_000, 'a few minutes: past a tick or two, short of a lasting skip');
+});
+
+test('every spot attempt remembered stocked out: the walk\'s first attempt is on demand', async () => {
+  const stockouts = stockoutMemory();
+  for (const p of placements(8, M6_CFG).filter((a) => a.provisioning === 'spot')) stockouts.add(p, 0);
+  const { tried, result } = await walk(8, () => null, [], M6_CFG, { stockouts, now: () => 1000 });
+  assert.deepEqual(tried, ['c4d-highcpu-8/standard@us-west4-a']);
   assert.equal(result.placement.provisioning, 'standard');
 });
 

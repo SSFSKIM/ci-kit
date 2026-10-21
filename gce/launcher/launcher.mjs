@@ -18,7 +18,7 @@ import { queuedPoolJobs } from '../../pool/agent/logic.mjs';
 import { staleBakeInstances } from '../bake/plan.mjs';
 import { servedRepos, placementZones } from './config.mjs';
 import {
-  allocationId, instanceName, repoLabel, viewInstance, isGce, planLaunches, runnersNeverOnline, placements, quotaBlocks, insertOutcome, walkPlacements,
+  allocationId, instanceName, repoLabel, viewInstance, isGce, planLaunches, runnersNeverOnline, placements, quotaBlocks, insertOutcome, walkPlacements, stockoutMemory,
   jobInstance, jitRequest, newestReadyImage, reviewInstances, reviewRows, orphanRunners, orphanDisks, reportable, claimedInstances,
   largestMachineCpus, raceAttempts, walkRecord, unsettledInsert, quotaMetric, RACE_AFTER_MS,
 } from './logic.mjs';
@@ -74,6 +74,7 @@ export class Launcher {
     this.alert ??= createAlerts(this.gh, this.cfg.ledger.repo, { log: this.log });
     this.budgetMs ??= TICK_BUDGET_MS;
     this.insertDeadlineMs ??= INSERT_DEADLINE_MS;
+    this.stockouts ??= stockoutMemory(); // the server passes one kept across ticks (logic.mjs stockoutMemory)
     this.after ??= (ms) => {
       let timer;
       const promise = new Promise((resolve) => { timer = setTimeout(resolve, ms); });
@@ -610,8 +611,8 @@ export class Launcher {
     const purpose = job ? `job ${job.id}` : `run ${prelaunch.run}'s cpus-${cpus} pre-launch`;
     const what = race ? `the race of ${instanceName(race.of)} for ${purpose}` : purpose;
     const attempts = item.attempts ?? placements(cpus, this.cfg);
-    if (attempts.every((p) => quotaBlocks(seen.quota, p))) {
-      this.log(`${what} in ${repo} waits: quota refused every placement for its size this tick`);
+    if (attempts.every((p) => quotaBlocks(seen.quota, p) || this.stockouts.has(p, this.now()))) {
+      this.log(`${what} in ${repo} waits: quota this tick, or a recent stock-out, refused every placement for its size`);
       return {};
     }
     const at = this.now();
@@ -680,7 +681,7 @@ export class Launcher {
         if (settled.outcome !== 'unknown') unsettled?.settle();
         return settled;
       },
-      now: this.now, deadline, quota: seen.quota, raced: () => raced,
+      now: this.now, deadline, quota: seen.quota, stockouts: this.stockouts, raced: () => raced,
     });
     if (unsettled) {
       // Its race is decided by the tick's deadline at the latest; a race that cannot start yet (a queued job not yet
@@ -739,7 +740,7 @@ export class Launcher {
     await ctx.firstTried;
     if (!stillPending()) return;
     const name = row.instance;
-    const next = raceAttempts(attempts, attempt).filter((p) => !quotaBlocks(ctx.seen.quota, p));
+    const next = raceAttempts(attempts, attempt).filter((p) => !quotaBlocks(ctx.seen.quota, p) && !this.stockouts.has(p, this.now()));
     const need = largestMachineCpus(item.cpus, this.cfg);
     let why = null;
     if (!next.length) why = 'no other zone left to try';

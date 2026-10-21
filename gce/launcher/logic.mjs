@@ -219,6 +219,26 @@ export const quotaBlocks = (memory, attempt) => memory.some((q) =>
   (!q.region || q.region === attempt.placement.region) && (!q.family || q.family === familyOf(attempt.machine)) &&
   (!q.spot || attempt.provisioning === 'spot') && machineCpus(attempt.machine) >= q.vcpus);
 
+// Capacity refusals (ZONE_RESOURCE_POOL_EXHAUSTED*) remembered by zone, machine and provisioning for STOCKOUT_TTL_MS,
+// across a tick's launches and across ticks (the server keeps one for the process; a restart forgets it). With eight
+// placements a size has 26 spot attempts before its first on-demand one, at ~2 s a refusal, more than a tick's 45 s
+// budget: a walk that asked every stocked-out zone again each tick would never reach on demand. Five minutes skips a
+// zone for about five ticks, enough for the walk to reach the rest; a zone that recovers sooner costs at most that long
+// on another zone or on demand, never a wait.
+export const STOCKOUT_TTL_MS = 5 * 60_000;
+export function stockoutMemory({ ttlMs = STOCKOUT_TTL_MS } = {}) {
+  const until = new Map();
+  const key = (p) => `${p.machine}|${p.zone}|${p.provisioning}`;
+  return {
+    add: (p, at) => until.set(key(p), at + ttlMs),
+    has(p, at) {
+      const end = until.get(key(p));
+      if (end !== undefined && at >= end) until.delete(key(p));
+      return end !== undefined && at < end;
+    },
+  };
+}
+
 // What a failed insert means. 'capacity' (ZONE_RESOURCE_POOL_EXHAUSTED*: this zone, this provisioning) and 'quota'
 // (a region's or the project's, as its message names it: quotaScope) are definite refusals. 'failed': nothing was
 // created and trying elsewhere would not help (the operation finished with another error, or the request was refused
@@ -273,7 +293,8 @@ export function pendingAllocation(row) {
 // is final. A walk stops at an unknown outcome, so a row has at most one.
 export const unsettledInsert = (row) => (row.state !== 'final' && row.slow?.find((s) => !s.done)) || null;
 
-// Walks the attempts until one creates the VM. Capacity moves to the next zone. A quota refusal is remembered in
+// Walks the attempts until one creates the VM. Capacity moves to the next zone, and is remembered in `stockouts`
+// (stockoutMemory, when given): an attempt it holds is skipped while its TTL lasts. A quota refusal is remembered in
 // `quota` (the tick's memory, quotaScope) and every attempt it covers is skipped, here and in the tick's later walks.
 // An unknown outcome is reconciled (through the zone's operation) before anything else is tried, and if it stays
 // unknown the walk stops: two zones must never both hold this allocation's VM.
@@ -285,11 +306,11 @@ export const unsettledInsert = (row) => (row.state !== 'final' && row.slow?.find
 // Returns {placement, tried, stop: 'exhausted'|'failed'|'unknown'|'deadline'|'raced' when no placement, quota: true if
 // any refused it}. Each of `tried` is the attempt with its outcome, when it was sent (`sent`, ms) and how long it took to
 // settle (`ms`), a quota refusal's `metric`, and an unsettled insert's `operation` (its link) when the API named it.
-export async function walkPlacements(list, { attempt, reconcile, now = Date.now, deadline = Infinity, quota: memory = [], raced = () => false }) {
+export async function walkPlacements(list, { attempt, reconcile, now = Date.now, deadline = Infinity, quota: memory = [], stockouts = null, raced = () => false }) {
   const tried = [];
   let quota = false;
   for (const p of list) {
-    if (quotaBlocks(memory, p)) continue;
+    if (quotaBlocks(memory, p) || stockouts?.has(p, now())) continue;
     if (raced()) return { placement: null, tried, stop: 'raced', quota };
     if (now() >= deadline) return { placement: null, tried, stop: 'deadline', quota };
     const sent = now();
@@ -312,7 +333,10 @@ export async function walkPlacements(list, { attempt, reconcile, now = Date.now,
       ...(outcome === 'unknown' && error?.operation ? { operation: error.operation } : {}),
     });
     if (outcome === 'created') return { placement: p, tried, quota };
-    if (outcome === 'capacity') continue;
+    if (outcome === 'capacity') {
+      stockouts?.add(p, now());
+      continue;
+    }
     if (outcome === 'quota') {
       quota = true;
       memory.push(quotaScope(error, p));

@@ -318,7 +318,10 @@ A launch writes the `launching` row, mints the JIT config (runner name = instanc
 `ci-kit-pool`, `cpus-N`, `ci-kit-gce`, work folder `/var/lib/ci-kit/cache/work/<instance>`), then creates
 `ci-kit-gce-<allocation id>` from the newest image labelled `ci-kit-ready=true`. It walks the placements: the
 size's machine as spot in each zone of the first placement, then of the next, and so on; then on demand in the same
-order (an attempt two placements share is made once). `ZONE_RESOURCE_POOL_EXHAUSTED*` moves to the next zone. A quota
+order (an attempt two placements share is made once). `ZONE_RESOURCE_POOL_EXHAUSTED*` moves to the next zone, and the
+launcher remembers that zone, machine and provisioning as stocked out for 5 min (in its process, across ticks; a
+restart forgets): with eight placements a size has 26 spot attempts before its first on-demand one, more refusals than
+one tick's 45 s holds, so the next ticks skip the zones already refused and reach the rest, then on demand. A quota
 refusal is remembered for the rest of the tick, scoped to what its message names: a family's CPUs (`CPUS_PER_VM_FAMILY`,
 the refused machine's family, or the older `C3D_CPUS` form) by region and family, so C4D refused in us-central1 leaves
 C3D there to try, any other regional quota (`CPUS`, `INSTANCES`, `IN_USE_ADDRESSES`, disk capacity) by region,
