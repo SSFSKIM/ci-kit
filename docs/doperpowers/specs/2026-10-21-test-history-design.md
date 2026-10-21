@@ -203,8 +203,13 @@ never land (10-20: 18 landings, about 75 unit runs).
   - gate files (`.github/`, `scripts/`);
   - any path outside the source and test trees;
   - a deleted or renamed non-test file, since `related` cannot follow a path that is gone;
-  - any directory tests read through `fs` or a glob rather than an import (`spikes/protocol-probe/fixtures`, and any
-    others the build finds).
+  - any changed file in the source or test trees that is not a script module: fixtures, snapshots, Markdown guides,
+    and CSS read as text (vitest's `related` walk drops `?raw`, `?inline` and `?asset` imports).
+- **Source readers.** Some suites read a whole source tree through `fs`, a lint or a build rather than an import.
+  Examples: a token guard that scans `src/renderer`, the bundle guards that read `out/`, and the desk-hub suites
+  that reach `apps/desk-hub/src` through a Worker bundle. A named map, from each such tree to the suites that read it,
+  adds those suites to the related set when the tree changes. Making those trees fallbacks would run the full suite on
+  nearly every change. A reading suite missing from the map is caught by the landing's full class 1a.
 - **Landing rule.** A marked run never counts as landing evidence, even when a fallback made it run the full suite. A
   full class 1a on the head's tree stays required, so what selection misses is caught before master. A marked run that
   is red counts as red.
@@ -416,8 +421,9 @@ MAWS (one PR, which the architect lands):
     rules in Design;
   - "outside the source and test trees" means any path not under `src/`, `test/`, `apps/<app>/src/` or
     `apps/<app>/test/`;
-  - the fs/glob directories are found by reading the suites (`readFileSync`, `readdir`, `glob`, `import.meta.glob` in
-    test files and test support), and kept as a named list with a comment.
+  - the source-reader map is found by reading the suites (`readFileSync`, `readdir`, `glob`, lints, builds, spawned
+    bundles in test files and test support), and kept in one place with a comment: a suite that starts reading a
+    source tree must be added there;
 
   It writes the decision to the plan's outputs and one line to the summary:
   - `Selection: affected — <n> paths, unit runs vitest related`, or
@@ -518,8 +524,15 @@ Each is written here in full when its condition holds:
   - The architect added three fallbacks: any path outside the source and test trees, a deleted or renamed non-test
     file, and directories tests read through `fs` or a glob. The same selection applies to `unit:darwin`.
   - "Source and test trees" includes `apps/<app>/src` and `apps/<app>/test`, since the desk's apps are vitest projects
-    of the same run (CI-opt's reading, confirmed by the architect; `apps/<app>/e2e` is outside). `e2e/` and `docs/` changes run the full unit suite by this
-    rule. Whether they could select nothing is left for the store's data.
+    of the same run (CI-opt's reading, confirmed by the architect; `apps/<app>/e2e` is outside). `e2e/` and `docs/`
+    changes run the full unit suite by this rule. Whether they could select nothing is left for the store's data.
+  - Amended after the build's probe of vitest 5.0.2, and agreed by the architect (gate-offload DL 82 at landing):
+    - the architect's fs/glob rule became two rules: a non-script file in the source or test trees runs the full
+      suite, and a source-reader map adds the reading suites;
+    - read literally, the fs/glob rule would have run the full suite on nearly every change, because several suites
+      read whole source trees (`src/renderer`, `src/`, `out/`);
+    - the probe also found that vitest's `related` walk drops query imports: `tokens.css` selected 0 suites although
+      four suites import it `?raw`.
   - The strongest alternative was the plan job computing the change itself. It lost because the plan checks out only
     `package.json` and `.github` sparsely, with no history, and a full fetch there costs every run.
   - The collector changes (never a selected base; an explicit list when shorter) follow from the store's delta design:
