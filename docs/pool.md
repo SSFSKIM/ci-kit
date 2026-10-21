@@ -281,7 +281,9 @@ GitHub. A tick:
    (under `egress: "nat"`, its region's NAT missing, misconfigured or out of ports), and the launcher logs it at ERROR each tick,
    `runner never online` with its zone and region, until the idle rule removes it;
    then, with what those launches leave of `max_vcpus` and only when no queued job waits, pre-launches the VMs of
-   each run that has begun before its pool jobs are queued (Pre-launch, below);
+   each run that has begun before its pool jobs are queued (Pre-launch, below), and races an insert still unsettled
+   after 20 s with a second allocation (The race of a slow insert, below). A launching row whose insert never settled
+   counts as its VM would (vCPUs, and cover while its runner waits);
 4. beside the launches, cleans up (below), finalizes rows whose VM is gone, and records on each running row the job
    its runner holds;
 5. once a day, in its first two hours (UTC), writes yesterday's daily line.
@@ -469,6 +471,29 @@ served repo's run begins, the tick launches the VMs its pool jobs will ask for, 
 - **To check:** the launcher logs `pre-launched <instance> (<machine>, <spot|standard>, <zone>) for run <id>
   (<workflow>) in <repo>`, and its tick line lists them in `prelaunched`. The ledger's row and daily line and the
   latency report show what they did (Reading the GCE ledger, below).
+
+**The race of a slow insert** (spec 2026-10-21 M6). An ordinary insert is accepted in 8–15 s; on 2026-10-21 every
+one whose outcome stayed unknown settled as created after 41–121 s, and the walk, which stops at an unknown outcome
+(two zones must never hold one allocation's VM), made its job wait all of it. So an insert still unsettled 20 s after
+it was sent (`RACE_AFTER_MS` in `logic.mjs`, provisional until the tick lines' `inserts` re-size it) starts a second
+allocation of the same size: its own row, name and JIT runner, walking the attempts after the pending one in other
+zones, another region first, spot before on demand.
+
+- The first allocation keeps waiting on its own operation as before and makes no further attempt: refused after its
+  race began, it is abandoned, never walked to another zone. Whichever VM's runner GitHub gives a job to first serves
+  it (either may take any job of its repo and size); the other is an unclaimed VM the idle rule removes.
+- An allocation races at most once and a race never races. A race starts only once every queued job of the tick has
+  made its first launch attempt, and none starts past the tick's budget, with no zone left, or beyond `max_vcpus`: it
+  reserves its largest machine like any launch, and pre-launch plans against what is left.
+- An insert whose outcome stays unknown leaves its row `launching` with the insert's send time (`slow`). Until a later
+  tick reads the end of its zone operation, the row keeps its vCPUs and, while its runner waits, covers a job of its
+  size as its VM would: the next tick, or a restarted launcher, neither launches nor races again for the same job.
+  Overlapping ticks remain the accepted overlap below; there is no strict bound of two VMs per job.
+- **To check:** the launcher logs `<instance>: its insert in <zone> is unsettled after 20 s; a second allocation races
+  it` (or `no race (<why>)`) and `raced <instance> (<machine>, <spot|standard>, <zone>) against <instance> for job
+  <id>`; the tick line lists races in `raced` (`<race> for <original>`), every insert sent in `inserts` (zone, machine,
+  provisioning, outcome, seconds from send to settle, null when it never settled), and, of the rows its launches wrote,
+  `refusals`, `slow` and `onDemand` as the daily line counts them.
 
 **Overlap.** Two ticks can run at once (Cloud Run can briefly exceed one instance; a deploy overlaps two revisions).
 Nothing depends on it never happening: deletes and unregisters treat 404 as done, rows are keyed by allocation and
@@ -720,6 +745,15 @@ per allocation:
   that rate, gives each family@region's VMs and dollars (and how many it could not price), on a day with
   pre-launches how many VMs were pre-launched, how many no job claimed and what those cost (`Pre-launched: N VMs, M
   unclaimed ($x)`), and names the gce.json commit the launcher ran.
+- Since M6 the daily line also counts, on a day that has any: the walks' refusals of the day's final rows by kind,
+  quota metric and zone (`Refusals: quota C4D_CPUS us-west4-a 2, capacity us-central1-a 1`); their slow inserts,
+  those unsettled 20 s after they were sent or never settled, with how many never did and the settle times of the rest
+  (`Slow inserts: 3, 1 unsettled, the rest settled in 41, 63 s`); the races launched that day by what was observed of
+  each pair (which VM a job claimed first, both, neither, or unresolved while either row is not final; a first claim is
+  not latency saved) and what the pairs' VMs that ran no job cost; and the VMs that ran on demand. Each row's JSON keeps
+  its walk's `refused` ({kind, zone, metric}) and `slow` ({zone, outcome, sent, done}) inserts, a slow insert's `done`
+  learned from its zone operation by a later tick when its own tick could not wait for it; a race's row keeps `race`
+  ({of: the allocation it raced, demand: the job or run that allocation was for}), apart from the job its VM ran.
 - A writer reads a row's comment again just before updating it, and drops the write if the comment is already as
   far along; a final row is never rewritten. Issue comments have no compare-and-swap, so during an overlap of two
   ticks a row is eventually final rather than finalized once: a stale write that lands in the milliseconds after

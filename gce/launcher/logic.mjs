@@ -112,7 +112,11 @@ export function runnersNeverOnline({ instances, runners, now, claimed = new Set(
 // since the vCPUs in flight and the coverage are unknown. A launch reserves the largest machine its walk could land
 // on (any placement's). inflight: the vCPUs in flight with this plan's launches, what pre-launch may add to (none
 // when the listing is incomplete).
-export function planLaunches({ queued, instances, runners, now, cfg, complete = true, claimed = new Set() }) {
+// rows: the ledger's. A launching row whose insert never settled (unsettledInsert) and whose VM is not listed is an
+// allocation whose VM may still appear (spec M6: an insert outcome stays unknown for 41-121 s): it keeps the vCPUs its
+// launch reserved, and while its runner is registered, not busy and unclaimed it covers a job of its size, as its VM
+// would. Without that, the next tick would launch again for the same job, and race again.
+export function planLaunches({ queued, instances, runners, now, cfg, complete = true, claimed = new Set(), rows = [] }) {
   if (!complete) return { launches: [], waiting: [...queued], unservable: [] };
   const idleMs = cfg.idle_runner_minutes * MIN;
   const of = runnerLookup(runners);
@@ -126,6 +130,13 @@ export function planLaunches({ queued, instances, runners, now, cfg, complete = 
     if (r && !r.busy && !claimed.has(i.name) && now - i.created < idleMs && !neverOnline(i, r, now, claimed)) {
       cover.set(key(repo, i.cpus), (cover.get(key(repo, i.cpus)) ?? 0) + 1);
     }
+  }
+  const listed = new Set(instances.map((i) => i.alloc));
+  for (const row of rows) {
+    if (row.state !== 'launching' || listed.has(row.alloc) || !unsettledInsert(row)) continue;
+    inflight += largestMachineCpus(row.cpus, cfg);
+    const r = runners.get(row.repo)?.get(row.instance);
+    if (r && !r.busy && !claimed.has(row.instance) && now - Date.parse(row.at) < idleMs) cover.set(key(row.repo, row.cpus), (cover.get(key(row.repo, row.cpus)) ?? 0) + 1);
   }
   const launches = [];
   const waiting = [];
@@ -187,7 +198,7 @@ export function quotaScope(err, attempt) {
   const message = err?.message ?? '';
   const vcpus = machineCpus(attempt.machine);
   const region = /in region ([a-z0-9-]+)/.exec(message)?.[1] ?? attempt.placement.region;
-  const metric = /Quota '([A-Z0-9_]+)' exceeded/.exec(message)?.[1];
+  const metric = quotaMetric(err);
   if (!metric) return { region, family: familyOf(attempt.machine), vcpus };
   const spot = metric.startsWith('PREEMPTIBLE_') ? { spot: true } : {};
   const base = metric.replace(/^PREEMPTIBLE_/, '');
@@ -195,6 +206,9 @@ export function quotaScope(err, attempt) {
   const family = /^([A-Z0-9]+)_CPUS$/.exec(base)?.[1];
   return family ? { region, family: family.toLowerCase(), ...spot, vcpus } : { region, ...spot, vcpus };
 }
+
+// The quota a refusal's message names ('C4D_CPUS', 'IN_USE_ADDRESSES', ...), or undefined.
+export const quotaMetric = (err) => /Quota '([A-Z0-9_]+)' exceeded/.exec(err?.message ?? '')?.[1];
 
 // Whether a remembered refusal covers an attempt: in its scope, and of the same or more vCPUs.
 export const quotaBlocks = (memory, attempt) => memory.some((q) =>
@@ -213,20 +227,55 @@ export function insertOutcome(err) {
   return 'unknown';
 }
 
+// How long an insert may stay unsettled before a second allocation races it (spec M6). Provisional: the day it was
+// sized from (2026-10-21) had ordinary inserts accepted in 8-15 s and 15 slow ones settling after 41-121 s, but those
+// counted only operations that outlived the 40 s wait. Every insert's send-to-settle time is on the tick summary
+// (`inserts`) so this can be re-sized from all of them.
+export const RACE_AFTER_MS = 20_000;
+
+// The attempts a race of the pending attempt walks (spec M6): those after it in the walk, in other zones; spot before
+// on demand as the walk has them, and within each, other regions before the pending one's.
+export function raceAttempts(list, pending) {
+  const rank = (p) => (p.provisioning === 'spot' ? 0 : 2) + (p.placement.region === pending.placement.region ? 1 : 0);
+  return list.slice(list.indexOf(pending) + 1).filter((p) => p.zone !== pending.zone).sort((a, b) => rank(a) - rank(b));
+}
+
+// What a launch's row keeps of its walk (spec M6 counts), from walkPlacements' `tried`: its refusals ({kind:
+// 'capacity'|'quota', zone, metric when the message names one}), and its slow inserts, those still unsettled
+// RACE_AFTER_MS after they were sent or never settled in the tick ({zone, outcome, sent, done: when it settled,
+// absent while it has not}).
+export function walkRecord(tried) {
+  const iso = (ms) => new Date(ms).toISOString();
+  const refused = tried.filter((t) => t.outcome === 'capacity' || t.outcome === 'quota')
+    .map((t) => ({ kind: t.outcome, zone: t.zone, ...(t.metric ? { metric: t.metric } : {}) }));
+  const slow = tried.filter((t) => t.outcome === 'unknown' || t.ms >= RACE_AFTER_MS)
+    .map((t) => ({ zone: t.zone, outcome: t.outcome, sent: iso(t.sent), ...(t.outcome === 'unknown' ? {} : { done: iso(t.sent + t.ms) }) }));
+  return { ...(refused.length ? { refused } : {}), ...(slow.length ? { slow } : {}) };
+}
+
+// A row's insert that never settled (outcome unknown, its operation's end not yet learned), or null; none once the row
+// is final. A walk stops at an unknown outcome, so a row has at most one.
+export const unsettledInsert = (row) => (row.state !== 'final' && row.slow?.find((s) => !s.done)) || null;
+
 // Walks the attempts until one creates the VM. Capacity moves to the next zone. A quota refusal is remembered in
 // `quota` (the tick's memory, quotaScope) and every attempt it covers is skipped, here and in the tick's later walks.
 // An unknown outcome is reconciled (through the zone's operation) before anything else is tried, and if it stays
 // unknown the walk stops: two zones must never both hold this allocation's VM.
 // attempt(p) resolves once created and throws the insert's error; reconcile(p, err) resolves to an outcome. No new
 // attempt starts at or past `deadline` (the tick's budget): the walk stops with 'deadline', having created nothing.
-// Returns {placement, tried, stop: 'exhausted'|'failed'|'unknown'|'deadline' when no placement, quota: true if any
-// refused it}.
-export async function walkPlacements(list, { attempt, reconcile, now = Date.now, deadline = Infinity, quota: memory = [] }) {
+// Once `raced()` (a second allocation races this one's pending insert, spec M6), the walk makes no further attempt and
+// stops with 'raced': the race carries the job, and this allocation is never moved to another zone.
+// Returns {placement, tried, stop: 'exhausted'|'failed'|'unknown'|'deadline'|'raced' when no placement, quota: true if
+// any refused it}. Each of `tried` is the attempt with its outcome, when it was sent (`sent`, ms) and how long it took to
+// settle (`ms`), and a quota refusal's `metric`.
+export async function walkPlacements(list, { attempt, reconcile, now = Date.now, deadline = Infinity, quota: memory = [], raced = () => false }) {
   const tried = [];
   let quota = false;
   for (const p of list) {
     if (quotaBlocks(memory, p)) continue;
+    if (raced()) return { placement: null, tried, stop: 'raced', quota };
     if (now() >= deadline) return { placement: null, tried, stop: 'deadline', quota };
+    const sent = now();
     let outcome;
     let error = null;
     try {
@@ -237,7 +286,7 @@ export async function walkPlacements(list, { attempt, reconcile, now = Date.now,
       outcome = insertOutcome(err);
       if (outcome === 'unknown') outcome = await reconcile(p, err);
     }
-    tried.push({ ...p, outcome });
+    tried.push({ ...p, outcome, sent, ms: now() - sent, ...(outcome === 'quota' ? { metric: quotaMetric(error) } : {}) });
     if (outcome === 'created') return { placement: p, tried, quota };
     if (outcome === 'capacity') continue;
     if (outcome === 'quota') {

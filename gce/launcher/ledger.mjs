@@ -87,9 +87,12 @@ const utc = (s) => s.slice(0, 19).replace('T', ' ');
 // prelaunch: {run, attempt, workflow} for a VM launched ahead of a run's pool jobs (spec M5, prelaunch.mjs), which the
 // row keeps to its end: it is what a later tick reads to know the run was served, and what the daily line counts.
 // egress: gce.json's when the VM launched, which prices the row whatever the file says by the time it is final.
-export const launchRow = ({ alloc, repo, cpus, at, config, egress, prelaunch }) => ({
+// race: {of: the allocation whose slow insert it races, demand: {job} or {run}, what that allocation was launched for}
+// for a race's allocation (spec M6). Either VM's runner may take any job of its repo and size, so the job a VM ran is
+// its row's `job`, never assumed from the demand.
+export const launchRow = ({ alloc, repo, cpus, at, config, egress, prelaunch, race }) => ({
   alloc, instance: instanceName(alloc), repo, cpus, at: iso(at), config: config.slice(0, 8), ...(egress ? { egress } : {}),
-  ...(prelaunch ? { prelaunch } : {}), state: 'launching',
+  ...(prelaunch ? { prelaunch } : {}), ...(race ? { race } : {}), state: 'launching',
 });
 
 // inst: {zone, machine, provisioning, diskType, created (ms), running (ms, when it became RUNNING; absent or null
@@ -177,10 +180,60 @@ export function rowsOf(comments) {
   return rows;
 }
 
+const seconds = (s) => Math.round((Date.parse(s.done) - Date.parse(s.sent)) / 1000);
+
+// What rows say of their walks (spec M6 counts; walkRecord): the refusals by kind, quota metric and zone ([{kind,
+// metric, zone, n}]); the slow inserts, how many never settled and the settle times of the rest, in seconds; and how
+// many VMs ran on demand.
+export function launchCounts(rows) {
+  const refusals = new Map();
+  for (const f of rows.flatMap((r) => r.refused ?? [])) {
+    const k = `${f.kind}|${f.metric ?? ''}|${f.zone}`;
+    refusals.set(k, { kind: f.kind, ...(f.metric ? { metric: f.metric } : {}), zone: f.zone, n: (refusals.get(k)?.n ?? 0) + 1 });
+  }
+  const slow = rows.flatMap((r) => r.slow ?? []);
+  return {
+    refusals: [...refusals.keys()].sort().map((k) => refusals.get(k)),
+    slow: { inserts: slow.length, unsettled: slow.filter((s) => !s.done).length, seconds: slow.filter((s) => s.done).map(seconds).sort((a, b) => a - b) },
+    onDemand: rows.filter((r) => r.provisioning === 'standard').length,
+  };
+}
+
+// The races launched on `day` (spec M6), each with its original, by what was observed of the pair: which VM a job
+// claimed first (by the jobs' start), both or neither claimed, or unresolved while either row is not final (its VM may
+// still appear and take a job). A first claim is not latency saved: either runner may take any job of its size. The
+// unclaimed dollars are what the pairs' VMs that ran no job cost, once final.
+function raceCounts(rows, day) {
+  const byAlloc = new Map(rows.map((r) => [r.alloc, r]));
+  const races = rows.filter((r) => r.race && r.at?.startsWith(day));
+  const out = { started: races.length, firstClaim: { race: 0, original: 0 }, bothClaimed: 0, neitherClaimed: 0, unresolved: 0, unclaimedDollars: 0 };
+  const startedAt = (r) => r.job?.started ?? r.job?.queued ?? '';
+  for (const race of races) {
+    const original = byAlloc.get(race.race.of);
+    const pair = [race, original].filter(Boolean);
+    for (const r of pair) if (r.state === 'final' && r.seconds != null && !r.job) out.unclaimedDollars += r.dollars ?? 0;
+    if (!original || pair.some((r) => r.state !== 'final')) {
+      out.unresolved += 1;
+      continue;
+    }
+    const claimed = pair.filter((r) => r.job);
+    if (claimed.length === 0) out.neitherClaimed += 1;
+    if (claimed.length === 2) out.bothClaimed += 1;
+    if (claimed.length) {
+      const first = claimed.length === 2 && startedAt(original) < startedAt(race) ? original : claimed[0];
+      out.firstClaim[first === race ? 'race' : 'original'] += 1;
+    }
+  }
+  out.unclaimedDollars = round4(out.unclaimedDollars);
+  return out;
+}
+
 // The day's totals (UTC `day`, YYYY-MM-DD): VMs, seconds and dollars of the rows finalized that day, each end's count,
 // the month at that day's rate, the commit of the gce.json the launcher ran, and each family@region's VMs and dollars
 // (spec 2026-10-21: each placement's count and cost, so a price swing shows), with the VMs it could not price. On a
-// day with pre-launched VMs (spec M5), `prelaunched`: how many, how many no job claimed, and what those cost.
+// day with pre-launched VMs (spec M5), `prelaunched`: how many, how many no job claimed, and what those cost. And, each
+// only on a day that has any (spec M6): the walks' `refusals` and `slow` inserts of the day's final rows and the VMs
+// that ran `onDemand` (launchCounts), and the `races` launched that day (raceCounts, over every row given).
 // The VMs' dollars carry each one's egress: its address hours, or its NAT gateway hours; the NATs' GB processed ($0.045 per GiB) and their addresses
 // ($0.005 an hour each) are per region, read from no row: the counts step of spec M6 (step 3) adds the day's NAT GB
 // to this line, priced, from Cloud Monitoring.
@@ -206,7 +259,32 @@ export function dailyLine(rows, day, config) {
     ...(prelaunched.length ? {
       prelaunched: { vms: prelaunched.length, unclaimed: unclaimed.length, unclaimedDollars: round4(unclaimed.reduce((sum, r) => sum + (r.dollars ?? 0), 0)) },
     } : {}),
+    ...walkCounts(rows, ofDay, day),
   };
+}
+
+function walkCounts(rows, ofDay, day) {
+  const { refusals, slow, onDemand } = launchCounts(ofDay);
+  const races = raceCounts(rows, day);
+  return {
+    ...(refusals.length ? { refusals } : {}), ...(slow.inserts ? { slow } : {}), ...(onDemand ? { onDemand } : {}), ...(races.started ? { races } : {}),
+  };
+}
+
+function renderWalks(d) {
+  const parts = [];
+  if (d.refusals) parts.push(`Refusals: ${d.refusals.map((f) => `${f.kind}${f.metric ? ` ${f.metric}` : ''} ${f.zone} ${f.n}`).join(', ')}.`);
+  if (d.slow) {
+    const settled = d.slow.seconds.length ? `${d.slow.unsettled ? 'the rest ' : ''}settled in ${d.slow.seconds.join(', ')} s` : '';
+    parts.push(`Slow inserts: ${[d.slow.inserts, d.slow.unsettled ? `${d.slow.unsettled} unsettled` : '', settled].filter(Boolean).join(', ')}.`);
+  }
+  if (d.races) {
+    const r = d.races;
+    parts.push(`Races: ${r.started} started; claimed first: the race ${r.firstClaim.race}, the original ${r.firstClaim.original}; ` +
+      `both claimed ${r.bothClaimed}, neither ${r.neitherClaimed}, unresolved ${r.unresolved}; unclaimed VMs $${r.unclaimedDollars.toFixed(4)}.`);
+  }
+  if (d.onDemand) parts.push(`On demand: ${d.onDemand} VMs.`);
+  return parts.map((p) => `${p} `).join('');
 }
 
 export function renderDaily(d) {
@@ -218,7 +296,7 @@ export function renderDaily(d) {
     `**GCE pool, ${d.day} (UTC):** ${d.vms} VMs, ${d.seconds} VM-seconds, $${d.dollars.toFixed(4)}; ` +
       `projected month $${d.month.toFixed(2)} at this day's rate. Ends: ${ends}.${families ? ` By family@region: ${families}.` : ''} ` +
       `${d.prelaunched ? `Pre-launched: ${d.prelaunched.vms} VMs, ${d.prelaunched.unclaimed} unclaimed ($${d.prelaunched.unclaimedDollars.toFixed(4)}). ` : ''}` +
-      `Launcher config (gce.json) ${d.config}.`,
+      `${renderWalks(d)}Launcher config (gce.json) ${d.config}.`,
   ].join('\n');
 }
 
