@@ -47,7 +47,7 @@ roughly twice the Mac lane's throughput without a second Mac.
   on the MacBook; MAWS is private, so this spec carries its conclusions, not its line references).
 - [x] (2026-10-21 10:2xZ) Adversarial review of the first draft (a reader-writer lease taken in hooks): six P1s and two
   P2s, all taken; the design below replaces it (Decision Log).
-- [x] (2026-10-21 ~10:3xZ) Second adversarial review (astra), of the second draft (shared listeners stopped by a
+- [x] (2026-10-21 ~10:1xZ) Second adversarial review (astra), of the second draft (shared listeners stopped by a
   wrapper hold and a drain): two P1s and two P2s, all taken; admission moved into the hooks under one lock (Decision
   Log).
 - [ ] M1 — ci-kit: instances, admission in the hooks, per-instance identity.
