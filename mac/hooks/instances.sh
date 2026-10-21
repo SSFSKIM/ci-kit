@@ -10,9 +10,13 @@
 #
 # Each instance runs its own copy of the hooks, under its own directory, so a hook's instance is the directory its copy
 # sits in (<instance>/ci-kit/hooks): the sweep finds its _work the same way.
+#
+# The VM lane (vm-claim.sh, mac/vm/lane.sh), a guest's desktop beside the host's, is installed when its launcher's
+# LaunchAgent file is, loaded or not: a lane disabled, or booted out for maintenance, still has host jobs claim.
 lane_root=$HOME/actions-runner-maws
 lane_agent=com.ssfskim.ci-kit.mac-runner
 shared_hold=$HOME/Library/Logs/ci-kit/shared-hold
+vm_lane_plist=$HOME/Library/LaunchAgents/com.ssfskim.ci-kit.vm-lane.plist
 
 instance_root() { # <hooks dir>: the instance whose copy of the hooks that is
   (cd "$1/../.." 2>/dev/null && pwd)
@@ -37,4 +41,7 @@ shared_instances() { # the shared instances' roots, by number: every ~/actions-r
   for dir in "$lane_root"-*; do
     n=$(shared_number "$dir") && [[ -d $dir ]] && printf '%s %s\n' "$n" "$dir"
   done | sort -n | cut -d ' ' -f 2-
+}
+vm_lane_installed() {
+  [[ -e $vm_lane_plist || -L $vm_lane_plist ]]
 }
