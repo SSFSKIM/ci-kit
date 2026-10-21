@@ -647,8 +647,10 @@ VM's walk.
   a smoke-every-placement bake would block every image whenever one placement is stocked out. A placement refused for
   capacity or quota in every zone is skipped with a warning; the image is ready when each family has a passing smoke;
   a smoke VM that boots and fails still fails the bake. Cost: a skipped region's first use of a new image can fall on
-  a job once (first use measured up to 145 s accepted → RUNNING, against 6–7 s warm). Placements stay in `gce.json`
-  while stocked out: the stock-out memory (5 min) bounds what they cost a walk.
+  a job once (first use measured up to 145 s accepted → RUNNING, against 6–7 s warm). The alternative that lost: the
+  strict per-placement bake, which blocks every image while any one placement is stocked out. Placements stay in
+  `gce.json` while stocked out (CI-opt): the stock-out memory costs one refused try per zone per 5 minutes, and the
+  placement serves when capacity returns.
 - 2026-10-21 (M6): **stocked-out zones are remembered for 5 minutes** (zone, machine, provisioning), in the launcher
   process. Eight placements mean 26 spot attempts before on demand, more than a 45 s tick can try at ~2 s a refusal;
   without the memory a job could wait on spot refusals indefinitely while on demand had room.
