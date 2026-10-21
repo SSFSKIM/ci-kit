@@ -31,6 +31,9 @@ check cpus test "$(nproc)" = "$CI_KIT_EXPECT_CPUS"
 check user test "$(id -un)" = runner
 check isolation test ! -e /var/run/docker.sock -a ! -e /etc/ci-kit
 check runner test -x /home/runner/run.sh -a -x /usr/local/bin/ci-kit-entrypoint
+# What MAWS's jobs used to apt-install at job time (pool/image/Dockerfile).
+check zsh zsh --version
+check fonts dpkg -s fonts-noto-cjk fonts-inter fonts-jetbrains-mono
 check node22 node_runs 22
 check node24 node_runs 24
 check warm jq -e 'length > 0 and all(.[]; .ok)' "$C/warm.json"

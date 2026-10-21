@@ -108,6 +108,11 @@ last step deletes its builder and any snapshot it left unfinished; the guard del
 Bump the runner image's pinned version in `pool/image/Dockerfile` when GitHub releases a new runner, so jobs do
 not pay a runner self-update at start.
 
+The job image also carries `zsh` and the fonts `fonts-noto-cjk`, `fonts-inter` and `fonts-jetbrains-mono` (Ubuntu
+noble, main and universe), which MAWS's jobs used to apt-install at job time: zsh on its static and unit jobs, zsh and
+the fonts on its pool e2e. That took about 35 s on each job's critical path and depended on Launchpad, whose 503 once
+failed a unit shard outright. The GCE smoke check proves them (`zsh`, `fonts`).
+
 ## Reading the ledger
 
 The ledger is the issue "pool ledger" in `SSFSKIM/ci-kit-sandbox`. Each pool server session has one comment:
@@ -405,7 +410,8 @@ CI_KIT_COMMIT=$(git rev-parse HEAD) node gce/bake/bake.mjs     # default commit:
 4. In each placement in turn it boots `ci-kit-gce-builder-<run id>-smoke-<n>` from the image on the placement's
    subnetwork and disk type, on its `cpus-2` machine (the next size's when that is refused), so an image that does not
    boot on a placement's family is never ready, with metadata `ci-kit-smoke=<vCPUs>` in place of a JIT config. The job
-   unit runs `gce/vm/smoke.sh` in a job container: vCPUs, user, isolation, the runner, Node 22 and 24, every warmed
+   unit runs `gce/vm/smoke.sh` in a job container: vCPUs, user, isolation, the runner, zsh and MAWS's fonts, Node 22
+   and 24, every warmed
    cache, the work directory, DNS, egress, and the metadata server refused. It reports
    `ci-kit/smoke=ok|failed:<check>` and powers off.
 5. It runs the real job on a VM booted from the image in the first placement that takes it. When every smoke VM

@@ -111,3 +111,13 @@ test('the smoke script checks the image, the caches and the isolation, and print
   }
   assert.match(script, /^echo 'ci-kit smoke: ok'$/m);
 });
+
+// MAWS's jobs used to apt-install these at job time (~35 s on the critical path, and a Launchpad 503 failed a shard):
+// the job image carries them, and the smoke check proves it before an image is marked ready.
+test('the job image carries zsh and the CJK, Inter and JetBrains Mono fonts, and the smoke check proves it', () => {
+  const docker = readFileSync(new URL('../../pool/image/Dockerfile', import.meta.url), 'utf8');
+  const script = readFileSync(new URL('../../gce/vm/smoke.sh', import.meta.url), 'utf8');
+  for (const pkg of ['zsh', 'fonts-noto-cjk', 'fonts-inter', 'fonts-jetbrains-mono']) assert.match(docker, new RegExp(`\\s${pkg}(\\s|$)`), pkg);
+  assert.match(script, /^check zsh zsh --version$/m);
+  assert.match(script, /^check fonts dpkg -s fonts-noto-cjk fonts-inter fonts-jetbrains-mono$/m);
+});
