@@ -52,7 +52,7 @@ roughly twice the Mac lane's throughput without a second Mac.
   Log).
 - [x] (2026-10-21 ~10:2xZ) Third adversarial review (astra), of the lock: two P1s and one P2, all taken (Decision
   Log).
-- [x] (2026-10-21 ~12:2xZ) M1 — ci-kit: instances, admission in the hooks, per-instance identity. ci-kit #67 merged
+- [x] (2026-10-21 ~11:5xZ) M1 — ci-kit: instances, admission in the hooks, per-instance identity. ci-kit #67 merged
   fcb538a (reviewer-medium, reviewer-high, and a delta review; every finding fixed; ci-gate 39594858245); `v1` moved.
   Its reinstall on the mini, with no shared instance, waits for an idle moment after the 10-21 evening hold and #103's
   Mac set.
