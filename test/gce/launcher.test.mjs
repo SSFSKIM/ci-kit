@@ -862,3 +862,13 @@ test('timing: a job no tick saw running is found when its VM is retired, with it
   assert.deepEqual([row.end, row.job.id, row.job.run, row.job.queued, row.job.started, row.running],
     ['done', job.id, job.run_id, new Date(T0).toISOString(), new Date(T0 + 20_000).toISOString(), new Date(T0 + 20_000).toISOString()]);
 });
+
+test('a tick that cannot list the instances fails whole, launching and deleting nothing, while its other reads settle', async () => {
+  const { w, launcher } = setup();
+  w.sim.queue(SBX, L(4));
+  w.gce.listInstances = async () => { throw new GceError(503, 'instances listing failed'); };
+  const getRepo = w.github.getRepo;
+  w.github.getRepo = async (repo) => { await new Promise((r) => setTimeout(r, 20)); return getRepo(repo); }; // slower than the failure
+  await assert.rejects(launcher.tick(), /instances listing failed/);
+  assert.deepEqual(w.log.filter((l) => /^(insert|delete|unregister)/.test(l)), []);
+});

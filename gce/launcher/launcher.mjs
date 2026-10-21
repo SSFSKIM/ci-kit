@@ -92,6 +92,9 @@ export class Launcher {
     images.catch(() => {});
     const reads = new Map(listed.map((repo) => [repo, this.readRepo(repo)]));
 
+    // Awaited first: it is the one read whose failure fails the tick, and a rejection nobody awaits yet would end the
+    // process. Every other read resolves, whatever happens to it.
+    const { rows, listing, disks, builders } = await store;
     // Public repos are refused, as on the Hetzner box; a repo whose visibility cannot be read is not served this tick.
     const served = [];
     for (const [repo, read] of reads) {
@@ -100,7 +103,6 @@ export class Launcher {
       else if (visible === false) this.log(`refusing ${repo}: it is public, and the pool serves private repos only`);
       else this.log(`not serving ${repo} this tick: its visibility could not be read (${visible.message})`);
     }
-    const { rows, listing, disks, builders } = await store;
     const instances = listing.items.filter(isGce).map(viewInstance);
     // A zone the listing missed may hide our VMs: nothing is admitted, and nothing is cleaned up for being absent. Ours
     // live in the placements' zones and in the zones of the rows not yet final (a VM outlives a placement removed or
