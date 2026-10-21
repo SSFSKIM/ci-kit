@@ -292,6 +292,25 @@ it:
   must never hold one allocation's VM), so the job waits the whole slow insert.
 - **Spot was never refused everywhere**, so the on-demand half of the walk never ran; zero C4D stock-outs.
 
+**Where the slow jobs' time went** (every pool job over 90 s queued → started, through 18:52Z, joined through the
+runner that actually ran it; a: queued → the tick that launched its VM, b: tick start → the successful insert, c:
+Compute's insert operation, d: operation done → job started; medians, seconds; `/tmp/slowjobs/` on the MacBook):
+
+| window (queued) | slow / started | a | b | c | d |
+|---|---:|---:|---:|---:|---:|
+| 00:00–14:25 (old path) | 224 / 491 | 49.0 (p90 178.6) | 13.9 | 11.7 | 29.8 |
+| 14:25–17:03 (before M3) | 19 / 38 | 50.4 | 13.0 | 12.7 | 28.4 |
+| 17:03–18:04 (M3 live) | 2 / 38 | 50.8 | 9.4 | 21.8 | 15.5 |
+| 18:04–18:52 (M4, M5 from 18:44) | 11 / 77 | 83.6 | 6.0 | 9.7 | 16.6 |
+
+The tail was waiting for the tick: the minute tick before M4, and before 14:25 admission against `max_vcpus` (24
+jobs behind 1–4 waiting ticks, median 395.5 s). Of the 11 after M4, nine queued during the secret-rotation test,
+when deliveries were refused on purpose, and two at M4's rollout; none queued after 18:20:53. With M3 in, d is boot
+to listener ~16 s and GitHub's assignment ~1 s. **The insert time is Compute's, not ours:** a tick's inserts reach
+Compute within 0.4–0.9 s of each other (allocation → insert, ledger write and JIT minting included, 1.2–1.9 s), and
+the operations then take 6–25 s each (18:45's six: 7.5–14.2 s); late inserts in a batch are retries after a quota
+refusal, not the 16-worker limit. Resource trouble is a small share of the tail, as the counts above say.
+
 **The design, in the order it pays:**
 
 1. **No external addresses: Cloud NAT per placement region.** Job and bake VMs drop `accessConfigs`; `deploy.sh
