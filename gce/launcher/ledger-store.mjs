@@ -3,12 +3,11 @@
 // yesterday), so a read stays small however long an issue grows. Writes keep that copy current. The store lives as
 // long as the launcher's instance, so after its first read of an issue it asks only for the comments updated since
 // its last read, less READ_OVERLAP_MS for GitHub's listing lag (spec M3: a busy day's window is several pages, read
-// one after another before every tick's first launch). A row never
-// moves back: before an update the comment is read again and the write is dropped if the comment is already as far
-// along (a final row is never rewritten). Issue comments have no compare-and-swap, so during an overlap of two
-// ticks a row is eventually final rather than finalized once: a stale writer whose update lands in the milliseconds
-// after another finalized the row rolls it back to running, and the next tick finalizes it again, possibly with a
-// later deletion time and charge. As with every overlap (spec Decision Log, 2026-10-16), correctness does not rest
+// one after another before every tick's first launch). A row never moves back: before an update the comment is read
+// again and the write is dropped if the comment is already as far along (a final row is never rewritten). Issue
+// comments have no compare-and-swap, so during an overlap of two ticks a row is eventually final rather than
+// finalized once: a stale writer whose update lands in the milliseconds after another finalized the row rolls it back
+// to running, and the next tick finalizes it again, possibly with a later deletion time and charge. As with every overlap (spec Decision Log, 2026-10-16), correctness does not rest
 // on a single writer, and the overlap heals itself.
 // Two writers that each created a row for one allocation converge on the one every reader counts.
 //
@@ -38,7 +37,7 @@ export function createGceLedger(gh, { repo, issue_title: title }, { now = Date.n
   // Issues this store opened that no listing has shown yet: GitHub lists a new issue only seconds after creating it.
   let opened = [];
   // Issue number → {readAt: when its last read began, byId: Map comment id → comment}: the comments in the window.
-  let held = new Map();
+  const held = new Map();
   const comments = () => [...held.values()].flatMap((h) => [...h.byId.values()]);
   const hold = (issue, c) => {
     if (!held.has(issue)) held.set(issue, { readAt: null, byId: new Map() });
@@ -61,19 +60,21 @@ export function createGceLedger(gh, { repo, issue_title: title }, { now = Date.n
   }
 
   // Each open issue's comments in the window, from what the store holds and what changed since it last read the issue.
+  // Each issue's entry is updated in place, so a comment a concurrent write holds meanwhile is kept.
   async function readComments() {
     const t = now();
     const cutoff = new Date(t - WINDOW_MS).toISOString();
-    const read = await Promise.all(issues.map(async (i) => {
+    for (const n of held.keys()) if (!issues.some((i) => i.number === n)) held.delete(n);
+    for (const i of issues) if (!held.has(i.number)) held.set(i.number, { readAt: null, byId: new Map() });
+    return Promise.all(issues.map(async (i) => {
       const h = held.get(i.number);
-      const since = h?.readAt == null ? cutoff : new Date(Math.max(t - WINDOW_MS, h.readAt - READ_OVERLAP_MS)).toISOString();
+      const since = h.readAt === null ? cutoff : new Date(Math.max(t - WINDOW_MS, h.readAt - READ_OVERLAP_MS)).toISOString();
       const fresh = await gh.issueComments(repo, i.number, { since });
-      const byId = new Map([...(h?.byId.values() ?? [])].filter((c) => !(c.updated_at < cutoff)).map((c) => [c.id, c]));
-      for (const c of fresh) byId.set(c.id, c);
-      return [i.number, { readAt: t, byId }];
+      for (const [id, c] of h.byId) if (c.updated_at < cutoff) h.byId.delete(id);
+      for (const c of fresh) h.byId.set(c.id, c);
+      h.readAt = t;
+      return [...h.byId.values()];
     }));
-    held = new Map(read);
-    return read.map(([, h]) => [...h.byId.values()]);
   }
 
   async function read() {
