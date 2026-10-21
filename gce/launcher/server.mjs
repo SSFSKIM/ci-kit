@@ -4,8 +4,8 @@
 //   POST /tick     Cloud Scheduler's ci-kit-launcher-tick, every minute, with an OIDC token: answered with the outcome
 //                  of the tick that serves it. A tick that cannot read Compute Engine or the ledger answers 500, which
 //                  Cloud Scheduler logs as a failed execution and the Monitoring alert counts.
-//   POST /request  the Pub/Sub push subscription ci-kit-tick-requests-launcher, one message per pool job queued
-//                  (gce/webhook): answered when the tick that serves it has ended, so the request keeps the
+//   POST /request  the Pub/Sub push subscription ci-kit-tick-requests-launcher, one message per job queued in a
+//                  served repo (gce/webhook): answered when the tick that serves it has ended, so the request keeps the
 //                  instance's CPU allocated (request-based billing) for that tick's whole run.
 // Both are the same full tick (launcher.mjs), run one at a time with at most one pending (ticker.mjs).
 // It runs as ci-kit-launcher@: Compute Engine through the metadata server's token, the App's id and key from Secret
@@ -64,7 +64,8 @@ async function tick({ trigger, requests }) {
   const served = { trigger, requests, started: new Date(began).toISOString() };
   try {
     const out = await reconcile();
-    say('INFO', `tick: ${out.launched.length} launched, ${out.deleted.length} deleted, ${out.finalized.length} finalized`,
+    const ahead = out.prelaunched.length ? ` (${out.prelaunched.length} pre-launched)` : '';
+    say('INFO', `tick: ${out.launched.length} launched${ahead}, ${out.deleted.length} deleted, ${out.finalized.length} finalized`,
       { ...out, ...served, ms: Date.now() - began });
     return out;
   } catch (err) {

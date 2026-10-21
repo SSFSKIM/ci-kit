@@ -1,5 +1,5 @@
 // When the launcher's ticks run (spec 2026-10-21 M4, The launcher). Cloud Scheduler asks for a tick every minute, and
-// the webhook receiver asks for one when a pool job is queued (through Pub/Sub). Every tick is the same full tick, so
+// the webhook receiver asks for one when a job is queued in a served repo (through Pub/Sub). Every tick is the same full tick, so
 // requests need not each get their own: one tick runs at a time in the process, and every request that arrives while
 // it runs is served by one more tick after it (at most one pending). Ticks start at least 10 s apart, which bounds a
 // burst's cost in GitHub calls. While the App's remaining budget is low, a tick that only requests asked for is

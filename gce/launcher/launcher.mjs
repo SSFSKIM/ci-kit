@@ -7,7 +7,8 @@
 // idle rule removes. Quota is the hard cap: a refusal is remembered for the rest of the tick, scoped to what ran out
 // (logic.mjs quotaScope), and later launches skip what it covers; one with nothing left to try waits in GitHub's queue.
 // A tick reads everything it can at once and launches before it cleans up (spec M3): a job's wait for its VM is
-// mostly the time to its first insert.
+// mostly the time to its first insert. A run that has begun before its pool jobs are queued gets their VMs launched
+// ahead of them (spec M5, prelaunch.mjs), after the queued jobs' launches and with what they leave of max_vcpus.
 import { GceError } from '../../lib/gce.mjs';
 import { createAlerts } from '../../pool/lib/alerts.mjs';
 import { queuedPoolJobs } from '../../pool/agent/logic.mjs';
@@ -17,6 +18,7 @@ import {
   allocationId, instanceName, repoLabel, viewInstance, isGce, planLaunches, placements, quotaBlocks, insertOutcome, walkPlacements,
   jobInstance, jitRequest, newestReadyImage, reviewInstances, reviewRows, orphanRunners, orphanDisks, reportable, claimedInstances,
 } from './logic.mjs';
+import { planPrelaunches } from './prelaunch.mjs';
 import { launchRow, runningRow, withJob, jobRecord, finalRow, dailyLine } from './ledger.mjs';
 
 export const TICK_BUDGET_MS = 45_000;
@@ -40,10 +42,11 @@ export class Launcher {
   }
 
   // One reconciliation. Throws only when Compute Engine or the ledger cannot be read (the tick then did nothing), or
-  // when the image list cannot be read for a launch. out.firstInsert: when the tick sent its first insert, or null.
+  // when the image list cannot be read for a launch. out.firstInsert: when the tick sent its first insert, or null;
+  // out.prelaunched: the VMs of out.launched launched ahead of a run's pool jobs.
   async tick() {
     const deadline = this.now() + this.budgetMs;
-    const out = { launched: [], deleted: [], unregistered: [], finalized: [], waiting: 0, firstInsert: null };
+    const out = { launched: [], prelaunched: [], deleted: [], unregistered: [], finalized: [], waiting: 0, firstInsert: null };
     const seen = await this.observe();
     // Launches start first, and the cleanup runs beside them: neither waits for the other. Launching before cleaning
     // up can only under-admit for a tick (a VM about to be deleted still counts against max_vcpus), never over-admit.
@@ -136,23 +139,25 @@ export class Launcher {
     const demand = new Map();
     const queued = [];
     const jobs = [];
+    const runs = [];
     for (const repo of served) {
-      const repoJobs = await reads.get(repo).jobs;
-      if (!repoJobs || !runners.has(repo)) continue;
-      queued.push(...queuedPoolJobs(repoJobs));
-      jobs.push(...repoJobs);
+      const read = await reads.get(repo).jobs;
+      if (!read || !runners.has(repo)) continue;
+      queued.push(...queuedPoolJobs(read.jobs));
+      jobs.push(...read.jobs);
+      runs.push(...read.runs);
       demand.set(repo, runners.get(repo));
     }
     seen.reports = await reports;
     await alerted;
-    return { ...seen, demand, queued, jobs, claimed: claimedInstances({ jobs, rows, reports: seen.reports }) };
+    return { ...seen, demand, queued, jobs, runs, claimed: claimedInstances({ jobs, rows, reports: seen.reports }) };
   }
 
-  // A repo's GitHub reads, started together: whether it is private, and its runners, then its queued and running
-  // jobs, each with its run's workflow path. Runners are read first: a job taken between the two reads then shows as
-  // not queued, never as double demand. The queued runs are listed before the running ones, so a run that starts
-  // between the two listings is in the second (listed at once, each could miss it), and a run in both is read once.
-  // A failed read resolves to null (visible: to the error), logged.
+  // A repo's GitHub reads, started together: whether it is private, and its runners, then its queued and running runs
+  // ({repo, id, path, attempt}) and their jobs, each with its run's workflow path. Runners are read first: a job taken
+  // between the two reads then shows as not queued, never as double demand. The queued runs are listed before the
+  // running ones, so a run that starts between the two listings is in the second (listed at once, each could miss it),
+  // and a run in both is read once. A failed read resolves to null (visible: to the error), logged.
   readRepo(repo) {
     const visible = this.gh.getRepo(repo).then((r) => r.private === true, (err) => err);
     const runners = this.listRunners(repo);
@@ -162,7 +167,7 @@ export class Launcher {
         const listed = [...(await this.gh.runsByStatus(repo, 'queued')), ...(await this.gh.runsByStatus(repo, 'in_progress'))];
         const runs = [...new Map(listed.map((run) => [run.id, run])).values()]; // one that started between is in both
         const lists = await Promise.all(runs.map(async (run) => (await this.gh.listJobs(repo, run.id)).map((j) => ({ ...j, repo, workflow: run.path }))));
-        return lists.flat();
+        return { jobs: lists.flat(), runs: runs.map((run) => ({ repo, id: run.id, path: run.path, attempt: run.run_attempt ?? 1 })) };
       } catch (err) {
         this.log(`jobs of ${repo}: ${err.message}`);
         return null;
@@ -393,35 +398,59 @@ export class Launcher {
     });
     for (const job of plan.unservable) this.log(`job ${job.id} in ${job.repo} cannot run on GCE: labels ${job.labels.join(',')}`);
     out.waiting = plan.waiting.length;
-    if (plan.launches.length === 0) return;
+    const ahead = !seen.complete ? [] : planPrelaunches({
+      runs: seen.runs, jobs: seen.jobs, rows: seen.rows, runners: seen.demand, inflight: plan.inflight, waiting: plan.waiting.length, cfg: this.cfg,
+    });
+    if (plan.launches.length + ahead.length === 0) return;
     const image = newestReadyImage(await seen.images, this.cfg.image_family);
     if (!image) {
-      this.log(`no ready image in family ${this.cfg.image_family}; ${plan.launches.length} job(s) wait`);
+      this.log(`no ready image in family ${this.cfg.image_family}; ${plan.launches.length} job(s) wait, ${ahead.length} pre-launch(es) not made`);
       return;
     }
     // A quota refusal stops no launch but the ones it covers (spec 2026-10-21, The launch queue): each launch skips
     // what the tick's memory says is out of quota, and one with nothing left waits in GitHub's queue.
-    const queue = [...plan.launches];
+    // The queued jobs' launches run to their end before any pre-launch starts: up to 16 launches mint and insert at
+    // once, so a pre-launch beside them could take the quota a waiting job needs (review, M5). And a tick in which any
+    // of them stayed unserved (refused, unsettled, or not started by the deadline) pre-launches nothing: it has no
+    // spare quota to speculate with, and its job comes first on the next tick.
+    const served = await this.launchQueue(plan.launches, image, { seen, deadline, out });
+    if (served < plan.launches.length) {
+      if (ahead.length) this.log(`no pre-launch this tick: ${plan.launches.length - served} queued job(s) were not served`);
+      return;
+    }
+    await this.launchQueue(ahead, image, { seen, deadline, out });
+  }
+
+  // Launches `items` with up to PARALLEL_LAUNCHES at once, none started past the deadline. Returns how many made a VM.
+  async launchQueue(items, image, { seen, deadline, out }) {
+    const queue = [...items];
+    let made = 0;
     const worker = async () => {
       while (queue.length && this.now() < deadline) {
         const result = await this.launch(queue.shift(), image, { seen, deadline, out }).catch((err) => {
           this.log(`launch: ${err.message}`);
           return {};
         });
-        if (result.name) out.launched.push(result.name);
+        if (!result.name) continue;
+        made += 1;
+        out.launched.push(result.name);
+        if (result.prelaunch) out.prelaunched.push(result.name);
       }
     };
     await Promise.all(Array.from({ length: Math.min(PARALLEL_LAUNCHES, queue.length) }, worker));
+    return made;
   }
 
   // One allocation (spec §3a VM lifecycle 1–2): the launching row, then the JIT config, then the walk over the
   // placements' zones, spot everywhere then on demand; a size the tick's quota memory rules out everywhere makes none.
   // A definite refusal everywhere unregisters the runner and abandons the row at once; an outcome that stays unknown
-  // leaves both for the cleanup rules, so a VM that does appear later is still served.
-  async launch({ repo, cpus, job }, image, { seen, deadline, out }) {
+  // leaves both for the cleanup rules, so a VM that does appear later is still served. For a queued `job`, or for a
+  // run's pool jobs to come (`prelaunch`: {run, attempt, workflow}, which its row keeps).
+  async launch({ repo, cpus, job, prelaunch }, image, { seen, deadline, out }) {
+    const what = job ? `job ${job.id}` : `run ${prelaunch.run}'s cpus-${cpus} pre-launch`;
     const attempts = placements(cpus, this.cfg);
     if (attempts.every((p) => quotaBlocks(seen.quota, p))) {
-      this.log(`job ${job.id} in ${repo} waits: quota refused every placement for its size this tick`);
+      this.log(`${what} in ${repo} waits: quota refused every placement for its size this tick`);
       return {};
     }
     const at = this.now();
@@ -429,13 +458,13 @@ export class Launcher {
     while (seen.rowOf.has(alloc)) alloc = allocationId(at, this.random); // ids are random: never reuse one in the ledger
     seen.rowOf.set(alloc, null);
     const name = instanceName(alloc);
-    const row = launchRow({ alloc, repo, cpus, at, config: this.config });
+    const row = launchRow({ alloc, repo, cpus, at, config: this.config, prelaunch });
     await this.ledger.upsert(row); // a launch with no row never happens: this throws, and nothing was created
     let jit;
     try {
       jit = await this.gh.jitConfig(repo, jitRequest(alloc, cpus));
     } catch (err) {
-      this.log(`jit for job ${job.id} in ${repo} (${name}): ${err.message}`);
+      this.log(`jit for ${what} in ${repo} (${name}): ${err.message}`);
       await this.write(finalRow(row, { end: 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb }));
       return {};
     }
@@ -455,15 +484,17 @@ export class Launcher {
     const tried = result.tried.map((t) => `${t.machine}/${t.provisioning}@${t.zone}: ${t.outcome}`).join(', ');
     if (result.placement) {
       const p = result.placement;
-      this.log(`launched ${name} (${p.machine}, ${p.provisioning}, ${p.zone}) for job ${job.id} in ${repo}${result.tried.length > 1 ? ` after ${tried}` : ''}`);
+      const after = result.tried.length > 1 ? ` after ${tried}` : '';
+      if (job) this.log(`launched ${name} (${p.machine}, ${p.provisioning}, ${p.zone}) for job ${job.id} in ${repo}${after}`);
+      else this.log(`pre-launched ${name} (${p.machine}, ${p.provisioning}, ${p.zone}) for run ${prelaunch.run} (${prelaunch.workflow}) in ${repo}${after}`);
       await this.write(runningRow(row, { ...p, diskType: p.placement.disk_type, created: this.now() }));
-      return { name };
+      return { name, prelaunch: Boolean(prelaunch) };
     }
     if (result.stop === 'unknown') {
       this.log(`${name}: insert outcome unknown (${tried}); the next ticks settle it`);
       return {};
     }
-    this.log(`${name}: not created (${result.stop}: ${tried}); job ${job.id} waits`);
+    this.log(`${name}: not created (${result.stop}: ${tried}); ${what} waits`);
     await this.gh.deleteRunner(repo, jit.runner.id).catch((err) => {
       if (err.status !== 404) this.log(`unregister ${name}: ${err.message}; the orphan-runner rule retries`);
     });

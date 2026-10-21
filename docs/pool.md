@@ -259,7 +259,8 @@ subnetwork. The bake reads the `gce.json` bundled at its deploy, so a change to 
 `gce/deploy.sh bake`.
 
 **The launcher.** Cloud Scheduler's `ci-kit-launcher-tick` POSTs to `ci-kit-launcher`'s `/tick` every minute with an
-OIDC token, and the webhook's Pub/Sub push POSTs to its `/request` when a pool job is queued (The webhook, below).
+OIDC token, and the webhook's Pub/Sub push POSTs to its `/request` when a job is queued in a served repo (The
+webhook, below).
 The service has no public ingress (`--ingress=internal`, IAM-only: `ci-kit-launcher@` is its one invoker), runs one
 instance at a time and admits many requests at once, but runs one tick at a time (`ticker.mjs`). Every tick is the
 same full reconciliation, whoever asked, and nothing is kept between ticks: state is in GCE labels, the ledger and
@@ -276,6 +277,8 @@ GitHub. A tick:
    `idle_runner_minutes`, and never having taken a job: a job VM is single-use, and its runner reads registered and
    not busy for a while after its job ends (a job this tick read names it, its row recorded a job, or it reported
    `ci-kit/job`). Static job 119166794835 waited 126 s on 2026-10-21 behind a VM whose job had just ended;
+   then, with what those launches leave of `max_vcpus` and only when no queued job waits, pre-launches the VMs of
+   each run that has begun before its pool jobs are queued (Pre-launch, below);
 4. beside the launches, cleans up (below), finalizes rows whose VM is gone, and records on each running row the job
    its runner holds;
 5. once a day, in its first two hours (UTC), writes yesterday's daily line.
@@ -348,9 +351,11 @@ GitHub App ci-kit-runners ──workflow_job──▶ ci-kit-webhook (public) �
   IAM check off (the org's domain-restricted sharing refuses an `allUsers` invoker). A delivery whose
   `X-Hub-Signature-256` is missing or not `sha256=` and 64 hex digits is answered 401 before the secret is read. Then
   it reads the body (1 MiB at most, else 413), checks the signature against the webhook secret and answers 401 to
-  anything that does not verify, before it parses a byte. A `workflow_job` `queued` delivery of a served repo whose job a GCE launch could serve
-  (`ci-kit-pool`, one `cpus-N` the placements name, no other runner label) publishes one message (repo, job, run,
-  labels, delivery id) and is answered 202; every other delivery is answered 200 with why it was ignored, which
+  anything that does not verify, before it parses a byte. A `workflow_job` `queued` delivery of a served repo, on any
+  runner, publishes one message (repo, job, run, labels, delivery id) and is answered 202: a pool job's tick launches
+  its VM, and any other job's (MAWS's `plan` on hosted `ubuntu-slim`) may find its run just begun, which the tick
+  pre-launches (Pre-launch, below). Holding no state, the receiver cannot tell a run's first job from a later one;
+  the tick, which reads the run, decides. Every other delivery is answered 200 with why it was ignored, which
   GitHub's delivery log shows. It runs as `ci-kit-webhook@`, which may read the webhook secret and publish to the
   topic, and nothing else: it cannot invoke the launcher. Which repos are served is read from the `gce.json` and
   `pool.json` bundled at its deploy, so a repo added on main reaches the webhook path at the receiver's next
@@ -424,6 +429,43 @@ To check: GitHub's delivery log (the App's page → Advanced) shows each deliver
 (`gcloud run services logs read ci-kit-webhook --region=us-central1 --project=ssfskim-ci-kit`) a line per published
 request (`tick requested: <repo> job <id>`) or refused signature; the launcher's a `tick request:` line per push and a
 `tick:` line per tick with its `trigger` (`scheduled` or `requested`) and `requests` (how many requests it served).
+
+**Pre-launch.** A MAWS class 1a run waits once for the pool: its `plan` job runs on hosted `ubuntu-slim` (~4 s to
+start, ~10–15 s to run), and its gates (static, the unit shards, probes) are created, queued, when it ends. So when a
+served repo's run begins, the tick launches the VMs its pool jobs will ask for, and they boot while the plan runs
+(`gce/launcher/prelaunch.mjs`):
+
+- **A run has begun** when it is listed queued or in progress and none of its jobs is a pool job (`ci-kit-pool`,
+  in any state, skipped included) or has ended. GitHub creates the jobs that need the first ones when those end, so
+  a run whose first job ended with no pool job listed has none coming (a docs-only run's skipped gates, or class 1a
+  on the Mac), and it gets nothing. The webhook's request for the plan's `queued` event finds the run at once; a
+  minute tick that falls inside the plan finds it too.
+- **What to launch** is the shape of the same workflow's runs on the ledger: for each size, the median count of VMs
+  its pool jobs took over its last 10 runs (newest by run id) among the rows in the ledger's 26 h window, rounded up;
+  a run with no job of a size counts 0 for it. A row counts through the job its VM ran (`job.run`, `job.workflow`),
+  whichever run it was launched for. A workflow with no run on the ledger gets nothing. Sizes go largest first.
+- **Once per run.** A pre-launched VM's row names the run it was launched for (`prelaunch`: run, attempt, workflow,
+  written in the `launching` row before the runner is minted), and a run gets its shape less the VMs already
+  pre-launched for its run and attempt, whatever became of them (an `abandoned` row, which made no VM, does not
+  count). A later tick, a redelivered or duplicate event and a second launcher reading the same ledger therefore
+  launch nothing more; two ticks overlapping can both launch for one run, the overlap's usual over-launch, which the
+  idle rule removes. A re-run of all of a run's jobs is a new attempt and is pre-launched again.
+- **An ordinary job VM.** Its runner is minted at launch with the size's labels, so it counts as cover for any queued
+  job of its repo and size from that moment, and the run's gates, once queued, launch nothing more. GitHub gives
+  each gate to any runner of its repo and size, so a VM pre-launched for one run may serve another's; the cover
+  count is per repo and size, so the books balance either way. One no job claims is removed by the idle rule at
+  `idle_runner_minutes` (10) after its creation, and a run is pre-launched once, so a docs-only run costs at most
+  one idle window of its shape's VMs.
+- **Admission.** Pre-launches come after the queued jobs' launches: none while a queued job waits, each reserves the
+  largest machine its walk could land on as a launch does, against what the launches left of `max_vcpus`, oldest
+  run first, and the first that does not fit stops the rest until a later tick. They start only once the queued jobs'
+  launches have ended (those mint and insert up to 16 at once, and a pre-launch beside them could take the quota a
+  job needs), and not at all in a tick where one of those launches stayed unserved (refused, unsettled or past the
+  tick's budget): that tick has no spare quota to speculate with. They walk the placements and share the tick's quota
+  memory like any launch.
+- **To check:** the launcher logs `pre-launched <instance> (<machine>, <spot|standard>, <zone>) for run <id>
+  (<workflow>) in <repo>`, and its tick line lists them in `prelaunched`. The ledger's row and daily line and the
+  latency report show what they did (Reading the GCE ledger, below).
 
 **Overlap.** Two ticks can run at once (Cloud Run can briefly exceed one instance; a deploy overlaps two revisions).
 Nothing depends on it never happening: deletes and unregisters treat 404 as done, rows are keyed by allocation and
@@ -616,14 +658,18 @@ per allocation:
 - The deleted column reads `launching` (before the VM exists), `running`, or `deleting <time>` until the row is
   final. A row never moves back.
 - `job (actual)` is the job the runner held, by name and id: a runner takes any queued job of its repo and size,
-  so it may not be the one the launch was for. Since M3 the row's JSON also keeps the job's run (`job.run`), its
+  so it may not be the one the launch was for. A pre-launched VM's says so (`pre-launched for run <id>`, and
+  `unclaimed` while it held no job), and its JSON keeps `prelaunch` (run, attempt, workflow). Since M3 the row's JSON also keeps the job's run (`job.run`), its
   workflow path (`job.workflow`) and GitHub's queued and started times (`job.queued`, `job.started`), and the VM's
   RUNNING time (`running`, Compute Engine's `lastStartTimestamp`); the size is `cpus`.
 - `node gce/latency-report.mjs [--since <ISO>] [--until <ISO>] [--repo <owner/name>]` (default: the last 24 h) reads
   the rows and the launcher's tick lines (Cloud Logging, gcloud's default account) and prints the median and p10–p90
   of each stage of a job's wait: queued → next tick, tick start → insert accepted (the tick's first VM's
   creation), tick start → first insert sent, insert accepted → RUNNING, RUNNING → job started, insert accepted →
-  job started (M3's target, each VM's own), and queued → started; then the VM stages again for each machine type.
+  job started (M3's target, each VM's own), and queued → started; then the VM stages again for each machine type;
+  then pre-launch's: how many VMs were pre-launched and how many a job claimed, each claimed VM's insert accepted →
+  its job queued when the job is of the run it was launched for (positive: the VM was on its way first, M5's proof),
+  and queued → started of the pool jobs of pre-launched runs beside every other run's (Acceptance 5).
   Rows on rotated ledger issues closed since the window began are read too. A row or tick without a stage's fields
   (written before M3) is left out of that stage.
 - `node gce/tools/boot-sample.mjs --image <name> [--region <r>] [--machine <m>] [--count 5] [--parallel 2] [--out <dir>]`
@@ -644,8 +690,9 @@ per allocation:
   there shows `-`. The row's JSON carries the disk type (`diskType`; a row without one is from before placements,
   on `pd-balanced`).
 - The daily line, `**GCE pool, <day> (UTC):** …`, totals the day's VMs, seconds and dollars, projects the month at
-  that rate, gives each family@region's VMs and dollars (and how many it could not price), and names the gce.json
-  commit the launcher ran.
+  that rate, gives each family@region's VMs and dollars (and how many it could not price), on a day with
+  pre-launches how many VMs were pre-launched, how many no job claimed and what those cost (`Pre-launched: N VMs, M
+  unclaimed ($x)`), and names the gce.json commit the launcher ran.
 - A writer reads a row's comment again just before updating it, and drops the write if the comment is already as
   far along; a final row is never rewritten. Issue comments have no compare-and-swap, so during an overlap of two
   ticks a row is eventually final rather than finalized once: a stale write that lands in the milliseconds after
@@ -692,8 +739,8 @@ through Cloud Quotas:
 
 A job reserves the largest machine its walk could land on in the launcher's count (a `cpus-2` job: `c3d-highcpu-4`).
 `max_vcpus` admits only; it tracks the sum of the placements' granted family quotas, and a placement's own refusal
-(family vCPUs, addresses, instances) falls through to the next one, so raise it with each grant (C4D us-west4
-re-filed at 128; addresses pending in both regions).
+(family vCPUs, addresses, instances) falls through to the next one, so raise it with each grant (C4D us-west4's
+re-filed 128 was denied 2026-10-21, so it stays 50; addresses pending in both regions).
 `PREEMPTIBLE_CPUS` is 0, so spot VMs count against the ordinary CPU quotas. To check:
 
 ```

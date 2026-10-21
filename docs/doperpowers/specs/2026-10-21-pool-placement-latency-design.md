@@ -88,8 +88,25 @@ toward the boot alone, and below it for the jobs a warm runner covers.
   12–19 s per unit shard against 36 s (C4D, old image, 39638465062) and 52 s (C3D, 39630519998); plan → last 294 s
   against #108's 310 s (on C3D, the burst holding us-west4; one sample). The day-of-rows proofs remain.
 - [ ] M4 — Launch on GitHub's `workflow_job` webhook. (2026-10-21) Built, reviewer-high clean after two fix waves, ci-gate green; PR to
-  CI-opt. Deploy follows the merge and the owner's secret and App steps; its proofs follow the deploy.
-- [ ] M5 — Pre-launch of a run's gate VMs (the owner chose it 2026-10-21; no warm runner).
+  CI-opt. Merged as #76 (0c71271); `deploy.sh base` 2026-10-21 (receiver's service account). A load-sensitive gce
+  test failure seen once while it was reviewed is ci-kit #77. Live 2026-10-21: owner's secret 18:03Z; `launcher
+  webhook` 18:04Z (launcher ci-kit-launcher-00012-27v, receiver ci-kit-webhook-00001-z7r); `app-hook`; owner's App
+  clicks (`events: ["workflow_job"]` at 18:09:50Z). Proofs:
+  - Receiver: unsigned and forged-signature POSTs got 401 and published nothing; scanners' GETs get 405.
+  - Launcher: a scratch topic's push subscriptions (no auth; `ci-kit-webhook@` as identity) made 10 pushes to
+    `/request`, every one 403 from Cloud Run, no code ran; scratch resources deleted the same minute.
+  - Burst (sandbox 39650257002): five cpus-4 jobs queued 18:10:19, five signed deliveries 18:10:20–21, one requested
+    tick at 18:10:29.67 (10 s after the scheduled one, `requests: 5`, first insert 4.9 s in) launched all five; the
+    pushes were answered when it ended; jobs started 41–43 s after queued, where the next scheduled tick (18:11:07.9)
+    would have begun 38 s later.
+  - Dropped delivery: the owner rotated the secret (version 2, 18:18:13Z); past the receiver's 60 s copy, sandbox job
+    119401… (run 39651686488) queued 18:19:46, its delivery got 401 (`delivery refused: its signature does not
+    verify`), and the 18:20:13 scheduled tick launched its VM (C4D quota full, us-central1-a out of C3D spot, the
+    us-central1-b insert outlasting the tick, settled next tick; started 18:22:25). `app-hook` resynced; the next
+    delivery (18:24:48) verified and requested a tick.
+  - Acceptance 4 (a day's median queued → started ≤ 50 s) is read from `latency-report.mjs` after a day of traffic.
+- [ ] M5 — Pre-launch of a run's gate VMs (the owner chose it 2026-10-21; no warm runner). (2026-10-21) Built, reviewer-medium clean after one fix wave, ci-gate green; PR to
+  CI-opt. Deploy (`launcher` + `webhook`) on CI-opt's go; Acceptance 5 is read from the live numbers.
 
 ## Acceptance
 
@@ -448,6 +465,24 @@ reported to the owner.
   `latest` volume, which Cloud Run reads through from Secret Manager) is kept 60 s, read by one caller at a time, at
   most once per 10 s counted from each read's start, failed reads included; a mismatch re-reads only a copy at least
   10 s old, so a rotation is picked up within seconds. With no good copy a delivery gets 503 and GitHub redelivers.
+
+- 2026-10-21 (M5): **Pre-launch learns a run began from the run itself.** The receiver forwards every queued job of a
+  served repo (it keeps no state, so it cannot tell a run's first job); a run counts as begun when it is listed queued
+  or in progress, none of its jobs carries `ci-kit-pool` and none has completed, the same rule on webhook and minute
+  ticks. GitHub creates the gates only when plan ends, so a docs-only run or one sent to the Mac gets nothing once
+  its plan has ended.
+- 2026-10-21 (M5): **No double pre-launch without a new store.** The `launching` row, written before the runner is
+  minted, carries `prelaunch: {run, attempt, workflow}`; a run gets its shape less its rows for that attempt (except
+  abandoned ones). Two overlapping ticks can both pre-launch for one run: the parent spec's accepted overlap, which
+  the idle rule bounds.
+- 2026-10-21 (M5): **The shape is the median count per size over the workflow's last 10 runs** in the ledger window,
+  rounded up (one VM too many idles out; one too few is a gate waiting on a boot), counted through the job each VM
+  actually ran.
+- 2026-10-21 (M5, after reviewer-medium): **Pre-launch spends only what real jobs left.** Queued-job launches run to
+  completion first, and a tick in which any queued launch made no VM (refused, unknown outcome, JIT failure, deadline)
+  pre-launches nothing; pre-launches go oldest run first, largest size first, under `max_vcpus`. A docs-only MAWS run
+  costs at most one idle window of its shape (~$0.08 on C4D spot); the daily line reports pre-launched and unclaimed
+  VMs and their cost.
 
 ## Surprises & Discoveries
 

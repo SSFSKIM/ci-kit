@@ -26,7 +26,6 @@ const receive = createReceiver({
   secret: () => readFile(secretFile, 'utf8'),
   publish: createPublisher({ topic, token: accessToken() }),
   served: new Set(served.map((r) => r.toLowerCase())),
-  machines: cfg.placements[0].machines, // every placement names every size
   log: say,
 });
 
