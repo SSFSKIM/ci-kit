@@ -36,9 +36,14 @@ async function launcher(serve, { delayMs = 0 } = {}) {
   return { call, asked, logs, close };
 }
 
-// Resolves once cond() holds, checked every few ms (the test's own timeout bounds it).
-async function until(cond) {
-  while (!cond()) await new Promise((r) => setTimeout(r, 2));
+// Resolves once cond() holds, checked every few ms; a transition that never comes fails the test after 5 s rather
+// than stalling the suite.
+async function until(cond, ms = 5000) {
+  const deadline = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`timed out after ${ms} ms waiting for: ${cond}`);
+    await new Promise((r) => setTimeout(r, 2));
+  }
 }
 const notYet = () => new Promise((r) => setTimeout(r, 30));
 // A request's answer, observable without awaiting it; a failed fetch is kept, not left unhandled.
