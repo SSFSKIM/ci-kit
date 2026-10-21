@@ -136,7 +136,8 @@ bake() {
   # The job runs the bake orchestrator only; the builder clones the kit at the commit it bakes (main's head).
   # Its timeout stays above the bake's own bounds (builder 30 min, a smoke 15 in each placement in turn, eight since
   # M6, real job 10, the image and the cleanup), so the bake's cleanup always runs; a typical bake takes about 15 min
-  # plus a few per placement.
+  # plus a few per placement. STALE_MS (gce/bake/plan.mjs, 4 h) stays above it, so no other bake sweeps a live one's
+  # check runner or image.
   g run jobs deploy ci-kit-bake --source="$KIT" --region="$REGION" --service-account="$SA" \
     --command=launcher --args=node,gce/bake/bake.mjs --labels=ci-kit=bake \
     --tasks=1 --max-retries=0 --task-timeout=180m --cpu=1 --memory=512Mi

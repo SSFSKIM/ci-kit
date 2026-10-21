@@ -7,8 +7,9 @@ import { readFileSync } from 'node:fs';
 import {
   reportOutcome, checkOutcome, ownsBakeInstance, staleBakeInstances, staleBakeRunners, imagesToPrune, placements, smokeMachines, refusal, bakeRunId, bakeNames,
   builderInstance, smokeInstance, checkInstance, checkJitRequest, imageBody, fillBuilderScript, machineCpus, BAKE_TIMEOUT_MS, CHECK_TIMEOUT_MS,
-  refusedOutright,
+  refusedOutright, STALE_MS, SMOKE_TIMEOUT_MS,
 } from '../../gce/bake/plan.mjs';
+import { parseGceConfig } from '../../gce/launcher/config.mjs';
 import { runBake } from '../../gce/bake/bake.mjs';
 import { WEST, CENTRAL, ONE_REGION_CFG } from './config-fixtures.mjs';
 import { vmMode } from '../../gce/vm/run.mjs';
@@ -39,7 +40,7 @@ test('a builder that reports a failed step, powers off without a report, vanishe
   assert.deepEqual(at(running, 'ok', 30 * MIN + 1), { done: true, ok: false, reason: 'timeout' }); // never powered off
 });
 
-test('the bake owns only instances labelled as its own builders, and sweeps those older than 2 h', () => {
+test('the bake owns only instances labelled as its own builders, and sweeps those older than 4 h', () => {
   const mine = instanceShape({ name: `ci-kit-gce-builder-${RUN}`, labels: { 'ci-kit': 'gce-builder', 'ci-kit-run': RUN } });
   const other = instanceShape({ name: 'ci-kit-gce-builder-20261016-000000', labels: { 'ci-kit': 'gce-builder', 'ci-kit-run': '20261016-000000' }, created: '2026-10-16T00:00:00.000Z' });
   const vm = instanceShape({ name: 'ci-kit-gce-abc', labels: { 'ci-kit': 'gce', 'ci-kit-run': RUN }, created: '2026-10-16T00:00:00.000Z' });
@@ -47,11 +48,12 @@ test('the bake owns only instances labelled as its own builders, and sweeps thos
   assert.equal(ownsBakeInstance(other, RUN), false);
   assert.equal(ownsBakeInstance(vm, RUN), false);
   for (const f of FOREIGN.instances) assert.equal(ownsBakeInstance(f, '20260901-000000'), false);
-  const now = Date.parse('2026-10-16T02:30:00Z');
+  assert.deepEqual(staleBakeInstances([other], Date.parse('2026-10-16T03:30:00Z')), [], 'a bake 3.5 h in may still be running');
+  const now = Date.parse('2026-10-16T04:30:00Z');
   assert.deepEqual(staleBakeInstances([mine, other, vm, ...FOREIGN.instances], now).map((i) => i.name), ['ci-kit-gce-builder-20261016-000000']);
 });
 
-test('retention keeps the two newest ready images, and drops unready ones only once they are 2 h old', () => {
+test('retention keeps the two newest ready images, and drops unready ones only once they are 4 h old', () => {
   const img = (name, created, ready) => imageShape({ name, created, labels: { 'ci-kit': 'gce-image', 'ci-kit-commit': SHA, 'ci-kit-ready': ready } });
   const images = [
     ...FOREIGN.images,
@@ -187,8 +189,8 @@ test('the real job passes only once its run succeeded with every job on the bake
   assert.deepEqual(at({ done: true, ok: false, reason: 'exit:2' }, { status: 'in_progress' }), { done: true, ok: false, reason: 'exit:2' });
 });
 
-test('an earlier bake\'s check runner is swept once it is 2 h old and not busy; a younger one may be a bake in flight', () => {
-  const now = Date.parse('2026-10-16T12:00:00Z');
+test('an earlier bake\'s check runner is swept once it is 4 h old and not busy; a younger one may be a bake in flight', () => {
+  const now = Date.parse('2026-10-16T14:00:00Z');
   const runners = [
     { id: 1, name: 'ci-kit-bake-20261016-094500-k3x9', busy: false },
     { id: 2, name: 'ci-kit-bake-20261016-094500-b7c1', busy: true },
@@ -197,6 +199,17 @@ test('an earlier bake\'s check runner is swept once it is 2 h old and not busy; 
     { id: 5, name: 'ci-kit-bake-probe', busy: false },
   ];
   assert.deepEqual(staleBakeRunners(runners, now).map((r) => r.id), [1]);
+});
+
+// Review (M6 placements, P2): a bake smokes each placement in turn, so the bake job's task timeout (gce/deploy.sh)
+// grows with the placements, and STALE_MS must stay above it: a younger bake's builder, check runner or unready image
+// may belong to a bake still running, which an overlapping bake must not sweep.
+test('the bake job outlives its own bounds for the shipped placements, and STALE_MS outlives the bake job', () => {
+  const deploy = readFileSync(new URL('../../gce/deploy.sh', import.meta.url), 'utf8');
+  const taskMs = Number(/--task-timeout=(\d+)m/.exec(deploy)[1]) * 60_000;
+  const shipped = parseGceConfig(readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
+  assert.ok(taskMs >= BAKE_TIMEOUT_MS + shipped.placements.length * SMOKE_TIMEOUT_MS + CHECK_TIMEOUT_MS, `task timeout ${taskMs / 60_000} min`);
+  assert.ok(STALE_MS > taskMs, `STALE_MS ${STALE_MS / 3600_000} h against a ${taskMs / 60_000} min bake`);
 });
 
 test('the image goes into the family unready, labelled with the kit commit and the run', () => {
@@ -511,10 +524,10 @@ test('a public sandbox gets no runner: the bake fails before registering one', a
   assert.deepEqual(leftInstances(gce), []);
 });
 
-test('a check runner an earlier bake left is unregistered at the start once it is 2 h old; a younger one is left to its bake', async () => {
+test('a check runner an earlier bake left is unregistered at the start once it is 4 h old; a younger one is left to its bake', async () => {
   const gce = fakeGce({ scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
-  const gh = fakeSandbox({ run: OK_RUN, runners: [{ id: 1, name: 'ci-kit-bake-20261016-060000-ol01' }, { id: 2, name: 'ci-kit-bake-20261016-090000-yg01' }] });
+  const gh = fakeSandbox({ run: OK_RUN, runners: [{ id: 1, name: 'ci-kit-bake-20261016-050000-ol01' }, { id: 2, name: 'ci-kit-bake-20261016-063000-yg01' }] });
   await bake(gce, clock(), gh);
-  assert.equal(gh.calls[0], 'unregister ci-kit-bake-20261016-060000-ol01');
-  assert.deepEqual(gh.state.runners.map((r) => r.name), ['ci-kit-bake-20261016-090000-yg01']);
+  assert.equal(gh.calls[0], 'unregister ci-kit-bake-20261016-050000-ol01');
+  assert.deepEqual(gh.state.runners.map((r) => r.name), ['ci-kit-bake-20261016-063000-yg01'], 'a bake 3 h in may still be running');
 });

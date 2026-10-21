@@ -354,7 +354,7 @@ Cleanup, every tick:
 - a VM older than `max_run_minutes` + 5 is deleted, and an alert opens (Compute Engine should have deleted it);
 - a `ci-kit-gce-*` runner with no VM, more than 5 min after its launch, is unregistered (a crash between the mint and
   the insert);
-- a `ci-kit=gce` disk attached to nothing for 10 min, and a `ci-kit=gce-builder` instance older than 2 h, are
+- a `ci-kit=gce` disk attached to nothing for 10 min, and a `ci-kit=gce-builder` instance older than 4 h, are
   deleted;
 - a `launching` row with no VM and no runner 10 min after its launch is finalized `abandoned`.
 
@@ -622,7 +622,8 @@ A VM short of NAT ports shows as an error entry in the NAT's log (`resource.type
 CI_KIT_COMMIT=$(git rev-parse HEAD) node gce/bake/bake.mjs     # default commit: the kit's main
 ```
 
-1. It deletes builders and smoke VMs any bake left more than 2 h ago.
+1. It deletes builders and smoke VMs any bake left more than 4 h ago (`STALE_MS`, above the bake job's 180-min task
+   timeout, so a bake still running is never swept).
 2. It creates `ci-kit-gce-builder-<run id>` (the run id is UTC seconds plus four random characters, so two bakes never
    share one; on demand: `e2-standard-4`, else `n2d-standard-4` when E2 is refused, on `pd-balanced`; the placements
    and their zones in `gce.json` order) from `ubuntu-2404-lts-amd64`. Its startup script (`gce/bake/builder.sh`)
@@ -643,7 +644,7 @@ CI_KIT_COMMIT=$(git rev-parse HEAD) node gce/bake/bake.mjs     # default commit:
    and the real job passed, the image is labelled `ci-kit-ready=true`; the launcher uses only ready images (never
    `getFromFamily`, which would return an unready one). On any failure the bake deletes its own image.
 6. On every exit it deletes its instances, and keeps the two newest ready images (unready images of other runs
-   are dropped once 2 h old). It deletes an image only while that image carries its `ci-kit-run` label: an image
+   are dropped once 4 h old). It deletes an image only while that image carries its `ci-kit-run` label: an image
    insert refused because the name exists leaves the existing image alone.
 
 The Cloud Run job `ci-kit-bake` runs the same script as `ci-kit-launcher@`, at main's head, with the `gce.json` it was
