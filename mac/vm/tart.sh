@@ -39,20 +39,25 @@ tart_state_in() { # <tart_vms output> <name>: its state, or nothing when it is n
   awk -F'\t' -v name="$2" '$1 == name { print $2; exit }' <<<"$1"
 }
 
-# The pids of the `tart run` processes of a VM, one per line, from the process table: a process whose arguments end with
-# the VM's name and have `run` right after a `tart`. False when the table cannot be read.
-tart_run_pids() { # <name>
+# The pids of a VM's `tart <subcommand>` processes, one per line, from the process table: a process with the
+# subcommand right after a `tart` and, for run, the VM's name last; for exec, right after the subcommand. False when
+# the table cannot be read.
+tart_pids() { # run|exec <name>
   local table
   table=$(LC_ALL=C bounded 10 /bin/ps -axww -o pid=,command= 7>&- 8>&- 2>/dev/null) || return 1
   perl -e '
-    my $name = shift;
+    my ($sub, $name) = @ARGV[0, 1];
+    @ARGV = ();
     while (<STDIN>) {
       my ($pid, @argv) = split " ";
-      next unless @argv && $argv[-1] eq $name;
-      for my $i (0 .. $#argv - 1) {
-        if ($argv[$i] =~ m{(?:^|/)tart$} && $argv[$i + 1] eq "run") { print "$pid\n"; last }
+      for my $i (0 .. $#argv - 2) {
+        next unless $argv[$i] =~ m{(?:^|/)tart$} && $argv[$i + 1] eq $sub;
+        if ($sub eq "run" ? $argv[-1] eq $name : $argv[$i + 2] eq $name) { print "$pid\n"; last }
       }
-    }' "$1" <<<"$table"
+    }' "$1" "$2" <<<"$table"
+}
+tart_run_pids() { # <name>: its `tart run` processes
+  tart_pids run "$1"
 }
 
 # Whether a VM's end is verified: 0 when Tart lists it stopped or not at all and no `tart run` of it runs, 1 when it

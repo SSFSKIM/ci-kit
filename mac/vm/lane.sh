@@ -13,8 +13,8 @@
 #               clone that fails releases under the same lock; a run that exits within CI_KIT_VM_SPAWN_CHECK s (1)
 #               has its stopped clone deleted, then releases. Then until `tart exec <clone> true` answers, at most
 #               CI_KIT_VM_BOOT s (120)
-#   kicking     `tart exec <clone> …/kickoff.sh <slot> <clone>`, then until out/listening or out/session-conflict, at
-#               most CI_KIT_VM_KICKOFF s (60) from the kickoff
+#   kicking     `tart exec <clone> …/kickoff.sh <slot> <clone>`, run beside the loop, then until out/listening or
+#               out/session-conflict, at most CI_KIT_VM_KICKOFF s (60) from the kickoff
 #   session     the listener found the slot's last session open: until out/listening, at most CI_KIT_VM_SESSION s
 #               (300); past it a `session` failure, counted apart from `image`
 #   listening   until out/assigned; past CI_KIT_VM_IDLE s (180) without it, the idle handshake (below)
@@ -38,9 +38,11 @@
 # RECOVERY runs at one point only, this launcher's start, under the desktop lock, before the first queue read, and
 # touches job clones alone (maws-vm-job-<slot>-*, and vm-reserved); a golden, a candidate, a trial clone or the base is
 # the maintenance procedure's. A reservation's VM running with out/assigned and no out/done is adopted (running, the
-# bound from out/assigned); one running with no assignment goes through the idle handshake where the wrapper runs
-# (out/listening or out/session-conflict) and is stopped where it does not; one stopped or gone is deleted and released;
-# a job clone with no reservation is reserved first, so settle sees it, then torn down the same way. Nothing else is
+# bound from out/assigned); one asked to stop has its answer read first, before an out/done after it; one running with
+# no assignment goes through the idle handshake where a wrapper may run (a marker or out/wrapper.log in out/, or a
+# kickoff still in the process table) and is stopped where none can; one stopped or gone is deleted and released;
+# a job clone with no reservation is reserved first, so settle sees it, then torn down the same way. A reservation that
+# names anything but a job clone of the slot stays, and is neither stopped nor deleted: recovery waits. Nothing else is
 # released, ever: a reservation goes only by a verified teardown, whatever became of the launcher that wrote it. A
 # recovery that cannot read what it needs waits, boots nothing, and alerts after CI_KIT_VM_STOP_ALERT s.
 #
@@ -48,7 +50,7 @@
 # idle bound with no out/assigned, it reads the queue again; with nothing the guest can take, it writes
 # out/stop-request, and the wrapper answers (wrapper.sh's header has the out/ protocol): stop-refused (a job was taken:
 # preparing), stopped (none was: the guest ends), stop-raced (a job was accepted as the listener stopped, which
-# cancelled it: logged, alerted with the run and the job, counted as `raced`).
+# cancelled it: logged, alerted with the run and the job, counted as `raced`, once per clone across restarts).
 #
 # THE BOOT RULE, read at each poll in idle (the reads are lane-reads.sh's); what fails it is logged once per change,
 # and a boot logs what it read. Conditions 3 and 4 are read again inside the locked step, where they are written.
@@ -76,14 +78,17 @@
 # job waiting. A hold is logged once per change and alerted, per owner, after CI_KIT_VM_HOLD_ALERT s (21600) on.
 #
 # THE MEMORY GUARD samples from tart run to the verified end, every CI_KIT_VM_SAMPLE s (15), into vm-lane.log:
-#   - pressure 2 on two samples in a row: a guest holding no job (booting, kicking, session, listening) is given up at
-#     once, through the idle handshake where the wrapper answers and by a plain teardown where it does not (a `memory`
-#     failure); a job (preparing, running, or an answer still owed) is left to finish, and vm-pause is written
-#     CI_KIT_VM_WARN_PAUSE s (120) past its teardown;
+#   - pressure 2 on two samples in a row: a guest holding no job (booting, kicking, session, listening, as the step
+#     just before the sample read out/) is given up at once (a `memory` failure), through the idle handshake where a
+#     wrapper may run, since its answer keeps a job taken meanwhile, and by a plain teardown only where none can (no
+#     kickoff started, or one that refused); a job (preparing, running, or an answer still owed) is left to finish,
+#     and vm-pause is written CI_KIT_VM_WARN_PAUSE s (120) past its teardown;
 #   - pressure 4 on one sample: tart stop in any state, `stopped for memory`, one alert, a `memory` failure, and a pause
 #     of CI_KIT_VM_CRITICAL_PAUSE s (600);
 #   - free disk under CI_KIT_VM_DISK_FLOOR GB (5): the same stop, for `disk`; under half the reserve, vm-pause (disk)
 #     until the space is back, in every state, idle included.
+#   Nothing the loop waits on outlasts about one sample: the kickoff runs beside it, and the queue read has an overall
+#   deadline of CI_KIT_VM_QUEUE_WAIT s (15), past which the queue reads as unknown (no boot, no stop).
 #
 # STATE, in ~/Library/Logs/ci-kit beside the host's, each file replaced whole by a rename and written under the
 # desktop lock; a write that fails leaves the stricter state (a reservation not written is no boot, a release not done
@@ -141,6 +146,7 @@ df_bin=${CI_KIT_VM_DF:-/bin/df}
 tart_home=${CI_KIT_VM_TART_HOME:-${TART_HOME:-$HOME/.tart}}
 tick=${CI_KIT_VM_TICK:-1}
 queue_poll=$(whole "${CI_KIT_VM_POLL:-}" 15)
+queue_wait=$(whole "${CI_KIT_VM_QUEUE_WAIT:-}" 15)
 boot_bound=$(whole "${CI_KIT_VM_BOOT:-}" 120)
 kickoff_bound=$(whole "${CI_KIT_VM_KICKOFF:-}" 60)
 session_bound=$(whole "${CI_KIT_VM_SESSION:-}" 300)
@@ -369,11 +375,14 @@ pause_clear() { # <reason> <why>
 }
 
 # THE FAILURES, counted by kind into vm-failures (this launcher's own, so a restart keeps the runs of them).
-image_run=0 refused_run=0 total_image=0 total_session=0 total_memory=0 total_disk=0 total_raced=0
+# raced_clone names the clone whose raced stop is counted and alerted already, so a restart neither loses it (the
+# answer stays in out/ until the teardown) nor counts it twice.
+image_run=0 refused_run=0 total_image=0 total_session=0 total_memory=0 total_disk=0 total_raced=0 raced_clone=''
 load_failures() {
   local key value
   [[ -f $failures_file ]] || return 0
   while IFS='=' read -r key value; do
+    [[ $key != raced_clone ]] || raced_clone=$value
     [[ $value =~ ^[0-9]+$ ]] || continue
     case $key in
       image_run | refused_run | total_image | total_session | total_memory | total_disk | total_raced) printf -v "$key" '%s' "$value" ;;
@@ -381,8 +390,8 @@ load_failures() {
   done <"$failures_file" 2>/dev/null
 }
 save_failures() {
-  if ! printf 'image_run=%s\nrefused_run=%s\ntotal_image=%s\ntotal_session=%s\ntotal_memory=%s\ntotal_disk=%s\ntotal_raced=%s\n' \
-    "$image_run" "$refused_run" "$total_image" "$total_session" "$total_memory" "$total_disk" "$total_raced" \
+  if ! printf 'image_run=%s\nrefused_run=%s\ntotal_image=%s\ntotal_session=%s\ntotal_memory=%s\ntotal_disk=%s\ntotal_raced=%s\nraced_clone=%s\n' \
+    "$image_run" "$refused_run" "$total_image" "$total_session" "$total_memory" "$total_disk" "$total_raced" "$raced_clone" \
     >"$failures_file.tmp" 2>/dev/null || ! mv -f "$failures_file.tmp" "$failures_file" 2>/dev/null; then
     rm -f "$failures_file.tmp" 2>/dev/null
     say "could not write $failures_file; the counts hold in this launcher"
@@ -415,6 +424,7 @@ enter() { # <state>
   state=$1 since=$now_epoch
 }
 clear_guest() {
+  kickoff_forget
   clone='' run_pid='' kicked='' assigned_at='' stop_at='' failed='' next_ask=0 pause_after='' td_next=0 td_since=''
   td_stopped='' td_done='' res_job='' warned=0
 }
@@ -671,11 +681,21 @@ ask_stop() { # <why>
     note stop "$clone: $1, but out/stop-request could not be written; trying again"
   fi
 }
-raced() { # <job>
+# A stop that may have cancelled a job: counted as raced and alerted once per clone, whichever launcher meets it.
+raced_once() { # <why> <alert title> <alert body>
   failed=raced
+  if [[ $raced_clone == "$clone" ]]; then
+    say "$clone: $1 (counted and alerted already)"
+    return 0
+  fi
+  raced_clone=$clone
+  count_failure raced "$1"
+  alert_event "$2" "$3"
+}
+raced() { # <job>
   say "$clone: a job ($1) was accepted as the listener stopped, and the stop cancelled it at GitHub; rerun it"
-  count_failure raced "an acceptance raced the idle stop (job $1)"
-  alert_event "ci-kit alert: vm lane on $machine cancelled job $1 at $(minute "$now") (an acceptance raced the idle stop)" \
+  raced_once "an acceptance raced the idle stop (job $1)" \
+    "ci-kit alert: vm lane on $machine cancelled job $1 at $(minute "$now") (an acceptance raced the idle stop)" \
     "Clone: $clone
 Job: $1 (the runner's id; GitHub shows the job cancelled on the runner ci-kit-mac-$machine-vm)
 The guest's listener accepted this job as the launcher's idle stop reached it. Rerun the job."
@@ -691,15 +711,62 @@ step_booting() {
   fi
   ((now_epoch - since < boot_bound)) || fail image "its guest agent did not answer within $boot_bound s"
 }
-step_kicking() {
-  local said
+# The kickoff runs beside the loop, so the guard samples through it: kick_pid while it runs, then kick_status (0, or
+# why it failed) once it has returned.
+kick_pid='' kick_status='' kick_file=''
+kickoff_start() {
+  kicked=1 kick_status=''
+  kick_file=$(mktemp) || { kick_status='no scratch file for its output'; return; }
+  (tart_kickoff "$clone" "$slot" "$kickoff_bound" >"$kick_file" 2>&1; echo $? >"$kick_file.status") 7>&- 8>&- &
+  kick_pid=$!
+}
+kickoff_poll() {
+  local code
+  [[ -n $kick_pid ]] && ! kill -0 "$kick_pid" 2>/dev/null || return 0
+  wait "$kick_pid" 2>/dev/null
+  kick_pid=''
+  code=$(cat "$kick_file.status" 2>/dev/null)
+  if [[ $code == 0 ]]; then
+    kick_status=0
+    say "$clone: $(tail -1 "$kick_file" 2>/dev/null)"
+  else
+    kick_status="kickoff.sh failed: $(tail -1 "$kick_file" 2>/dev/null)"
+    [[ $state == kicking ]] || say "$clone: $kick_status"
+  fi
+  rm -f "$kick_file" "$kick_file.status"
+}
+# A kickoff still under way when its clone is forgotten: its exec ends with the clone, which is stopped by then.
+kickoff_forget() {
+  if [[ -n $kick_pid ]]; then
+    kill "$kick_pid" 2>/dev/null
+    wait "$kick_pid" 2>/dev/null
+  fi
+  [[ -z $kick_file ]] || rm -f "$kick_file" "$kick_file.status"
+  kick_pid='' kick_status='' kick_file=''
+}
+# Whether the clone's wrapper may be running, so a guest holding no job may still take one: 1 only when none can be.
+# kickoff.sh opens out/wrapper.log as it starts the wrapper, returns 0 once it has, and refuses before that when out/
+# holds a marker; a kickoff still under way (this launcher's, or an earlier one's, found in the process table) may yet
+# start it.
+wrapper_may_run() {
+  local marker pids
+  [[ ! -e $out/wrapper.log ]] || return 0
+  for marker in $markers; do
+    [[ $marker == stop-request ]] || ! has "$marker" || return 0
+  done
+  [[ -z $kick_pid && $kick_status != 0 ]] || return 0
   if [[ -z $kicked ]]; then
-    kicked=1
-    if ! said=$(tart_kickoff "$clone" "$slot" "$kickoff_bound" 2>&1); then
-      fail image "kickoff.sh failed: $(tail -1 <<<"$said")"
-      return
-    fi
-    say "$clone: $(tail -1 <<<"$said")"
+    pids=$(tart_pids exec "$clone") || return 0
+    [[ -z $pids ]] || return 0
+  fi
+  return 1
+}
+step_kicking() {
+  [[ -n $kicked ]] || kickoff_start
+  kickoff_poll
+  if [[ -n $kick_status && $kick_status != 0 ]]; then
+    fail image "$kick_status"
+    return
   fi
   if has listening; then say "$clone: listening ($(first_line listening))"; enter listening; return; fi
   if has session-conflict; then
@@ -757,18 +824,24 @@ step_stopping() {
     return
   fi
   if has stopped; then say "$clone: the listener stopped with no job ($(first_line stopped))"; enter ending; return; fi
+  # The runner exited before the request was read: its record (job, done) says what ran, and an answer that still
+  # comes is read at the teardown.
+  if has 'done'; then say "$clone: the runner exited before the stop was answered; ending"; enter ending; return; fi
+  # No wrapper was started (kickoff refused, or never got that far): nothing can hold a job, and no answer will come.
+  if ! wrapper_may_run; then
+    to_teardown 'no wrapper was started in it, so no answer comes and no job can be in it; stopping it'
+    return
+  fi
   if run_gone; then
-    failed=raced
-    count_failure raced 'the guest ended with the stop unanswered'
-    alert_event "ci-kit alert: vm lane on $machine lost an unanswered stop of $clone at $(minute "$now")" \
+    raced_once 'the guest ended with the stop unanswered' \
+      "ci-kit alert: vm lane on $machine lost an unanswered stop of $clone at $(minute "$now")" \
       "The guest ended before its wrapper answered the idle stop; a job it may have taken is unknown."
     to_teardown 'the guest ended with the stop unanswered'
     return
   fi
   if ((now_epoch - stop_at >= answer_bound)); then
-    failed=raced
-    count_failure raced "the stop was not answered within $answer_bound s"
-    alert_event "ci-kit alert: vm lane on $machine stopped $clone with its idle stop unanswered at $(minute "$now")" \
+    raced_once "the stop was not answered within $answer_bound s" \
+      "ci-kit alert: vm lane on $machine stopped $clone with its idle stop unanswered at $(minute "$now")" \
       "The wrapper did not answer the idle stop within $answer_bound s, so a job it may have accepted is unknown; the clone was stopped. Check the run on ci-kit-mac-$machine-vm and rerun what was cancelled."
     to_teardown "the stop was not answered within $answer_bound s; stopping it"
   fi
@@ -791,6 +864,8 @@ step_ending() {
 # failures by a clone that ran its course.
 conclude() {
   local line
+  # An answer the steps did not see (it came after the clone was given up) is still the clone's record.
+  if [[ $failed != raced ]] && has stop-raced; then raced "$(field stop-raced job)"; fi
   if has job; then
     line="run $(field job run) job $(field job job)"
     if has refused; then
@@ -849,6 +924,10 @@ step_teardown() {
   ((now_epoch >= td_next)) || return 0
   td_next=$((now_epoch + queue_poll))
   [[ -n $td_since ]] || td_since=$now_epoch
+  if [[ ! $clone =~ $job_clone_pattern ]]; then
+    teardown_stuck "$clone is not a job clone of slot $slot; it is neither stopped nor deleted here"
+    return
+  fi
   if [[ -z $td_stopped ]]; then
     tart_stop_verified "$clone" "$stop_timeout"
     status=$?
@@ -924,19 +1003,21 @@ guard_sample() {
   fi
   if ((m_pressure >= 2)); then warned=$((warned + 1)); else warned=0; fi
   ((warned >= 2)) || return 0
+  # The step just before this sample read what the guest wrote, and a guest whose wrapper may run is asked through the
+  # handshake, whose answer keeps a job taken since: only one with no wrapper is stopped outright.
   case $state in
-    booting | kicking)
-      failed=memory
-      count_failure memory "memory pressure warned on two samples ($(memory_line))"
-      to_teardown 'given up for memory: it holds no job'
-      ;;
-    session | listening)
-      # Counted once, though a stop request that could not be written is asked again at the next sample.
-      if [[ -z $failed ]]; then
+    booting | kicking | session | listening)
+      if wrapper_may_run; then
+        if [[ -z $failed ]]; then
+          failed=memory
+          count_failure memory "memory pressure warned on two samples ($(memory_line))"
+        fi
+        ask_stop 'given up for memory'
+      else
         failed=memory
         count_failure memory "memory pressure warned on two samples ($(memory_line))"
+        to_teardown 'given up for memory: no wrapper runs in it, so it holds no job'
       fi
-      ask_stop 'given up for memory'
       ;;
     preparing | running | stopping | ending)
       if [[ -z $pause_after ]]; then
@@ -1018,6 +1099,11 @@ recover_poll() {
     fi
     say "recovery: $target is a job clone with no reservation; reserved it before its teardown"
   fi
+  if [[ ! $target =~ $job_clone_pattern ]]; then
+    unlock
+    recovery_waits "the reservation names $target, which is not a job clone of slot $slot; it stays, and nothing is stopped or deleted"
+    return
+  fi
   if ! pids=$(tart_run_pids "$target"); then
     unlock
     recovery_waits 'the process table cannot be read'
@@ -1039,6 +1125,13 @@ recover_poll() {
     enter teardown
     return
   fi
+  # The handshake first: its answer is the clone's record whatever came after it (done follows every answer).
+  if has stop-request || has stop-refused || has stop-raced || has stopped; then
+    stop_at=$(mtime "$out/stop-request") || stop_at=$now_epoch
+    say "recovery: $clone was asked to stop; its answer is read before anything after it"
+    enter stopping
+    return
+  fi
   if has assigned && ! has 'done'; then
     assigned_at=$(mtime "$out/assigned") || assigned_at=$now_epoch
     if has job; then enter running; else enter preparing; fi
@@ -1050,13 +1143,7 @@ recover_poll() {
     enter ending
     return
   fi
-  if has stop-request; then
-    stop_at=$(mtime "$out/stop-request") || stop_at=$now_epoch
-    say "recovery: $clone was asked to stop; waiting for the wrapper's answer"
-    enter stopping
-    return
-  fi
-  if has listening || has session-conflict; then
+  if wrapper_may_run; then
     say "recovery: $clone runs with no job assigned; the idle handshake"
     enter listening
     since=$((now_epoch - idle_bound))
@@ -1068,6 +1155,26 @@ recover_poll() {
 }
 
 # THE LAUNCHER.
+step() { # the state's step; a kickoff under way is followed in every state
+  kickoff_poll
+  case $state in
+    recover) recover_poll ;;
+    idle)
+      if ((now_epoch >= next_poll)); then
+        next_poll=$((now_epoch + queue_poll))
+        idle_poll
+      fi
+      ;;
+    booting) step_booting ;;
+    kicking) step_kicking ;;
+    session) step_session ;;
+    listening) step_listening ;;
+    stopping) step_stopping ;;
+    preparing | running) step_job ;;
+    ending) step_ending ;;
+    teardown) step_teardown ;;
+  esac
+}
 take_lane_lock() {
   mkdir -p "$ci_kit_logs" 2>/dev/null
   if ! exec 7>>"$lane_lock"; then
@@ -1086,26 +1193,10 @@ say "starting (pid $$, slot $slot, mode $lane_mode); recovery first"
 next_sample=0 next_poll=0
 while :; do
   clock
+  step
   if [[ -n $clone ]] && ((now_epoch >= next_sample)); then
     next_sample=$((now_epoch + sample_every))
     guard_sample
   fi
-  case $state in
-    recover) recover_poll ;;
-    idle)
-      if ((now_epoch >= next_poll)); then
-        next_poll=$((now_epoch + queue_poll))
-        idle_poll
-      fi
-      ;;
-    booting) step_booting ;;
-    kicking) step_kicking ;;
-    session) step_session ;;
-    listening) step_listening ;;
-    stopping) step_stopping ;;
-    preparing | running) step_job ;;
-    ending) step_ending ;;
-    teardown) step_teardown ;;
-  esac
   sleep "$tick"
 done

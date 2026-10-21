@@ -78,8 +78,25 @@ case $command in
     [[ ! -e $t/no-agent ]] || { echo 'Error: failed to connect to the guest agent' >&2; exit 1; }
     [[ $1 != true ]] || exit 0
     if [[ $1 == */vm/guest/kickoff.sh ]]; then
-      printf '%s\\n' "$@" > "$vms/$name/kicked"
-      [[ ! -e $t/fail-kickoff ]] || { echo 'kickoff: out/ already holds listening: every clone starts from an empty out/' >&2; exit 1; }
+      # As kickoff.sh, it refuses an out/ that holds a marker, and otherwise opens out/wrapper.log as it starts the
+      # wrapper. With block-kickoff it waits before that, with block-kickoff-return after it (the wrapper started, the
+      # exec not yet returned), until kickoff-go or its VM's run ends. kicked (its arguments) is written as it returns,
+      # so a guest marker a test writes after it comes after the wrapper's start.
+      kicked() { printf '%s\\n' "$@" > "$vms/$name/kicked"; }
+      block() {
+        [[ -e $t/$1 ]] || return 0
+        touch "$t/kickoff-waiting"
+        until [[ -e $t/kickoff-go ]] || ! kill -0 "$(cat "$vms/$name/run.pid" 2>/dev/null)" 2>/dev/null; do sleep 0.05; done
+      }
+      block block-kickoff
+      [[ ! -e $t/fail-kickoff ]] || { kicked "$@"; echo 'kickoff: out/ already holds listening: every clone starts from an empty out/' >&2; exit 1; }
+      out=$(sed -n 's/^--dir=out://p' "$vms/$name/run.args")
+      for marker in listening session-conflict assigned job refused stop-request stop-refused stop-raced stopped done; do
+        [[ ! -e $out/$marker ]] || { kicked "$@"; echo "kickoff: out/ already holds $marker: every clone starts from an empty out/" >&2; exit 1; }
+      done
+      echo 'wrapper: started' >> "$out/wrapper.log"
+      block block-kickoff-return
+      kicked "$@"
       echo "kickoff: $2 $3: identity copied, cache linked, wrapper 4242 started"; exit 0
     fi
     exit 1 ;;
@@ -102,6 +119,7 @@ const fakeGh = `g=$HOME/gh
 printf '%s\\0' "$@" "GH_TOKEN=\${GH_TOKEN-unset}" >> "$g/calls"; printf '\\0' >> "$g/calls"
 if [[ $1 == api ]]; then
   [[ ! -e $g/fail ]] || { echo 'gh: HTTP 502: Bad Gateway' >&2; exit 1; }
+  if [[ -e $g/slow ]]; then touch "$g/slow-waiting"; sleep 3; fi
   case $2 in
     *'runs?status=queued'*) file=$g/runs-queued.json ;;
     *'runs?status=in_progress'*) file=$g/runs-in_progress.json ;;
@@ -259,6 +277,11 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/disk3s5
       return { release: async () => { const gone = once(holder, 'exit'); holder.kill('SIGKILL'); await gone; } };
     },
     lockFree: () => spawnSync('perl', ['-MFcntl=:flock', '-e', 'open(my $fh, ">>", shift) or exit 2; exit(flock($fh, LOCK_EX | LOCK_NB) ? 0 : 1)', join(logs, 'desktop.lock')]).status === 0,
+    // A clone whose kickoff (with block-kickoff) has started and not returned.
+    async kickoffBlocked() {
+      await m.until(() => existsSync(join(home, 'tart/kickoff-waiting')), 'the kickoff blocked');
+      return m.clones()[0];
+    },
     // Boots one clone for a queued job and returns its name once its kickoff ran.
     async booted() {
       await m.until(() => m.clones().some((name) => existsSync(join(vms, name, 'kicked'))), 'a clone kicked off');
@@ -324,7 +347,7 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     assert.deepEqual(readFileSync(join(m.vms, clone, 'run.args'), 'utf8').trim().split('\n'), [
       '--no-graphics', `--dir=kit:${mac}:ro`, `--dir=identity:${m.slotDir}/identity:ro`, `--dir=out:${m.out}`, `--dir=cache:${m.slotDir}/cache`, clone]);
     assert.deepEqual(readFileSync(join(m.vms, clone, 'kicked'), 'utf8').trim().split('\n'), ['/Users/admin/ci-kit/vm/guest/kickoff.sh', m.slot, clone]);
-    assert.deepEqual(readdirSync(m.out), [], 'the clone is handed an empty out/');
+    assert.deepEqual(readdirSync(m.out).filter((name) => name !== 'wrapper.log'), [], 'the clone is handed an empty out/ (the wrapper.log its kickoff opens aside)');
     await m.listening(clone);
     await m.assigned(clone);
     await m.job(clone);
@@ -516,9 +539,12 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     assert.match(m.alerts()[0], /^ci-kit alert: vm lane on mini held by CI-opt-a45b97a3 since \d{4}-\d\d-\d\dT\d\d:\d\dZ$/);
     await sleep(1500);
     assert.equal(m.alerts().length, 1, 'one issue, not one a poll');
+    // With the queue empty while the hold goes, no boot can take the lane out of idle, where the close is read.
+    m.queue();
     rmSync(join(m.logs, 'vm-hold.CI-opt-a45b97a3'));
     await m.until(() => m.closed().length === 1, 'the close');
     assert.deepEqual(m.closed(), ['https://github.com/SSFSKIM/ci-kit-sandbox/issues/1']);
+    m.queue(['ci-kit-mac-vm']);
     await m.booted();
     await finish(m, a);
   });
@@ -552,8 +578,10 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
 
   test('a launcher killed during a boot: the reservation stands and settle stays parked; the next launcher, after waiting for the lock, finds the guest running with no wrapper and stops it; settle is released only after Tart shows it stopped', async () => {
     const m = lane({ queue: [['ci-kit-mac-vm']] });
+    m.flag('no-agent');
     const a = m.start();
-    const clone = await m.booted();
+    await m.waitLog(/runs \(tart run, pid \d+\); waiting for its guest agent/);
+    const clone = m.clones()[0];
     const claim = await m.claim();
     await a.kill();
     assert.equal(m.state(clone), 'running', 'the guest outlives its launcher');
@@ -735,6 +763,127 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     await finish(m, a);
   });
 
+  // THE GUARD THROUGH BLOCKING WORK. A kickoff that has not returned, and a queue read that is slow.
+  test('a kickoff that has not returned: critical pressure meanwhile stops the guest at the next sample', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    m.flag('block-kickoff');
+    const a = m.start();
+    const clone = await m.kickoffBlocked();
+    m.memory({ pressure: 4, available: 8 });
+    await m.waitLog(new RegExp(`${clone}: stopped for memory: memory pressure critical`));
+    assert.equal(existsSync(join(m.home, 'tart/kickoff-go')), false, 'the kickoff never returned');
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    assert.equal(m.failures().total_memory, '1');
+    m.memory();
+    await finish(m, a);
+  });
+
+  test('a kickoff that has not returned, while the guest takes a job: a warning leaves the job to finish, never a stop', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_WARN_PAUSE: '600' } });
+    m.flag('block-kickoff-return');
+    const a = m.start();
+    const clone = await m.kickoffBlocked();
+    // The guest's wrapper writes out/ as the exec that started it has yet to return (the reviewer's probe).
+    m.mark('listening', 'at=2026-10-21T12:00:40Z');
+    m.mark('assigned', 'job=9e8d7c6b at=2026-10-21T12:01:00Z by=diag');
+    m.mark('job', 'run=7 attempt=1 job=e2e repository=SSFSKIM/MAWS at=2026-10-21T12:01:30Z');
+    m.memory({ pressure: 2 });
+    await m.waitLog(new RegExp(`${clone}: memory pressure warned on two samples; its job is left to finish`));
+    await sleep(1500);
+    assert.equal(existsSync(join(m.out, 'stop-request')), false);
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
+    m.memory();
+    m.flag('kickoff-go');
+    await m.finished(clone);
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
+    assert.equal(m.failures().total_memory ?? '0', '0');
+    await finish(m, a);
+  });
+
+  test('a kickoff that has not returned, with nothing in out/ yet: a warning asks through the handshake; the kickoff then refuses, so no wrapper runs and the guest is stopped, with no race', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    m.flag('block-kickoff');
+    const a = m.start();
+    const clone = await m.kickoffBlocked();
+    m.memory({ pressure: 2 });
+    await m.waitLog(new RegExp(`${clone}: given up for memory; asked the wrapper to stop`));
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0, 'the kickoff may yet start the wrapper');
+    m.memory();
+    m.flag('kickoff-go');
+    await m.waitLog(new RegExp(`${clone}: kickoff.sh failed: kickoff: out/ already holds stop-request`));
+    await m.waitLog(new RegExp(`${clone}: no wrapper was started in it, so no answer comes and no job can be in it; stopping it; teardown`));
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    assert.equal(m.failures().total_memory, '1');
+    assert.equal(m.failures().total_raced, '0');
+    assert.equal(m.alerts().length, 0);
+    await finish(m, a);
+  });
+
+  test('a slow queue read is bounded as a whole: past its deadline it reads as unknown (no stop asked), and critical pressure meanwhile stops the guest', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_IDLE: '1', CI_KIT_VM_QUEUE_WAIT: '2' } });
+    const a = m.start();
+    const clone = await m.booted();
+    await m.listening(clone);
+    await m.waitLog(new RegExp(`${clone}: idle past 1 s, but 1 job\\(s\\) queued it can take; listening on`));
+    m.ghFlag('slow');
+    await m.until(() => existsSync(join(m.home, 'gh/slow-waiting')), 'a slow read');
+    m.memory({ pressure: 4, available: 8 });
+    await m.waitLog(new RegExp(`${clone}: stopped for memory: memory pressure critical`));
+    const log = m.log();
+    assert.match(log, new RegExp(`${clone}: idle past 1 s, but the queue cannot be read \\(the queue read passed its 2 s deadline\\); listening on`));
+    assert.ok(log.indexOf('passed its 2 s deadline') < log.indexOf(`${clone}: stopped for memory`));
+    assert.equal(existsSync(join(m.out, 'stop-request')), false);
+    m.ghFlag('slow', false);
+    m.memory();
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    await finish(m, a);
+  });
+
+  // THE HANDSHAKE'S RECORD. An answer is read before the done after it, and counted once whichever launcher meets it.
+  test('a raced stop with out/done after it, met by recovery: counted and alerted once, though the next launcher meets it again', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_END_WAIT: '600' } });
+    const a = m.start();
+    const clone = await m.booted();
+    await m.listening(clone);
+    await a.kill();
+    m.queue();
+    m.mark('stop-request');
+    m.mark('stop-raced', 'job=9e8d7c6b');
+    m.mark('done', '143');
+    const b = m.start();
+    await m.waitLog(new RegExp(`recovery: ${clone} was asked to stop; its answer is read before anything after it`));
+    await m.waitLog(new RegExp(`${clone}: a job \\(9e8d7c6b\\) was accepted as the listener stopped`));
+    await m.until(() => m.alerts().length === 1, 'the alert');
+    assert.equal(m.failures().total_raced, '1');
+    await b.kill();
+    const c = m.start();
+    await m.waitLog(new RegExp(`${clone}: an acceptance raced the idle stop \\(job 9e8d7c6b\\) \\(counted and alerted already\\)`));
+    m.powerOff(clone);
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    await sleep(1000);
+    assert.equal(m.failures().total_raced, '1');
+    assert.equal(m.alerts().length, 1);
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
+    await finish(m, c);
+  });
+
+  test('a reservation naming a VM that is not a job clone of the slot: recovery keeps it, stops and deletes nothing, boots nothing, and alerts', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_STOP_ALERT: '1' } });
+    const candidate = 'maws-vm-candidate-20261021';
+    m.vm(candidate, 'running');
+    const reservation = `reserved since 2026-10-21T12:00:00Z: vm=${candidate} slot=${m.slot} golden=- (launcher 1)\nvm=${candidate}\nslot=${m.slot}\ngolden=-\nsince=2026-10-21T12:00:00Z\nlauncher=1\nstarted=-\njob=\n`;
+    writeFileSync(join(m.logs, 'vm-reserved'), reservation);
+    const a = m.start();
+    await m.waitLog(new RegExp(`recovery waits: the reservation names ${candidate}, which is not a job clone of slot ${m.slot}; it stays, and nothing is stopped or deleted; nothing boots`));
+    await m.until(() => m.alerts().length === 1, 'the alert');
+    assert.match(m.alerts()[0], /^ci-kit alert: vm lane on mini cannot recover since /);
+    await sleep(1500);
+    assert.deepEqual(m.calls().filter((call) => /^(stop|delete|clone|run|exec) /.test(call)), []);
+    assert.equal(m.state(candidate), 'running');
+    assert.equal(m.reserved(), reservation);
+    await finish(m, a);
+  });
+
   // THE MEMORY GUARD, in every state. reach brings a lane's guest to the state.
   const states = {
     booting: { before: (m) => m.flag('no-agent'), reach: async (m) => { await m.waitLog(/runs \(tart run, pid \d+\); waiting for its guest agent/); return m.clones()[0]; } },
@@ -764,12 +913,13 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
         assert.ok(Math.abs(until - (Date.now() / 1000 + 600)) < 60, 'the pause ends 600 s after the teardown');
         await m.waitLog(/no boot: paused \(memory\) until \S+: memory pressure warned during/);
         assert.equal(m.failures().total_memory ?? '0', '0');
-      } else if (['session', 'listening'].includes(name)) {
+      } else if (['kicking', 'session', 'listening'].includes(name)) {
+        // Its wrapper started: the handshake, whose answer keeps a job it may have taken meanwhile.
         await m.waitLog(new RegExp(`${clone}: given up for memory; asked the wrapper to stop`));
         assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
         assert.equal(m.failures().total_memory, '1');
       } else {
-        await m.waitLog(new RegExp(`${clone}: given up for memory: it holds no job; teardown`));
+        await m.waitLog(new RegExp(`${clone}: given up for memory: no wrapper runs in it, so it holds no job; teardown`));
         await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
         assert.ok(m.calls().includes(`stop ${clone} --timeout 30`));
         assert.equal(m.failures().total_memory, '1');

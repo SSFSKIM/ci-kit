@@ -74,10 +74,10 @@ display_admits() {
 }
 # The queue: q_solo and q_vm, the queued jobs only a guest or the exclusive instance can take (ci-kit-mac-solo) and
 # only a guest can (ci-kit-mac-vm). False with q_why when it cannot be read.
-gh_read() { # <api path> <output file>
+gh_read() { # <api path> <output file> [<seconds>, 10]
   local err status
   err=$(mktemp) || return 1
-  bounded 10 env -u GH_TOKEN -u GITHUB_TOKEN "${CI_KIT_GH_BIN:-gh}" api "$1" >"$2" 2>"$err" 7>&- 8>&-
+  bounded "${3:-10}" env -u GH_TOKEN -u GITHUB_TOKEN "${CI_KIT_GH_BIN:-gh}" api "$1" >"$2" 2>"$err" 7>&- 8>&-
   status=$?
   if ((status == 124)); then
     q_why="the read of $1 timed out"
@@ -87,12 +87,24 @@ gh_read() { # <api path> <output file>
   rm -f "$err"
   return "$status"
 }
+# The read as a whole is bounded by queue_wait s, each call by what is left of it (at most 10 s): a slow queue reads as
+# unknown, so the loop's guard samples on.
+queue_left() {
+  q_left=$((q_deadline - SECONDS))
+  ((q_left > 10)) && q_left=10
+  ((q_left > 0)) && return 0
+  q_why="the queue read passed its $queue_wait s deadline"
+  return 1
+}
 queue_read() {
-  local scratch status runs='' id counts
+  local scratch status runs='' id counts q_deadline=$((SECONDS + queue_wait)) q_left
   q_solo=0 q_vm=0 q_why=''
   scratch=$(mktemp) || { q_why='no scratch file'; return 1; }
   for status in queued in_progress; do
-    gh_read "repos/$repo/actions/runs?status=$status&per_page=100" "$scratch" || { rm -f "$scratch"; return 1; }
+    if ! { queue_left && gh_read "repos/$repo/actions/runs?status=$status&per_page=100" "$scratch" "$q_left"; }; then
+      rm -f "$scratch"
+      return 1
+    fi
     if ! id=$(perl -MJSON::PP -e '
       my $d = eval { JSON::PP->new->decode(do { local $/; <STDIN> }) };
       exit 1 unless ref $d eq "HASH" && ref $d->{workflow_runs} eq "ARRAY";
@@ -105,7 +117,10 @@ queue_read() {
     runs+=" $id"
   done
   for id in $(tr ' ' '\n' <<<"$runs" | sort -un); do
-    gh_read "repos/$repo/actions/runs/$id/jobs?filter=latest&per_page=100" "$scratch" || { rm -f "$scratch"; return 1; }
+    if ! { queue_left && gh_read "repos/$repo/actions/runs/$id/jobs?filter=latest&per_page=100" "$scratch" "$q_left"; }; then
+      rm -f "$scratch"
+      return 1
+    fi
     if ! counts=$(perl -MJSON::PP -e '
       my $d = eval { JSON::PP->new->decode(do { local $/; <STDIN> }) };
       exit 1 unless ref $d eq "HASH" && ref $d->{jobs} eq "ARRAY";
