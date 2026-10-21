@@ -206,3 +206,21 @@ test('no follow-up starts past FOLLOW_WINDOW_MS from the run\'s first tick, so n
   assert.equal(w.ticks.length, 2, 'past the window: none');
   assert.deepEqual(await done, { cut: 1 });
 });
+
+test('review: the window counts from the first request\'s arrival, so a request queued behind a long tick is not held past it', async () => {
+  const w = world();
+  w.ticker('scheduled'); // tick 0, 0-85 s
+  await w.advance(1_000);
+  const queued = w.ticker('requested'); // arrives at 1 s
+  await w.advance(84_000);
+  await w.end(0);
+  assert.equal(w.ticks.length, 2); // its tick, 85-170 s
+  await w.advance(85_000);
+  await w.end(1, { cut: 1 });
+  assert.equal(w.ticks.length, 3, 'a follow-up at 170 s: 169 s after the request arrived');
+  await w.advance(85_000);
+  await w.end(2, { cut: 1 });
+  await w.advance(TICK_SPACING_MS);
+  assert.equal(w.ticks.length, 3, 'none at 255 s: 254 s after the request arrived');
+  assert.deepEqual(await queued, { cut: 1 });
+});

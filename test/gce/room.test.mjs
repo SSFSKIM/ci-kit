@@ -156,3 +156,23 @@ test('the walk skips a full placement without an insert, and gives back what a r
   assert.ok(!room.fits(attempt(2, 'us-central1')), 'the refusal closed C4D us-central1');
   assert.ok(quotaBlocks(memory, attempt(4, 'us-central1')));
 });
+
+test('review: a closed limit stays closed when another insert in flight gives its share back', () => {
+  const room = createRoom({ limits: LIMITS, instances: [], egress: 'external' });
+  const four = attempt(4, 'us-west4');
+  room.take(four);
+  room.take(four);
+  room.release(four);
+  room.refused(four, 'IN_USE_ADDRESSES'); // the first refused: something outside the listing holds the rest
+  room.release(four); // the second fails for capacity
+  assert.ok(!room.fits(attempt(2, 'us-west4')), 'no address came free');
+});
+
+test('review: an unsettled insert of an earlier tick holds its region\'s address, instance and vCPUs while unlisted', () => {
+  const pending = [{ zone: 'us-west4-a', vcpus: 4, egress: 'external' }];
+  const room = createRoom({ limits: { ...LIMITS, addresses: { 'us-west4': 1 } }, instances: [], pending, egress: 'external', placements: M6_CFG.placements });
+  assert.ok(!room.fits(attempt(4, 'us-west4')));
+  assert.equal(room.why(attempt(4, 'us-west4')), 'us-west4 addresses 1/1');
+  const vcpus = createRoom({ limits: { ...LIMITS, vcpus: { 'us-west4|c4d': 6 } }, instances: [], pending, egress: 'external', placements: M6_CFG.placements });
+  assert.ok(!vcpus.fits(attempt(4, 'us-west4')), '4 of 6 held by the pending insert');
+});

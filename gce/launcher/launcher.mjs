@@ -20,7 +20,7 @@ import { servedRepos, placementZones } from './config.mjs';
 import {
   allocationId, instanceName, repoLabel, viewInstance, isGce, planLaunches, runnersNeverOnline, placements, quotaBlocks, insertOutcome, walkPlacements, stockoutMemory,
   jobInstance, jitRequest, newestReadyImage, reviewInstances, reviewRows, orphanRunners, orphanDisks, reportable, claimedInstances,
-  largestMachineCpus, raceAttempts, walkRecord, unsettledInsert, quotaMetric, RACE_AFTER_MS,
+  largestMachineCpus, raceAttempts, walkRecord, unsettledInsert, pendingAllocation, quotaMetric, RACE_AFTER_MS,
 } from './logic.mjs';
 import { planPrelaunches } from './prelaunch.mjs';
 import { createRoom } from './room.mjs';
@@ -566,7 +566,11 @@ export class Launcher {
     const limits = await Promise.race([seen.limits, wait.promise.then(() => null)]);
     wait.cancel();
     const bake = seen.builders.filter((b) => b.labels?.['ci-kit'] === 'gce-builder').map(viewInstance);
-    const room = createRoom({ limits, instances: [...seen.instances, ...bake], egress: this.cfg.egress });
+    // An earlier insert still unsettled and unlisted holds its share as its VM would (planLaunches counts its vCPUs).
+    const listed = new Set(seen.instances.map((i) => i.alloc));
+    const pending = seen.rows.filter((r) => !listed.has(r.alloc) && pendingAllocation(r) && unsettledInsert(r)?.zone)
+      .map((r) => ({ zone: unsettledInsert(r).zone, vcpus: r.reserved ?? largestMachineCpus(r.cpus, this.cfg), egress: r.egress }));
+    const room = createRoom({ limits, instances: [...seen.instances, ...bake], pending, placements: this.cfg.placements, egress: this.cfg.egress });
     let open;
     const ctx = {
       seen, deadline, out, image, room, inflight: plan.inflight, races: [],
@@ -630,6 +634,7 @@ export class Launcher {
     const what = race ? `the race of ${instanceName(race.of)} for ${purpose}` : purpose;
     const attempts = item.attempts ?? placements(cpus, this.cfg);
     if (attempts.every((p) => quotaBlocks(seen.quota, p) || this.stockouts.has(p, this.now()) || (ctx.room && !ctx.room.fits(p)))) {
+      for (const p of attempts) ctx.room?.skip(p);
       this.log(`${what} in ${repo} waits: every placement for its size is full, out of quota this tick, or recently stocked out`);
       return {};
     }

@@ -10,6 +10,8 @@ import { Launcher } from '../../gce/launcher/launcher.mjs';
 import { createGceLedger } from '../../gce/launcher/ledger-store.mjs';
 import { M6_CFG } from './config-fixtures.mjs';
 import { GceError } from '../../lib/gce.mjs';
+import { launchRow, renderRow } from '../../gce/launcher/ledger.mjs';
+import { allocationId } from '../../gce/launcher/logic.mjs';
 
 const SBX = 'SSFSKIM/ci-kit-sandbox';
 const CFG = { ...M6_CFG, repos: [{ repo: SBX }], max_vcpus: 386 };
@@ -78,6 +80,7 @@ test('every placement full: the launch waits without a row, a runner or an inser
   assert.deepEqual(out.launched, []);
   assert.equal(w.log.filter((l) => l.startsWith('insert') || l.startsWith('jit')).length, 0);
   assert.ok(w.log.some((l) => /waits: every placement for its size is full/.test(l)));
+  assert.ok(out.full['us-west4 addresses'] >= 1, `the summary counts it: ${JSON.stringify(out.full)}`);
 });
 
 test('a limit that was wrong: its refusal closes it, so the walk goes on to the next placement and the next tick reads afresh', async () => {
@@ -104,4 +107,17 @@ test('a launch the tick\'s deadline cut off is counted for the follow-up tick', 
   const out = await launcher.tick();
   assert.deepEqual(out.launched, []);
   assert.equal(out.cut, 1);
+});
+
+test('review: an earlier tick\'s insert still unsettled and unlisted holds its placement\'s room', async () => {
+  const one = { ...LIVE, addresses: { ...LIVE.addresses, 'us-west4': 1 } };
+  const { w, launcher } = setup({ limits: one });
+  // The ledger's row of a launch whose insert into us-west4-a never settled, its VM not (yet) listed.
+  const at = T0 - 60_000;
+  const alloc = allocationId(at, () => 7);
+  const row = { ...launchRow({ alloc, repo: SBX, cpus: 4, at, config: COMMIT, egress: 'external', reserved: 4 }), slow: [{ zone: 'us-west4-a', outcome: 'unknown', sent: new Date(at).toISOString() }] };
+  w.gh.comments.push({ id: 1, body: renderRow(row), updated_at: new Date(at).toISOString() });
+  w.sim.queue(SBX, L(4));
+  const out = await launcher.tick();
+  assert.deepEqual(out.launched.map((n) => zoneOf(w, n)), ['us-central1-a'], 'us-west4\'s one address is the pending insert\'s');
 });

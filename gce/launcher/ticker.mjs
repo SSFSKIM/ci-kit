@@ -10,7 +10,7 @@ export const TICK_SPACING_MS = 10_000;
 // TICK_SPACING_MS after its start, rather than leaving those jobs to the next minute tick: it joins the pending tick if
 // there is one, and the request that asked for the cut tick is answered only once its follow-up has ended, because a
 // tick run with no request open would have no CPU (the service runs with --cpu-throttling). FOLLOW_UPS bounds a run of
-// them, and none starts FOLLOW_WINDOW_MS past the run's first tick: a tick takes up to ~90 s (its 45 s budget, then the
+// them, and none starts FOLLOW_WINDOW_MS after the earliest request the run serves arrived: a tick takes up to ~90 s (its 45 s budget, then the
 // inserts already sent, which wait up to 40 s), and a request held past Cloud Run's 300 s timeout, Cloud Scheduler's
 // 300 s attempt deadline or Pub/Sub's 300 s ack deadline would fail or be redelivered. A pool that keeps running out
 // of time waits for the next request.
@@ -24,7 +24,8 @@ export const FOLLOW_WINDOW_MS = 180_000;
 // error it failed with.
 export function createTicker({ tick, budgetLow, now = Date.now, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), spacingMs = TICK_SPACING_MS }) {
   let running = null; // the tick in progress
-  let pending = null; // {scheduled, requests, chain, since, done}: the tick that serves requests arriving now
+  let pending = null; // {scheduled, requests, chain, since, done}: the tick that serves requests arriving now; since:
+  // when the earliest request it serves arrived (a follow-up's, its run's)
   let lastStart = -Infinity;
 
   async function start(slot) {
@@ -36,7 +37,6 @@ export function createTicker({ tick, budgetLow, now = Date.now, sleep = (ms) => 
     pending = null;
     if (!slot.scheduled && budgetLow()) return { dropped: 'rate budget', requests: slot.requests };
     lastStart = now();
-    slot.since ??= lastStart;
     const mine = tick({ trigger: slot.scheduled ? 'scheduled' : slot.requests ? 'requested' : 'follow-up', requests: slot.requests });
     running = mine;
     let out;
@@ -49,13 +49,13 @@ export function createTicker({ tick, budgetLow, now = Date.now, sleep = (ms) => 
     return out;
   }
 
-  // A request, or a follow-up `chain` ticks into a run of them that began at `since`, joins the pending tick, or makes it.
-  function join(trigger, chain = 0, since = null) {
-    const slot = pending ?? (pending = { scheduled: false, requests: 0, chain: 0, since: null, done: null });
-    if (trigger === 'follow-up') {
-      slot.chain = Math.max(slot.chain, chain);
-      slot.since = Math.min(slot.since ?? since, since);
-    } else slot.requests += 1;
+  // A request, or a follow-up `chain` ticks into a run of them whose earliest request arrived at `since`, joins the
+  // pending tick, or makes it.
+  function join(trigger, chain = 0, since = now()) {
+    const slot = pending ?? (pending = { scheduled: false, requests: 0, chain: 0, since, done: null });
+    slot.since = Math.min(slot.since, since);
+    if (trigger === 'follow-up') slot.chain = Math.max(slot.chain, chain);
+    else slot.requests += 1;
     if (trigger === 'scheduled') slot.scheduled = true;
     slot.done ??= start(slot);
     return slot.done;

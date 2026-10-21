@@ -91,8 +91,12 @@ export function limitsCache({ read, ttlMs = LIMITS_TTL_MS, now = Date.now, log =
 // behind the NAT holds no address, and while gce.json's egress is `nat` no new one needs one. take() as an insert is
 // sent and release() when it is refused or fails; an unknown outcome keeps its share, since its VM may exist. A refusal
 // that still happens (the limit was wrong, or something outside the listing holds a share) closes that limit for the
-// rest of the tick: refused(attempt, metric). Null without limits: nothing is skipped, as before admission.
-export function createRoom({ limits, instances, egress }) {
+// rest of the tick: refused(attempt, metric), whatever later releases do. pending: an earlier tick's inserts whose
+// outcome is still unknown and whose VM is not listed ({zone, vcpus, egress}, from the ledger): each holds its region's
+// instance and address, and its vCPUs in each family a placement offers in its zone (its machine is not recorded, so
+// where two families share the zone both count it, the safe side). Null without limits: nothing is skipped, as before
+// admission.
+export function createRoom({ limits, instances, egress, pending = [], placements = [] }) {
   if (!limits) return null;
   const caps = new Map();
   for (const [region, n] of Object.entries(limits.addresses ?? {})) caps.set(`${region} addresses`, n);
@@ -107,11 +111,19 @@ export function createRoom({ limits, instances, egress }) {
     add(`${region} ${familyOf(i.machine)} vCPUs`, i.vcpus);
     if (i.egress !== 'nat') add(`${region} addresses`, 1);
   }
+  for (const u of pending) {
+    const region = regionOf(u.zone);
+    add(`${region} instances`, 1);
+    if (u.egress !== 'nat') add(`${region} addresses`, 1);
+    const families = new Set(placements.filter((p) => p.zones.includes(u.zone)).flatMap((p) => Object.values(p.machines).map(familyOf)));
+    for (const family of families) add(`${region} ${family} vCPUs`, u.vcpus);
+  }
+  const closed = new Set(); // limits a refusal closed for the tick
   const needs = (p) => {
     const region = p.placement.region;
     return [[`${region} ${familyOf(p.machine)} vCPUs`, machineCpus(p.machine)], [`${region} instances`, 1], ...(egress === 'nat' ? [] : [[`${region} addresses`, 1]])];
   };
-  const over = (p) => needs(p).find(([key, n]) => caps.has(key) && (held.get(key) ?? 0) + n > caps.get(key));
+  const over = (p) => needs(p).find(([key, n]) => closed.has(key) || (caps.has(key) && (held.get(key) ?? 0) + n > caps.get(key)));
   const skipped = {};
   return {
     fits: (p) => !over(p),
@@ -135,7 +147,10 @@ export function createRoom({ limits, instances, egress }) {
       const key = base === 'IN_USE_ADDRESSES' ? `${region} addresses`
         : base === 'INSTANCES' ? `${region} instances`
           : base === 'CPUS_PER_VM_FAMILY' || base === `${family.toUpperCase()}_CPUS` ? `${region} ${family} vCPUs` : null;
-      if (key && base === metric) caps.set(key, Math.min(caps.get(key) ?? Infinity, held.get(key) ?? 0));
+      if (key && base === metric) {
+        closed.add(key);
+        caps.set(key, Math.min(caps.get(key) ?? Infinity, held.get(key) ?? 0));
+      }
     },
   };
 }
