@@ -82,8 +82,9 @@ After this work:
   run's unsuffixed name and the fault-injection run), 0 errors, 5 files on `test-history`; its log carries counts only.
   Reconstructed membership equals the log's `Tests` line on three runs (22,360; 22,360; 22,454).
 - [ ] M3 — Labels and reports (starts when the store holds ≥ 14 days).
-- [ ] M4 — Selection for iteration runs: agreed and written 08:1xZ; ci-kit #64 merged (919f0f6); MAWS #101 open, class 1a
-  green 39575096972; `unit:darwin` proof and the architect's landing pending.
+- [ ] M4 — Selection for iteration runs: agreed and written 08:1xZ; ci-kit #64 merged (919f0f6); MAWS #101, class 1a
+  green 39575096972, `unit:darwin` proof 39576855823; landed ee9ecace6 (MAWS DL 82). Follow-up: `docs/` exempt but
+  for `docs/doperpowers/evidence`. Open: a real selected run in the store.
 - [ ] M5 — Unit overhead experiment: written 2026-10-21 08:0xZ (arms S, C, D, I); running.
 - [ ] M6 — The `ci-kit:optimize` skill.
 
