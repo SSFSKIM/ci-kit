@@ -1298,6 +1298,20 @@ hold-aware plan send them to the guest, which this spec leaves open.
   V4's evidence, group by group, which leaves a bound unprotected from the lane's install until that evidence exists.
   The same fix made the contract test catch the class (a raw time bound in a spec a non-measured job runs fails it
   unless it is behind its group's switch, through the budget, or a listed liveness bound on the product's own timers).
+- 2026-10-21 (late, V2b's builder): **the guest's shapes.** `kickoff.sh <slot> <clone>` (the guest learns its clone's
+  name only from it, and the posture line needs it); the shares are named `kit`, `identity`, `out` and `cache`. The
+  `out/` protocol is written once, in `wrapper.sh`'s header, and adds two markers to Design's list: `job` (the run,
+  attempt, job and repository, written by the guest's job-started hook before any check) and `refused` (the refusal
+  line verbatim, which the two-refusals pause reads). `done` holds the exit code alone; every other marker is
+  `key=value`, written once by a rename. A stop is refused whenever a job is seen or the processes cannot be read, and
+  every `stop-refused` also writes `assigned`, so the launcher always has the running bound's anchor. The wrapper scans
+  every `Runner_*.log` (kickoff empties `_diag` first, since the image's registration left one), counts the broker's
+  acknowledgement line as a job, and stops the listener with SIGINT to the runner's process group, SIGINT first
+  restored to default (a backgrounded command starts with it ignored). Worker detection reuses `runner-state.py`, so
+  the image needs `python3`; the compiled helpers default to `~/ci-kit-helpers/`. The guest's desktop check is a copy
+  (the host's opens an episode and its alert through `gh`), refuses an unreadable display as it refuses a wrong one,
+  and the cursor park runs in the guest too. The GitHub job id exists nowhere in the guest, so `bake.sh --trial` reads
+  it through `gh` from `out/job`'s run and attempt and the runner's name.
 
 ## Surprises & Discoveries
 
@@ -1368,6 +1382,12 @@ hold-aware plan send them to the guest, which this spec leaves open.
   - **MAWS's alert check counts an online guest as a free Mac** (V3): a run may go ahead while the host has an alert,
     and its host jobs are then refused; a `--lane vm` run during a host alert stops while the guest is offline
     (`MAWS_GATE_IGNORE_ALERTS=1` passes it).
+  - **The runner's diag log carries its console** (`WRITE LINE: …`, v2.338.0's HostTraceListener), so `Listening for
+    Jobs` and `Running job:` are read there. **`run.sh` exits 0 for almost every listener code** (run-helper maps 1, 5
+    and unknown codes to 0), so `done`'s code says little: the launcher reads a job's outcome from `out/job`,
+    `out/refused` and `_diag`.
+  - Not yet seen on the mini (V4): that a `setsid` process outlives the `tart exec` that started it, and that
+    `sudo -n shutdown` works for `admin` in the base image.
 
 ## Outcomes & Retrospective
 
