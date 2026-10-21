@@ -769,9 +769,18 @@ test('cover, replayed from 10-21: a VM whose job just ended covers no queued job
   assert.ok([unit, probes, stat].every((j) => j.status === 'queued'));
 });
 
-// Every call to Compute Engine and GitHub takes `ms` of real time, as a remote API's does.
-const slowed = (api, ms) => Object.fromEntries(Object.entries(api).map(([k, fn]) =>
-  [k, typeof fn === 'function' ? async (...a) => { await new Promise((r) => setTimeout(r, ms)); return fn(...a); } : fn]));
+// Every call to Compute Engine and GitHub answers on a later turn, as a remote API's does, and is counted on a logical
+// clock of call layers: a call ends one layer after it began, so calls made together end in the same layer and a call
+// made after another ended lands in a later one. The layer is the depth of sequential calls, whatever the machine's
+// load (wall time, the measure here before, stretched under load: ci-kit#77). Every call waits the same 1 ms timer,
+// and Node fires equal timers in the order they were set, so the count is the same on every run.
+const layered = (api, clock) => Object.fromEntries(Object.entries(api).map(([k, fn]) =>
+  [k, typeof fn === 'function' ? async (...a) => {
+    const began = clock.layer;
+    await new Promise((r) => setTimeout(r, 1));
+    clock.layer = Math.max(clock.layer, began + 1);
+    return fn(...a);
+  } : fn]));
 
 test('reads in parallel, launches before cleanup: the first insert comes a few calls into the tick, however much else there is', async () => {
   const MAWS = 'SSFSKIM/MAWS';
@@ -796,21 +805,19 @@ test('reads in parallel, launches before cleanup: the first insert comes a few c
   for (const repo of Object.keys(repos)) for (const size of [2, 8]) w.sim.queue(repo, L(size));
   w.advance(MIN);
 
-  const D = 50;
+  const clock = { layer: 0 };
   let first = null;
-  w.hooks.beforeInsert = () => { first ??= Date.now(); };
+  w.hooks.beforeInsert = () => { first ??= clock.layer; };
   const slow = new Launcher({
-    gce: slowed(w.gce, D), gh: slowed(w.github, D), ledger: createGceLedger(slowed(w.github, D), cfg.ledger, { now: w.now }), cfg, config: COMMIT,
-    poolRepos: [], now: w.now, random: () => Math.floor(Math.random() * 36 ** 5), alert: async () => {},
+    gce: layered(w.gce, clock), gh: layered(w.github, clock), ledger: createGceLedger(layered(w.github, clock), cfg.ledger, { now: w.now }),
+    cfg, config: COMMIT, poolRepos: [], now: w.now, random: () => Math.floor(Math.random() * 36 ** 5), alert: async () => {},
   });
-  const began = Date.now();
   const out = await slow.tick();
   assert.equal(out.launched.length, 6);
   assert.ok(out.deleted.some((d) => d.startsWith(names[1])), 'the cleanup ran in the same tick');
   // Sequentially this tick makes about 30 calls before its first insert. In parallel: the ledger, then the instances;
   // beside them each repo's runners, runs and jobs; then the ledger row, the JIT config and the insert.
-  const depth = (first - began) / D;
-  assert.ok(depth < 10, `the first insert came ${depth.toFixed(1)} calls deep`);
+  assert.ok(first < 10, `the first insert came ${first} calls deep`);
 });
 
 test('timing: the tick reports its first insert, and a row its job\'s run, workflow, queued and started times and its VM\'s RUNNING time', async () => {
