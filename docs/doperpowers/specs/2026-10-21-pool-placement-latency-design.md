@@ -631,9 +631,11 @@ VM's walk.
   Live behind the NAT (launcher 00014-b8p, 19:46–19:58Z), GitHub's runner endpoints stalled bursts: a MAWS run on C3D
   started 84–110 s after queued, a 20-job sandbox burst 39–132 s. The launcher went back to 00013-78r. A same-hour
   experiment (20 check VMs per point, us-central1) ruled out the per-IP ratio: spreading the burst over more NAT
-  addresses did not help (Surprises). The address raises stay the path to more VMs per region; `egress: "nat"` returns
-  it by a config commit once the cause is known. Router, NAT, Private Google Access, the never-online rule and the
-  alerts stay.
+  addresses did not help (Surprises: the four-point curve). The reason is GitHub's edge under concurrent NAT flows.
+  More VMs per region now come from the address raises (left in review, not refiled) and from M6's placements, since
+  each new region brings its own 8 addresses; `egress: "nat"` is the one-line config that re-enables NAT. Router, NAT,
+  Private Google Access, the never-online rule and the alerts stay. M6's placements are therefore sized per region by
+  min(family vCPUs, 8 addresses × the machine size), and `max_vcpus` is the sum of those, not of the vCPU grants.
 
 
 ## Surprises & Discoveries
@@ -678,8 +680,9 @@ VM's walk.
   NAT on 1 address 57.1 / 75.8 s (12/19); 3 addresses 53.6 / 76.2 s (12/20); 11 addresses 70.4 / 107.6 s (15/20). The
   runner's `Location.GetConnectionData` to pipelines*.actions.githubusercontent.com takes ~20 s an attempt, or is
   reset ("Connection refused"). Zero NAT drops, at most 14 ports in use per VM; 6 VMs (us-west4) or 2 VMs through the
-  NAT connected in ~9 s. Not port exhaustion, not the per-address ratio; the cause is unproven (a packet-level probe
-  from a no-IP VM would tell). The git-core PPA's 503s that hour were Launchpad's (the Mac saw them too).
+  NAT connected in ~9 s. Not port exhaustion, not the per-address ratio. Open question, not a task: what in GitHub's
+  edge treats concurrent NAT flows this way (a packet-level probe from a no-IP VM would tell). The git-core PPA's 503s
+  that hour were Launchpad's (the Mac saw them too).
 
 
 ## Outcomes & Retrospective
