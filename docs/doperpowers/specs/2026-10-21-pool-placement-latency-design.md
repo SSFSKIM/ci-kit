@@ -57,7 +57,8 @@ toward the boot alone, and below it for the jobs a warm runner covers.
   - [x] (2026-10-21 15:57Z) Step 2: a c4d-highcpu-2 on hyperdisk-balanced in us-west4-a, from the current ready image,
     ran a real sandbox job (exit:0); VM, disk and runner gone. Insert accepted → RUNNING 23.2 s, RUNNING → started
     28.9 s (one sample; C3D's accepted → RUNNING is ~7.6 s, a finding step 4's ~18 C4D starts settle).
-- [ ] M3 — The tick and the boot.
+- [ ] M3 — The tick and the boot. (2026-10-21) Built, rebased onto M1+M2, reviewer-medium clean after one fix wave,
+  ci-gate green; PR to CI-opt. Its proofs over a day of rows follow the launcher deploy and the bake after merge.
 - [ ] M4 — Launch on GitHub's `workflow_job` webhook.
 - [ ] M5 — Pre-launch of a run's gate VMs (the owner chose it 2026-10-21; no warm runner).
 
@@ -371,6 +372,11 @@ reported to the owner.
 - 2026-10-21 (M3): **The ledger read is incremental.** After its first whole read the store asks only for comments
   updated since its last read, less 5 min, and updates its held set in place; the whole 26 h window was 5 sequential
   pages (2.2 s) ahead of every launch. The first insert now comes ~7 calls into a tick, from ~32.
+  `since` returns no tombstones, so at most every 5 min the store re-reads the whole window and forgets what GitHub
+  no longer lists (an overlapping launcher's delete would otherwise survive in the cache: reviewer-medium). Within a
+  repo, queued runs are still listed before in-progress ones, and a run in both is read once.
+- 2026-10-21 (M3): **`latency-report.mjs` reports each machine type's stages**, insert accepted → job started paired
+  per VM (the target's statistic, not a sum of medians), over open and closed ledger issues.
 - 2026-10-21 (M3, CI-opt approved): **Job VMs boot without cloud-init.** The spec's premise that docker waited on
   `cloud-final` was wrong: cloud-init's local and network stages hold `sysinit.target`, which every service waits
   for, so trimming modules (the first build) left RUNNING → started at 34.4 s on one sample. Five real sandbox jobs
