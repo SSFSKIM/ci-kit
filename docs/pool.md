@@ -761,10 +761,11 @@ per allocation:
   and queued → started of the pool jobs of pre-launched runs beside every other run's (Acceptance 5).
   Rows on rotated ledger issues closed since the window began are read too. A row or tick without a stage's fields
   (written before M3) is left out of that stage.
-- `node gce/tools/boot-sample.mjs --image <name> [--region <r>] [--machine <m>] [--count 5] [--parallel 2] [--out <dir>]`
+- `node gce/tools/boot-sample.mjs --image <name> [--region <r>] [--family <f>] [--machine <m>] [--count 5] [--parallel 2] [--out <dir>]`
   times job VMs from an image through the bake's real-job path (one `bake-check` job per sample in ci-kit-sandbox,
-  on its own JIT runner) in one placement: `--region`'s (default: the first), on its zones, subnetwork and boot disk
-  type, with `--machine` (default: its size-4 machine). It reports insert accepted → RUNNING → job started, keeps each
+  on its own JIT runner) in one placement: the first in `--region` (default: any) of `--family` (`c4d`, `c3d`) that
+  names `--machine`, so `--region us-central1 --machine c3d-highcpu-4` samples C3D there, not the C4D placement before
+  it; on its zones, subnetwork and boot disk type, with `--machine` (default: its size-4 machine). It reports insert accepted → RUNNING → job started, keeps each
   sample's console and `ci-kit/job` report, and gives the median and range of each stage. It shares the pool's quota and stops at the first quota refusal;
   every VM and runner it made is gone when it ends.
 - `end`: `done` (its job ended, or its runner did), `cancelled-idle` (no job came within `idle_runner_minutes`, or
