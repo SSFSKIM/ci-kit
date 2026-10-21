@@ -83,7 +83,7 @@ After this work:
   Reconstructed membership equals the log's `Tests` line on three runs (22,360; 22,360; 22,454).
 - [ ] M3 — Labels and reports (starts when the store holds ≥ 14 days).
 - [ ] M4 — Selection for iteration runs (with the MAWS architect).
-- [ ] M5 — Unit overhead experiment: written 2026-10-21 08:2xZ (arms S, C, D, I); running.
+- [ ] M5 — Unit overhead experiment: written 2026-10-21 08:0xZ (arms S, C, D, I); running.
 - [ ] M6 — The `ci-kit:optimize` skill.
 
 ## Design
