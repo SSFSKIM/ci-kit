@@ -589,6 +589,20 @@ Each is written here in full when its condition holds:
     - the explicit form is `ids`, chosen when its serialized UTF-8 size is smaller than the delta's;
     - new skipped sets carry a hash, and old lines' skipped deltas without one are checked by count only;
     - the existing store (8 lines, 6 reports, 112,440 memberships) reconstructs with the new readers.
+- 2026-10-21 (shards, ci-kit #69): **the collector reads a sharded job as one line.** MAWS shards `unit` across VMs for
+  wall time: a matrix of jobs `unit <k>/<n>`, each uploading `test-results-unit-<k>of<n>-<attempt>`. Unsharded runs
+  (`--affected` iterations, and every run before the switch) keep `unit` and `test-results-unit-<attempt>` and read as
+  before. An attempt's n shards make one line of `unit`, so bases, durations, selection and the change links run across
+  the switch:
+  - its report is the union of the shards', each checked against its own shard's job;
+  - it carries the earliest start, the latest completion and the worst conclusion; `shards` holds each shard's job, id,
+    runner, times, conclusion and artifact;
+  - it waits while a shard runs; it is `missing` when every shard ran its tests and an artifact is absent; an attempt in
+    which a shard did not run its tests has none, since a shard from another attempt never completes a set; mixed shard
+    counts are refused.
+
+  So a run whose shard GCE preempted (ci-gate reruns that job alone) leaves no report. Completing the rerun from the
+  copied shards' earlier artifacts would recover it; that is the owner's call.
 
 ## Surprises & Discoveries
 
