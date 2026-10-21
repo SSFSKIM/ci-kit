@@ -1312,6 +1312,13 @@ hold-aware plan send them to the guest, which this spec leaves open.
   (the host's opens an episode and its alert through `gh`), refuses an unreadable display as it refuses a wrong one,
   and the cursor park runs in the guest too. The GitHub job id exists nowhere in the guest, so `bake.sh --trial` reads
   it through `gh` from `out/job`'s run and attempt and the runner's name.
+  Its review made the handshake fail closed further: a job once seen is never stopped whatever a later read says; a
+  diag log that cannot be read (at open or mid-read) refuses a stop (`stop-refused job=unknown`) or, after one, answers
+  `stop-raced job=unknown`; `stop-refused` is published only after its `assigned`; and an answer that still cannot be
+  written after `CI_KIT_VM_WRITE_WAIT` (60 s) leaves no `done` and no power-off, so the launcher's bound ends the clone.
+  **The launcher (V2c) therefore bounds an unanswered stop on its own clock,** counted from its `stop-request`, not
+  from `assigned`, which such a guest may never write; past it, the stop is a stop the wrapper could not answer
+  (`tart stop`, the failure counted, the alert).
 
 ## Surprises & Discoveries
 
