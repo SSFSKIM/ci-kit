@@ -438,8 +438,17 @@ VM needed from it:
   DHCP on any `en*` (or `eth*`) interface, which covers virtio-net and gVNIC (C3D's comes up as `ens3`);
 - the root's growth: the image is the builder's 30 GB disk and a job VM's is `disk_gb`. `ci-kit-gce-instance.service`
   (`gce/vm/instance.sh`, which the job unit requires) runs `growpart` and `resize2fs`, and names the host after the
-  instance (the builder's `/etc/hostname` is emptied). It prints `ci-kit instance: root <size> on <disk>, hostname
-  <name>` to the console.
+  instance (the builder's `/etc/hostname` is emptied). It prints `ci-kit instance (up <s> s): root <size> on <disk>,
+  hostname <name>` to the console.
+
+The console runs at 115200 baud (about 11.5 KB/s), and rsyslog forwards the boot's journal backlog to it once it
+starts, so a journal line reaches the console 20 s and more late, and the VM powers off before most of them arrive.
+The instance and job units therefore write to the console directly (`StandardOutput=journal+console`); their lines,
+the runner's included, carry the uptime in the kernel's stamp. Measured on c3d-highcpu-4 (5 jobs per image,
+`gce/tools/boot-sample.mjs`, 2026-10-21): RUNNING → job started fell from a median of 31.4 s to 16.3 s. About 6 s
+of it passes before the kernel starts (firmware); the guest reaches its job unit at 5.2–5.8 s of uptime and the runner
+listens about 3 s later. The rest is GitHub's: connecting and assigning the job took 1–2 s in most samples and up to
+11 s in some.
 
 The guest agent, not cloud-init, serves the metadata and guest attributes. snapd is purged (no job uses a snap, and it
 seeded itself on the first boot of every disk made from the image) and pinned out.
@@ -511,6 +520,11 @@ per allocation:
   of each stage of a job's wait: queued → next tick, tick start → insert accepted (the tick's first VM's
   creation), tick start → first insert sent, insert accepted → RUNNING, RUNNING → job started, and queued →
   started. A row or tick without a stage's fields (written before M3) is left out of that stage.
+- `node gce/tools/boot-sample.mjs --image <name> [--machine c3d-highcpu-4] [--count 5] [--parallel 2] [--out <dir>]`
+  times job VMs from an image through the bake's real-job path (one `bake-check` job per sample in ci-kit-sandbox,
+  on its own JIT runner): insert accepted → RUNNING → job started, each sample's console and `ci-kit/job` report
+  kept, and the median and range of each stage. It shares the pool's quota and stops at the first quota refusal;
+  every VM and runner it made is gone when it ends.
 - `end`: `done` (its job ended, or its runner did), `cancelled-idle` (no job came within `idle_runner_minutes`, or
   its repo stopped being served), `preempted`, `max-run` (Compute Engine's run limit, or the launcher's overage
   rule), `abandoned` (no VM was created: every zone refused, quota, or a crash before the insert), `orphan` (a VM
