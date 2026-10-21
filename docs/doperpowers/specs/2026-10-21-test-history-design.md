@@ -76,7 +76,11 @@ After this work:
 - [x] (2026-10-21 08:2xZ) M1 — MAWS writes and uploads unit's JUnit report: MAWS #99, merge 4d34b1d12. Class 1a
   pool green 39557488356 (22,360 cases = the `Tests` line; upload 1 s); unit:darwin green on the mini 39559203378
   (`test-results-unit-darwin-1`); an injected upload error left its step green (39555148333).
-- [ ] M2 — ci-kit's collector and the sandbox store.
+- [x] (2026-10-21 07:57Z) M2 — ci-kit's collector and the sandbox store: ci-kit #63 (merge 81230ef03), sandbox #22
+  (merge 2929ccbb0). Two `reviewer-medium` rounds (5 then 2 findings, all fixed with tests; residue in ci-kit #62).
+  First `workflow_dispatch` 39565155535 green through the App: 6 artifacts, 8 lines (6 present, 2 missing: the first M1
+  run's unsuffixed name and the fault-injection run), 0 errors, 5 files on `test-history`; its log carries counts only.
+  Reconstructed membership equals the log's `Tests` line on three runs (22,360; 22,360; 22,454).
 - [ ] M3 — Labels and reports (starts when the store holds ≥ 14 days).
 - [ ] M4 — Selection for iteration runs (with the MAWS architect).
 - [ ] M5 — Unit overhead experiment (independent; any time).
@@ -320,7 +324,33 @@ Each is written here in full when its condition holds:
   7. **Report ownership.** The upload runs only after this job's test step; `ci-results/` is cleared first; ingestion
      checks the report's timestamps.
 
+- 2026-10-21 (M2, open for M3): **amended commits break the change line.** Sessions amend, so two runs of one change
+  can test sibling commits. `compare` then says `diverged`, and the later run has no previous run. As built, M3 would
+  label such a failure `unresolved`. The likely fix is a `rewritten` relation whose paths come from the merge base (a
+  superset of what changed). Decide it when M3 is written, with real lines to check it against.
+
 ## Surprises & Discoveries
+
+- 2026-10-21 (M2): what the build found, and what the collector does about it.
+  - **A case id is not unique.** MAWS repeats 15 titles within one (project, file). The nth occurrence's id carries
+    `n` as a fourth element.
+  - **Volume is about twice the estimate.** A `unit` base is 731 KB gzipped (estimated ≈ 200 KB), so the store grows
+    about 25 MB a month. A run line is 1.4 KB green, and 17.7 KB with a 95-case delta. This is acceptable for now; if it
+    matters later, a base can be written only when the suite changes.
+  - **Refs are gone by collection.** MAWS's ci-gate deletes its `ci/` ref after the run. Commits stay readable by sha:
+    `git/commits` works, but `compare` works only in its three-dot form (two-dot returns 404 on a dangling commit).
+  - **"Re-run failed jobs" lists copied jobs.** Such an attempt lists every job, including the copied ones with their
+    old times. A job whose `completed_at` is before its `created_at` is a copy and is skipped.
+  - **"Missing" needs a definition.** A job is `missing` only when its upload step ran and produced no artifact. A report
+    stamped outside its job is `rejected`, a fourth status.
+  - **Discovery rule (collector step 1).** Listing until the stored artifacts could lose a failed older one, so every pass
+    lists down to the artifacts' 8-day lifetime and skips known ids.
+  - **Search and late arrivals (step 7).** The previous-run search reads the whole store, and a run that arrives late
+    relinks the later line of its change.
+  - **Errors vs `unparseable`.** Only an archive or JUnit defect makes a report `unparseable`. Any other failure is an
+    error, retried by the next pass. A pass with errors still pushes what it wrote and then shows red.
+  - **`node --test` writes no file into its JUnit (Node 22).** Every classname is `test`. Static's and probes' reports
+    (M3) need a per-file run or a reporter that writes the file.
 
 - 2026-10-21: Unit's duration grows about 2.5× faster than its test count (295 → 469 s against 18.0k → 22.3k tests,
   10-18 → 10-21). Heavy suites are being added, and per-file overhead dominates (above). The 100 slowest files are 55%
