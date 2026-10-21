@@ -118,8 +118,9 @@ test('the builder has no service account, carries only a token in its metadata, 
   assert.equal(body.scheduling.instanceTerminationAction, 'DELETE');
   assert.ok(Number(body.scheduling.maxRunDuration.seconds) > BAKE_TIMEOUT_MS / 1000);
   assert.equal(body.machineType, 'zones/us-central1-a/machineTypes/e2-standard-4');
-  // The kit's own network, which has no ingress rules; never the project's default network.
-  assert.deepEqual(body.networkInterfaces, [{ subnetwork: 'regions/us-central1/subnetworks/ci-kit-us-central1', accessConfigs: [{ type: 'ONE_TO_ONE_NAT', name: 'External NAT' }] }]);
+  // The kit's own network, which has no ingress rules; never the project's default network. No external address: it
+  // clones and installs through the region's Cloud NAT (spec M6).
+  assert.deepEqual(body.networkInterfaces, [{ subnetwork: 'regions/us-central1/subnetworks/ci-kit-us-central1' }]);
 });
 
 test('the smoke VM boots the new image like a job VM, with no JIT config and the vCPUs it must see', () => {
@@ -130,7 +131,8 @@ test('the smoke VM boots the new image like a job VM, with no JIT config and the
   assert.equal(body.disks[0].initializeParams.diskSizeGb, '50');
   const meta = Object.fromEntries(body.metadata.items.map((i) => [i.key, i.value]));
   assert.deepEqual(meta, { 'enable-guest-attributes': 'TRUE', 'ci-kit-smoke': '2' });
-  assert.equal(body.networkInterfaces[0].subnetwork, 'regions/us-central1/subnetworks/ci-kit-us-central1');
+  // As a job VM: no external address, so its egress check proves the region's NAT.
+  assert.deepEqual(body.networkInterfaces, [{ subnetwork: 'regions/us-central1/subnetworks/ci-kit-us-central1' }]);
 });
 
 test('the check VM boots the new image as a job VM: its JIT config in ci-kit-jit, and the bake\'s labels, never a pool VM\'s', () => {
@@ -228,6 +230,7 @@ test('an ok builder and a passing smoke publish one ready image, and leave no bu
   const result = await bake(gce);
   assert.equal(result.image, `ci-kit-runner-${RUN}-aaaaaaaa`);
   assert.ok(gce.inserted.every((b) => b.networkInterfaces[0].subnetwork === SUBNET), 'every VM is on the kit\'s subnetwork, from gce.json');
+  assert.ok(gce.inserted.every((b) => b.networkInterfaces.every((n) => !n.accessConfigs)), 'no VM of the bake takes an external address');
   assert.deepEqual(ready(gce), [result.image]);
   assert.deepEqual(leftInstances(gce), []);
   const i = gce.calls.indexOf(`insert image ${result.image} from ci-kit-gce-builder-${RUN}`);

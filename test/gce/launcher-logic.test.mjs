@@ -8,7 +8,7 @@ import { GceError } from '../../lib/gce.mjs';
 import {
   allocationId, allocationTime, instanceName, allocOf, repoLabel, runnerLabels, jobCpus, viewInstance, planLaunches,
   placements, insertOutcome, walkPlacements, reviewInstances, reviewRows, orphanRunners, orphanDisks, newestReadyImage,
-  jobInstance, reportable, claimedInstances,
+  jobInstance, reportable, claimedInstances, runnersNeverOnline,
 } from '../../gce/launcher/logic.mjs';
 import { parseGceConfig, servedRepos } from '../../gce/launcher/config.mjs';
 import { ONE_REGION_CFG } from './config-fixtures.mjs';
@@ -114,6 +114,33 @@ test('an instance whose runner has taken a job is never cover, though its runner
   assert.deepEqual(free.launches, [], 'unclaimed, it covers the job');
   const claimed = planLaunches({ queued, instances, runners, now: T0, cfg: CFG, claimed: new Set([name]) });
   assert.deepEqual(claimed.launches.map((l) => l.job.id), [1]);
+});
+
+// Spec M6 (NAT): a VM can boot and still not reach GitHub (its region's NAT missing, misconfigured or out of ports);
+// its offline JIT runner must not cover a job for the whole idle window while every tick reads as healthy.
+test('a VM RUNNING over 3 min whose runner never came online is no cover, and is named for the launcher to report', () => {
+  const n = (k) => instanceName(A(k));
+  const started = (k, ago) => viewInstance({ ...instance({ alloc: A(k), cpus: 4 }), lastStartTimestamp: new Date(T0 - ago).toISOString() });
+  const instances = [
+    started(1, 4 * MIN), // offline 4 min after it started: broken
+    started(2, 4 * MIN), // online: cover
+    started(3, MIN), // offline, still booting: cover
+    viewInstance(instance({ alloc: A(4), cpus: 4, status: 'PROVISIONING' })), // not started yet: cover
+    started(5, 4 * MIN), // offline but claimed (its runner took a job): neither cover nor reported
+  ];
+  const runners = new Map([[SBX, new Map([
+    [n(1), runner(n(1), { status: 'offline' })], [n(2), runner(n(2))], [n(3), runner(n(3), { status: 'offline' })],
+    [n(4), runner(n(4), { status: 'offline' })], [n(5), runner(n(5), { status: 'offline' })],
+  ])]]);
+  const claimed = new Set([n(5)]);
+  const queued = [1, 2, 3, 4].map((id) => job(id, L(4)));
+  const p = planLaunches({ queued, instances, runners, now: T0, cfg: CFG, claimed });
+  assert.deepEqual(p.launches.map((l) => l.job.id), [4], 'three instances cover; the never-online one does not');
+  assert.deepEqual(runnersNeverOnline({ instances, runners, now: T0, claimed }).map((i) => i.name), [n(1)]);
+  // Its runner comes online: it covers again, and is not reported.
+  runners.get(SBX).set(n(1), runner(n(1)));
+  assert.deepEqual(planLaunches({ queued, instances, runners, now: T0, cfg: CFG, claimed }).launches, []);
+  assert.deepEqual(runnersNeverOnline({ instances, runners, now: T0, claimed }), []);
 });
 
 test('claimed: a runner named by a job this tick read, a row that recorded a job, or a VM that reported its job\'s end', () => {
@@ -228,7 +255,7 @@ test('any other failure stops the walk as a failure', async () => {
 });
 
 // The job VM's request body.
-test('a job VM: spot with a DELETE run limit, no service account, the JIT config in metadata, I12 labels, the kit subnetwork', () => {
+test('a job VM: spot with a DELETE run limit, no service account, the JIT config in metadata, I12 labels, the kit subnetwork and no external address', () => {
   const body = jobInstance({
     alloc: A(1), zone: 'us-central1-b', machine: 'c3d-highcpu-8', provisioning: 'spot', repo: SBX, cpus: 8,
     image: 'projects/ssfskim-ci-kit/global/images/ci-kit-runner-x', jit: 'JITCONFIG', placement: CFG.placements[0], cfg: CFG, config: 'abcdef0123456789',
@@ -249,7 +276,9 @@ test('a job VM: spot with a DELETE run limit, no service account, the JIT config
   assert.equal(disk.initializeParams.diskSizeGb, '50');
   assert.equal(disk.initializeParams.sourceImage, 'projects/ssfskim-ci-kit/global/images/ci-kit-runner-x');
   assert.deepEqual(body.metadata.items, [{ key: 'enable-guest-attributes', value: 'TRUE' }, { key: 'ci-kit-jit', value: 'JITCONFIG' }]);
-  assert.equal(body.networkInterfaces[0].subnetwork, 'regions/us-central1/subnetworks/ci-kit-us-central1');
+  // No external address: the VM reaches GitHub, apt and npm through its region's Cloud NAT (spec M6), and the
+  // address quota is no limit on the pool.
+  assert.deepEqual(body.networkInterfaces, [{ subnetwork: 'regions/us-central1/subnetworks/ci-kit-us-central1' }]);
   const std = jobInstance({ alloc: A(1), zone: 'us-central1-b', machine: 'c3d-highcpu-8', provisioning: 'standard', placement: CFG.placements[0], repo: SBX, cpus: 8, image: 'i', jit: 'j', cfg: CFG, config: 'bundled' });
   assert.equal(std.scheduling.provisioningModel, 'STANDARD');
   assert.equal(std.scheduling.instanceTerminationAction, 'DELETE');

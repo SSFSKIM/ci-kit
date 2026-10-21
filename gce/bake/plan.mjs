@@ -131,9 +131,9 @@ export function machineCpus(machine) {
 }
 
 // What the builder and smoke VMs share with a job VM: no service account (the metadata server hands job code no
-// credential), the placement's subnetwork of the kit's network (it has no ingress rule; gce/deploy.sh network) with an
-// ephemeral external address for outbound traffic, guest attributes for reporting, and a run limit after which
-// Compute Engine deletes the VM whatever the bake is doing.
+// credential), the placement's subnetwork of the kit's network (it has no ingress rule; gce/deploy.sh network) with no
+// external address, its outbound traffic through the region's Cloud NAT (spec 2026-10-21 M6), guest attributes for
+// reporting, and a run limit after which Compute Engine deletes the VM whatever the bake is doing.
 function vm({ name, zone, machine, labels, sourceImage, diskGb, diskType, metadata, maxRunSeconds, placement }) {
   return {
     name,
@@ -144,7 +144,7 @@ function vm({ name, zone, machine, labels, sourceImage, diskGb, diskType, metada
       autoDelete: true,
       initializeParams: { diskName: name, sourceImage, diskSizeGb: String(diskGb), diskType: `zones/${zone}/diskTypes/${diskType}`, labels },
     }],
-    networkInterfaces: [{ subnetwork: subnetworkOf(placement), accessConfigs: [{ type: 'ONE_TO_ONE_NAT', name: 'External NAT' }] }],
+    networkInterfaces: [{ subnetwork: subnetworkOf(placement) }],
     serviceAccounts: [],
     metadata: { items: [{ key: 'enable-guest-attributes', value: 'TRUE' }, ...Object.entries(metadata).map(([key, value]) => ({ key, value }))] },
     scheduling: { provisioningModel: 'STANDARD', instanceTerminationAction: 'DELETE', maxRunDuration: { seconds: String(maxRunSeconds) }, automaticRestart: false },

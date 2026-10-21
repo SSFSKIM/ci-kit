@@ -782,6 +782,40 @@ const layered = (api, clock) => Object.fromEntries(Object.entries(api).map(([k, 
     return fn(...a);
   } : fn]));
 
+// Spec M6 (NAT): a VM that boots but cannot reach GitHub must not hold its job for the whole idle window unseen.
+test('a VM RUNNING over 3 min whose runner never came online is reported at ERROR with its zone and region, and its job gets another VM', async () => {
+  const errors = [];
+  const { w, make } = setup();
+  const launcher = make({ error: (message, fields) => errors.push({ message, fields }) });
+  w.sim.queue(SBX, L(4));
+  assert.equal((await launcher.tick()).launched.length, 1);
+  const [name] = vms(w);
+  const vm = w.sim.vm(name);
+  vm.status = 'RUNNING'; // it starts, but its runner never connects
+  vm.lastStartTimestamp = new Date(w.now()).toISOString();
+  w.advance(2 * MIN);
+  assert.deepEqual((await launcher.tick()).launched, [], 'still within the boot allowance: its runner covers the job');
+  assert.deepEqual(errors, []);
+  w.advance(2 * MIN);
+  const out = await launcher.tick();
+  assert.equal(out.launched.length, 1, 'the job is launched again');
+  const zone = vm.zone.split('/').pop();
+  assert.deepEqual(errors.map((e) => e.fields), [{ event: 'runner-never-online', instance: name, zone, region: zone.replace(/-[a-z]$/, ''), runningSeconds: 240 }]);
+  assert.match(errors[0].message, new RegExp(`^runner never online: ${name} \\(c3d-highcpu-4@${zone}\\)`));
+});
+
+test('a VM whose runner came online is cover however long it has run, and nothing is reported', async () => {
+  const errors = [];
+  const { w, make } = setup();
+  const launcher = make({ error: (message, fields) => errors.push({ message, fields }) });
+  w.sim.queue(SBX, L(4));
+  await launcher.tick();
+  w.sim.boot(SBX, vms(w)[0]);
+  w.advance(5 * MIN);
+  assert.deepEqual((await launcher.tick()).launched, []);
+  assert.deepEqual(errors, []);
+});
+
 test('reads in parallel, launches before cleanup: the first insert comes a few calls into the tick, however much else there is', async () => {
   const MAWS = 'SSFSKIM/MAWS';
   const MANIM = 'SSFSKIM/manim-master';

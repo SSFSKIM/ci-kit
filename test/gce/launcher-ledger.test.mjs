@@ -69,16 +69,30 @@ test('an abandoned allocation (no VM) costs nothing and has no seconds', () => {
 });
 
 const C3D = { machine: 'c3d-highcpu-4', zone: 'us-central1-a', diskType: 'pd-balanced', diskGb: 50 };
-test('dollars: vCPU and memory at the machine family\'s spot or on-demand rate in its region, plus the address and the disk, at least a minute', () => {
-  // c3d-highcpu-4 spot: 4 vCPU × 0.00715 + 8 GiB × 0.00096 + IP 0.0025 = 0.03878 $/h; disk 50 GiB × 0.10 / 730 h.
+test('dollars: vCPU and memory at the machine family\'s spot or on-demand rate in its region, plus its NAT and the disk, at least a minute', () => {
+  // c3d-highcpu-4 spot: 4 vCPU × 0.00715 + 8 GiB × 0.00096 + NAT gateway 0.0014 = 0.03768 $/h; disk 50 GiB × 0.10 / 730 h.
   const hour = dollars({ ...C3D, provisioning: 'spot', seconds: 3600 });
-  assert.ok(Math.abs(hour - (0.03878 + 50 * 0.1 / 730)) < 1e-9, String(hour));
+  assert.ok(Math.abs(hour - (0.03768 + 50 * 0.1 / 730)) < 1e-9, String(hour));
   assert.equal(dollars({ ...C3D, provisioning: 'spot', seconds: 10 }), dollars({ ...C3D, provisioning: 'spot', seconds: 60 }));
   assert.ok(dollars({ ...C3D, provisioning: 'standard', seconds: 3600 }) > hour * 3);
   assert.ok(dollars({ ...C3D, machine: 'e2-highcpu-2', provisioning: 'spot', seconds: 3600 }) > 0);
   assert.equal(dollars({ ...C3D, machine: 'n9-mystery-4', provisioning: 'spot', seconds: 60 }), null);
   // A row from before placements names no disk type: its VM booted from pd-balanced.
   assert.equal(dollars({ ...C3D, diskType: undefined, provisioning: 'spot', seconds: 3600 }), hour);
+});
+
+test('dollars: a VM has no external address; its region\'s Cloud NAT gateway is $0.0014 an hour, spot or on demand', () => {
+  // The same VM on two rate tables that differ only in vCPU and memory: what is left is the NAT, the disk and nothing else.
+  const vm = { ...C3D, seconds: 3600 };
+  const disk = 50 * 0.1 / 730;
+  const compute = { spot: 4 * 0.00715 + 8 * 0.00096, standard: 4 * 0.033982 + 8 * 0.004555 };
+  for (const provisioning of ['spot', 'standard']) {
+    const nat = dollars({ ...vm, provisioning }) - compute[provisioning] - disk;
+    assert.ok(Math.abs(nat - 0.0014) < 1e-9, `${provisioning}: ${nat}`);
+  }
+  // Billed by the VM's time, at least a minute, like the rest.
+  const minute = dollars({ ...vm, provisioning: 'spot', seconds: 60 });
+  assert.ok(Math.abs(minute - (compute.spot + 0.0014 + disk) / 60) < 1e-12, String(minute));
 });
 
 test('dollars: a c4d VM in us-west4 at the catalog\'s C4D rates there, on Hyperdisk Balanced with its default performance', () => {
@@ -88,9 +102,9 @@ test('dollars: a c4d VM in us-west4 at the catalog\'s C4D rates there, on Hyperd
   const disk = (50 * 0.09 + 300 * 0.006 + 75 * 0.045) / 730;
   const vm = { machine: 'c4d-highcpu-8', zone: 'us-west4-b', diskType: 'hyperdisk-balanced', diskGb: 50, seconds: 3600 };
   const spot = dollars({ ...vm, provisioning: 'spot' });
-  assert.ok(Math.abs(spot - (8 * 0.0062 + gb * 0.000661 + 0.0025 + disk)) < 1e-9, String(spot));
+  assert.ok(Math.abs(spot - (8 * 0.0062 + gb * 0.000661 + 0.0014 + disk)) < 1e-9, String(spot));
   const standard = dollars({ ...vm, provisioning: 'standard' });
-  assert.ok(Math.abs(standard - (8 * 0.036834 + gb * 0.00393707 + 0.005 + disk)) < 1e-9, String(standard));
+  assert.ok(Math.abs(standard - (8 * 0.036834 + gb * 0.00393707 + 0.0014 + disk)) < 1e-9, String(standard));
   assert.ok(dollars({ ...vm, machine: 'c4d-highcpu-2', provisioning: 'spot' }) > 0);
   // No rate for the family in that region, or for the disk type there: unpriced, never guessed.
   assert.equal(dollars({ ...vm, zone: 'europe-west4-a', provisioning: 'spot' }), null);

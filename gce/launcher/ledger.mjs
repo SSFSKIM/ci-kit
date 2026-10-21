@@ -30,7 +30,13 @@ const RATES = {
 // GiB of memory of each highcpu size (gcloud compute machine-types describe; C4D's is not a fixed ratio).
 const MEMORY_GIB = { e2: { 2: 2, 4: 4, 8: 8, 16: 16 }, c3d: { 4: 8, 8: 16, 16: 32 }, c4d: { 2: 3, 4: 7, 8: 15, 16: 30 } };
 const GB_PER_GIB = 2 ** 30 / 1e9;
-const IP_HOURLY = { spot: 0.0025, standard: 0.005 };
+// A VM has no external address (spec 2026-10-21 M6): its region's Cloud NAT carries its traffic, and the NAT gateway
+// bills $0.0014 for each hour of each VM it serves, spot or on demand (Cloud Billing catalog on 2026-10-21, Networking
+// E505-1604-58F8, SKU 32E2-4EFC-EF9F "Cloud Nat Gateway Uptime"; cloud.google.com/nat/pricing). That page caps a
+// gateway at $0.044 an hour from 32 VMs up, so this is the VM's share at most: past 32 VMs at once in a region it
+// overstates. The NAT's other two charges are its region's, not a VM's, and are left to the daily line: its addresses,
+// $0.005 an hour each (SKU 8515-9425-D2CE "Cloud NAT IP Usage"), and $0.045 per GiB it processes (SKU 015F-5732-FFF0).
+const NAT_GATEWAY_HOURLY = 0.0014;
 // Boot disks by region and type, $ a month: per GiB, and for Hyperdisk Balanced per IOPS and per MiB/s provisioned
 // above the 3,000 IOPS and 140 MiB/s its capacity price includes. pd-balanced us-central1: the list price of
 // 2026-10-16. hyperdisk-balanced us-west4: the catalog on 2026-10-21, capacity F704-99E9-0130, IOPS D4CA-3484-910A,
@@ -65,7 +71,7 @@ export function dollars({ machine, zone, provisioning, seconds, diskGb, diskType
   if (!gib) return null;
   const memory = rate.gib ? gib * rate.gib : gib * GB_PER_GIB * rate.gb;
   const hours = Math.max(60, seconds) / 3600;
-  return hours * (vcpus * rate.vcpu + memory + IP_HOURLY[provisioning] + diskMonthly(disk, diskGb) / HOURS_PER_MONTH);
+  return hours * (vcpus * rate.vcpu + memory + NAT_GATEWAY_HOURLY + diskMonthly(disk, diskGb) / HOURS_PER_MONTH);
 }
 
 const round4 = (n) => Math.round(n * 1e4) / 1e4;
@@ -163,6 +169,9 @@ export function rowsOf(comments) {
 // the month at that day's rate, the commit of the gce.json the launcher ran, and each family@region's VMs and dollars
 // (spec 2026-10-21: each placement's count and cost, so a price swing shows), with the VMs it could not price. On a
 // day with pre-launched VMs (spec M5), `prelaunched`: how many, how many no job claimed, and what those cost.
+// The VMs' dollars carry each one's NAT gateway hours; the NATs' GB processed ($0.045 per GiB) and their addresses
+// ($0.005 an hour each) are per region, read from no row: the counts step of spec M6 (step 3) adds the day's NAT GB
+// to this line, priced, from Cloud Monitoring.
 export function dailyLine(rows, day, config) {
   const ofDay = rows.filter((r) => r.state === 'final' && r.deleted?.startsWith(day));
   const vms = ofDay.filter((r) => r.seconds !== null && r.seconds !== undefined);

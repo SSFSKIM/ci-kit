@@ -276,7 +276,10 @@ GitHub. A tick:
    stay at or under `max_vcpus`. An unclaimed VM has its runner registered, not busy, younger than
    `idle_runner_minutes`, and never having taken a job: a job VM is single-use, and its runner reads registered and
    not busy for a while after its job ends (a job this tick read names it, its row recorded a job, or it reported
-   `ci-kit/job`). Static job 119166794835 waited 126 s on 2026-10-21 behind a VM whose job had just ended;
+   `ci-kit/job`). Static job 119166794835 waited 126 s on 2026-10-21 behind a VM whose job had just ended. Nor is a
+   VM unclaimed whose runner never came online 3 minutes after the VM started: it booted but cannot reach GitHub
+   (its region's NAT missing, misconfigured or out of ports), and the launcher logs it at ERROR each tick,
+   `runner never online` with its zone and region, until the idle rule removes it;
    then, with what those launches leave of `max_vcpus` and only when no queued job waits, pre-launches the VMs of
    each run that has begun before its pool jobs are queued (Pre-launch, below);
 4. beside the launches, cleans up (below), finalizes rows whose VM is gone, and records on each running row the job
@@ -516,17 +519,29 @@ the label again before it acts.
 
 **The network.** Every builder, smoke VM and job VM sits on its placement's subnetwork of the VPC `ci-kit`
 (`network` and each placement's `subnetwork` in `gce.json`: `ci-kit-us-central1`, 10.64.0.0/20, and `ci-kit-us-west4`,
-10.64.16.0/20), with an ephemeral external address for outbound traffic. The VPC has no firewall rule: GCE's implied rules deny all ingress and allow
-all egress. The project's `default` network is never used, since its stock rules open ssh and RDP to the internet.
-`gce/deploy.sh network` creates the VPC and a subnetwork for each placement of `gce.json` idempotently (a new one takes
-the first free /20 of 10.64.0.0/16, `gce/subnets.mjs`; an existing one is left alone) and fails if any rule allows
-ingress into `ci-kit`. Networks and firewall rules take no labels; the names carry the kit's. To check:
+10.64.16.0/20). No VM has a public IP: each subnetwork has Private Google Access, so Google APIs are reached
+without one, and all other egress (GitHub, apt, npm, Docker Hub) goes through the region's Cloud NAT, `ci-kit-nat` on the
+Cloud Router `ci-kit-router` (spec 2026-10-21 M6). The NAT allocates its own addresses as needed, so the region's
+`IN_USE_ADDRESSES` quota does not bound the pool; it covers every range of the region's subnetworks, gives each VM 1024
+ports to 65536 by dynamic allocation (pnpm and apt open many connections at once; provisional, sized by M6's burst
+proof), and logs dropped connections only, which `gce/deploy.sh alert` mails.
+The VPC has no firewall rule: GCE's implied rules deny all ingress and allow all egress. The project's `default`
+network is never used, since its stock rules open ssh and RDP to the internet. `gce/deploy.sh network` creates the
+VPC, a subnetwork for each placement of `gce.json` (a new one takes the first free /20 of 10.64.0.0/16,
+`gce/subnets.mjs`; an existing one keeps its range and gets Private Google Access if it lacks it), and a router and NAT
+in each placement region (an existing NAT is updated to these settings), all idempotently, never deleting anything;
+it fails if any rule allows ingress into `ci-kit`. Networks, routers and firewall rules take no labels; the names
+carry the kit's. To check:
 
 ```
 gcloud compute networks list --project=ssfskim-ci-kit
-gcloud compute networks subnets list --project=ssfskim-ci-kit --network=ci-kit
+gcloud compute networks subnets list --project=ssfskim-ci-kit --network=ci-kit --format='table(name,region,ipCidrRange,privateIpGoogleAccess)'
+gcloud compute routers nats describe ci-kit-nat --router=ci-kit-router --region=us-central1 --project=ssfskim-ci-kit
 gcloud compute firewall-rules list --project=ssfskim-ci-kit --filter='network~/ci-kit$'   # expect: none
 ```
+
+A VM short of NAT ports shows as an error entry in the NAT's log (`resource.type="nat_gateway"`) and as
+`dropped_sent_packets_count` with reason `OUT_OF_RESOURCES` in its Cloud Monitoring metrics.
 
 **The bake.** From the Mac (gcloud's default account), at a commit pushed to GitHub:
 
@@ -625,11 +640,11 @@ config from metadata `ci-kit-jit`, reports `ci-kit/job=exit:<code>`, and the uni
 
 ```
 gce/deploy.sh                       # every part, in order; or name parts:
-gce/deploy.sh base network          # APIs, the service account and its compute role, serial port logging; the VPC
+gce/deploy.sh base network          # APIs, the service account and its compute role, serial port logging; the VPC, its NATs
 gce/deploy.sh bake bake-schedule    # the Cloud Run job ci-kit-bake and its weekly Scheduler job
 gce/deploy.sh launcher launcher-schedule   # the Cloud Run service ci-kit-launcher and its one-minute tick
 gce/deploy.sh webhook               # the receiver ci-kit-webhook, its Pub/Sub topic and push subscription
-gce/deploy.sh alert                 # the failed-tick metric and its alert policy, mailed to the owner
+gce/deploy.sh alert                 # log-based metrics and alert policies mailed to the owner (below)
 gce/deploy.sh app-hook              # not in "every part": the App's webhook URL and secret (The webhook, above)
 ```
 
@@ -685,9 +700,10 @@ per allocation:
   hand outside the launcher).
 - `seconds` runs from the VM's creation to its deletion, `$` at the rates in `gce/launcher/ledger.mjs` by region and
   family (c3d and e2 in us-central1, 2026-10-16; c4d in us-west4, the Cloud Billing catalog on 2026-10-21, SKU ids
-  beside the table), the address and the disk by region and type included (Hyperdisk Balanced with the IOPS and
-  throughput its defaults provision above the free baseline). A VM in a region, family or disk type with no rate
-  there shows `-`. The row's JSON carries the disk type (`diskType`; a row without one is from before placements,
+  beside the table), the VM's hours of its region's Cloud NAT gateway ($0.0014 an hour; the NAT's GB processed and
+  its addresses are per region, not per VM, and go on the daily line with M6's counts) and the disk by region and
+  type included (Hyperdisk Balanced with the IOPS and throughput its defaults provision above the free baseline). A
+  VM in a region, family or disk type with no rate there shows `-`. The row's JSON carries the disk type (`diskType`; a row without one is from before placements,
   on `pd-balanced`).
 - The daily line, `**GCE pool, <day> (UTC):** …`, totals the day's VMs, seconds and dollars, projects the month at
   that rate, gives each family@region's VMs and dollars (and how many it could not price), on a day with
@@ -731,16 +747,16 @@ quotas are the hard cap, and a refusal is a wait. Parallelism comes first: the o
 never be the bottleneck, and that cost is not a reason to lower parallelism. So `max_vcpus` follows the quotas. Granted
 through Cloud Quotas:
 - 2026-10-21: `CPUS-ALL-REGIONS` 256, C3D per-family 192 in us-central1, `INSTANCES` 64, `SSD-TOTAL-GB` 4096;
-  `IN-USE-ADDRESSES` asked 64, still 32 when this was written (each job VM holds one external address, so 32 VMs at
-  once until granted);
+  `IN-USE-ADDRESSES` asked 64, still 32 when this was written (a job VM held one external address until M6's Cloud
+  NAT; it holds none now, so this quota no longer bounds the pool);
 - 2026-10-16: the first grants;
 - never granted: E2 per-family stays at its default 24 (asked 64, refused twice), so at most 12 `cpus-2` VMs run on E2
   and the rest fell back to `c3d-highcpu-4` (`machine_fallback`); E2 has since left the pool with that key.
 
 A job reserves the largest machine its walk could land on in the launcher's count (a `cpus-2` job: `c3d-highcpu-4`).
 `max_vcpus` admits only; it tracks the sum of the placements' granted family quotas, and a placement's own refusal
-(family vCPUs, addresses, instances) falls through to the next one, so raise it with each grant (C4D us-west4's
-re-filed 128 was denied 2026-10-21, so it stays 50; addresses pending in both regions).
+(family vCPUs, instances, disk capacity) falls through to the next one, so raise it with each grant (C4D us-west4's
+re-filed 128 was denied 2026-10-21, so it stays 50).
 `PREEMPTIBLE_CPUS` is 0, so spot VMs count against the ordinary CPU quotas. To check:
 
 ```
@@ -748,5 +764,6 @@ gcloud compute regions describe us-central1 --project=ssfskim-ci-kit --format=js
 ```
 
 The billing budget alert on the project ($40, mails at 50/90/100 %) is the billing admin's to create (spec,
-Human-only steps). The Monitoring alert `ci-kit launcher ticks failing` mails the owner when three ticks fail within
-10 minutes.
+Human-only steps). Monitoring alerts (`gce/deploy.sh alert`) mail the owner: `ci-kit launcher ticks failing` when three
+ticks fail within 10 minutes; `ci-kit pool VM runners never online` when the launcher logs a VM whose runner never
+came online (above); and `ci-kit NAT dropping connections` when a pool NAT drops a connection (The network).
