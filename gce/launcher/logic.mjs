@@ -244,13 +244,15 @@ export function raceAttempts(list, pending) {
 // What a launch's row keeps of its walk (spec M6 counts), from walkPlacements' `tried`: its refusals ({kind:
 // 'capacity'|'quota', zone, metric when the message names one}), and its slow inserts, those still unsettled
 // RACE_AFTER_MS after they were sent or never settled in the tick ({zone, outcome, sent, done: when it settled,
-// absent while it has not}).
+// absent while it has not; operation: an unsettled one's link, when known}).
 export function walkRecord(tried) {
   const iso = (ms) => new Date(ms).toISOString();
   const refused = tried.filter((t) => t.outcome === 'capacity' || t.outcome === 'quota')
     .map((t) => ({ kind: t.outcome, zone: t.zone, ...(t.metric ? { metric: t.metric } : {}) }));
   const slow = tried.filter((t) => t.outcome === 'unknown' || t.ms >= RACE_AFTER_MS)
-    .map((t) => ({ zone: t.zone, outcome: t.outcome, sent: iso(t.sent), ...(t.outcome === 'unknown' ? {} : { done: iso(t.sent + t.ms) }) }));
+    .map((t) => ({
+      zone: t.zone, outcome: t.outcome, sent: iso(t.sent), ...(t.outcome === 'unknown' ? {} : { done: iso(t.sent + t.ms) }), ...(t.operation ? { operation: t.operation } : {}),
+    }));
   return { ...(refused.length ? { refused } : {}), ...(slow.length ? { slow } : {}) };
 }
 
@@ -279,7 +281,7 @@ export const unsettledInsert = (row) => (row.state !== 'final' && row.slow?.find
 // stops with 'raced': the race carries the job, and this allocation is never moved to another zone.
 // Returns {placement, tried, stop: 'exhausted'|'failed'|'unknown'|'deadline'|'raced' when no placement, quota: true if
 // any refused it}. Each of `tried` is the attempt with its outcome, when it was sent (`sent`, ms) and how long it took to
-// settle (`ms`), and a quota refusal's `metric`.
+// settle (`ms`), a quota refusal's `metric`, and an unsettled insert's `operation` (its link) when the API named it.
 export async function walkPlacements(list, { attempt, reconcile, now = Date.now, deadline = Infinity, quota: memory = [], raced = () => false }) {
   const tried = [];
   let quota = false;
@@ -302,7 +304,10 @@ export async function walkPlacements(list, { attempt, reconcile, now = Date.now,
         error = settled?.error ?? error;
       }
     }
-    tried.push({ ...p, outcome, sent, ms: now() - sent, ...(outcome === 'quota' ? { metric: quotaMetric(error) } : {}) });
+    tried.push({
+      ...p, outcome, sent, ms: now() - sent, ...(outcome === 'quota' ? { metric: quotaMetric(error) } : {}),
+      ...(outcome === 'unknown' && error?.operation ? { operation: error.operation } : {}),
+    });
     if (outcome === 'created') return { placement: p, tried, quota };
     if (outcome === 'capacity') continue;
     if (outcome === 'quota') {

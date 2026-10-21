@@ -33,6 +33,10 @@ const DAILY_WITHIN_MS = 2 * 3600_000; // the 26 h ledger window holds all of yes
 const DAILY_AFTER_MS = 5 * 60_000;
 const SETTLE_BUDGET_MS = 15_000; // what a tick spends learning how unsettled inserts ended; the rest wait a tick
 const SETTLE_PARALLEL = 4; // zones whose operations are read at once
+// How far an insert operation's insertTime may fall before the launcher's own send time (clocks and request latency)
+// and still be that insert's, when its link is unknown. A walk's earlier attempt in the same zone was sent at least one
+// operation earlier.
+const SEND_SKEW_MS = 2_000;
 const NAT_GATEWAY = 'ci-kit-nat'; // each placement region's Cloud NAT (gce/deploy.sh network)
 const zoneOf = (r) => r.zone.split('/').pop();
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -46,6 +50,16 @@ function settledAs(op) {
   return { outcome: insertOutcome(error), error };
 }
 const NEVER = new Promise(() => {});
+
+// The insert operation of an unsettled insert (a row's slow entry), among a zone's operations for its instance: by the
+// link the API gave, else the newest sent no earlier than the insert (less SEND_SKEW_MS), so a walk's earlier attempt in
+// the same zone under the same name (spot, then on demand) is never taken for it. None found: it stays unsettled.
+function operationOf(ops, instance, insert) {
+  const mine = ops.filter((o) => o.operationType === 'insert' && o.targetLink.endsWith(`/instances/${instance}`));
+  if (insert.operation) return mine.find((o) => o.selfLink === insert.operation) ?? null;
+  const after = Date.parse(insert.sent) - SEND_SKEW_MS;
+  return mine.filter((o) => Date.parse(o.insertTime) >= after).sort((a, b) => Date.parse(b.insertTime) - Date.parse(a.insertTime))[0] ?? null;
+}
 
 // deps: {gce, gh, ledger, cfg, config, poolRepos, now, log, error, random, alert, after}; error(message, fields) logs at
 // ERROR what a log-based alert watches (gce/deploy.sh alert), log otherwise.
@@ -331,8 +345,9 @@ export class Launcher {
   async settleInsert(seen, zone, alloc, ops) {
     const row = seen.rowOf.get(alloc) ?? seen.rows.find((r) => r.alloc === alloc);
     const insert = unsettledInsert(row);
-    const op = ops.find((o) => o.operationType === 'insert' && o.targetLink.endsWith(`/instances/${row.instance}`));
-    if (!insert || op?.status !== 'DONE') return;
+    if (!insert) return;
+    const op = operationOf(ops, row.instance, insert);
+    if (op?.status !== 'DONE') return;
     const { outcome, error } = settledAs(op);
     const metric = quotaMetric(error);
     const refused = outcome === 'capacity' || outcome === 'quota' ? [...(row.refused ?? []), { kind: outcome, zone, ...(metric ? { metric } : {}) }] : row.refused;
@@ -623,7 +638,10 @@ export class Launcher {
     // before its operation did (unknown, and still running when reconciled) stays pending, and the launch waits, within
     // the tick, for its race to be decided (unsettled).
     let raced = false;
-    let marking = null; // the write of this row's pending insert, made before its race starts
+    // The writes of this row's pending inserts, each made before a race could start, in the order of its attempts: one
+    // still in flight when its attempt is refused and the walk sends the next must land before the next one's, and all
+    // before the walk's result.
+    let marking = Promise.resolve(true);
     let unsettled = null; // {settle, decision, fired}: the last attempt, while its outcome is unknown
     const result = await walkPlacements(attempts, {
       attempt: async (p) => {
@@ -644,7 +662,7 @@ export class Launcher {
         };
         slow?.promise.then(() => this.raceSlowInsert({
           item, row, attempt: p, sent, attempts, stillPending: () => pending && !raced,
-          hold: (write) => { marking = write; },
+          hold: (write) => (marking = marking.then(write)),
           start: () => { raced = true; },
         }, ctx)).catch((err) => this.log(`race of ${name}: ${err.message}`)).finally(decided);
         try {
@@ -735,9 +753,8 @@ export class Launcher {
     // Reserved while the original's pending insert is written; without that row, a restarted launcher would not count
     // the original, so no race starts.
     ctx.inflight += need;
-    const marking = this.write({ ...row, slow: [{ zone: attempt.zone, outcome: 'unknown', sent: iso(sent) }] });
-    hold(marking);
-    if (!(await marking) || !stillPending()) {
+    const marked = hold(() => this.write({ ...row, slow: [{ zone: attempt.zone, outcome: 'unknown', sent: iso(sent) }] }));
+    if (!(await marked) || !stillPending()) {
       ctx.inflight -= need;
       this.log(`${unsettled}; no race (${stillPending() ? 'its pending insert could not be written to the ledger' : 'it settled meanwhile'})`);
       return;

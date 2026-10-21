@@ -124,7 +124,7 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
   function operation(zone, body, status) {
     const op = `op-${nextId++}`;
     const made = {
-      name: op, zone, operationType: 'insert', status, targetLink: `${ZONE_URL(zone)}/instances/${body.name}`, selfLink: `${ZONE_URL(zone)}/operations/${op}`,
+      name: op, zone, operationType: 'insert', status, insertTime: new Date(clock).toISOString(), targetLink: `${ZONE_URL(zone)}/instances/${body.name}`, selfLink: `${ZONE_URL(zone)}/operations/${op}`,
       ...(status === 'DONE' ? { endTime: new Date(clock).toISOString() } : {}), body,
     };
     g.ops.push(made);

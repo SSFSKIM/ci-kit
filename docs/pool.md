@@ -493,7 +493,9 @@ zones, another region first, spot before on demand.
   say now) and, while its runner waits, covers a job of its size as its VM would: the next tick, or a launcher
   restarted mid-race, neither launches nor races again for the same job. Those reads go one per zone, a few zones at
   once, within 15 s and beside the cleanup's deletions; a zone not read waits for the next tick, and what was read is
-  written before any row is finalized. A refusal learned that way joins the row's `refused`, and a launching row so
+  written before any row is finalized. An insert is matched to its own operation (the link the API gave, else the
+  newest sent no earlier than it), never to a walk's earlier attempt in the same zone. A refusal learned that way joins
+  the row's `refused`, and a launching row so
   refused is abandoned and its runner unregistered at once: no VM will come. A race starts only once its original's
   pending insert is on the ledger. Overlapping ticks remain the accepted overlap below; there is no strict bound of
   two VMs per job.

@@ -192,7 +192,7 @@ test('one race per allocation and none of a race; an unsettled pair keeps its jo
   const done = new Date(w.now()).toISOString();
   w.advance(MIN);
   await make().tick();
-  assert.deepEqual([rowOf(w, first).state, rowOf(w, first).slow.at(-1)], ['running', { zone: 'us-west4-a', outcome: 'created', sent: rowOf(w, first).slow[0].sent, done }]);
+  assert.deepEqual([rowOf(w, first).state, rowOf(w, first).slow.at(-1)], ['running', { zone: 'us-west4-a', outcome: 'created', sent: rowOf(w, first).slow[0].sent, done, operation: rowOf(w, first).slow[0].operation }]);
   assert.deepEqual([rowOf(w, second).state, rowOf(w, second).end, rowOf(w, second).slow.at(-1).outcome, rowOf(w, second).slow.at(-1).done], ['final', 'abandoned', 'quota', done]);
   assert.deepEqual(rowOf(w, second).refused, [{ kind: 'quota', zone: 'us-central1-a', metric: 'C3D_CPUS' }], 'the refusal learned late is counted, with its metric');
 });
@@ -331,7 +331,7 @@ test('learning how unsettled inserts ended reads each zone once, never holds a s
     const row = { ...launchRow({ alloc, repo: SBX, cpus: 4, at: w.now() - 50_000, config: COMMIT, reserved: 4 }), slow: [{ zone, outcome: 'unknown', sent: new Date(w.now() - 49_000).toISOString() }] };
     w.gh.comments.push({ id: 9000 + w.gh.comments.length, issue: 1, body: renderRow(row), updated_at: new Date(w.now()).toISOString() });
     const target = `https://www.googleapis.com/compute/v1/projects/ssfskim-ci-kit/zones/${zone}/instances/${instanceName(alloc)}`;
-    w.g.ops.push({ name: `op-${alloc}`, zone, operationType: 'insert', status: 'DONE', endTime: ended, targetLink: target, selfLink: `${target}-op` });
+    w.g.ops.push({ name: `op-${alloc}`, zone, operationType: 'insert', status: 'DONE', insertTime: new Date(w.now() - 49_000).toISOString(), endTime: ended, targetLink: target, selfLink: `${target}-op` });
   }
   w.hooks.zoneOperations = (zone) => (zone === 'us-west4-a' ? new Promise(() => {}) : null); // that zone's read hangs
   const ticking = launcher.tick();
@@ -437,7 +437,7 @@ test('a settlement whose ledger write outlasts the read budget is written before
   w.gh.comments.push({ id: 9100, issue: 1, body: renderRow(row), updated_at: new Date(w.now()).toISOString() });
   const target = `https://www.googleapis.com/compute/v1/projects/ssfskim-ci-kit/zones/us-west4-a/instances/${instanceName(alloc)}`;
   const ended = new Date(at + 61_000).toISOString();
-  w.g.ops.push({ name: 'op-d', zone: 'us-west4-a', operationType: 'insert', status: 'DONE', endTime: ended, targetLink: target, selfLink: `${target}-op` });
+  w.g.ops.push({ name: 'op-d', zone: 'us-west4-a', operationType: 'insert', status: 'DONE', insertTime: new Date(at + 1_000).toISOString(), endTime: ended, targetLink: target, selfLink: `${target}-op` });
   let release;
   const slowWrite = new Promise((resolve) => { release = resolve; });
   w.hooks.commentWrite = (body) => (body.includes(ended) ? slowWrite : null);
@@ -466,4 +466,61 @@ test('the daily line waits until 5 min past midnight UTC, when the NAT samples o
   w.advance(3 * MIN);
   await launcher.tick();
   assert.equal(posted(), 1);
+});
+
+// Review of 2a300bd: marker writes of one allocation land in order, before its walk's result; an unsettled insert is
+// matched to its own operation, not to an earlier attempt's in the same zone.
+
+test('two slow attempts of one walk: a marker write held past the second lands before the walk\'s result, never after it', async () => {
+  const { w, launcher } = setup();
+  w.sim.queue(SBX, L(4));
+  const held = new Map(); // zone → release
+  w.hooks.holdInsert = (zone) => (zone.startsWith('us-west4') ? new Promise((resolve) => held.set(zone, resolve)) : null);
+  const ticking = launcher.tick();
+  await until(() => held.has('us-west4-a'), 'attempt A');
+  const name = w.log.find((l) => l.startsWith('insert-wait ')).split(' ')[1];
+  let releaseMarker;
+  const markerHeld = new Promise((resolve) => { releaseMarker = resolve; });
+  w.hooks.commentWrite = (body) => (body.includes(`"alloc":"${allocOf(name)}"`) && body.includes('"slow":[{"zone":"us-west4-a","outcome":"unknown"') ? markerHeld : null);
+  w.advance(RACE_AFTER_MS); // A's race decision: its marker write is held
+  await turns();
+  w.g.insertErrors.push({ match: (zone) => zone === 'us-west4-a', error: gceErr(['ZONE_RESOURCE_POOL_EXHAUSTED']) });
+  held.get('us-west4-a')(); // A is refused; the walk sends B, in us-west4-b
+  await until(() => held.has('us-west4-b'), 'attempt B');
+  w.advance(RACE_AFTER_MS); // B reaches the threshold too
+  await turns();
+  w.g.insertErrors.push({ ...unsettled(), match: (zone) => zone === 'us-west4-b' });
+  held.get('us-west4-b')(); // B's wait ends unsettled: the walk's result keeps B's insert
+  await turns();
+  releaseMarker(); // A's obsolete marker lands only now
+  await ticking;
+  await turns();
+  const row = rowOf(w, name);
+  assert.equal(row.state, 'launching');
+  assert.deepEqual(row.slow.map((s) => [s.zone, s.outcome]), [['us-west4-a', 'capacity'], ['us-west4-b', 'unknown']], 'the walk\'s record, not A\'s marker');
+});
+
+test('an unsettled insert is matched to its own operation: an earlier refused attempt in the same zone neither settles nor abandons it', async () => {
+  for (const byLink of [true, false]) {
+    const { w, launcher } = setup();
+    const alloc = 'same00000a';
+    const name = instanceName(alloc);
+    const sent = w.now() - 30_000;
+    const target = `https://www.googleapis.com/compute/v1/projects/ssfskim-ci-kit/zones/us-central1-a/instances/${name}`;
+    const op = (id, status, insertTime, extra) => ({ name: id, zone: 'us-central1-a', operationType: 'insert', status, insertTime: new Date(insertTime).toISOString(), targetLink: target, selfLink: `${target.replace(/instances\/.*/, 'operations/')}${id}`, ...extra });
+    // The spot attempt, refused, then the standard attempt in the same zone under the same name, still running.
+    w.g.ops.push(op('op-spot', 'DONE', sent - 20_000, { endTime: new Date(sent - 15_000).toISOString(), error: { errors: [{ code: 'ZONE_RESOURCE_POOL_EXHAUSTED' }] } }));
+    w.g.ops.push(op('op-std', 'RUNNING', sent));
+    const insert = { zone: 'us-central1-a', outcome: 'unknown', sent: new Date(sent).toISOString(), ...(byLink ? { operation: w.g.ops.at(-1).selfLink } : {}) };
+    const row = { ...launchRow({ alloc, repo: SBX, cpus: 4, at: sent - 25_000, config: COMMIT, reserved: 4 }), refused: [{ kind: 'capacity', zone: 'us-central1-a' }], slow: [insert] };
+    w.gh.comments.push({ id: 9200, issue: 1, body: renderRow(row), updated_at: new Date(w.now()).toISOString() });
+    await w.github.jitConfig(SBX, { name, labels: L(4), work_folder: 'x' });
+    await launcher.tick();
+    assert.deepEqual([rowOf(w, name).state, rowOf(w, name).slow[0].done], ['launching', undefined], `still pending (${byLink ? 'by link' : 'by send time'})`);
+    assert.ok(w.sim.runner(SBX, name), 'its runner stays');
+    Object.assign(w.g.ops.at(-1), { status: 'DONE', endTime: new Date(w.now()).toISOString() });
+    w.advance(MIN);
+    await launcher.tick();
+    assert.deepEqual([rowOf(w, name).state, rowOf(w, name).slow[0].outcome], ['launching', 'created'], 'its own operation settles it');
+  }
 });
