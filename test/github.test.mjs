@@ -29,7 +29,7 @@ test('a repeated poll sends If-None-Match and a 304 returns the cached body', as
   assert.deepEqual(await gh.getRun('o/r', 7), RUN);
   assert.equal(f.requests[0].headers['if-none-match'], undefined);
   assert.equal(f.requests[1].headers['if-none-match'], 'W/"abc"');
-  assert.deepEqual(gh.stats(), { requests: 2, notModified: 1, remaining: 4900, reset: null });
+  assert.deepEqual(gh.stats(), { requests: 2, notModified: 1, remaining: 4900, limit: null, reset: null });
 });
 
 test('a changed resource replaces the cached body and ETag', async () => {
@@ -117,6 +117,18 @@ test('stats reports the reset of the lowest open window', async () => {
   await gh.getRun('o/r', 1);
   await gh.getRun('o/r', 2);
   assert.deepEqual([gh.stats().remaining, gh.stats().reset], [10, 1792112074]);
+});
+
+test('stats reports the limit of the lowest open window beside its remaining (the share a caller rations by)', async () => {
+  const f = fakeFetch([
+    { status: 200, body: RUN, headers: { 'x-ratelimit-remaining': '900', 'x-ratelimit-limit': '5000', 'x-ratelimit-reset': '1792112074' } },
+    { status: 200, body: RUN, headers: { 'x-ratelimit-remaining': '4827', 'x-ratelimit-limit': '15000', 'x-ratelimit-reset': '1792112484' } },
+  ]);
+  const gh = createGitHub('t', { fetchImpl: f.impl, now: () => 1792112000 * 1000 });
+  assert.equal(gh.stats().limit, null);
+  await gh.getRun('o/r', 1);
+  await gh.getRun('o/r', 2);
+  assert.deepEqual([gh.stats().remaining, gh.stats().limit], [900, 5000]);
 });
 
 test('issue comments can be read from a time on, and runs from a creation time on', async () => {
