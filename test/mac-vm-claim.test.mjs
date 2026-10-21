@@ -214,6 +214,42 @@ test('an end hook removes only the claim naming its own worker; a stale claim of
   assert.match(m.log(), new RegExp(`${deadName.replace(/[.()]/g, '\\$&')} is stale: its worker is gone`));
 });
 
+// Permissions do not stop root, so these run as an ordinary user only.
+const asUser = { skip: process.getuid?.() === 0 };
+test('a claim that cannot be read holds the lane: the claims read prints it as of unknown owner and keeps it, and its job\'s end leaves it', asUser, async () => {
+  const m = mac({ workflow: workflows.absent });
+  const job = m.job(1);
+  assert.equal(await job.started(), 0, job.stderr());
+  const [name] = m.claims();
+  chmodSync(join(m.logs, name), 0o000);
+  try {
+    const read = m.run('claims');
+    assert.equal(read.status, 0, read.stderr);
+    assert.equal(read.stdout, `${name}: unreadable, owner unknown\n`);
+    assert.equal(await job.end(), 0);
+    assert.deepEqual(m.claims(), [name], 'neither the read nor the end removes what it cannot read');
+    assert.match(m.log(), new RegExp(`could not read ${name.replace(/[.]/g, '\\.')}; it stays, and holds the lane until someone removes it`));
+    // Its worker is gone now, and still the claim holds: nothing can tell whose it is.
+    assert.equal(m.run('claims').stdout, `${name}: unreadable, owner unknown\n`);
+  } finally {
+    chmodSync(join(m.logs, name), 0o644);
+  }
+});
+
+test('claims that cannot be listed are not read as none: the claims read fails, and the caller takes the lane as held', asUser, () => {
+  const m = mac();
+  writeFileSync(join(m.logs, 'vm-claim.1-x'), 'worker=1\n');
+  chmodSync(m.logs, 0o300);
+  try {
+    const read = m.run('claims');
+    assert.equal(read.status, 1);
+    assert.equal(read.stdout, '');
+    assert.match(read.stderr, /^the claims in \S+ cannot be listed \(Permission denied\)\n$/);
+  } finally {
+    chmodSync(m.logs, 0o755);
+  }
+});
+
 test('a shared instance\'s job is not classified, and an exclusive job of unknown kind holds both its claim and the shared hold', async () => {
   const m = mac({ shared: [2], workflow: workflows.absent });
   const shared = m.job(2);

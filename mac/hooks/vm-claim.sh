@@ -14,8 +14,10 @@
 #   vm-claim.sh end <worker>                every instance's job-completed hook, once its sweep went through: removes the
 #                                           claim naming its worker
 #   vm-claim.sh reservation                 settle, at each read: prints none, reserved or unknown
-#   vm-claim.sh claims                      the launcher, holding the desktop lock: prints the live claims, one line
-#                                           each, and removes the stale ones
+#   vm-claim.sh claims                      the launcher, holding the desktop lock: prints the claims that hold the
+#                                           lane, one line each, and removes the stale ones. Any line printed holds
+#                                           the lane: a live claim, or one that cannot be read (owner unknown). Exits
+#                                           1 when the claims cannot be listed, which the caller takes as held too
 #
 # In ~/Library/Logs/ci-kit, under the desktop lock (desktop-lock.sh), each file replaced whole:
 #
@@ -197,14 +199,30 @@ end_job() { # <worker pid>
   started=$(started_of "$1")
   for file in "$ci_kit_logs/vm-claim.$1-"*; do
     [[ -e $file && $file != *.tmp ]] || continue
+    if ! read_marker "$file"; then
+      log "could not read ${file##*/}; it stays, and holds the lane until someone removes it"
+      continue
+    fi
     remove_named "$file" "$1" "$started" claim 'its job ended' || true
   done
 }
 
 claims() { # the caller holds the desktop lock: taking it here would wait on the caller
-  local file
+  local file why
+  # A directory that cannot be listed hides every claim in it: the glob below would see none.
+  why=$(perl -e 'opendir(my $d, $ARGV[0]) and exit 0; exit 1 if $!{ENOENT}; print "$!"; exit 2' "$ci_kit_logs" 2>&1)
+  case $? in
+    0) ;;
+    1) return 0 ;;
+    *) echo "the claims in $ci_kit_logs cannot be listed (${why:-the listing failed})" >&2; exit 1 ;;
+  esac
   for file in "$ci_kit_logs"/vm-claim.*; do
-    [[ -e $file && $file != *.tmp ]] && read_marker "$file" || continue
+    [[ -e $file && $file != *.tmp ]] || continue
+    # A claim that cannot be read may be a live job's: it holds the lane, and is never removed here.
+    if ! read_marker "$file"; then
+      printf '%s: unreadable, owner unknown\n' "${file##*/}"
+      continue
+    fi
     if alive "$m_worker" "$m_started"; then
       printf '%s: %s\n' "${file##*/}" "$(named)"
     elif rm -f "$file"; then
