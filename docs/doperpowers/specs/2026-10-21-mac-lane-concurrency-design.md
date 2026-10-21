@@ -1319,6 +1319,26 @@ hold-aware plan send them to the guest, which this spec leaves open.
   **The launcher (V2c) therefore bounds an unanswered stop on its own clock,** counted from its `stop-request`, not
   from `assigned`, which such a guest may never write; past it, the stop is a stop the wrapper could not answer
   (`tart stop`, the failure counted, the alert).
+- 2026-10-21 (late, V2c's builder): **the launcher's shapes** (detail in `lane.sh`'s header).
+  - Every bound is in seconds but `CI_KIT_VM_JOB_BOUND` (minutes, 50). Added inputs: `CI_KIT_VM_STOP_ANSWER` (180 s,
+    the unanswered stop), `CI_KIT_VM_END_WAIT`, `CI_KIT_VM_STOP_TIMEOUT`, `CI_KIT_VM_SPAWN_CHECK` (1 s),
+    `CI_KIT_VM_MEMORY_FLOOR` (37 %, V1 sets it), `CI_KIT_VM_WARN_PAUSE` (120 s), `CI_KIT_VM_CRITICAL_PAUSE` (600 s),
+    the alert bounds, and the path overrides.
+  - **What the lock covers:** the reads nothing under `desktop.lock` writes (the queue, memory, disk, display, mode,
+    the host instance) are taken just before it, so no network read ever holds the host's admission lock; conditions 3
+    and 4 are read again under it, with the reservation's write and the spawn. A spawn failure is `tart run` exiting
+    within 1 s, checked under the lock: the clone deleted, then the reservation released.
+  - **Kinds:** the running bound counts as `image`, the unanswered stop as `raced` (with an alert). A refusal counts
+    when teardown finds `out/refused`; two in a row pause the lane. Raced alerts are one per event and never closed by
+    the lane; every other kind closes when its condition clears.
+  - **One `vm-pause`,** holding the strictest pause (failures over disk over memory); a pause that cannot be written
+    holds in the launcher's memory. Pause windows are implemented (UTC `HH:MM-HH:MM`, comma-separated).
+  - **Recovery** of a running clone with no assignment, where the wrapper answers, re-enters `listening` with its idle
+    bound spent, so the handshake (its queue read included) decides; recovery repeats until no job clone and no
+    reservation remain. The reservation has its own key=value shape (it names a VM and a launcher, not a worker), and
+    an adopting launcher keeps its `since` and golden. `out/` is kept as `vm-out/<clone>` (the last 20).
+  - The pure reads are `mac/vm/lane-reads.sh`; the plist is `mac/vm/com.ssfskim.ci-kit.vm-lane.plist`
+    (AbandonProcessGroup, ProcessType Interactive, since the guest's QoS follows its starter).
 
 ## Surprises & Discoveries
 
@@ -1395,6 +1415,8 @@ hold-aware plan send them to the guest, which this spec leaves open.
     `out/refused` and `_diag`.
   - Not yet seen on the mini (V4): that a `setsid` process outlives the `tart exec` that started it, and that
     `sudo -n shutdown` works for `admin` in the base image.
+  - **`tart list --format json` also lists cached OCI images** (`"Source":"OCI"`), which the launcher drops. Still to
+    be seen with real Tart (V4): `tart run`'s argv as `ps` prints it, `tart stop --timeout` ending the run.
 
 ## Outcomes & Retrospective
 
