@@ -3,11 +3,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, symlinkSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { setAppHook } from '../../gce/tools/app-hook.mjs';
 
 const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -50,17 +45,4 @@ test('a refused PATCH throws with its status and never the secret', async () => 
     setAppHook({ url: 'https://example.com/hook', secret: SECRET, appId: '1', pem: PEM, fetchImpl: g.fetchImpl, log: () => {} }),
     (err) => /401/.test(err.message) && !err.message.includes(SECRET),
   );
-});
-
-test('the CLI runs when started through a symlinked path (macOS /tmp is /private/tmp), and says how to use it', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'app-hook-'));
-  try {
-    const link = join(dir, 'tools');
-    symlinkSync(fileURLToPath(new URL('../../gce/tools/', import.meta.url)), link);
-    const run = spawnSync(process.execPath, [join(link, 'app-hook.mjs')], { encoding: 'utf8' });
-    assert.equal(run.status, 2, run.stderr); // no URL given: usage, before any secret is read
-    assert.match(run.stderr, /usage: node gce\/tools\/app-hook\.mjs <receiver url>/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
 });

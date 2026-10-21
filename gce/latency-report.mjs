@@ -8,8 +8,8 @@
 // as those written before M3, counts in none of that stage's samples. The whole pool's stages come first, then each
 // machine type's VM stages, insert accepted → job started (M3's target, per VM) among them.
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { readFileSync, realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { createGitHub, ghToken } from '../lib/github.mjs';
 import { rowsOf } from './launcher/ledger.mjs';
 
@@ -148,7 +148,8 @@ async function main(argv) {
   console.log(`\nBy machine type\n\n${renderByMachine(rows)}`);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Both sides canonical: argv[1] is the path as typed, the module URL is resolved through symlinks.
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   main(process.argv.slice(2)).catch((err) => {
     console.error(err.message);
     process.exit(1);

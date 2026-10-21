@@ -9,7 +9,8 @@
 // the bake made is gone when it ends, a failed bake deletes its own image, and the two newest ready images are kept.
 // Env (optional): CI_KIT_COMMIT, the kit commit to bake (default: main's head); CI_KIT_BAKE_RUN, the run id.
 import { readFile } from 'node:fs/promises';
-import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { createGce, accessToken, GceError } from '../../lib/gce.mjs';
 import { createAppTokens } from '../../lib/github-app.mjs';
 import { createGitHub } from '../../lib/github.mjs';
@@ -279,7 +280,8 @@ async function main() {
   log(`done: ${image}, real job ${check}`);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Both sides canonical: argv[1] is the path as typed, the module URL is resolved through symlinks.
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   main().catch((err) => {
     console.error(err.message);
     process.exit(1);
