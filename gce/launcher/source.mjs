@@ -44,11 +44,13 @@ export function createConfigSource({ gh, fetchText, readBundled, bundledCommit, 
   }
 
   return async function load() {
-    const gce = await read(GCE_PATH, (text) => {
-      if (text === null) throw new Error(`${GCE_PATH} is missing`);
-      return parseGceConfig(text);
-    }, 'gce.json');
-    const pool = await read(POOL_PATH, (text) => (text === null ? [] : poolRepos(text)), 'pool.json');
+    const [gce, pool] = await Promise.all([
+      read(GCE_PATH, (text) => {
+        if (text === null) throw new Error(`${GCE_PATH} is missing`);
+        return parseGceConfig(text);
+      }, 'gce.json'),
+      read(POOL_PATH, (text) => (text === null ? [] : poolRepos(text)), 'pool.json'),
+    ]);
     return { cfg: gce.value, config: gce.commit, poolRepos: pool.value };
   };
 }

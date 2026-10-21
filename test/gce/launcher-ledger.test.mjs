@@ -4,9 +4,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  launchRow, runningRow, finalRow, renderRow, parseRow, rowsOf, moreFinal, dollars, dailyLine, renderDaily, dailyDays,
+  launchRow, runningRow, withJob, jobRecord, finalRow, renderRow, parseRow, rowsOf, moreFinal, dollars, dailyLine, renderDaily, dailyDays,
 } from '../../gce/launcher/ledger.mjs';
-import { createGceLedger, ROTATE_AT, WINDOW_MS } from '../../gce/launcher/ledger-store.mjs';
+import { createGceLedger, ROTATE_AT, WINDOW_MS, FULL_READ_MS } from '../../gce/launcher/ledger-store.mjs';
 import { createLedgerStore } from '../../pool/lib/ledger-store.mjs';
 import { parseRow as parseHetznerRow } from '../../pool/lib/ledger.mjs';
 
@@ -29,6 +29,28 @@ test('a row goes launching → running → deleting → final, and renders the I
   assert.match(text, /\| tb0abc0001 \| ci-kit-gce-tb0abc0001 \| SSFSKIM\/ci-kit-sandbox \| ci \/ nproc \(99\) \| 2026-10-16 12:00:05 \| 2026-10-16 12:03:05 \| c3d-highcpu-4@us-central1-a \| spot \| 180 \| 0\.\d{4} \| done \|$/);
   assert.deepEqual(parseRow(text), done);
   assert.equal(parseHetznerRow(text), null, 'the Hetzner ledger readers skip GCE rows');
+});
+
+// M3 Timing in the ledger: the stages of a job's start are read back from its row (gce/latency-report.mjs).
+test('timing: a row carries its job\'s run, workflow, queued and started times and the VM\'s RUNNING time', () => {
+  const launching = launchRow({ alloc: 'tb0abc0001', repo: SBX, cpus: 4, at: T0, config: 'x' });
+  const booting = runningRow(launching, INST);
+  assert.equal('running' in booting, false, 'not RUNNING yet: no time, not a guess');
+  const up = runningRow(booting, { ...INST, running: T0 + 16_000 });
+  assert.equal(up.running, new Date(T0 + 16_000).toISOString());
+  assert.equal(runningRow(up, INST).running, up.running, 'a later view without the time keeps it');
+  // As GET /repos/{repo}/actions/runs/{id}/jobs lists one, with the run's workflow path the launcher adds.
+  const apiJob = {
+    id: 119166794835, run_id: 39583515002, name: 'static', workflow: '.github/workflows/gate.yml', status: 'in_progress',
+    created_at: '2026-10-21T10:17:58Z', started_at: '2026-10-21T10:20:04Z', runner_name: 'ci-kit-gce-tb0abc0001', labels: ['cpus-4'],
+  };
+  const record = { id: 119166794835, name: 'static', run: 39583515002, workflow: '.github/workflows/gate.yml', queued: '2026-10-21T10:17:58Z', started: '2026-10-21T10:20:04Z' };
+  assert.deepEqual(jobRecord(apiJob), record);
+  assert.deepEqual(withJob(up, apiJob).job, record);
+  assert.deepEqual(jobRecord({ id: 5, name: 'probes', run_id: 7, created_at: '2026-10-21T10:00:00Z', started_at: null }), { id: 5, name: 'probes', run: 7, queued: '2026-10-21T10:00:00Z' }, 'what GitHub has not set is left out');
+  const done = finalRow(withJob(up, apiJob), { end: 'done', deleted: T0 + 600_000, job: record, diskGb: 50 });
+  assert.deepEqual([done.job, done.running, done.cpus], [record, up.running, 4], 'the size is the row\'s cpus');
+  assert.deepEqual(parseRow(renderRow(done)), done);
 });
 
 test('a row is never moved back toward launching', () => {
@@ -177,6 +199,41 @@ test('the store reads only the recent window, creates a launch row, and finalize
   await store.upsert(launching); // older: never written over the running row
   assert.deepEqual(f.calls.filter((c) => !c.startsWith('read') && c !== 'list'), ['create #7', 'get 100', 'update 100']);
   assert.equal(parseRow(f.state.comments.find((c) => c.id === 100).body).state, 'running');
+});
+
+// M3: a tick's first insert waits for the ledger read, which at a busy day's rate is several pages of the window.
+test('a later read asks only for what changed since the last one (with an overlap), and keeps the rest of the window', async () => {
+  const f = fakeIssue({ comments: [{ id: 1, body: renderRow(launchRow({ alloc: 'tb0abc0001', repo: SBX, cpus: 4, at: T0, config: 'x' })) }] });
+  const store = createGceLedger(f.gh, LEDGER, { now: () => f.clock.t });
+  await store.read();
+  f.clock.t += 60_000;
+  // Another writer moves the row on; this store writes one of its own.
+  const other = runningRow(launchRow({ alloc: 'tb0abc0001', repo: SBX, cpus: 4, at: T0, config: 'x' }), INST);
+  await f.gh.updateComment(SBX, 1, renderRow(other));
+  f.clock.t += 60_000;
+  await store.upsert(launchRow({ alloc: 'tb0abc0002', repo: SBX, cpus: 2, at: f.clock.t, config: 'x' }));
+  f.calls.length = 0;
+  await store.read();
+  assert.deepEqual(f.calls, ['list', `read #7 since ${iso(T0 - 5 * 60_000)}`], 'from the last read (at T0), less 5 min');
+  assert.deepEqual((await store.rows()).map((r) => [r.alloc, r.state]).sort(), [['tb0abc0001', 'running'], ['tb0abc0002', 'launching']]);
+  // A comment last updated before the window leaves it, as it would from a whole read.
+  f.clock.t = T0 + WINDOW_MS + 90_000;
+  await store.read();
+  assert.deepEqual((await store.rows()).map((r) => r.alloc), ['tb0abc0002']);
+});
+
+test('a comment this store deleted (a duplicate row) does not come back from the store\'s own memory', async () => {
+  const dup = launchRow({ alloc: 'tb0abc0003', repo: SBX, cpus: 4, at: T0, config: 'x' });
+  const f = fakeIssue({ comments: [{ id: 1, body: renderRow(dup) }, { id: 2, body: renderRow(dup) }] });
+  const store = createGceLedger(f.gh, LEDGER, { now: () => f.clock.t });
+  await store.read();
+  await store.upsert(runningRow(dup, INST)); // updates #1 and removes #2
+  assert.ok(f.calls.includes('delete 2'));
+  f.clock.t += 60_000;
+  await store.read();
+  f.calls.length = 0;
+  await store.upsert(finalRow(runningRow(dup, INST), { end: 'done', deleted: f.clock.t, diskGb: 50 }));
+  assert.ok(!f.calls.includes('delete 2'), 'nothing to delete twice');
 });
 
 test('two writers that each created a row for one allocation converge on one: the most final, then the oldest', async () => {
@@ -402,4 +459,47 @@ test('rotation: the store keeps reading the issue it opened while GitHub\'s list
   f.clock.t += 60_000; // listed now
   await store.read();
   assert.deepEqual((await store.rows()).map((r) => r.alloc).sort(), ['tb0abc0001', 'tb0abc0002']);
+});
+
+// Review (M3, P2): an incremental read returns what changed, never what was deleted. Two launchers overlap on an
+// allocation with two comments: B read the second while it was running and removes it as the duplicate (its deleting
+// comment is further along); A read it after it went final. Until A drops what GitHub no longer has, rowsOf prefers
+// that final comment, and A never finalizes the allocation.
+test('a comment another writer deleted leaves this store\'s memory at its next whole read, at most FULL_READ_MS later', async () => {
+  const launching = launchRow({ alloc: 'tb0abc0001', repo: SBX, cpus: 4, at: T0, config: 'x' });
+  const running = runningRow(launching, INST);
+  const deleting = finalRow(running, { end: 'done', deleted: T0 + 60_000, diskGb: 50, state: 'deleting' });
+  const final = finalRow(running, { end: 'done', deleted: T0 + 60_000, diskGb: 50 });
+  const f = fakeIssue({ comments: [{ id: 1, body: renderRow(deleting) }, { id: 2, body: renderRow(running) }] });
+  const a = createGceLedger(f.gh, LEDGER, { now: () => f.clock.t });
+  const b = createGceLedger(f.gh, LEDGER, { now: () => f.clock.t });
+  await b.read();
+  await f.gh.updateComment(SBX, 2, renderRow(final)); // a third writer's stale finalization of the duplicate
+  await a.read();
+  assert.equal((await a.rows())[0].state, 'final');
+  f.clock.t += 60_000;
+  await b.upsert(deleting); // B keeps its deleting comment and removes the duplicate it holds as running
+  assert.ok(f.calls.includes('delete 2'));
+  f.clock.t += 60_000;
+  await a.read();
+  assert.equal((await a.rows())[0].state, 'final', 'an incremental read does not show the deletion');
+  f.clock.t += FULL_READ_MS;
+  f.calls.length = 0;
+  await a.read();
+  assert.ok(f.calls.includes(`read #7 since ${iso(f.clock.t - WINDOW_MS)}`), 'a whole read of the window');
+  assert.equal((await a.rows())[0].state, 'deleting', 'A no longer holds the deleted final comment');
+  await a.upsert(final);
+  assert.equal(parseRow(f.state.comments.find((c) => c.id === 1).body).state, 'final', 'and A finalizes the allocation');
+});
+
+test('a whole read keeps a comment this store just wrote that GitHub does not list yet', async () => {
+  const f = fakeIssue();
+  const store = createGceLedger(f.gh, LEDGER, { now: () => f.clock.t });
+  await store.read();
+  f.clock.t += FULL_READ_MS;
+  await store.upsert(launchRow({ alloc: 'tb0abc0002', repo: SBX, cpus: 2, at: f.clock.t, config: 'x' }));
+  const listing = f.gh.issueComments;
+  f.gh.issueComments = async (...args) => (await listing(...args)).filter((c) => Date.parse(c.updated_at) < f.clock.t); // listing lag
+  await store.read();
+  assert.deepEqual((await store.rows()).map((r) => r.alloc), ['tb0abc0002']);
 });

@@ -66,10 +66,58 @@ test('the unit powers the VM off at once however the job ends (no orderly shutdo
   assert.match(unit, /^WantedBy=multi-user\.target$/m);
 });
 
+// Pool M3, The boot: the image disables cloud-init, so the VM's own unit does what a job VM needed from it.
+test('the job waits for the VM\'s own setup: its root grown to its disk and its hostname set to the instance name', () => {
+  const job = readFileSync(new URL('../../gce/vm/ci-kit-gce-job.service', import.meta.url), 'utf8');
+  assert.match(job, /^Requires=ci-kit-gce-instance\.service$/m);
+  assert.match(job, /^After=.*\bci-kit-gce-instance\.service\b/m);
+  const unit = readFileSync(new URL('../../gce/vm/ci-kit-gce-instance.service', import.meta.url), 'utf8');
+  assert.match(unit, /^Type=oneshot$/m);
+  assert.match(unit, /^ExecStart=\/opt\/ci-kit\/gce\/vm\/instance\.sh$/m);
+  const script = readFileSync(new URL('../../gce/vm/instance.sh', import.meta.url), 'utf8');
+  assert.match(script, /growpart/);
+  assert.match(script, /resize2fs/);
+  assert.match(script, /NOCHANGE/, 'a root that already fills its disk is not a failure');
+  assert.match(script, /computeMetadata\/v1\/instance\/name/);
+  assert.match(script, /hostnamectl set-hostname/);
+});
+
+// The console is a job VM's only window (no ssh), and journal lines reach it through rsyslog, which runs 20 s and more
+// behind on a 115200-baud port and is cut off when the VM powers off: the VM's own units write to it directly.
+test('the VM\'s setup and its job write to the serial console directly, the setup line stamped with the uptime', () => {
+  for (const name of ['ci-kit-gce-instance.service', 'ci-kit-gce-job.service']) {
+    const unit = readFileSync(new URL(`../../gce/vm/${name}`, import.meta.url), 'utf8');
+    assert.match(unit, /^StandardOutput=journal\+console$/m, name);
+    assert.match(unit, /^StandardError=journal\+console$/m, name);
+  }
+  const script = readFileSync(new URL('../../gce/vm/instance.sh', import.meta.url), 'utf8');
+  assert.match(script, /\/proc\/uptime/);
+});
+
+test('the image boots without cloud-init: disabled, the builder\'s MAC-bound netplan replaced by one for any ethernet name', () => {
+  const builder = readFileSync(new URL('../../gce/bake/builder.sh', import.meta.url), 'utf8');
+  assert.match(builder, /^touch \/etc\/cloud\/cloud-init\.disabled$/m);
+  assert.match(builder, /^rm -f \/etc\/netplan\/50-cloud-init\.yaml$/m);
+  assert.match(builder, /match: \{name: "en\*"\}/);
+  assert.match(builder, /^systemctl enable ci-kit-gce-job\.service ci-kit-gce-instance\.service$/m);
+  assert.match(builder, /^: > \/etc\/hostname$/m);
+  assert.match(builder, /^apt-get purge -y snapd$/m);
+});
+
 test('the smoke script checks the image, the caches and the isolation, and prints one verdict', () => {
   const script = readFileSync(new URL('../../gce/vm/smoke.sh', import.meta.url), 'utf8');
   for (const check of ['cpus', 'user', 'isolation', 'runner', 'node22', 'node24', 'warm', 'pnpm-store', 'workdir', 'dns', 'egress', 'metadata-refused']) {
     assert.match(script, new RegExp(`^check ${check} `, 'm'), check);
   }
   assert.match(script, /^echo 'ci-kit smoke: ok'$/m);
+});
+
+// MAWS's jobs used to apt-install these at job time (~35 s on the critical path, and a Launchpad 503 failed a shard):
+// the job image carries them, and the smoke check proves it before an image is marked ready.
+test('the job image carries zsh and the CJK, Inter and JetBrains Mono fonts, and the smoke check proves it', () => {
+  const docker = readFileSync(new URL('../../pool/image/Dockerfile', import.meta.url), 'utf8');
+  const script = readFileSync(new URL('../../gce/vm/smoke.sh', import.meta.url), 'utf8');
+  for (const pkg of ['zsh', 'fonts-noto-cjk', 'fonts-inter', 'fonts-jetbrains-mono']) assert.match(docker, new RegExp(`\\s${pkg}(\\s|$)`), pkg);
+  assert.match(script, /^check zsh zsh --version$/m);
+  assert.match(script, /^check fonts dpkg -s fonts-noto-cjk fonts-inter fonts-jetbrains-mono$/m);
 });

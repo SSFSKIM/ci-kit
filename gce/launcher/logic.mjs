@@ -51,6 +51,7 @@ export function viewInstance(i) {
     vcpus: machineCpus(machine),
     status: i.status,
     created: Date.parse(i.creationTimestamp),
+    running: Date.parse(i.lastStartTimestamp) || null, // when it last became RUNNING; none before its first boot
     repoLabel: i.labels?.['ci-kit-repo'] ?? null,
     cpus: Number(i.labels?.['ci-kit-cpus']) || null,
     provisioning: i.labels?.['ci-kit-provisioning'] ?? null,
@@ -62,16 +63,30 @@ export function viewInstance(i) {
 
 export const isGce = (r) => r?.labels?.['ci-kit'] === 'gce';
 
+// The instances whose runner has taken a job (M3 Cover). A job VM is single-use (JIT): once its runner has taken a job
+// it never takes another, though its runner reads registered and not busy from the job's end until GitHub removes
+// it. Known from any of: a job this tick read names it as its runner; its ledger row recorded a job (a tick saw it
+// busy; the job's run may be over, so no job this tick read names it); its job unit reported (ci-kit/job).
+// jobs: the jobs this tick read; rows: the ledger's; reports: Map instance name → its ci-kit/job report or null.
+export function claimedInstances({ jobs, rows, reports }) {
+  return new Set([
+    ...jobs.map((j) => j.runner_name).filter(Boolean),
+    ...rows.filter((r) => r.job).map((r) => r.instance),
+    ...[...reports].filter(([, report]) => report).map(([name]) => name),
+  ]);
+}
+
 // Which queued jobs get a VM now (spec §3a Demand). Demand is keyed by (repo, size): a servable job's labels are
 // determined by its size. Each key's unclaimed instances (runner registered and not busy, younger than
-// idle_runner_minutes) cover one queued job each; a busy instance covers nothing. The rest launch oldest first while
-// the vCPUs in flight stay at or under max_vcpus; a job that does not fit holds the line (first in, first out, as on
-// the Hetzner box), and the rest wait in GitHub's queue.
+// idle_runner_minutes, its runner never having taken a job) cover one queued job each; a busy or claimed instance
+// covers nothing. The rest launch oldest first while the vCPUs in flight stay at or under max_vcpus; a job that does
+// not fit holds the line (first in, first out, as on the Hetzner box), and the rest wait in GitHub's queue.
 // queued: queued pool jobs of served repos, each with `repo`. instances: viewInstance()s of every ci-kit=gce instance.
 // runners: Map repo → Map runner name → runner, for each repo whose listing succeeded; a repo without one gets nothing.
-// complete: false when the instance listing missed a zone; nothing is admitted then, since the vCPUs in flight and
-// the coverage are unknown. A launch reserves the largest machine its walk could land on (any placement's).
-export function planLaunches({ queued, instances, runners, now, cfg, complete = true }) {
+// claimed: claimedInstances(). complete: false when the instance listing missed a zone; nothing is admitted then,
+// since the vCPUs in flight and the coverage are unknown. A launch reserves the largest machine its walk could land
+// on (any placement's).
+export function planLaunches({ queued, instances, runners, now, cfg, complete = true, claimed = new Set() }) {
   if (!complete) return { launches: [], waiting: [...queued], unservable: [] };
   const idleMs = cfg.idle_runner_minutes * MIN;
   const repoByLabel = new Map([...runners.keys()].map((r) => [repoLabel(r), r]));
@@ -83,7 +98,7 @@ export function planLaunches({ queued, instances, runners, now, cfg, complete = 
     inflight += i.vcpus;
     const repo = repoByLabel.get(i.repoLabel);
     const r = repo && runners.get(repo).get(i.name);
-    if (r && !r.busy && now - i.created < idleMs) cover.set(key(repo, i.cpus), (cover.get(key(repo, i.cpus)) ?? 0) + 1);
+    if (r && !r.busy && !claimed.has(i.name) && now - i.created < idleMs) cover.set(key(repo, i.cpus), (cover.get(key(repo, i.cpus)) ?? 0) + 1);
   }
   const launches = [];
   const waiting = [];

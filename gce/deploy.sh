@@ -3,7 +3,8 @@
 # gcloud's default account. No GCP credential exists anywhere else.
 #   gce/deploy.sh [base] [network] [bake] [bake-schedule] [launcher] [launcher-schedule] [alert]
 #                  (no argument: all of them, in that order)
-#   base               the APIs, the service account ci-kit-launcher, and its compute role on the project
+#   base               the APIs, the service account ci-kit-launcher, its compute role on the project, and serial
+#                      port logging, so a VM deleted after a failed boot leaves its console in Cloud Logging
 #   network            the VPC ci-kit and a subnetwork for each placement of pool/config/gce.json (gce/subnets.mjs: a new
 #                      one takes the first free /20 of 10.64.0.0/16; one that exists is left alone), with no firewall
 #                      rule: GCE's implied rules deny all ingress and allow all egress. It then checks that no rule
@@ -43,7 +44,9 @@ base() {
   number=$(g projects describe "$PROJECT" --format='value(projectNumber)')
   g projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$number-compute@developer.gserviceaccount.com" \
     --role=roles/run.builder --condition=None > /dev/null
-  echo "deploy: base ok ($SA)"
+  # A job VM's console is the only record of its boot, and the VM is deleted minutes after its job (spec M3).
+  g compute project-info add-metadata --metadata=serial-port-logging-enable=TRUE > /dev/null
+  echo "deploy: base ok ($SA; serial port logging on)"
 }
 
 # Every pool VM and bake VM sits here, never on the project's default network, whose stock rules open ssh and RDP to

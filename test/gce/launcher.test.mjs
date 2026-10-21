@@ -44,6 +44,7 @@ const only = (map) => {
   return list[0];
 };
 const vms = (w) => w.g.instances.map((i) => i.name);
+const idName = (job) => job && { id: job.id, name: job.name };
 const leftovers = (w) => ({ instances: w.g.instances.length, disks: w.g.disks.length, runners: [...w.gh.runners.values()].flat().length });
 
 test('a job\'s whole life: launch, run, power off, delete, one final row with the job it ran; nothing left', async () => {
@@ -68,7 +69,7 @@ test('a job\'s whole life: launch, run, power off, delete, one final row with th
   w.sim.take(SBX, name, job);
   w.advance(MIN);
   await launcher.tick();
-  assert.deepEqual(only(rows(w)).job, { id: job.id, name: 'ci / nproc' }, 'the job goes on the row while it runs');
+  assert.deepEqual(idName(only(rows(w)).job), { id: job.id, name: 'ci / nproc' }, 'the job goes on the row while it runs');
 
   w.advance(2 * MIN);
   w.sim.finish(SBX, name, job);
@@ -288,7 +289,7 @@ test('a preempted spot VM: the row is finalized preempted with the job it held; 
   w.sim.runner(SBX, name).status = 'offline'; // runner lost; GitHub still shows it busy until it fails the job
   await launcher.tick();
   const row = only(rows(w));
-  assert.deepEqual([row.state, row.end, row.job], ['final', 'preempted', { id: job.id, name: 'ci / unit' }]);
+  assert.deepEqual([row.state, row.end, idName(row.job)], ['final', 'preempted', { id: job.id, name: 'ci / unit' }]);
   job.status = 'completed';
   w.sim.runner(SBX, name).busy = false;
   await settle(w, launcher, 6);
@@ -461,7 +462,7 @@ test('review 6: the job a runner held is found when its run began long before th
   await launcher.tick();
   w.advance(MIN);
   await launcher.tick();
-  assert.deepEqual(only(rows(w)).job, { id: job.id, name: 'ci / late' });
+  assert.deepEqual(idName(only(rows(w)).job), { id: job.id, name: 'ci / late' });
 });
 
 test('review 7: with GCE\'s operation history unreadable, a vanished VM\'s row waits; it is classified once history reads', async () => {
@@ -725,4 +726,182 @@ test('placements (review): while a live row names no zone (its running write fai
   const out = await central.tick();
   assert.deepEqual(out.launched, []);
   assert.equal(out.waiting, 1, 'the VM, seen again, holds the 4 vCPUs');
+});
+
+// ── M3: the tick and the cover ─────────────────────────────────────────────────────────────────────────────────
+
+// The 10-21 sequence (GitHub's job timeline and the pool ledger): MAWS run 39583515002's static job 119166794835
+// (cpus-4) was queued at 10:17:58 and started at 10:20:04, 126 s later. The tick at 10:18:2x launched its run's unit
+// and probes but nothing for static: hscox688lt, the cpus-4 VM of an earlier run's static job 119162503511 (started
+// 10:10:17, the last job of its run, completed 10:18:12), still had its runner registered and not busy, and was
+// counted as cover. The same tick deleted it (its job had reported), and the next tick launched hscp78uw4c.
+test('cover, replayed from 10-21: a VM whose job just ended covers no queued job, and the job launches in that tick', async () => {
+  const MAWS = 'SSFSKIM/MAWS';
+  const at = (hms) => Date.parse(`2026-10-21T${hms}Z`);
+  const w = world({ start: at('10:07:44'), repos: { [MAWS]: { private: true } } });
+  const { launcher } = setup({ cfg: { ...BASE_CFG, repos: [{ repo: MAWS }] }, w });
+  const earlier = w.sim.queue(MAWS, L(4), { name: 'static' }); // 119162503511
+  w.advance(at('10:09:31') - w.now());
+  await launcher.tick();
+  const [old] = vms(w); // hscox688lt
+  w.advance(at('10:10:17') - w.now());
+  w.sim.boot(MAWS, old);
+  w.sim.take(MAWS, old, earlier);
+  w.advance(at('10:11:20') - w.now());
+  await launcher.tick(); // a tick while it runs records the job on its row
+  assert.equal(only(rows(w)).job?.id, earlier.id);
+
+  w.advance(at('10:17:58') - w.now());
+  const unit = w.sim.queue(MAWS, L(8), { name: 'unit' });
+  const probes = w.sim.queue(MAWS, L(2), { name: 'probes', run: unit.run_id });
+  const stat = w.sim.queue(MAWS, L(4), { name: 'static', run: unit.run_id }); // 119166794835
+  w.advance(at('10:18:12') - w.now());
+  w.sim.finish(MAWS, old, earlier, { poweredOff: false, runnerLeaves: false });
+  assert.deepEqual([w.sim.runner(MAWS, old).busy, w.gh.runs.find((r) => r.id === earlier.run_id).status], [false, 'completed'],
+    'its runner still reads registered and not busy, and its run is over: this tick lists no job naming it');
+
+  w.advance(at('10:18:22') - w.now());
+  const out = await launcher.tick();
+  assert.equal(out.launched.length, 3, 'static, unit and probes all launch in this tick');
+  const sizes = vms(w).filter((n) => n !== old).map((n) => w.sim.vm(n).labels['ci-kit-cpus']).sort();
+  assert.deepEqual(sizes, ['2', '4', '8']);
+  assert.deepEqual(out.deleted, [`${old} (job-exited)`], 'and the ended VM goes in the same tick');
+  assert.ok([unit, probes, stat].every((j) => j.status === 'queued'));
+});
+
+// Every call to Compute Engine and GitHub takes `ms` of real time, as a remote API's does.
+const slowed = (api, ms) => Object.fromEntries(Object.entries(api).map(([k, fn]) =>
+  [k, typeof fn === 'function' ? async (...a) => { await new Promise((r) => setTimeout(r, ms)); return fn(...a); } : fn]));
+
+test('reads in parallel, launches before cleanup: the first insert comes a few calls into the tick, however much else there is', async () => {
+  const MAWS = 'SSFSKIM/MAWS';
+  const MANIM = 'SSFSKIM/manim-master';
+  const repos = { [SBX]: { private: true }, [MAWS]: { private: true }, [MANIM]: { private: true } };
+  const cfg = { ...BASE_CFG, repos: Object.keys(repos).map((repo) => ({ repo })) };
+  const w = world({ start: T0, repos });
+  const { launcher } = setup({ cfg, w });
+  // Work for every part of the tick: a busy VM, a VM whose job just reported, two runs queued in each repo.
+  for (const repo of Object.keys(repos)) w.sim.queue(repo, L(4));
+  await launcher.tick();
+  const names = vms(w);
+  const jobs = w.gh.jobs.slice();
+  names.forEach((n, k) => {
+    const repo = Object.keys(repos)[k];
+    w.sim.boot(repo, n);
+    w.sim.take(repo, n, jobs[k]);
+  });
+  w.advance(MIN);
+  await launcher.tick();
+  w.sim.finish(MAWS, names[1], jobs[1], { poweredOff: false });
+  for (const repo of Object.keys(repos)) for (const size of [2, 8]) w.sim.queue(repo, L(size));
+  w.advance(MIN);
+
+  const D = 50;
+  let first = null;
+  w.hooks.beforeInsert = () => { first ??= Date.now(); };
+  const slow = new Launcher({
+    gce: slowed(w.gce, D), gh: slowed(w.github, D), ledger: createGceLedger(slowed(w.github, D), cfg.ledger, { now: w.now }), cfg, config: COMMIT,
+    poolRepos: [], now: w.now, random: () => Math.floor(Math.random() * 36 ** 5), alert: async () => {},
+  });
+  const began = Date.now();
+  const out = await slow.tick();
+  assert.equal(out.launched.length, 6);
+  assert.ok(out.deleted.some((d) => d.startsWith(names[1])), 'the cleanup ran in the same tick');
+  // Sequentially this tick makes about 30 calls before its first insert. In parallel: the ledger, then the instances;
+  // beside them each repo's runners, runs and jobs; then the ledger row, the JIT config and the insert.
+  const depth = (first - began) / D;
+  assert.ok(depth < 10, `the first insert came ${depth.toFixed(1)} calls deep`);
+});
+
+test('timing: the tick reports its first insert, and a row its job\'s run, workflow, queued and started times and its VM\'s RUNNING time', async () => {
+  const { w, launcher } = setup();
+  const quiet = await launcher.tick();
+  assert.equal(quiet.firstInsert, null, 'no insert, no time');
+  w.advance(5_000);
+  const job = w.sim.queue(SBX, L(4), { name: 'ci / nproc' });
+  w.advance(20_000);
+  const out = await launcher.tick();
+  assert.equal(out.firstInsert, new Date(w.now()).toISOString());
+  const [name] = vms(w);
+  w.advance(15_000);
+  w.sim.boot(SBX, name);
+  w.advance(10_000);
+  w.sim.take(SBX, name, job);
+  w.advance(MIN);
+  await launcher.tick();
+  const row = only(rows(w));
+  assert.deepEqual(row.job, {
+    id: job.id, name: 'ci / nproc', run: job.run_id, workflow: '.github/workflows/gate.yml', queued: new Date(T0 + 5_000).toISOString(),
+    started: new Date(T0 + 50_000).toISOString(),
+  });
+  assert.equal(row.running, new Date(T0 + 40_000).toISOString());
+  w.advance(MIN);
+  w.sim.finish(SBX, name, job);
+  await launcher.tick();
+  w.advance(MIN);
+  await launcher.tick();
+  const final = only(rows(w));
+  assert.deepEqual([final.state, final.running, final.job.started], ['final', row.running, row.job.started]);
+});
+
+test('timing: a job no tick saw running is found when its VM is retired, with its times', async () => {
+  const { w, launcher } = setup();
+  const job = w.sim.queue(SBX, L(2), { name: 'probes' });
+  await launcher.tick();
+  const [name] = vms(w);
+  w.advance(20_000);
+  w.sim.boot(SBX, name);
+  w.sim.take(SBX, name, job);
+  w.advance(30_000);
+  w.sim.finish(SBX, name, job);
+  w.advance(10_000);
+  await launcher.tick();
+  w.advance(MIN);
+  await launcher.tick();
+  const row = only(rows(w));
+  assert.deepEqual([row.end, row.job.id, row.job.run, row.job.queued, row.job.started, row.running],
+    ['done', job.id, job.run_id, new Date(T0).toISOString(), new Date(T0 + 20_000).toISOString(), new Date(T0 + 20_000).toISOString()]);
+});
+
+test('a tick that cannot list the instances fails whole, launching and deleting nothing, while its other reads settle', async () => {
+  const { w, launcher } = setup();
+  w.sim.queue(SBX, L(4));
+  w.gce.listInstances = async () => { throw new GceError(503, 'instances listing failed'); };
+  const getRepo = w.github.getRepo;
+  w.github.getRepo = async (repo) => { await new Promise((r) => setTimeout(r, 20)); return getRepo(repo); }; // slower than the failure
+  await assert.rejects(launcher.tick(), /instances listing failed/);
+  assert.deepEqual(w.log.filter((l) => /^(insert|delete|unregister)/.test(l)), []);
+});
+
+// Review (M3, P2): a repo's two run snapshots are taken in order, queued then in progress. A run that starts between
+// them (another runner took its first job) is then in the second, and its still-queued pool jobs launch this tick;
+// two snapshots taken at once could each miss it.
+test('a run that starts between the queued and in-progress snapshots still has its queued jobs launched', async () => {
+  const { w, launcher } = setup();
+  const a = w.sim.queue(SBX, L(4), { name: 'a' });
+  w.sim.queue(SBX, L(2), { name: 'b', run: a.run_id });
+  const runsByStatus = w.github.runsByStatus;
+  w.github.runsByStatus = async (repo, status) => {
+    if (status === 'queued') {
+      await new Promise((r) => setImmediate(r));
+      w.gh.runs.find((r) => r.id === a.run_id).status = 'in_progress'; // it starts just before this snapshot
+    }
+    return runsByStatus(repo, status);
+  };
+  const out = await launcher.tick();
+  assert.equal(out.launched.length, 2);
+});
+
+test('a run listed both queued and in progress (it started between the two listings) is read once: no double launch', async () => {
+  const { w, launcher } = setup();
+  const a = w.sim.queue(SBX, L(4), { name: 'a' });
+  w.sim.queue(SBX, L(2), { name: 'b', run: a.run_id });
+  const runsByStatus = w.github.runsByStatus;
+  w.github.runsByStatus = async (repo, status) => {
+    const list = await runsByStatus(repo, status);
+    if (status === 'queued') w.gh.runs.find((r) => r.id === a.run_id).status = 'in_progress'; // it starts just after
+    return list;
+  };
+  const out = await launcher.tick();
+  assert.equal(out.launched.length, 2);
 });

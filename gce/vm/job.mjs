@@ -6,6 +6,7 @@
 // The JIT config reaches the container only through the docker CLI's environment, never a command line or a log.
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { readFileSync } from 'node:fs';
 import { mkdir, chown } from 'node:fs/promises';
 import { availableParallelism } from 'node:os';
 import { workDir } from '../../pool/agent/docker.mjs';
@@ -14,7 +15,7 @@ import { jobRunArgs, vmMode, smokeVerdict, METADATA_BLOCK } from './run.mjs';
 const sh = promisify(execFile);
 const MD = 'http://169.254.169.254/computeMetadata/v1/instance';
 const RUNNER_UID = 1001;
-const log = (...a) => console.log('ci-kit gce job:', ...a);
+const log = (...a) => console.log(`ci-kit gce job (up ${readFileSync('/proc/uptime', 'utf8').split(' ')[0]} s):`, ...a);
 
 async function meta(path) {
   const res = await fetch(`${MD}/${path}`, { headers: { 'metadata-flavor': 'Google' }, signal: AbortSignal.timeout(10_000) });

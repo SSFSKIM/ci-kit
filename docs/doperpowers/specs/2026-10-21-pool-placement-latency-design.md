@@ -57,7 +57,25 @@ toward the boot alone, and below it for the jobs a warm runner covers.
   - [x] (2026-10-21 15:57Z) Step 2: a c4d-highcpu-2 on hyperdisk-balanced in us-west4-a, from the current ready image,
     ran a real sandbox job (exit:0); VM, disk and runner gone. Insert accepted → RUNNING 23.2 s, RUNNING → started
     28.9 s (one sample; C3D's accepted → RUNNING is ~7.6 s, a finding step 4's ~18 C4D starts settle).
-- [ ] M3 — The tick and the boot.
+  - [x] (2026-10-21 16:29Z) Step 3: #73 merged 16:10Z (f26f726); `deploy.sh bake`; manual bake ci-kit-bake-md6wc built
+    in us-west4, smoke-1 c4d-highcpu-2@us-west4-a ok, smoke-2 c3d-highcpu-4@us-central1-a ok, real job on c4d-2 passed,
+    image `ci-kit-runner-20261021-161209-fa1d-f26f726b` ready.
+  - [x] (2026-10-21 17:2xZ) Step 4: arm b (MAWS b2d286cea), three runs each side, all green, 22457 tests each, every
+    job's VM in the arm's placement (Acceptance 2 met on the 3-vs-3 rule):
+
+    | | C3D (cp-b9..11, before) | C4D (cp-c4d1..3, after) | gain |
+    |---|---|---|---|
+    | static job (cpus-4) | 463 s (443–478) | 335 s (323–346) | 128 s, C3D spread 35 |
+    | unit job (cpus-8) | 570 s (516–572) | 427 s (387–506) | 143 s, C3D spread 56 |
+    | probes job (cpus-2; C3D side on e2) | 60 s (60–66) | 34 s (32–35) | 26 s |
+    | plan → last job | 657 s (590–664) | 532 s (486–559) | 125 s |
+    | insert accepted → job started, per VM | 48.4 s (n=9) | 37.4 s (n=9) | 11 s |
+
+    Against all nine C3D arm b runs of the day (critical-path b1–b3, b6–b8 and these), unit's gain (median 494 → 427)
+    is inside C3D's 486–572 spread; static's (447 → 335) is well outside it. Runs 39630493322, 39630507852,
+    39630519998 / 39635358119, 39636927897, 39638465062.
+- [ ] M3 — The tick and the boot. (2026-10-21) Built, rebased onto M1+M2, reviewer-medium clean after one fix wave,
+  ci-gate green; PR to CI-opt. Its proofs over a day of rows follow the launcher deploy and the bake after merge.
 - [ ] M4 — Launch on GitHub's `workflow_job` webhook.
 - [ ] M5 — Pre-launch of a run's gate VMs (the owner chose it 2026-10-21; no warm runner).
 
@@ -151,8 +169,12 @@ deleted in M2, once main carries the new form.
   whose runner has taken a job is never cover, whatever its runner's state reads. How the launcher knows (the jobs
   API's `runner_name`, a guest attribute the job-started hook writes, or the VM's age against its claim) is M3's
   choice; its test replays that 10-21 sequence.
-- **The boot.** The bake purges snapd and stops cloud-init from gating dockerd (`docker.service` no longer waits on
-  `cloud-final`), and keeps only the cloud-init modules the VM uses. Target: RUNNING → job started ≤ 20 s.
+- **The boot.** Job VMs boot without cloud-init: the bake purges snapd, bakes a generic netplan (DHCP on any `en*` or
+  `eth*` interface, gVNIC's `ens3` included) and `/etc/cloud/cloud-init.disabled` into the image, and the VM's own
+  instance unit grows the root filesystem to the disk and sets the hostname to the instance name; ssh host keys and
+  the `ubuntu` user stay with the guest agent. (cloud-init gated dockerd through `sysinit.target`, not `cloud-final`,
+  so trimming its modules saved nothing: Decision Log.) Target: a median insert accepted → job started of ≤ 26 s on
+  c3d-highcpu-4 over a day of pool rows, measured with `latency-report.mjs`; C4D's is reported separately.
 - **Timing in the ledger.** Each ledger row gains the job's run id, workflow path and size, the job's queued and
   started times (GitHub's `created_at` and `started_at`, read when the row is reviewed) and the VM's RUNNING time
   (`lastStartTimestamp`); the tick logs its start and its first insert as structured fields. A collector in the repo
@@ -247,7 +269,8 @@ Proof: Acceptance 1–3.
 
 ### M3 — The tick and the boot
 
-As designed above. Proof: tick start → first insert ≤ 5 s and RUNNING → job started ≤ 20 s over a day's ledger; the
+As designed above. Proof: tick start → first insert ≤ 5 s and a median insert accepted → job started ≤ 26 s on c3d-highcpu-4 over a
+day's ledger (`latency-report.mjs`); the
 cover fix's test reproduces 119166794835's sequence; A13 clauses hold.
 
 ### M4 — Launch on the webhook
@@ -356,6 +379,40 @@ reported to the owner.
   configs (`test/gce/config-fixtures.mjs`), so a reorder commit on main cannot change what a test means; one test
   holds the shipped file to the spec's shape without pinning its order.
 
+- 2026-10-21 (M3): **Cover: an instance whose runner has taken a job is never cover**, known from any of three
+  signals: a job read this tick names its runner, its ledger row recorded a job, or it reported `ci-kit/job`. On
+  10-21 only the row's recorded job caught it (the ended job was its run's last, so no job read that tick named the
+  runner); the report covers a short job no tick saw busy. A guest attribute from the job-started hook is impossible:
+  the hook runs in the job container, which `METADATA_BLOCK` cuts off from the metadata server.
+- 2026-10-21 (M3): **Cleanup runs beside the launches, not after them**: strictly after would delay every deletion by
+  the inserts' operations (~10–20 s) on ticks that launch, eating into A13's 2-min teardown bound.
+- 2026-10-21 (M3): **The ledger read is incremental.** After its first whole read the store asks only for comments
+  updated since its last read, less 5 min, and updates its held set in place; the whole 26 h window was 5 sequential
+  pages (2.2 s) ahead of every launch. The first insert now comes ~7 calls into a tick, from ~32.
+  `since` returns no tombstones, so at most every 5 min the store re-reads the whole window and forgets what GitHub
+  no longer lists (an overlapping launcher's delete would otherwise survive in the cache: reviewer-medium). Within a
+  repo, queued runs are still listed before in-progress ones, and a run in both is read once.
+- 2026-10-21 (M3): **`latency-report.mjs` reports each machine type's stages**, insert accepted → job started paired
+  per VM (the target's statistic, not a sum of medians), over open and closed ledger issues.
+- 2026-10-21 (M3, CI-opt approved): **Job VMs boot without cloud-init.** The spec's premise that docker waited on
+  `cloud-final` was wrong: cloud-init's local and network stages hold `sysinit.target`, which every service waits
+  for, so trimming modules (the first build) left RUNNING → started at 34.4 s on one sample. Five real sandbox jobs
+  per arm on c3d-highcpu-4 (median, range):
+
+  | stage | current image | no cloud-init |
+  |---|---|---|
+  | insert accepted → RUNNING | 7.6 s (6.4–8.7) | 8.5 s (7.2–27.5) |
+  | RUNNING → job started | 31.4 s (29.2–32.1) | 16.3 s (15.2–26.6) |
+  | insert accepted → job started | 38.5 s (36.6–40.1) | 35.2 s (24.1–43.3) |
+
+  The new image's first two inserts took 27.5 s to RUNNING (a first-use cost on a fresh image, unproven); the two
+  RUNNING → started misses were GitHub's (runner connection, job assignment). `lastStartTimestamp` lags the guest's
+  kernel by ~6 s of firmware, so the target is restated as insert accepted → job started, the honest span: ≤ 26 s
+  median on c3d-highcpu-4 (CI-opt confirmed), from today's 38.5–42 s.
+- 2026-10-21 (CI-opt): **The job image carries zsh and MAWS's fonts** (`fonts-noto-cjk`, `fonts-inter`,
+  `fonts-jetbrains-mono`), which MAWS's setup apt-installed at job time (~35 s on each job's critical path, and a
+  Launchpad 503 failed a unit shard); the smoke check fails an image without them.
+
 ## Surprises & Discoveries
 
 - 2026-10-21 (CI-opt): the first version of this spec and the owner's first standby question assumed a pool hop for
@@ -374,6 +431,9 @@ reported to the owner.
   75 MiB/s above the free baseline, which makes a c4d boot disk about 1.9x a pd-balanced one ($0.0133/h against
   $0.0068/h). Provisioning only the baseline would remove that and might slow the install steps; under the owner's
   speed-first ruling the launcher keeps the defaults, and the ledger prices them.
+- 2026-10-21 (M3): `lib/gce.mjs` `accessToken()` cached gcloud's token for 30 min whatever its own expiry, which
+  killed a local bake with a 401 (friction #68); fixed on this branch. `get-serial-port-output` returned an empty body
+  late in a VM's life; the job VM's setup and job now write to the serial console directly, stamped with the uptime.
 
 ## Outcomes & Retrospective
 

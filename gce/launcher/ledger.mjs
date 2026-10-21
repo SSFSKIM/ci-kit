@@ -75,21 +75,30 @@ const utc = (s) => s.slice(0, 19).replace('T', ' ');
 export const launchRow = ({ alloc, repo, cpus, at, config }) =>
   ({ alloc, instance: instanceName(alloc), repo, cpus, at: iso(at), config: config.slice(0, 8), state: 'launching' });
 
-// inst: {zone, machine, provisioning, diskType, created (ms)}. A VM launched before placements carries no disk type.
+// inst: {zone, machine, provisioning, diskType, created (ms), running (ms, when it became RUNNING; absent or null
+// before)}. A VM launched before placements carries no disk type.
 export const runningRow = (row, inst) => ({
   ...row, machine: inst.machine, zone: inst.zone, provisioning: inst.provisioning, ...(inst.diskType ? { diskType: inst.diskType } : {}),
-  created: iso(inst.created), state: 'running',
+  created: iso(inst.created), ...(inst.running ? { running: iso(inst.running) } : {}), state: 'running',
 });
 
-export const withJob = (row, job) => ({ ...row, job: { id: job.id, name: job.name } });
+// What a row keeps of the job its VM ran (M3 Timing in the ledger): its id and name, its run and the run's workflow
+// path (`workflow`, which the launcher adds from the run), and GitHub's queued (created_at) and started times. A
+// field GitHub has not set is left out.
+export function jobRecord(job) {
+  const fields = { id: job.id, name: job.name, run: job.run_id, workflow: job.workflow, queued: job.created_at, started: job.started_at };
+  return Object.fromEntries(Object.entries(fields).filter(([, v]) => v != null));
+}
+
+export const withJob = (row, job) => ({ ...row, job: jobRecord(job) });
 
 // Finalized, or about to be deleted (`state: 'deleting'`). Seconds run from the VM's creation to its deletion; an
-// allocation that never had a VM has neither.
+// allocation that never had a VM has neither. job: a jobRecord().
 export function finalRow(row, { end, deleted, job, diskGb, state = 'final' }) {
   const seconds = row.created ? Math.max(0, Math.round((deleted - Date.parse(row.created)) / 1000)) : null;
   const cost = seconds === null ? null : dollars({ machine: row.machine, zone: row.zone, provisioning: row.provisioning, seconds, diskGb, diskType: row.diskType });
   return {
-    ...row, ...(job ? { job: { id: job.id, name: job.name } } : {}),
+    ...row, ...(job ? { job } : {}),
     deleted: iso(deleted), seconds, dollars: cost === null ? null : round4(cost), end, state,
   };
 }

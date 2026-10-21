@@ -1,0 +1,17 @@
+[Unit]
+Description=ci-kit GCE job VM: root grown to the disk, hostname from the instance (in place of cloud-init; spec M3)
+# The metadata server is reached through the network DHCP configures.
+After=network-online.target
+Wants=network-online.target
+Before=ci-kit-gce-job.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/ci-kit/gce/vm/instance.sh
+# The console is this VM's only window (no ssh); journal lines reach it late through rsyslog (spec M3, The boot).
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
