@@ -62,7 +62,9 @@ const server = http.createServer(async (req, res) => {
   const began = Date.now();
   try {
     const out = await tick();
-    say('INFO', `tick: ${out.launched.length} launched, ${out.deleted.length} deleted, ${out.finalized.length} finalized`, { ...out, ms: Date.now() - began });
+    // `started` and the launcher's `firstInsert` time the tick's own share of a job's wait (gce/latency-report.mjs).
+    say('INFO', `tick: ${out.launched.length} launched, ${out.deleted.length} deleted, ${out.finalized.length} finalized`,
+      { ...out, started: new Date(began).toISOString(), ms: Date.now() - began });
     res.writeHead(200, { 'content-type': 'application/json' }).end(`${JSON.stringify(out)}\n`);
   } catch (err) {
     say('ERROR', `tick failed: ${err.stack ?? err.message}`, { ms: Date.now() - began });

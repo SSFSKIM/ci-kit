@@ -1,6 +1,9 @@
 // The GCE ledger on GitHub (spec I12): one comment per allocation on the current ledger issue, plus the daily lines.
-// A tick reads only the comments updated in the last 26 h (a VM lives at most max_run_minutes, and the daily line needs
-// yesterday), so the read stays small however long an issue grows. Writes keep that copy current. A row never
+// The store holds the comments updated in the last 26 h (a VM lives at most max_run_minutes, and the daily line needs
+// yesterday), so a read stays small however long an issue grows. Writes keep that copy current. The store lives as
+// long as the launcher's instance, so after its first read of an issue it asks only for the comments updated since
+// its last read, less READ_OVERLAP_MS for GitHub's listing lag (spec M3: a busy day's window is several pages, read
+// one after another before every tick's first launch). A row never
 // moves back: before an update the comment is read again and the write is dropped if the comment is already as far
 // along (a final row is never rewritten). Issue comments have no compare-and-swap, so during an overlap of two
 // ticks a row is eventually final rather than finalized once: a stale writer whose update lands in the milliseconds
@@ -23,6 +26,7 @@ export const WINDOW_MS = 26 * 3600_000;
 // 500 below the cap: about two days at MAWS's rate, for a rotation that keeps failing, a count GitHub reports late,
 // and the comments a tick already under way adds. An issue left behind therefore never reaches the cap.
 export const ROTATE_AT = 2000;
+export const READ_OVERLAP_MS = 5 * 60_000;
 
 // `row` may replace `current` unless current is final or further along.
 const mayWrite = (current, row) => current !== null && current.state !== 'final' && !moreFinal(current, row);
@@ -33,7 +37,16 @@ export function createGceLedger(gh, { repo, issue_title: title }, { now = Date.n
   let issues = []; // the open ledger issues, oldest first: the last is current
   // Issues this store opened that no listing has shown yet: GitHub lists a new issue only seconds after creating it.
   let opened = [];
-  let comments = [];
+  // Issue number → {readAt: when its last read began, byId: Map comment id → comment}: the comments in the window.
+  let held = new Map();
+  const comments = () => [...held.values()].flatMap((h) => [...h.byId.values()]);
+  const hold = (issue, c) => {
+    if (!held.has(issue)) held.set(issue, { readAt: null, byId: new Map() });
+    held.get(issue).byId.set(c.id, c);
+  };
+  const drop = (id) => {
+    for (const h of held.values()) h.byId.delete(id);
+  };
 
   async function open(previous) {
     const made = await gh.createIssue(repo, {
@@ -47,11 +60,20 @@ export function createGceLedger(gh, { repo, issue_title: title }, { now = Date.n
     return issue;
   }
 
+  // Each open issue's comments in the window, from what the store holds and what changed since it last read the issue.
   async function readComments() {
-    const since = new Date(now() - WINDOW_MS).toISOString();
-    const per = await Promise.all(issues.map((i) => gh.issueComments(repo, i.number, { since })));
-    comments = per.flat();
-    return per;
+    const t = now();
+    const cutoff = new Date(t - WINDOW_MS).toISOString();
+    const read = await Promise.all(issues.map(async (i) => {
+      const h = held.get(i.number);
+      const since = h?.readAt == null ? cutoff : new Date(Math.max(t - WINDOW_MS, h.readAt - READ_OVERLAP_MS)).toISOString();
+      const fresh = await gh.issueComments(repo, i.number, { since });
+      const byId = new Map([...(h?.byId.values() ?? [])].filter((c) => !(c.updated_at < cutoff)).map((c) => [c.id, c]));
+      for (const c of fresh) byId.set(c.id, c);
+      return [i.number, { readAt: t, byId }];
+    }));
+    held = new Map(read);
+    return read.map(([, h]) => [...h.byId.values()]);
   }
 
   async function read() {
@@ -83,7 +105,7 @@ export function createGceLedger(gh, { repo, issue_title: title }, { now = Date.n
       }
     }
     issues = issues.filter((i) => !retired.has(i.number));
-    return comments;
+    return comments();
   }
 
   async function current() {
@@ -93,17 +115,17 @@ export function createGceLedger(gh, { repo, issue_title: title }, { now = Date.n
 
   return {
     read,
-    rows: async () => rowsOf(comments),
+    rows: async () => rowsOf(comments()),
     // Writes `row` over its allocation's comment unless that one is already further along; creates it if none.
     // `dedupe`: after creating, re-read and remove any other comment for the allocation (a concurrent writer's). A
     // launch row needs none: its allocation id was just made.
     async upsert(row, { dedupe = false } = {}) {
       const issue = await current();
-      const [counted, ...extras] = rowComments(comments, row.alloc).map((x) => x.c);
+      const [counted, ...extras] = rowComments(comments(), row.alloc).map((x) => x.c);
       const body = renderRow(row);
       if (!counted) {
         const made = await gh.createComment(repo, issue, body);
-        comments.push(made ?? { id: Number.MAX_SAFE_INTEGER, body });
+        hold(issue, made ?? { id: Number.MAX_SAFE_INTEGER, body });
       } else if (mayWrite(parseRow(counted.body), row) && counted.body !== body) {
         const fresh = await gh.getComment(repo, counted.id);
         counted.body = fresh.body;
@@ -114,21 +136,21 @@ export function createGceLedger(gh, { repo, issue_title: title }, { now = Date.n
       }
       if (extras.length || (!counted && dedupe)) {
         if (!counted) await readComments();
-        for (const extra of rowComments(comments, row.alloc).slice(1).map((x) => x.c)) {
+        for (const extra of rowComments(comments(), row.alloc).slice(1).map((x) => x.c)) {
           await gh.deleteComment(repo, extra.id).catch((err) => {
             if (err.status !== 404) throw err; // the other writer removed it first
           });
-          comments = comments.filter((c) => c.id !== extra.id);
+          drop(extra.id);
         }
       }
     },
     // Posts the day's line unless one is already on any open ledger issue. Returns whether it posted.
     async postDaily(line) {
       const issue = await current();
-      if (dailyDays(comments).has(line.day)) return false;
+      if (dailyDays(comments()).has(line.day)) return false;
       const body = renderDaily(line);
       const made = await gh.createComment(repo, issue, body);
-      comments.push(made ?? { id: Number.MAX_SAFE_INTEGER, body });
+      hold(issue, made ?? { id: Number.MAX_SAFE_INTEGER, body });
       return true;
     },
   };

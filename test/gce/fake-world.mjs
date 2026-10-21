@@ -179,10 +179,17 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
   // GitHub's and the VM's side.
   let runId = 1000;
   const sim = {
-    queue(repo, labels, { name = 'ci / gate' } = {}) {
-      const run = { id: runId++, repo, status: 'queued', created_at: new Date(clock).toISOString() };
-      const job = { id: run.id * 10, run_id: run.id, name, status: 'queued', labels, created_at: new Date(clock).toISOString(), runner_name: null };
-      gh.runs.push(run);
+    // A job in a new run, or in `run` (another job's run_id) when given.
+    queue(repo, labels, { name = 'ci / gate', run: inRun } = {}) {
+      let run = gh.runs.find((r) => r.id === inRun);
+      if (!run) {
+        run = { id: runId++, repo, status: 'queued', path: '.github/workflows/gate.yml', created_at: new Date(clock).toISOString() };
+        gh.runs.push(run);
+      }
+      const job = {
+        id: run.id * 10 + gh.jobs.filter((j) => j.run_id === run.id).length, run_id: run.id, name, status: 'queued', labels,
+        created_at: new Date(clock).toISOString(), started_at: null, runner_name: null,
+      };
       gh.jobs.push(job);
       return job;
     },
@@ -190,21 +197,26 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
     runner: (repo, name) => runnersOf(repo).find((r) => r.name === name),
     boot(repo, name) {
       sim.vm(name).status = 'RUNNING';
+      sim.vm(name).lastStartTimestamp = new Date(clock).toISOString();
       sim.runner(repo, name).status = 'online';
     },
     take(repo, name, job) {
       const r = sim.runner(repo, name);
       r.busy = true;
       job.status = 'in_progress';
+      job.started_at = new Date(clock).toISOString();
       job.runner_name = name;
       gh.runs.find((x) => x.id === job.run_id).status = 'in_progress';
     },
     // The job ends: the JIT runner leaves, the unit reports ci-kit/job=exit:<code>, and the guest powers off, which
-    // takes it a while (`poweredOff: false` stops before the VM is TERMINATED).
-    finish(repo, name, job, { poweredOff = true, code = 0 } = {}) {
+    // takes it a while (`poweredOff: false` stops before the VM is TERMINATED). GitHub removes the runner a little
+    // after the job ends (`runnerLeaves: false` stops before: it reads registered and not busy). The run completes
+    // with its last job.
+    finish(repo, name, job, { poweredOff = true, code = 0, runnerLeaves = true } = {}) {
       job.status = 'completed';
-      gh.runs.find((x) => x.id === job.run_id).status = 'completed';
-      gh.runners.set(repo, runnersOf(repo).filter((r) => r.name !== name)); // a JIT runner leaves after its job
+      if (gh.jobs.every((j) => j.run_id !== job.run_id || j.status === 'completed')) gh.runs.find((x) => x.id === job.run_id).status = 'completed';
+      if (runnerLeaves) gh.runners.set(repo, runnersOf(repo).filter((r) => r.name !== name)); // a JIT runner leaves after its job
+      else sim.runner(repo, name).busy = false;
       sim.vm(name).attrs = { ...sim.vm(name).attrs, 'ci-kit/job': `exit:${code}` };
       if (poweredOff) sim.vm(name).status = 'TERMINATED';
     },

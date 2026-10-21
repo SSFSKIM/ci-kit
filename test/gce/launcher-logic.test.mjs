@@ -8,7 +8,7 @@ import { GceError } from '../../lib/gce.mjs';
 import {
   allocationId, allocationTime, instanceName, allocOf, repoLabel, runnerLabels, jobCpus, viewInstance, planLaunches,
   placements, insertOutcome, walkPlacements, reviewInstances, reviewRows, orphanRunners, orphanDisks, newestReadyImage,
-  jobInstance, reportable,
+  jobInstance, reportable, claimedInstances,
 } from '../../gce/launcher/logic.mjs';
 import { parseGceConfig, servedRepos } from '../../gce/launcher/config.mjs';
 import { ONE_REGION_CFG } from './config-fixtures.mjs';
@@ -66,11 +66,12 @@ test('a job is served only with exactly one known cpus-N and labels its runner w
 });
 
 test('viewInstance reads the fields the launcher decides on', () => {
-  const v = viewInstance(instance({ alloc: A(1), machine: 'e2-highcpu-2', cpus: 2 }));
+  const v = viewInstance({ ...instance({ alloc: A(1), machine: 'e2-highcpu-2', cpus: 2 }), lastStartTimestamp: '2026-10-16T04:59:16.040-07:00' });
   assert.deepEqual({ ...v, raw: undefined }, {
     name: `ci-kit-gce-${A(1)}`, alloc: A(1), zone: 'us-central1-a', machine: 'e2-highcpu-2', vcpus: 2, status: 'RUNNING',
-    created: T0 - 2 * MIN, repoLabel: 'ssfskim--ci-kit-sandbox', cpus: 2, provisioning: 'spot', config: null, diskType: null, raw: undefined,
+    created: T0 - 2 * MIN, running: T0 - 44_000 + 40, repoLabel: 'ssfskim--ci-kit-sandbox', cpus: 2, provisioning: 'spot', config: null, diskType: null, raw: undefined,
   });
+  assert.equal(viewInstance(instance({ alloc: A(2), status: 'PROVISIONING' })).running, null, 'never started yet');
 });
 
 // Demand and admission.
@@ -100,6 +101,29 @@ test('a busy instance covers nothing, nor does one past the idle limit, one whos
   const runners = new Map([[SBX, new Map([[names[0], runner(names[0], { busy: true })], [names[1], runner(names[1])], [names[3], runner(names[3])]])]]);
   const p = plan({ queued: [job(1, L(4)), job(2, L(4))], instances, runners });
   assert.deepEqual(p.launches.map((l) => l.job.id), [1, 2]);
+});
+
+// M3 Cover: a job VM is single-use (JIT), so one whose runner has taken a job never covers another, whatever its runner
+// reads: after its job ends the runner stays registered and not busy until GitHub removes it.
+test('an instance whose runner has taken a job is never cover, though its runner reads registered and not busy', () => {
+  const name = instanceName(A(1));
+  const instances = [instance({ alloc: A(1), cpus: 4 })].map(viewInstance);
+  const runners = new Map([[SBX, new Map([[name, runner(name)]])]]);
+  const queued = [job(1, L(4))];
+  const free = planLaunches({ queued, instances, runners, now: T0, cfg: CFG });
+  assert.deepEqual(free.launches, [], 'unclaimed, it covers the job');
+  const claimed = planLaunches({ queued, instances, runners, now: T0, cfg: CFG, claimed: new Set([name]) });
+  assert.deepEqual(claimed.launches.map((l) => l.job.id), [1]);
+});
+
+test('claimed: a runner named by a job this tick read, a row that recorded a job, or a VM that reported its job\'s end', () => {
+  const n = (k) => instanceName(A(k));
+  const claimed = claimedInstances({
+    jobs: [{ id: 1, runner_name: n(1) }, { id: 2, runner_name: null }, { id: 3, runner_name: 'GitHub Actions 1000012140' }],
+    rows: [{ instance: n(2), job: { id: 9, name: 'static' } }, { instance: n(3) }],
+    reports: new Map([[n(4), 'exit:0'], [n(5), null]]),
+  });
+  assert.deepEqual([...claimed].sort(), [n(1), n(2), n(4), 'GitHub Actions 1000012140'].sort());
 });
 
 test('a repo whose runner listing failed gets no launches: unknown coverage is never read as demand', () => {
