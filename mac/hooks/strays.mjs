@@ -5,9 +5,9 @@
 // under it in its command line: the job's Electron, its node from the tool cache, its vitest) or sits in it (its working
 // directory is under it), and so is every descendant of a stray: an app's pty shell in /tmp is the app's. The sweep
 // itself, its ancestors (the hook's shell, the runner's worker and listener) and its own children are never strays,
-// though the hook runs inside the workspace. Nor, when the sweep is told to spare them, are the runners' live workers
-// and their descendants: a sweep of a _work other than its own job's (shared-hold.sh) must leave alone a job that sits
-// in its own hook there, or one whose worker started since its caller last looked.
+// though the hook runs inside the workspace. Nor are the processes it is told to spare and their descendants: the
+// runners' live job workers, for a sweep of a _work other than its own job's (shared-hold.sh), which must leave alone
+// a job that sits in its own hook there, or one whose worker started since its caller last looked.
 
 /** Rows of `ps -axo pid=,ppid=,uid=,lstart=,command=`, run in the C locale (`lstart` is then `Thu Oct 15 22:02:31 2026`). */
 export function parsePs(text) {
@@ -37,15 +37,6 @@ export function parseLsofCwd(text) {
     else if (line.startsWith('n') && pid !== null) cwds.set(pid, line.slice(1));
   }
   return cwds;
-}
-
-/**
- * The runners' live job workers among `processes`: each process of the user whose command runs an executable named
- * Runner.Worker, as every listener starts one (`<runner>/bin/Runner.Worker spawnclient <out> <in>`, a runner that
- * updated itself from bin.<version>).
- */
-export function workerPids(processes, uid) {
-  return processes.filter((p) => p.uid === uid && /(^|\/)Runner\.Worker$/.test(p.command.split(/\s+/)[0])).map((p) => p.pid);
 }
 
 /**

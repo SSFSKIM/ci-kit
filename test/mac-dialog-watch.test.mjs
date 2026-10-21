@@ -690,6 +690,33 @@ test('runner-state.py reads the kernel\'s executable paths: decoys never count, 
   }
 });
 
+test('runner-state.py --workers: every job worker of any runner by the kernel\'s executable path, whatever its command line', macOnly, async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'ci-kit workers ')));
+  const copy = (path) => { mkdirSync(dirname(path), { recursive: true }); copyFileSync(process.execPath, path, constants.COPYFILE_FICLONE); return path; };
+  const children = [];
+  const running = async (file, options = {}) => {
+    const child = spawn(file, ['-e', "console.log('running'); setTimeout(() => {}, 30_000)"], { stdio: ['ignore', 'pipe', 'ignore'], ...options });
+    children.push(child);
+    await once(child.stdout, 'data');
+    return child.pid;
+  };
+  try {
+    // Workers: under a path with spaces (ps prints it unquoted), and a runner that updated itself (bin.<version>).
+    const spaced = await running(copy(join(dir, 'actions runner/bin/Runner.Worker')));
+    const updated = await running(copy(join(dir, 'actions-runner-maws-2/bin.2.339.0/Runner.Worker')));
+    // Not workers: a process whose argv[0] or arguments name one.
+    const decoys = [await running(process.execPath, { argv0: join(dir, 'x/Runner.Worker') }), await running(process.execPath, { cwd: dir })];
+    const result = spawnSync('python3', ['-I', join(hooks, 'runner-state.py'), '--workers'], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const pids = result.stdout.trim().split(' ').map(Number);
+    for (const pid of [spaced, updated]) assert.ok(pids.includes(pid), `${pid} in ${result.stdout}`);
+    for (const pid of decoys) assert.ok(!pids.includes(pid), `${pid} is not a worker`);
+  } finally {
+    for (const child of children) child.kill('SIGKILL');
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // The drain at a job's end, against real processes. A stand-in Runner.Worker (a clone of node at the runner's worker
 // path) runs the installed job-completed.sh as the mini's runner did (its Worker_*.log of 2026-10-18): as its own child,
 // `/bin/bash -e <hook>`, in the job's workspace, with the job's RUNNER_TRACKING_ID, its output piped and waited for. Once the hook's output closes, the

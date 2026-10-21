@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { identityOf, parsePs, parseLsofCwd, selectStrays, workerPids } from '../mac/hooks/strays.mjs';
+import { identityOf, parsePs, parseLsofCwd, selectStrays } from '../mac/hooks/strays.mjs';
 
 const WORK = '/Users/new/actions-runner-maws/_work';
 const UID = 501;
@@ -128,7 +128,7 @@ const lanes = [
   proc(204, 203, 'sleep 1'),
   // What a dead shared job left: an orphaned Electron in the shared _work.
   proc(250, 1, `${SHARED}/MAWS/MAWS/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron out/main/index.js`),
-  // Not workers: a process that only names one, and another user's.
+  // Not workers (runner-state.py --workers reads the kernel's paths): a process that only names one, another user's.
   proc(300, 1, 'grep Runner.Worker'),
   proc(301, 1, '/Users/other/actions-runner/bin/Runner.Worker spawnclient 1 2', 502),
 ];
@@ -141,10 +141,6 @@ const laneCwds = new Map([
   [203, `${SHARED}/MAWS/MAWS`],
   [204, `${SHARED}/MAWS/MAWS`],
 ]);
-
-test('workerPids: the runners\' job workers by the executable their command runs, from bin or bin.<version>, of this user', () => {
-  assert.deepEqual(workerPids(lanes, UID), [102, 202]);
-});
 
 test('each instance\'s sweep selects only its own leftovers while the other instance\'s job runs', () => {
   // The shared instance's own sweep, from its own job's hook: the exclusive job's processes are not under its _work.
@@ -159,7 +155,8 @@ test('a sweep of another instance\'s _work spares every live worker\'s tree ther
   // The exclusive start's sweep of the shared _work (shared-hold.sh): its own tree is the exclusive job's.
   const without = selectStrays({ processes: lanes, cwds: laneCwds, workDir: SHARED, uid: UID, self: 113 });
   assert.deepEqual(pids(without), [203, 204, 250], 'without sparing, the parked hook sits in the workspace');
-  const spared = selectStrays({ processes: lanes, cwds: laneCwds, workDir: SHARED, uid: UID, self: 113, spare: workerPids(lanes, UID) });
+  // The live workers, as runner-state.py --workers reads them from the kernel.
+  const spared = selectStrays({ processes: lanes, cwds: laneCwds, workDir: SHARED, uid: UID, self: 113, spare: [102, 202] });
   assert.deepEqual(pids(spared), [250]);
 });
 
@@ -178,6 +175,6 @@ test('a recovery sweep spares a worker that started after its caller last looked
     proc(150, 1, `${WORK}/MAWS/MAWS/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron out/main/index.js`),
   ];
   const cwdsNext = new Map([[121, `${WORK}/MAWS/MAWS`], [122, `${WORK}/MAWS/MAWS`]]);
-  const strays = selectStrays({ processes: next, cwds: cwdsNext, workDir: WORK, uid: UID, self: 91, spare: workerPids(next, UID) });
+  const strays = selectStrays({ processes: next, cwds: cwdsNext, workDir: WORK, uid: UID, self: 91, spare: [120] });
   assert.deepEqual(pids(strays), [150]);
 });

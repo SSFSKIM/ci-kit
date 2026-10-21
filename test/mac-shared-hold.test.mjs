@@ -60,9 +60,12 @@ function mac({ shared = [2], env = {} } = {}) {
   writeFileSync(front, terminal);
   executable(join(bin, 'lsappinfo'), `if [[ $1 == front ]]; then echo 'ASN:0x0-0x1:'; exit 0; fi\ncat '${front}'`);
   executable(join(bin, 'open'), 'exit 0');
-  // The sweep: each call recorded as the instance it sweeps and its arguments; an instance listed in sweep-fail fails.
-  executable(join(bin, 'node'), `root=\${1%/ci-kit/hooks/sweep.mjs}; shift
-printf '%s %s\\n' "\${root##*/}" "$*" >> "$HOME/sweeps"
+  // The sweep: each call recorded as the instance whose _work it sweeps (--work, else the copy's own) and its other
+  // arguments; a copy that is not there fails, as node would, and so does an instance listed in sweep-fail.
+  executable(join(bin, 'node'), `[[ -f $1 ]] || { echo "node: cannot find $1" >&2; exit 1; }
+root=\${1%/ci-kit/hooks/sweep.mjs}; shift; args=()
+while (($# > 0)); do if [[ $1 == --work ]]; then root=\${2%/_work}; shift 2; continue; fi; args+=("$1"); shift; done
+printf '%s %s\\n' "\${root##*/}" "\${args[*]}" >> "$HOME/sweeps"
 [[ -f $HOME/sweep-fail ]] && grep -qxF "\${root##*/}" "$HOME/sweep-fail" && exit 1
 exit 0`);
   executable(join(bin, 'unified-log'), 'exit 0');
@@ -351,6 +354,16 @@ test('after a reboot: the markers on disk name gone workers, the wrappers start 
   assert.match(m.hold(), new RegExp(`worker=${refused.pid}\\n`));
 });
 
+test('a shared directory an install left half-way, without its copy of the hooks, does not stop exclusive jobs', async () => {
+  const m = mac();
+  // Registration failed after the runner's files were laid down: no ci-kit/hooks there.
+  mkdirSync(join(m.instance(3), '_work'), { recursive: true });
+  const exclusive = m.job(1);
+  assert.equal(await exclusive.started(), 0, exclusive.stderr());
+  assert.ok(m.sweeps().includes('actions-runner-maws-3 shared-hold --spare-workers'), m.sweeps().join('\n'));
+  assert.equal(await exclusive.end(), 0);
+});
+
 test('with no shared instance the hooks are today\'s: no lock, no hold, no admission line', async () => {
   const m = mac({ shared: [] });
   const exclusive = m.job(1);
@@ -363,8 +376,9 @@ test('with no shared instance the hooks are today\'s: no lock, no hold, no admis
 
 // The recovery sweep against real processes (sweep.mjs reads ps and lsof): the next exclusive worker starts between the
 // watcher's decision and the sweep's own process list; it and its hook survive, what the crashed job left does not.
-test('a recovery sweep spares a worker that started after the decision, and its hook; the crashed job\'s leftover goes', macOnly, async () => {
-  const home = realpathSync(mkdtempSync(join(root, 'real-')));
+for (const [where, prefix] of [['', 'real-'], [' under a path with a space', 'real home ']]) test(`a recovery sweep spares a worker that started after the decision, and its hook; the crashed job's leftover goes${where}`, macOnly, async () => {
+  // ps prints a command line unquoted: a path with a space must not hide a worker from the sweep (the kernel's path does).
+  const home = realpathSync(mkdtempSync(join(root, prefix)));
   const lane = join(home, 'actions-runner-maws');
   const installed = join(lane, 'ci-kit/hooks');
   const workspace = join(lane, '_work/MAWS/MAWS');

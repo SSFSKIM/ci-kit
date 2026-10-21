@@ -131,10 +131,11 @@ remove_named() { # <file> <worker pid> <its start time> <what> <why>
   unlock
 }
 
-# An instance's own copy of the sweep, which finds its _work from where it sits, sparing every live job worker's tree.
-# It may run under the lock: the descriptor is closed for it.
+# A sweep of an instance's _work by this copy of the hooks, sparing every live job worker's tree: it never relies on
+# the other instance's own copy, which an install that stopped half-way may not have published. It may run under the
+# lock: the descriptor is closed for it.
 sweep() { # <instance root>
-  bounded 120 node "$1/ci-kit/hooks/sweep.mjs" shared-hold --spare-workers 8>&-
+  bounded 120 node "$here/sweep.mjs" shared-hold --spare-workers --work "$1/_work" 8>&-
 }
 
 exclusive_start() { # <worker pid>

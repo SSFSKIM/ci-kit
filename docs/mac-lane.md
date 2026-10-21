@@ -408,6 +408,9 @@ killed while holding it leaves no lock behind), so no job's check can be overtak
   the running ones: until no running marker names a live worker, for at most `CI_KIT_EXCLUSIVE_WAIT` minutes (10).
   It then sweeps every shared instance's work directory, so nothing a dead or finished shared job left runs beside
   it, sparing every live job worker and what it started (a shared job parked in its own hook sits in its workspace).
+  A worker is known by the kernel's path of its executable (`runner-state.py --workers`), never by a command line,
+  which `ps` prints unquoted; and the sweep is the exclusive instance's own copy, given that work directory, so a
+  shared instance an install left half-way, without its hooks, stops nothing.
   Then it runs today's start. Past its bound, or when a sweep fails, it is refused:
 
   ```
