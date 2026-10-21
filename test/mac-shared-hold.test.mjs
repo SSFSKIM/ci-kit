@@ -162,6 +162,20 @@ test('a shared job parks while the hold is up, then is admitted once the exclusi
   assert.ok(sweeps.indexOf('actions-runner-maws-2 job-completed') >= 0);
 });
 
+test('a shared job parks while the dialog watcher holds the runners, and is admitted once the hold is released', async () => {
+  const m = mac();
+  writeFileSync(join(m.logs, 'runner-drained'), 'held at 2026-10-21T10:02:00Z: SecurityAgent since 2026-10-21T10:01:00Z\n');
+  const shared = m.job(2);
+  await until(() => /parked: the dialog watcher holds every runner \(held at 2026-10-21T10:02:00Z: SecurityAgent since 2026-10-21T10:01:00Z\)/.test(m.log()), 'the parked job');
+  await sleep(300);
+  assert.equal(shared.status(), null);
+  assert.equal(m.marker(2), null);
+  rmSync(join(m.logs, 'runner-drained'));
+  assert.equal(await shared.started(), 0, shared.stderr());
+  assert.notEqual(m.marker(2), null);
+  await shared.end();
+});
+
 test('an exclusive job waits for a running shared job and is admitted after its end, which sweeps before it releases', async () => {
   const m = mac();
   const shared = m.job(2);
