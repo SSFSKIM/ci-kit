@@ -107,8 +107,9 @@ toward the boot alone, and below it for the jobs a warm runner covers.
   - Acceptance 4 (a day's median queued → started ≤ 50 s) is read from `latency-report.mjs` after a day of traffic.
 - [ ] M5 — Pre-launch of a run's gate VMs (the owner chose it 2026-10-21; no warm runner). (2026-10-21) Built, reviewer-medium clean after one fix wave, ci-gate green; PR to
   CI-opt. Deploy (`launcher` + `webhook`) on CI-opt's go; Acceptance 5 is read from the live numbers.
-- [ ] M6 — Stock-out and quota resilience. Candidate (2026-10-21), sized from the day's data below; the design goes to
-  CI-opt before anything is built.
+- [ ] M6 — Stock-out and quota resilience. Sized from the day's data (2026-10-21); approved by CI-opt 18:5xZ with
+  NAT (Decision Log). Hyperdisk raises filed. Build order: NAT, proved in us-central1 first; then the race and the
+  counts; then the placements.
 
 ## Acceptance
 
@@ -296,8 +297,10 @@ it:
 1. **No external addresses: Cloud NAT per placement region.** Job and bake VMs drop `accessConfigs`; `deploy.sh
    network` adds a Cloud Router and a Cloud NAT (auto-allocated IPs, dynamic port allocation, Private Google Access on
    the subnet so Google APIs bypass the NAT) in every region a placement names. This removes `IN_USE_ADDRESSES` from
-   the pool's limits: 10 of the day's 16 quota refusals, and the 8-VM ceiling of every new region. Cost: $0.0014 per
-   VM-hour (the gateway) and $0.045 per GB processed, against the $0.0025 per hour an in-use external IPv4 costs a spot VM today ($0.005 on demand);
+   the pool's limits: 10 of the day's 16 quota refusals, and the 8-VM ceiling of every new region. pnpm and apt open
+   many connections at once, so the NAT allocates ports dynamically, well above the 64-per-VM default (minimum 1024,
+   maximum 65536 per VM, sized from the burst proof), and logs errors only. Cost: $0.0014 per
+   VM-hour (the gateway) and $0.045 per GB processed (about $0.012 for a VM's ~260 MB of downloads), against the $0.0025 per hour an in-use external IPv4 costs a spot VM today ($0.005 on demand);
    the ledger prices both, and the day's GB through each NAT goes on the daily line. The alternative, waiting on the
    two address raises, is out of the pool's hands (both have reconciled at a partial grant for hours).
 2. **More spot placements on today's grants.** After C4D us-west4, in this order: C4D us-central1 (24; the existing
@@ -393,8 +396,9 @@ reported to the owner.
 4. Hyperdisk raises filed for the new C4D regions; `gce.json` adds the placements in the order above, `max_vcpus`
    their sum; `deploy.sh network` then `bake`, one complete bake by hand.
 
-Proof: a sandbox burst of 20 cpus-2 jobs launches in one tick with no address refusal, every VM without an external
-IP, every job green (it reaches GitHub, apt and npm through NAT); the bake log shows a smoke VM in every placement; a
+Proof: NAT first, in us-central1: a smoke VM there without an external IP passes before the launcher deploys. Then a
+sandbox burst of 20 cpus-2 jobs launches in one tick with no address refusal, every VM without an external IP, every
+job green (it reaches GitHub, apt and npm through NAT), and the NAT's metrics show no packet dropped for want of ports; the bake log shows a smoke VM in every placement; a
 day's counts on the daily line, and no pool job over 90 s queued → started with a refusal or a slow insert in its
 VM's walk.
 
@@ -571,6 +575,13 @@ VM's walk.
   one allocation's VM". Alternatives considered: waiting on the address raises (out of the pool's control; both
   partial and reconciling for hours); falling through an unknown outcome (a duplicate VM for one allocation, the
   rule M1 keeps); always-on standard VMs (no observed case).
+
+- 2026-10-21 (CI-opt, M6): **Cloud NAT now; this supersedes "Cloud NAT only if the address quota does not keep
+  pace".** That entry's trigger has fired: the address cap binds (10 of the day's 16 quota refusals) and both raises
+  have stalled at partial grants (us-west4 8 of 64, us-central1 32 of 64). NAT also lifts the ceiling in every region
+  a placement adds, and VMs without a public IP are the better posture. Its cost (the gateway per VM-hour, about
+  $0.012 a VM in processing) is reported on the daily line. Hyperdisk Balanced raises to 4096 GB are filed for
+  us-central1, us-east1, us-east4 and us-east5, so disks do not become the next ceiling.
 
 ## Surprises & Discoveries
 
