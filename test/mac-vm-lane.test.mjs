@@ -758,6 +758,7 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
         assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
         m.memory();
         await m.finished(clone);
+        await m.waitLog(/paused \(memory\) until \S+: memory pressure warned during/);
         assert.match(m.pause(), /\nreason=memory\nuntil=\d+\n/);
         const until = Number(/until=(\d+)/.exec(m.pause())[1]);
         assert.ok(Math.abs(until - (Date.now() / 1000 + 600)) < 60, 'the pause ends 600 s after the teardown');
@@ -867,6 +868,7 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     await job(true);
     await job(true);
     await m.waitLog(/paused \(failures\) until an operator removes vm-pause: 2 refusals in a row by the guest's hook/);
+    await m.until(() => m.alerts().length === 1, 'the alert');
     assert.match(m.alerts()[0], /^ci-kit alert: vm lane on mini paused after 2 refusals since /);
     assert.match(m.ghCalls().find((call) => call[1] === 'create').join(' '), new RegExp(escape(refusal)));
     await m.waitLog(/no boot: paused \(failures\)/);
@@ -924,8 +926,8 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     await m.job(first);
     await m.finished(first);
     await m.waitLog(/booting maws-vm-job-\S+ from the golden image maws-vm-golden-20261021/);
+    await m.until(() => m.calls().some((call) => /^clone maws-vm-golden-20261021 maws-vm-job-/.test(call)), 'the clone of the new golden image');
     assert.ok(m.calls().includes(`clone ${GOLDEN} ${first}`));
-    assert.ok(m.calls().some((call) => /^clone maws-vm-golden-20261021 maws-vm-job-/.test(call)));
     await finish(m, a);
   });
 

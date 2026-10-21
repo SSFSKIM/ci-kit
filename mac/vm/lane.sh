@@ -108,6 +108,8 @@ source "$hooks/instances.sh"
 source "$here/tart.sh"
 # shellcheck source=guest/diag.sh
 source "$here/guest/diag.sh"
+# shellcheck source=lane-reads.sh
+source "$here/lane-reads.sh"
 
 lane_log=$ci_kit_logs/vm-lane.log
 say() {
@@ -168,6 +170,7 @@ run_log=$ci_kit_logs/vm-run.log
 drain_marker=$ci_kit_logs/runner-drained
 markers='listening session-conflict assigned job refused stop-request stop-refused stop-raced stopped done'
 identity_files='.runner .credentials .credentials_rsaparams'
+job_clone_pattern="^maws-vm-job-$slot-[0-9]{8}T[0-9]{6}Z\$"
 
 # Logged when what is said under its key changes, not at every poll; a read whose figures move at every poll gives
 # what stays the same as its signature.
@@ -261,8 +264,9 @@ read_reservation() {
     0) r_state=reserved ;;
     *) r_state=unknown r_why="$reserved_file: ${exists_why:-the lookup failed}"; return 0 ;;
   esac
+  r_since='' r_golden=''
   while IFS='=' read -r key value; do
-    [[ $key != vm ]] || r_vm=$value
+    case $key in vm) r_vm=$value ;; since) r_since=$value ;; golden) r_golden=$value ;; esac
   done <"$reserved_file" 2>/dev/null || true
   [[ $r_vm =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || r_vm=''
 }
@@ -431,213 +435,6 @@ to_teardown() { # <why>
   say "$clone: $1; teardown"
   enter teardown
 }
-
-# THE READS.
-memory_read() { # m_pressure, m_available (%), m_swap (MB); false when the read fails. Each read joins swap's history.
-  local text swap
-  m_pressure='' m_available='' m_swap=''
-  text=$(bounded 5 "$sysctl_bin" -n kern.memorystatus_vm_pressure_level kern.memorystatus_level vm.swapusage 7>&- 8>&- 2>/dev/null) ||
-    return 1
-  { read -r m_pressure && read -r m_available && read -r swap; } <<<"$text" || return 1
-  [[ $m_pressure =~ ^[0-9]+$ && $m_available =~ ^[0-9]+$ && $swap =~ used\ =\ ([0-9]+)([.][0-9]+)?M ]] || return 1
-  m_swap=${BASH_REMATCH[1]}
-  swap_at+=("$now_epoch")
-  swap_mb+=("$m_swap")
-}
-swap_at=() swap_mb=()
-# Whether swap has not grown since the newest read at least swap_gap s older than the last one; why in swap_why.
-swap_steady() {
-  local n=${#swap_at[@]} i ref=-1 keep_at=() keep_mb=()
-  ((n > 0)) || { swap_why='swap: no read yet'; return 1; }
-  for ((i = n - 2; i >= 0; i--)); do
-    if ((swap_at[n - 1] - swap_at[i] >= swap_gap)); then ref=$i; break; fi
-  done
-  if ((ref < 0)); then
-    swap_why="swap: no read $swap_gap s older than this one yet"
-    return 1
-  fi
-  for ((i = ref; i < n; i++)); do keep_at+=("${swap_at[i]}"); keep_mb+=("${swap_mb[i]}"); done
-  swap_at=("${keep_at[@]}") swap_mb=("${keep_mb[@]}")
-  if ((swap_mb[${#swap_mb[@]} - 1] > swap_mb[0])); then
-    swap_why="swap grew from ${swap_mb[0]} MB to ${swap_mb[${#swap_mb[@]} - 1]} MB in $((swap_at[${#swap_at[@]} - 1] - swap_at[0])) s"
-    return 1
-  fi
-  swap_why="swap steady over $((swap_at[${#swap_at[@]} - 1] - swap_at[0])) s"
-}
-disk_read() { # d_free (GB, whole) and d_free_kb; false when the read fails
-  local text
-  d_free='' d_free_kb=''
-  text=$(bounded 10 "$df_bin" -Pk "$tart_home" 7>&- 8>&- 2>/dev/null) || return 1
-  d_free_kb=$(awk 'NR == 2 { print $4 }' <<<"$text")
-  [[ $d_free_kb =~ ^[0-9]+$ ]] || { d_free_kb=''; return 1; }
-  d_free=$((d_free_kb / 1048576))
-}
-memory_line() {
-  if [[ -n $m_pressure ]]; then printf 'pressure %s, available %s%%, swap %s MB' "$m_pressure" "$m_available" "$m_swap"; else printf 'memory unknown'; fi
-}
-disk_line() {
-  if [[ -n $d_free_kb ]]; then printf 'free %s GB' "$d_free"; else printf 'free space unknown'; fi
-}
-# Under half the reserve, the disk pause; back over it, the pause lifted. Every poll and every sample.
-follow_disk() {
-  [[ -n $d_free_kb ]] || return 0
-  if ((d_free_kb < disk_reserve * 1048576 / 2)); then
-    pause_set disk none "$d_free GB free on the volume of $tart_home, under half the reserve of $disk_reserve GB"
-  else
-    pause_clear disk "$d_free GB free, at least half the reserve of $disk_reserve GB" && alert_close disk "$d_free GB free"
-  fi
-}
-display_admits() {
-  local described
-  described=$(bounded 5 "$display_read" --describe 7>&- 8>&- 2>/dev/null) || described=''
-  described=${described//$'\n'/}
-  display_seen=${described:-unreadable}
-  [[ $described =~ ^[0-9]+x[0-9]+@2x$ ]]
-}
-# The queue: q_solo and q_vm, the queued jobs only a guest or the exclusive instance can take (ci-kit-mac-solo) and
-# only a guest can (ci-kit-mac-vm). False with q_why when it cannot be read.
-gh_read() { # <api path> <output file>
-  local err status
-  err=$(mktemp) || return 1
-  bounded 10 env -u GH_TOKEN -u GITHUB_TOKEN "${CI_KIT_GH_BIN:-gh}" api "$1" >"$2" 2>"$err" 7>&- 8>&-
-  status=$?
-  if ((status == 124)); then
-    q_why="the read of $1 timed out"
-  elif ((status != 0)); then
-    q_why="the read of $1 failed: $(head -1 "$err" 2>/dev/null)"
-  fi
-  rm -f "$err"
-  return "$status"
-}
-queue_read() {
-  local scratch status runs='' id counts
-  q_solo=0 q_vm=0 q_why=''
-  scratch=$(mktemp) || { q_why='no scratch file'; return 1; }
-  for status in queued in_progress; do
-    gh_read "repos/$repo/actions/runs?status=$status&per_page=100" "$scratch" || { rm -f "$scratch"; return 1; }
-    if ! id=$(perl -MJSON::PP -e '
-      my $d = eval { JSON::PP->new->decode(do { local $/; <STDIN> }) };
-      exit 1 unless ref $d eq "HASH" && ref $d->{workflow_runs} eq "ARRAY";
-      print join(" ", map { $_->{id} } grep { ref $_ eq "HASH" && ($_->{id} // "") =~ /^\d+$/ } @{$d->{workflow_runs}}), "\n";
-    ' <"$scratch"); then
-      q_why="the $status runs could not be read"
-      rm -f "$scratch"
-      return 1
-    fi
-    runs+=" $id"
-  done
-  for id in $(tr ' ' '\n' <<<"$runs" | sort -un); do
-    gh_read "repos/$repo/actions/runs/$id/jobs?filter=latest&per_page=100" "$scratch" || { rm -f "$scratch"; return 1; }
-    if ! counts=$(perl -MJSON::PP -e '
-      my $d = eval { JSON::PP->new->decode(do { local $/; <STDIN> }) };
-      exit 1 unless ref $d eq "HASH" && ref $d->{jobs} eq "ARRAY";
-      my ($solo, $vm) = (0, 0);
-      for my $job (@{$d->{jobs}}) {
-        next unless ref $job eq "HASH" && ($job->{status} // "") eq "queued" && ref $job->{labels} eq "ARRAY";
-        my @labels = map { lc } @{$job->{labels}};
-        next unless @labels && !grep { $_ ne "ci-kit-mac-solo" && $_ ne "ci-kit-mac-vm" } @labels;
-        if (grep { $_ eq "ci-kit-mac-vm" } @labels) { $vm++ } else { $solo++ }
-      }
-      print "$solo $vm\n";
-    ' <"$scratch"); then
-      q_why="the jobs of run $id could not be read"
-      rm -f "$scratch"
-      return 1
-    fi
-    q_solo=$((q_solo + ${counts% *})) q_vm=$((q_vm + ${counts#* }))
-  done
-  rm -f "$scratch"
-}
-# What a host instance is doing (runner-state.py, from the kernel's paths): busy, idle, stopped, or unknown.
-instance_state() { # <instance root>
-  local read
-  read=$(bounded 10 python3 -I "$hooks/runner-state.py" "$1" 7>&- 8>&- 2>/dev/null) || { echo unknown; return; }
-  echo "${read%% *}"
-}
-# Conditions 1 and 2 from the queue read: true when a queued job wants a guest; why says what was read.
-wants_guest() {
-  local host
-  if ((q_vm > 0)); then want_why="$q_vm ci-kit-mac-vm job(s) queued"; return 0; fi
-  if ((q_solo == 0)); then want_why='no queued job for the guest'; return 1; fi
-  if ((q_solo > 1)); then want_why="$q_solo ci-kit-mac-solo jobs queued, more than the host's exclusive instance takes"; return 0; fi
-  if [[ -e $drain_marker ]]; then
-    host=held
-  else
-    host=$(instance_state "$lane_root")
-  fi
-  case $host in
-    busy | held) want_why="a ci-kit-mac-solo job queued, and the host's exclusive instance is $host"; return 0 ;;
-    stopped) want_why='a ci-kit-mac-solo job queued, and the host'\''s exclusive instance is offline'; return 0 ;;
-    idle) want_why='a ci-kit-mac-solo job queued, but the host'\''s exclusive instance is idle and takes it first'; return 1 ;;
-    *) want_why='a ci-kit-mac-solo job queued, but whether the host'\''s exclusive instance takes it cannot be read'; return 1 ;;
-  esac
-}
-# Condition 7.
-mode_admits() {
-  local root roots
-  case $lane_mode in
-    always) mode_why='mode always'; return 0 ;;
-    hold-only) ;;
-    *) mode_why="CI_KIT_VM_LANE_MODE is '$lane_mode', neither always nor hold-only"; return 1 ;;
-  esac
-  if [[ -e $drain_marker ]]; then mode_why='mode hold-only, every host instance held'; return 0; fi
-  roots=$( { printf '%s\n' "$lane_root"; shared_instances; } )
-  while IFS= read -r root; do
-    [[ -d $root ]] || continue
-    if [[ $(instance_state "$root") != stopped ]]; then
-      mode_why="mode hold-only, and ${root##*/} is not held"
-      return 1
-    fi
-  done <<<"$roots"
-  mode_why='mode hold-only, every host instance held'
-}
-# The holds: h_owners, one line each (<owner>: <its first line>); 1 when there is one, 2 when they cannot be listed.
-holds_read() {
-  local file why
-  h_owners=''
-  why=$(perl -e 'opendir(my $d, $ARGV[0]) and exit 0; exit 1 if $!{ENOENT}; print "$!"; exit 2' "$ci_kit_logs" 2>&1)
-  case $? in
-    0) ;;
-    1) return 0 ;;
-    *) h_owners="the holds in $ci_kit_logs cannot be listed (${why:-the listing failed})"; return 2 ;;
-  esac
-  for file in "$ci_kit_logs"/vm-hold.*; do
-    [[ -e $file && $file != *.tmp ]] || continue
-    h_owners+="${h_owners:+$'\n'}${file##*/vm-hold.}: $(head -1 "$file" 2>/dev/null || echo unreadable)"
-  done
-  [[ -z $h_owners ]] || return 1
-}
-in_pause_window() { # whether now is inside one of CI_KIT_VM_PAUSE_WINDOWS (UTC)
-  local window from to hhmm
-  [[ -n $pause_windows ]] || return 1
-  hhmm=$(date -u +%H%M)
-  for window in ${pause_windows//,/ }; do
-    [[ $window =~ ^([0-2][0-9]):([0-5][0-9])-([0-2][0-9]):([0-5][0-9])$ ]] || continue
-    from=${BASH_REMATCH[1]}${BASH_REMATCH[2]} to=${BASH_REMATCH[3]}${BASH_REMATCH[4]}
-    if ((10#$from <= 10#$to)); then
-      ((10#$hhmm >= 10#$from && 10#$hhmm < 10#$to)) && { window_seen=$window; return 0; }
-    else
-      ((10#$hhmm >= 10#$from || 10#$hhmm < 10#$to)) && { window_seen=$window; return 0; }
-    fi
-  done
-  return 1
-}
-
-# The lane's parts, from one Tart list: g_name the golden image the pointer names; false with parts_why.
-parts_ready() { # <tart_vms output>
-  local file
-  g_name=''
-  if [[ ! -r $golden_pointer ]]; then parts_why="no golden pointer at $golden_pointer"; return 1; fi
-  IFS= read -r g_name <"$golden_pointer" 2>/dev/null || true
-  g_name=${g_name%%[[:space:]]*}
-  if [[ ! $g_name =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then parts_why="the golden pointer $golden_pointer names no VM"; return 1; fi
-  if [[ -z $(tart_state_in "$1" "$g_name") ]]; then parts_why="the golden image $g_name is not among Tart's VMs"; return 1; fi
-  for file in $identity_files; do
-    [[ -f $slot_dir/identity/$file ]] || { parts_why="the slot's identity lacks $file ($slot_dir/identity)"; return 1; }
-  done
-  [[ -f $kit/vm/guest/kickoff.sh ]] || { parts_why="no kit at $kit"; return 1; }
-}
-job_clone_pattern="^maws-vm-job-$slot-[0-9]{8}T[0-9]{6}Z\$"
 
 # IDLE: one poll. Housekeeping first (the disk pause, the alerts that follow holds, maintenance VMs and missing parts),
 # then the boot rule.
@@ -1091,6 +888,15 @@ The reservation stays, so nothing boots and settle keeps measured jobs waiting, 
   fi
 }
 
+# Under half the reserve, the disk pause; back over it, the pause lifted. Every poll and every sample.
+follow_disk() {
+  [[ -n $d_free_kb ]] || return 0
+  if ((d_free_kb < disk_reserve * 1048576 / 2)); then
+    pause_set disk none "$d_free GB free on the volume of $tart_home, under half the reserve of $disk_reserve GB"
+  else
+    pause_clear disk "$d_free GB free, at least half the reserve of $disk_reserve GB" && alert_close disk "$d_free GB free"
+  fi
+}
 # THE GUARD: a sample from tart run to the verified end, every sample_every s.
 warned=0
 guard_sample() {
@@ -1098,6 +904,8 @@ guard_sample() {
   disk_read || true
   say "sample $state $clone: $(memory_line); $(disk_line)"
   follow_disk
+  # A teardown is already the stop: the samples go on, and nothing more is done.
+  [[ $state != teardown ]] || return 0
   if [[ -n $d_free_kb ]] && ((d_free_kb < disk_floor * 1048576)); then
     stop_for disk "$d_free GB free on the volume of $tart_home, under the floor of $disk_floor GB" none
     return
@@ -1194,6 +1002,7 @@ recover_poll() {
   forget recover
   clear_guest
   clone=$target
+  [[ $target != "$r_vm" ]] || res_since=${r_since:-$now} res_golden=$r_golden
   vstate=$(tart_state_in "$vms" "$target")
   if [[ (-z $vstate || $vstate == stopped) && -z $pids ]]; then
     say "recovery: $clone is ${vstate:-gone}; teardown"
