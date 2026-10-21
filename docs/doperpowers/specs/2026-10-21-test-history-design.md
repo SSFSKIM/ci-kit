@@ -85,7 +85,8 @@ After this work:
 - [ ] M4 — Selection for iteration runs: agreed and written 08:1xZ; ci-kit #64 merged (919f0f6); MAWS #101, class 1a
   green 39575096972, `unit:darwin` proof 39576855823; landed ee9ecace6 (MAWS DL 82). Follow-up: `docs/` exempt but
   for `docs/doperpowers/evidence`. Open: a real selected run in the store.
-- [ ] M5 — Unit overhead experiment: written 2026-10-21 08:0xZ (arms S, C, D, I); running. B = MAWS 0ddd2012f.
+- [ ] M5 — Unit overhead experiment: written 2026-10-21 08:0xZ (arms S, C, D, I). B = MAWS 0ddd2012f. Experiment done
+  11:4xZ; open until #104 lands.
   (09:5xZ) Baseline, S, S′, C's ceiling, D and I measured (Surprises); none of S, S′, D, I adopted. C's ceiling
   cleared the 10% bar, and its cold half showed most of the gain needs no delivered cache (arm C0, running); the
   delivery question went to CI-opt.
@@ -93,6 +94,9 @@ After this work:
   current master, class 1a pool green 39582732641; CI-opt sends it to the architect and schedules `unit:darwin`.
   Compiler-only numbers sent to CI-opt for the architect. CI-opt chose the master-ref delivery (Decision Log); its arm
   CD is running, measured against C0.
+  (11:1xZ) CD not adopted (−13 s against C0); both its checks passed (Surprises). Compiler-only waits for desk-web to
+  build with the compiler (the architect's condition): branch `unit-compiler-only`, head be9d36aab, on top of #104,
+  pushed and not opened; CI-opt opens it when the desk lane has deployed.
 - [ ] M6 — The `ci-kit:optimize` skill.
 
 ## Design
@@ -667,6 +671,8 @@ Each is written here in full when its condition holds:
   | S′, `-timing` first | 39571640636, 39572998936, 39574256403 | 439, 423, 418 (423, 21) | 419.2 | none | not adopted: −26 s, under the 42 s spread |
   | C, ceiling, cold → warm in one job | 39569475316, 39573317257, 39575395042 | cold 429, 403, 398; warm 390, 349, 364 (warm 364) | warm 359.7 (tests 50%, import 32%, environment 15%, transform 2%) | +7 to +8 s | cleared the 10% bar: −85 s (−19%) |
   | C0, `--fsModuleCache`, empty cache, no delivery | 39580469603, 39580535339, 39581673554 | 399, 387, 418 (399, 31) | 394.8 (tests 44%, import 28%, transform 14%, environment 13%) | +387 → +395, +376 → +384, +406 → +414 | **adopted**: −50 s (−11%) |
+  | CD, C0 plus a cache restored from an earlier run of the same key (stand-in for master's) | saved by 39585864153; restored 39587199314, 39587213818, 39587230745 | restore 3 + test 400, 344, 383 = 403, 347, 386 (386) | 378.7 (transform 2%) | +388 → +396, +333 → +340, +371 → +379 | not adopted: −13 s against C0 (its spread 31) |
+  | H, C0 plus a parallel pre-read of the checkout (hydration test) | 39591017524, 39591077339, 39591139217 | pre-read 10, 10, 9 + test 379, 382, 392 = 389, 392, 401 (392) | 378.6 | +367 → +375, +372 → +379, +381 → +388 | not adopted: test step −17 s, net −7 s against C0 |
   | D, `deps.optimizer.client` | 39570695200 | 455, red | 448.7 | +395 → +449 | red, no gain; stopped |
   | I, exploration (no exceptions) | 39569413560 | 411, red | 405.7 | +356 → +406 | 17 files red, 16 of them mocking suites |
   | I, mocking suites isolated | 39571997873, 39575551870, 39577464231; shuffled 39576834456 | 391, 423, 434 (423, 43); shuffled 405, green | 417.6 (tests 46%, import 23–24%) | +339 → +385, +364 → +418, +380 → +428 | not adopted: −26 s, under the 42 s spread |
@@ -696,7 +702,46 @@ Each is written here in full when its condition holds:
       `renderer` keeps its 220 suites that render nothing;
     - the third run was red on a desk-hub test the change does not touch.
 
-    The numbers went to CI-opt for the MAWS architect, whose coverage decision it is.
+    The numbers went to CI-opt for the MAWS architect, whose coverage decision it is. The architect declined it as
+    measured: `apps/desk-web` builds the same `src/renderer` modules with plain `react()`, so the uncompiled
+    behaviour ships in the desk. The desk lane is moving desk-web onto the compiler, and the change waits for that.
+  - **CD, the delivered cache.** It ran as C0 plus `actions/cache` restore and save, every run on one fixed ref
+    (`ci/m5-cd`) so they share a cache scope.
+    - The restore took 3 s: 68 MB compressed, 232 MB in 6,973 files. The transform share fell to 2%, but the runs
+      were 13 s faster than C0 at the median, which is under the bar. Two more of each, run at the same time as
+      supplementary numbers outside the rule: CD 359 and 401 s (39589561728, 39589577964), C0 385 and 440 s
+      (39589602365, 39589665895). Over five runs each, the medians are 386 and 399 s and the means 379 and 406 s, so
+      the delivered cache saves about 13–27 s.
+    - The ceiling's 41 s came from a warm pass on the same VM as its cold pass. There, `node_modules` and the sources
+      had already been read off the disk. A fresh VM's disk is hydrated lazily from its image, so it pays those reads
+      whatever cache it is given. This is the likely reason, not verified.
+    - **Absolute paths.** vitest's entries, keys and cached code name absolute paths, and each GCE VM's work folder is
+      named after the VM (`/var/lib/ci-kit/cache/work/<instance>/…`), so a cache from another VM never hits.
+      - The arm moved the checkout to `work/fixed/MAWS/MAWS` and linked the work folder to it. The fixed path must be
+        exactly as deep: actions/cache stores the path relative to the link, and tar resolves it from the real
+        directory. The first save failed on that (39584455603).
+      - The clean fix is a fixed `work_folder` for GCE jobs in ci-kit (one job per VM).
+    - **One ref cancels itself.** gate.yml's concurrency group, `gate-${{ github.ref }}` with cancel-in-progress, cancels
+      runs that share a ref. Three restored runs pushed together cancelled each other (39587055562, 39587070800,
+      39587086156), and the arm's scratch commit put the run id in the group.
+    - **Planted failure, 39587101466.** The cache was restored, and `plural()` in `copy.ts` was changed after the cache
+      was built. 14 files and 42 tests failed: the changed module was transformed again, not served stale.
+    - **Stale key, 39588409984.** A comment added to `test/support/compiled-suites.ts` changed the key prefix: "Cache not
+      found", transform share 14%, as cold.
+    - **H tested that explanation (CI-opt's request).**
+      - Setup: B plus C0, and a step right before the tests that reads every file of the checkout, `node_modules`
+        included (50,255 files, 1,557 MiB), with `xargs -P 32`.
+      - The pre-read took 9.5 s, about 165 MB/s.
+      - The test step fell to a median of 382 s, 17 s under C0's 399, so the pre-read and test together saved 7 s. Its
+        transform share stayed at C0's 14%.
+      - So hydration explains part of the ceiling: about 17 s of its 41, with the transforms (CD) the rest. A
+        pre-read in series pays back 10 of those 17 s, so it is no lever for this job. Overlapping it with the build
+        might be one; that is unmeasured.
+    - **The production form.** It was drafted and not opened, since CD was not adopted:
+      - a composite action with `place`, `restore` and `save`;
+      - a `unit-cache.yml` on master: on a push that changes the key's files, daily, and on dispatch; the whole suite
+        on the pool, saved whatever its outcome;
+      - the unit job restores, and never saves from a `ci/` ref.
   - **A desk-hub test flakes on the current suite.** `provisioning-sweep.test.ts > the offline sweep > binds each
     candidate to the enrollment it read…` failed in 2 of about 33 runs: S's (interleaved order) and the third
     compiler-only run (vitest's own order). S's red was therefore partly this flake; its other failure was
@@ -707,4 +752,19 @@ Each is written here in full when its condition holds:
 
 ## Outcomes & Retrospective
 
-(At completion.)
+- **M5 (2026-10-21).** One arm of nine was adopted: C0, `--fsModuleCache` on a fresh checkout, −50 s (−11%) on the
+  unit test step, with nothing to deliver, store or key. It is MAWS #104; it lands after its `unit:darwin` run.
+  - Compiler-only measured −94 s on top of C0, but it changes what is tested. It waits on desk-web moving to the
+    compiler (branch `unit-compiler-only`).
+  - S′ and I measured −26 s each, below a bar set by the pool's own noise.
+  - A delivered cache measured −13 s, H −7 s net. D and V broke tests, and S as written met a flake.
+  - Lessons for M6:
+    - **Read per-file times across arms, not only totals.** The tail looked like scheduling. Only App.test.tsx's
+      test time collapsing in C's cold runs (44 s → 8 s) showed it was transform work duplicated by a second Vite
+      server.
+    - **A before/after on one VM is not a fresh VM.** C's ceiling (−41 s warm against cold) mixed transforms with a
+      disk the cold pass had already read; delivered to fresh VMs, the transforms were worth about 13–27 s.
+    - **Three runs resolve about 10% here.** Five baseline runs on one commit and one machine type spread 424–477 s.
+      Gains of 20–30 s need more runs, or runs paired in time, before they can be called.
+    - **vitest's diagnostics point at real costs, not at safe fixes.** Its hint toward `vmThreads` (environment
+      setup) broke tests across realms. Its `fsModuleCache` hint was right, for a reason it does not name.
