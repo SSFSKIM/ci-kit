@@ -85,7 +85,10 @@ After this work:
 - [ ] M4 — Selection for iteration runs: agreed and written 08:1xZ; ci-kit #64 merged (919f0f6); MAWS #101, class 1a
   green 39575096972, `unit:darwin` proof 39576855823; landed ee9ecace6 (MAWS DL 82). Follow-up: `docs/` exempt but
   for `docs/doperpowers/evidence`. Open: a real selected run in the store.
-- [ ] M5 — Unit overhead experiment: written 2026-10-21 08:0xZ (arms S, C, D, I); running.
+- [ ] M5 — Unit overhead experiment: written 2026-10-21 08:0xZ (arms S, C, D, I); running. B = MAWS 0ddd2012f.
+  (09:5xZ) Baseline, S, S′, C's ceiling, D and I measured (Surprises); none of S, S′, D, I adopted. C's ceiling
+  cleared the 10% bar, and its cold half showed most of the gain needs no delivered cache (arm C0, running); the
+  delivery question went to CI-opt.
 - [ ] M6 — The `ci-kit:optimize` skill.
 
 ## Design
@@ -517,6 +520,31 @@ Each is written here in full when its condition holds:
   arm in one combined run. It lost because one run cannot attribute a gain or a failure to an arm. Running the renderer
   suites only under the compiler would save the most (`renderer`'s 256 s of summed test time), but it drops a tested
   configuration, so it goes to the architect as a proposal, not as an arm.
+- 2026-10-21 (M5 running): choices the method left open.
+  - **S′ replaced S.** S as written (base rules across every project) was red on its first run: two desk-hub suites
+    that time real leases failed while the compiled renderer's transforms ran beside them. S′ is the spec's own
+    fallback, the `-timing` projects first and the rest in vitest's order, so no other suite's neighbours change.
+  - **D's include list** was chosen by importing single files locally: `radix-ui`, `zod`, `shiki`, `katex`. Wider
+    lists broke locally (`@tiptap/react` bundled a second ProseMirror; `streamdown` and `@y/prosemirror` pulled browser
+    builds of Node packages). D stopped after one red run with no gain.
+  - **I's exceptions are a rule, not a list.** The first run without isolation failed 17 files (2.6% of `node`), 16
+    of them suites that mock modules. Without isolation a worker keeps its mocker and module graph from file to file,
+    so which mocking suite fails depends on the schedule. The exceptions are therefore every suite that calls
+    `vi.mock` or `vi.doMock`, read from the files when the config loads (as `compiled-suites.ts` does): 84 of 615 in
+    `node` (14%) and 2 of 144 in `artifacts`. That is above the 5% the plan named. It ran anyway, because the failing
+    set was 2.6% and the rule is its stable form. I then fell short of the adoption bar on time, so the 5% decided
+    nothing.
+  - **The shuffled run shuffles files only** (`--sequence.shuffle.files`): isolation leaks depend on which files share
+    a worker, and shuffling tests inside a file tests something I does not change.
+  - **Two more baseline runs as a drift check**, after the arms (39578117722, 39578826466: test steps 424 s and
+    446 s). They are outside the rule's baseline; they show the baseline did not drift while the arms ran.
+  - **A fifth arm, V, tried locally and dropped:** vitest's own hint on the baseline names `pool: 'vmThreads'` for
+    happy-dom (`renderer`'s environment created 436 times, 204–237 s). Under it, files that pass a `Uint8Array` across
+    the context boundary fail (Yjs frames in `artifacts-dom`: "a frame that is not bytes"; one renderer file in a
+    1-in-12 sample), and `MessageChannel` is missing. Passing would mean changing tests, so no pool run was spent.
+  - **A sixth arm, C0: `--fsModuleCache` on a fresh checkout, no delivered cache.** C's cold runs, which only write the
+    cache, beat the baseline (Surprises). C0 is that run as the unit job's own step, three runs under the rule. Its
+    gain needs no delivery, so it does not wait on the delivery decision.
 - 2026-10-21 (M4 agreed with the MAWS architect): **the landing rule and the mark.**
   - A run marked `Selection: affected` never counts as landing evidence, even when a fallback ran the full suite; a red
     marked run counts as red.
@@ -615,6 +643,41 @@ Each is written here in full when its condition holds:
     pinned at the PR head. The MAWS friction tracker has the row.
   - **Two runs for the collector's proof.** Run 39573713454 is a selected run that ran the full suite: it must not
     become a day's base. Run 39571488563 is a red selected run.
+
+- 2026-10-21 (M5): the arms' runs. B = MAWS 0ddd2012f; every run unit-only on the pool, each on a
+  `c3d-highcpu-8` spot VM in `us-central1-a` (the GCE ledger). Test step and job in seconds; Duration is vitest's.
+  Every green run counted `1612 passed | 8 skipped (1620)` files and `22373 passed | 80 skipped (22453)` tests.
+
+  | Arm | Runs | Test step (median, spread) | Duration median | Tail: last other file → end | Verdict |
+  |---|---|---|---|---|---|
+  | Baseline | 39566832678, 39566874932, 39568056678 | 449, 435, 477 (449, 42) | 443.7 (tests 45%, import 27%, transform 16%, environment 12%) | +391 → +444, +384 → +431, +418 → +471 | the reference |
+  | S, size across projects | 39568222090 | 399, red | 393.9 | none (App.test.tsx done at +234) | red: 2 desk-hub real-time suites failed |
+  | S′, `-timing` first | 39571640636, 39572998936, 39574256403 | 439, 423, 418 (423, 21) | 419.2 | none | not adopted: −26 s, under the 42 s spread |
+  | C, ceiling, cold → warm in one job | 39569475316, 39573317257, 39575395042 | cold 429, 403, 398; warm 390, 349, 364 (warm 364) | warm 359.7 (tests 50%, import 32%, environment 15%, transform 2%) | +7 to +8 s | cleared the 10% bar: −85 s (−19%) |
+  | D, `deps.optimizer.client` | 39570695200 | 455, red | 448.7 | +395 → +449 | red, no gain; stopped |
+  | I, exploration (no exceptions) | 39569413560 | 411, red | 405.7 | +356 → +406 | 17 files red, 16 of them mocking suites |
+  | I, mocking suites isolated | 39571997873, 39575551870, 39577464231; shuffled 39576834456 | 391, 423, 434 (423, 43); shuffled 405, green | 417.6 (tests 46%, import 23–24%) | +339 → +385, +364 → +418, +380 → +428 | not adopted: −26 s, under the 42 s spread |
+
+  - **The tail was transform work, not test work.** Each `-timing` project has its own Vite server, so it transforms
+    the whole app again, on demand, while its two files run at the end. With `fsModuleCache` on, a project reuses
+    the transforms another project of the same plugins and resolve config wrote earlier in the run: `App.test.tsx`'s
+    tests took 7–9 s instead of 42–52 s, in the cold runs as in the warm ones. Locally, `renderer-timing` read 202 of
+    its 784 modules from what `renderer` had written. S′ removed the tail but ran `App.test.tsx` at the start, where it
+    took 66–68 s under the start's contention, so it gained little.
+  - **C's cold runs beat the baseline**: Duration 426.5, 400.7, 396.3 (median 400.7) against 443.7. On the same VM,
+    the warm run saved a further 41, 56 and 37 s (median 41 s, about 10%), mostly in `renderer-compiled`, whose block
+    shrank from 90–95 s to 74–86 s. The cache was 232 MB in 6,973 files.
+  - **How long a delivered cache would stay valid.** In the last 14 days, 24 first-parent master commits changed the
+    lockfile (10, which makes vitest drop the whole cache) or a vitest config file or its imports (the root config 18,
+    `compiled-suites.ts` 1, the desk apps' configs 3; a commit can change several), which re-keys every module of the projects it configures. With
+    `tsconfig*.json`, which the delivered cache must also be keyed on, there were 33. The median gap between two such
+    commits is 10.8 h (the longest 98 h), and 10 of the 14 days had one. A weekly bake would be stale within a day.
+  - **The baseline's spread is about 10% of a run.** Five baseline runs on the same commit and VM type took 424–477 s.
+    An arm must beat the median by more than the three-run spread (42 s), so a real gain of 20–40 s cannot be adopted
+    from three runs. S′ and I both measured −26 s, and all six of their runs were below the baseline median.
+  - **D duplicated packages.** With the optimizer on for `client`, 15 files failed: the code editor's and viewer's
+    suites, the sidebar's and the artifact viewers', each in both renderer projects, and `mermaid.dom.test.ts`, whose
+    spy sat on a second instance of mermaid. The run took 448.7 s.
 
 ## Outcomes & Retrospective
 
