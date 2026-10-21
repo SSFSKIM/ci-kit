@@ -12,7 +12,7 @@ import { gunzipSync } from 'node:zlib';
 import { createGitHub } from '../../lib/github.mjs';
 import { ArchiveDefect, collectRepo, formatCounts, readArtifact } from '../../history/collect.mjs';
 import { parseJUnit } from '../../history/junit.mjs';
-import { membershipOf, summarize } from '../../history/record.mjs';
+import { membershipOf, skippedOf, summarize } from '../../history/record.mjs';
 import { fakeGitHub, vitestReport, zipOf } from './helpers.mjs';
 
 const REPO = 'o/r';
@@ -43,10 +43,10 @@ function builder() {
     { name: 'Run actions/upload-artifact@v7', conclusion },
   ];
   // A gate run: a nonce commit on top of `tested` for the ci-gates, the head itself otherwise.
-  function run({ id, ref, event = 'push', tested, tree, created, attempts }) {
+  function run({ id, ref, event = 'push', tested, tree, created, attempts, selection = null }) {
     const nonce = event === 'push' && ref.startsWith('ci/');
     const head = nonce ? `${id}0000000000000000000000000000000000000`.slice(0, 40) : tested;
-    if (nonce) repo.commits[head] = { tree, parents: [tested], message: `ci-gate: ${tested.slice(0, 8)}\n\nNonce: 1-2\nGates: static,unit` };
+    if (nonce) repo.commits[head] = { tree, parents: [tested], message: `ci-gate: ${tested.slice(0, 8)}\n\nNonce: 1-2\nGates: static,unit${selection ? `\nSelection: ${selection}` : ''}` };
     repo.commits[tested] = { tree, parents: ['0'.repeat(40)], message: 'work' };
     repo.runs.push({ id, event, head_branch: ref, head_sha: head, path: '.github/workflows/gate.yml', run_attempt: attempts.length, created_at: created });
     attempts.forEach((jobs, i) => {
@@ -228,6 +228,60 @@ const passes = (repo, root) => {
   return { fake, pass };
 };
 const lineOf = (root, day, key) => linesOf(root, day).find((l) => `${l.run}/${l.attempt}/${l.job}` === key);
+
+test('a day starting with selection has no base or durations until a full run, and later selection replaces neither', async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  const selectedSuites = [{ project: 'app', file: 'src/a.test.ts', time: 0.1, cases: [{ name: 'a > later', status: 'skipped' }] }];
+  const selectedIds = [['app', 'src/a.test.ts', 'a > later']];
+  const add = (id, sha, completed, suites, selection) => run({
+    id, ref: `ci/selection-${sha.repeat(8)}`, tested: c(sha), tree: `T${sha}`, created: at(completed, -900), selection,
+    attempts: [[{ name: 'unit', started: at(completed, -600), completed, suites }]],
+  });
+  add(701, 'a', '2026-10-21T08:00:00Z', selectedSuites, 'affected');
+  const { pass } = passes(repo, root);
+
+  const first = await pass();
+  assert.deepEqual([first.errors, first.counts.present], [[], 1]);
+  assert.deepEqual(readDir(join(root, REPO)), ['runs/2026-10-21.jsonl']);
+  const beforeBase = lineOf(root, '2026-10-21', '701/1/unit');
+  assert.equal(beforeBase.selection, 'affected');
+  assert.deepEqual(beforeBase.membership.ids, selectedIds);
+  assert.deepEqual(beforeBase.skipped.ids, selectedIds);
+  assert.deepEqual(membershipOf(beforeBase), selectedIds);
+  assert.deepEqual(skippedOf(beforeBase), selectedIds);
+
+  // A selected full-suite fallback is still ineligible for the base and the full-suite cost snapshot.
+  add(702, 'b', '2026-10-21T08:30:00Z', suitesA(), 'affected');
+  const fallback = await pass();
+  assert.deepEqual([fallback.errors, fallback.counts.present], [[], 1]);
+  assert.deepEqual(readDir(join(root, REPO)), ['runs/2026-10-21.jsonl']);
+
+  add(703, 'c', '2026-10-21T09:00:00Z', suitesA());
+  const full = await pass();
+  assert.deepEqual([full.errors, full.counts.present], [[], 1]);
+  const base = gz(root, 'base/2026-10-21/unit.json.gz');
+  const durations = gz(root, 'durations/2026-10-21/unit.json.gz');
+  assert.equal(base.run, 703);
+  assert.equal(durations.run, 703);
+  assert.equal(base.cases.length, 4);
+  assert.equal(lineOf(root, '2026-10-21', '703/1/unit').selection, null);
+  assert.deepEqual(membershipOf(beforeBase, base), selectedIds);
+  assert.deepEqual(skippedOf(beforeBase, base), selectedIds);
+
+  add(704, 'd', '2026-10-21T10:00:00Z', selectedSuites, 'affected');
+  const later = await pass();
+  assert.deepEqual([later.errors, later.counts.present], [[], 1]);
+  const selected = lineOf(root, '2026-10-21', '704/1/unit');
+  assert.equal(selected.selection, 'affected');
+  assert.deepEqual(selected.membership.ids, selectedIds);
+  assert.deepEqual(membershipOf(selected, base), selectedIds);
+  assert.deepEqual(skippedOf(selected, base), selectedIds);
+  assert.deepEqual(gz(root, 'base/2026-10-21/unit.json.gz'), base);
+  assert.deepEqual(gz(root, 'durations/2026-10-21/unit.json.gz'), durations);
+  assert.deepEqual(lineOf(root, '2026-10-21', '701/1/unit'), beforeBase);
+  assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
+});
 
 test('an artifact a pass could not download is listed again by the next, however many newer ones were stored', async (t) => {
   const root = tempRoot(t);

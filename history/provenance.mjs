@@ -27,19 +27,25 @@ export function gatesOf(message) {
   return m ? m[1] : null;
 }
 
-// { producer, label, gates, tested, tree }. Both ci-gates push the tested commit with one empty commit on top, so
+// Selected runs are marked on the pushed head, even when selection fell back to the full suite.
+export function selectionOf(message) {
+  return /^Selection:[ \t]*affected[ \t]*$/m.test(message ?? '') ? 'affected' : null;
+}
+
+// { producer, label, gates, selection, tested, tree }. Both ci-gates push the tested commit with one empty commit on top, so
 // the tested commit is the head's only parent, whose sha starts with the ref's sha8. A head that is not such a
 // commit makes the run `other`: it tested its own head, and no change is guessed for it.
 export async function resolveTested(gh, repo, run) {
   const head = await gh.gitCommit(repo, run.head_sha);
   const gates = gatesOf(head.message);
+  const selection = selectionOf(head.message);
   const { producer, label, sha8 } = producerOf(run);
   const parent = head.parents?.length === 1 ? head.parents[0].sha : null;
   if (producer !== 'other' && parent?.startsWith(sha8)) {
     const tested = await gh.gitCommit(repo, parent);
-    return { producer, label, gates, tested: parent, tree: tested.tree.sha };
+    return { producer, label, gates, selection, tested: parent, tree: tested.tree.sha };
   }
-  return { producer: 'other', label: null, gates, tested: run.head_sha, tree: head.tree.sha };
+  return { producer: 'other', label: null, gates, selection, tested: run.head_sha, tree: head.tree.sha };
 }
 
 // Whether line a started before line b (ties broken by run, then attempt).

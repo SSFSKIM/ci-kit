@@ -63,8 +63,88 @@ test('membership across two branches with different suites and a deleted test: e
   assert.ok(!membershipOf(featureLine, base).some((id) => id[2] === 'a > two'));
   assert.ok(membershipOf(mainLine, base).some((id) => id[2] === 'a > two'));
   assert.deepEqual(skippedOf(featureLine, base), feature.skipped);
-  assert.deepEqual(featureLine.skipped, { count: 2, added: [['app', 'src/b.test.ts', 'b > one']], removed: [] });
+  assert.deepEqual(featureLine.skipped, { count: 2, hash: hashIds(feature.skipped), added: [['app', 'src/b.test.ts', 'b > one']], removed: [] });
   assert.deepEqual(featureLine.failed, [{ id: ['app', 'src/c.test.ts', 'c > new'], message: 'no' }]);
+});
+
+test('a small selected run stores explicit membership and skipped ids instead of removing most of the base', () => {
+  const main = summarize([parseJUnit(mainReport)]);
+  const selected = summarize([parseJUnit(vitestReport({ timestamp: T, suites: [
+    { project: 'app', file: 'src/b.test.ts', time: 1, cases: [{ name: 'b > one' }] },
+  ] }))]);
+  const base = buildBase(prov(), main);
+  const line = buildRunLine(prov({ selection: 'affected' }), null, 'present', selected, base);
+  assert.equal(line.selection, 'affected');
+  assert.deepEqual(line.membership, { count: 1, hash: hashIds(selected.ids), ids: [['app', 'src/b.test.ts', 'b > one']] });
+  assert.deepEqual(line.skipped, { count: 0, hash: hashIds([]), ids: [] });
+  assert.deepEqual(membershipOf(line, base), selected.ids);
+  assert.deepEqual(skippedOf(line, base), []);
+});
+
+test('a present line without a base is self-contained, including an empty report', () => {
+  for (const summary of [summarize([parseJUnit(featureReport)]), summarize([])]) {
+    const line = buildRunLine(prov({ selection: 'affected' }), null, 'present', summary);
+    assert.deepEqual(line.membership, { count: summary.ids.length, hash: hashIds(summary.ids), ids: summary.ids });
+    assert.deepEqual(line.skipped, { count: summary.skipped.length, hash: hashIds(summary.skipped), ids: summary.skipped });
+    assert.deepEqual(membershipOf(line), summary.ids);
+    assert.deepEqual(skippedOf(line), summary.skipped);
+    // A full run collected later can create a base without changing how this line reads.
+    const base = buildBase(prov(), summarize([parseJUnit(mainReport)]));
+    assert.deepEqual(membershipOf(line, base), summary.ids);
+    assert.deepEqual(skippedOf(line, base), summary.skipped);
+  }
+});
+
+test('encoding minimizes serialized size independently for membership and skipped ids', () => {
+  const a = ['', 'a', 'a'];
+  const b = ['', 'src/b.test.ts', 'b'];
+  const long = ['', 'long-file-name', 'a very long test title that costs more than two short ids'];
+  const summary = { ids: [a, b], skipped: [b], failed: [], projects: {}, ms: 0 };
+  const base = { cases: [a, long], skipped: [b] };
+  const line = buildRunLine(prov(), null, 'present', summary, base);
+  // Both alternatives contain two ids; the removed long id makes the delta larger.
+  assert.deepEqual(line.membership, { count: 2, hash: hashIds([a, b]), ids: [a, b] });
+  assert.deepEqual(line.skipped, { count: 1, hash: hashIds([b]), added: [], removed: [] });
+  assert.deepEqual(membershipOf(line, base), [a, b]);
+  assert.deepEqual(skippedOf(line, base), [b]);
+  // Marking a full fallback selected does not force explicit storage when the delta is smaller.
+  const main = summarize([parseJUnit(mainReport)]);
+  const fallback = buildRunLine(prov({ selection: 'affected' }), null, 'present', main, buildBase(prov(), main));
+  assert.deepEqual(fallback.membership, { count: 4, hash: hashIds(main.ids), added: [], removed: [] });
+});
+
+test('legacy delta lines still reconstruct without a skipped hash or selection field', () => {
+  const one = ['app', 'src/a.test.ts', 'one'];
+  const two = ['app', 'src/a.test.ts', 'two'];
+  const added = ['app', 'src/b.test.ts', 'new'];
+  const line = {
+    run: 1, attempt: 1, job: 'unit',
+    membership: { count: 2, hash: hashIds([one, added]), added: [added], removed: [two] },
+    skipped: { count: 1, added: [added], removed: [two] },
+  };
+  const base = { cases: [one, two], skipped: [two] };
+  assert.deepEqual(membershipOf(line, base), [one, added]);
+  assert.deepEqual(skippedOf(line, base), [added]);
+  assert.throws(() => membershipOf({ ...line, membership: { ...line.membership, added: [two] } }, base), /does not match its hash/);
+  assert.throws(() => skippedOf({ ...line, skipped: { ...line.skipped, count: 2 } }, base), /does not match its count/);
+});
+
+test('both new encodings check hashes even when corruption leaves the count unchanged', () => {
+  const main = summarize([parseJUnit(mainReport)]);
+  const base = buildBase(prov(), main);
+  for (const against of [base, null]) {
+    const line = buildRunLine(prov(), null, 'present', main, against);
+    assert.match(line.skipped.hash, /^[a-f0-9]{64}$/);
+    const changed = ['app', 'src/other.test.ts', 'not the original'];
+    if (against) {
+      const wrong = { ...base, cases: [changed, ...base.cases.slice(1)], skipped: [changed] };
+      assert.throws(() => membershipOf(line, wrong), /does not match its hash/);
+      assert.throws(() => skippedOf(line, wrong), /does not match its hash/);
+    } else {
+      assert.throws(() => membershipOf({ ...line, membership: { ...line.membership, ids: [changed, ...line.membership.ids.slice(1)] } }), /does not match its hash/);
+      assert.throws(() => skippedOf({ ...line, skipped: { ...line.skipped, ids: [changed] } }), /does not match its hash/);
+    }
+  }
 });
 
 test("a project named like an object's own key keeps its counts", () => {
@@ -95,6 +175,8 @@ test('a line with no report holds provenance only', () => {
   assert.equal(line.artifact, null);
   assert.equal(line.membership, null);
   assert.equal(line.tested, 't');
+  assert.equal(line.selection, null);
+  assert.equal(buildRunLine(prov({ selection: 'affected' }), null, 'missing').selection, 'affected');
 });
 
 test('the durations snapshot is sampled and names its source', () => {
