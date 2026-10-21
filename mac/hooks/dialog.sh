@@ -322,11 +322,11 @@ close_episode() {
   close_alert || true
 }
 # What the closed episode owes its alert: the clear comment, unless it went through, then the close. True, with the
-# file gone, once the close has gone through; gh's close of an issue someone has already closed goes through too, and
-# an issue gh cannot find (deleted, say) leaves nothing to close. A comment that fails beside a close that goes through
-# is not tried again: the close is what MAWS reads.
+# file gone, once the close has gone through; gh's close of an issue someone has already closed goes through too. A
+# failed close is settled only when the alert is no longer open where MAWS reads it (alert_listed). A comment that
+# fails beside a close that goes through is not tried again: the close is what MAWS reads.
 close_alert() {
-  local err owed=''
+  local owed=''
   if [[ -n $st_issue ]]; then
     read_alert_token
     if [[ -z $st_commented ]]; then
@@ -337,22 +337,33 @@ close_alert() {
         log "dialog alert clear comment failed or timed out" || true
       fi
     fi
-    err=$(mktemp) || err=/dev/null
-    if alert_gh issue close "$st_issue" --repo "$alert_repo" >/dev/null 2>"$err"; then
+    if alert_gh issue close "$st_issue" --repo "$alert_repo" >/dev/null 2>&1; then
       :
-    elif grep -q 'Could not resolve to an issue' "$err" 2>/dev/null; then
-      log "dialog alert $st_issue no longer exists; nothing is left to close" || true
-    else
+    elif alert_listed; then
       log "dialog alert close failed or timed out; the alert stays open until a later read closes it" || true
       owed=1
+    else
+      log "dialog alert close failed, and $st_issue is not among the open alerts; nothing is left to close" || true
     fi
-    [[ $err == /dev/null ]] || rm -f "$err" || true
     if [[ -n $owed ]]; then
       save_state || true
       return 1
     fi
   fi
   drop_state || true
+}
+# Whether the alert may still be open where MAWS reads it: the sandbox's open ci-kit-alert issues. False only when a
+# list of them goes through without it (deleted, or its label taken off). gh's "Could not resolve to an issue" proves
+# nothing: GitHub says it too of an issue the caller cannot see, a token whose access changed for one (cli/cli#8013).
+alert_listed() {
+  local out listed=0
+  out=$(mktemp) || return 0
+  if alert_gh issue list --repo "$alert_repo" --label ci-kit-alert --state open --limit 1000 --json number --jq '.[].number' \
+    >"$out" 2>/dev/null; then
+    grep -qx "${st_issue##*/}" "$out" || listed=1
+  fi
+  rm -f "$out" || true
+  return $listed
 }
 # A later read's try at an owed close (phase=closed). True, with the file gone, once it has gone through.
 retry_close() {

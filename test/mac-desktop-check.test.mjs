@@ -405,11 +405,11 @@ test('gh failure is logged and cannot change a failing or passing job; a failed 
   const clearFails = twoClear.watch(asnShape('Terminal'), { ghExit: 1 });
   assert.equal(clearFails.status, 0, clearFails.stderr);
   assert.equal(clearFails.state.phase, 'closed', 'the close is owed, not forgotten');
-  assert.deepEqual(clearFails.ghCalls.map((call) => call[1]), ['create', 'comment', 'close']);
+  assert.deepEqual(clearFails.ghCalls.map((call) => call[1]), ['create', 'comment', 'close', 'list']);
   assert.match(clearFails.log, /alert.*(failed|timed out)/);
   const retried = clearFails.watch(asnShape('Terminal'));
   assert.equal(retried.state, null);
-  assert.deepEqual(retried.ghCalls.map((call) => call[1]), ['create', 'comment', 'close', 'comment', 'close']);
+  assert.deepEqual(retried.ghCalls.map((call) => call[1]), ['create', 'comment', 'close', 'list', 'comment', 'close']);
 });
 
 test('SecurityAgent names the latest requesting process before its launch, not a later request', () => {
@@ -484,17 +484,17 @@ test('hung gh cleanup calls that ignore SIGALRM do not block the watcher, and th
   const twoClear = first.watch(asnShape('Terminal')).watch(asnShape('Terminal'));
   const cleared = twoClear.watch(asnShape('Terminal'), { ghStall: true });
   assert.equal(cleared.status, 0, cleared.stderr);
-  assert.ok(cleared.elapsed < 25_000, 'comment and close each have a 10 s deadline');
-  assert.deepEqual(cleared.ghSurvivors, [], 'both timed-out gh processes are terminated and reaped');
+  assert.ok(cleared.elapsed < 35_000, 'comment, close and the open alerts\' list each have a 10 s deadline');
+  assert.deepEqual(cleared.ghSurvivors, [], 'every timed-out gh process is terminated and reaped');
   assert.equal(cleared.state.phase, 'closed');
-  assert.deepEqual(cleared.ghCalls.map((call) => call[1]), ['create', 'comment', 'close']);
+  assert.deepEqual(cleared.ghCalls.map((call) => call[1]), ['create', 'comment', 'close', 'list']);
   assert.match(cleared.log, /dialog alert clear comment failed or timed out/);
   assert.match(cleared.log, /dialog alert close failed or timed out/);
   const next = cleared.watch(asnShape('Terminal'));
   assert.equal(next.status, 0, next.stderr);
   assert.equal(next.state, null);
-  assert.equal(next.ghCalls.length, 5, 'the next clear read makes both calls again');
-  assert.equal(next.watch(asnShape('Terminal')).ghCalls.length, 5, 'and then nothing is owed');
+  assert.equal(next.ghCalls.length, 6, 'the next clear read makes both calls again');
+  assert.equal(next.watch(asnShape('Terminal')).ghCalls.length, 6, 'and then nothing is owed');
 });
 
 test('another machine is named in every refusal line and the alert title, and the lines keep their ci-kit: … rerun shape', () => {

@@ -120,17 +120,18 @@ test('an alert whose close fails stays owed and is tried at each read until it g
   const job = failed.again(terminal, { at: 250 });
   assert.equal(job.status, 0, job.stderr);
   assert.equal(job.state.phase, 'closed');
-  assert.equal(job.ghCalls.length, 3, 'the job hook makes no gh call for it');
+  assert.equal(job.ghCalls.length, 4, 'the job hook makes no gh call for it');
   // Each read tries again. One whose comment goes through and whose close does not leaves only the close owed.
   const still = job.watch(terminal, { at: 300, ghExit: 1 });
-  assert.deepEqual([still.state.phase, still.ghCalls.length], ['closed', 5]);
+  assert.deepEqual([still.state.phase, still.ghCalls.length], ['closed', 7]);
   const half = still.watch(terminal, { ghFail: 'close' });
   assert.deepEqual([half.state.phase, half.state.commented], ['closed', iso(T0 + 360)]);
   const done = half.watch(terminal);
   assert.equal(done.status, 0, done.stderr);
   assert.equal(done.stateText, null);
-  const pair = [['comment', alertURL], ['close', alertURL]];
-  assert.deepEqual(done.ghCalls.map((call) => call.slice(1, 3)), [['create', '--repo'], ...pair, ...pair, ...pair, ['close', alertURL]]);
+  // A failed close also lists the open alerts, which is what MAWS reads (below).
+  const tried = [['comment', alertURL], ['close', alertURL], ['list', '--repo']];
+  assert.deepEqual(done.ghCalls.map((call) => call.slice(1, 3)), [['create', '--repo'], ...tried, ...tried, ...tried, ['close', alertURL]]);
   for (const call of done.ghCalls.filter((call) => call[1] === 'comment')) {
     assert.equal(argValue(call, '--body'), `cleared at ${cleared}: no dialog in front on 3 reads in a row since ${iso(T0 + 120)}`);
   }
@@ -171,14 +172,26 @@ test('a dialog while an alert close is owed: the close is tried first; once it g
   assert.match(argValue(creates(renewed)[1], '--body'), /Opened by: a refused job \(run 123456\)\n/);
 });
 
-test('an alert issue that no longer exists owes nothing: the state goes, and a dialog after it is a new episode', () => {
-  // Deleted by hand, say. Owed for ever, it would also take in every later dialog, which would then alert nobody.
-  const gone = owing().watch(terminal, { ghGone: true });
+test('an owed close is settled only by a list of the open alerts, the ones MAWS reads, that goes through without it', () => {
+  // Deleted by hand, say, or its label taken off: MAWS no longer sees it, and owed for ever it would also take in every
+  // later dialog, which would then alert nobody.
+  const gone = owing().watch(terminal, { ghUnresolved: true, ghOpen: '17' });
   assert.equal(gone.status, 0, gone.stderr);
   assert.equal(gone.stateText, null);
-  assert.ok(gone.log.includes(`dialog alert ${alertURL} no longer exists; nothing is left to close`), gone.log);
-  const fresh = owing().watch(notification, { ghGone: true });
+  const list = gone.ghCalls.at(-1);
+  assert.deepEqual(list.slice(1), ['list', '--repo', 'SSFSKIM/ci-kit-sandbox', '--label', 'ci-kit-alert', '--state', 'open', '--limit', '1000', '--json', 'number', '--jq', '.[].number']);
+  assert.ok(gone.log.includes(`dialog alert close failed, and ${alertURL} is not among the open alerts; nothing is left to close`), gone.log);
+  const fresh = owing().watch(notification, { ghUnresolved: true, ghOpen: '' });
   assert.deepEqual([fresh.state.phase, fresh.state.name, fresh.state.since], ['pending', 'UserNotificationCenter', iso(T0 + 300)]);
+  // gh cannot resolve an issue the caller cannot see either (a token whose access changed): still listed, it stays owed.
+  const hidden = owing().watch(terminal, { ghUnresolved: true });
+  assert.deepEqual([hidden.state.phase, hidden.state.issue], ['closed', alertURL]);
+  assert.match(hidden.log, /dialog alert close failed or timed out; the alert stays open until a later read closes it/);
+  // A list that fails proves nothing either.
+  const unlisted = owing().watch(terminal, { ghUnresolved: true, ghOpen: '', ghFail: 'list' });
+  assert.deepEqual([unlisted.state.phase, unlisted.state.issue], ['closed', alertURL]);
+  const reopened = owing().watch(notification, { ghUnresolved: true, ghOpen: '', ghFail: 'list' });
+  assert.deepEqual([reopened.state.phase, reopened.state.issue, creates(reopened).length], ['open', alertURL, 1]);
 });
 
 test('a state file the version before wrote still loads: its episode closes on the clear reads it has left, and a failed close is kept', () => {
@@ -191,7 +204,8 @@ test('a state file the version before wrote still loads: its episode closes on t
     ['closed', 'loginwindow', iso(T0 - 600), alertURL, iso(T0 + 60)]);
   const done = d.watch(terminal);
   assert.equal(done.stateText, null);
-  assert.equal(argValue(done.ghCalls[2], '--body'), `cleared at ${iso(T0 + 60)}: no dialog in front on 3 reads in a row since ${iso(T0 - 60)}`);
+  const comment = done.ghCalls.filter((call) => call[1] === 'comment').at(-1);
+  assert.equal(argValue(comment, '--body'), `cleared at ${iso(T0 + 60)}: no dialog in front on 3 reads in a row since ${iso(T0 - 60)}`);
 });
 
 test('an unreadable frontmost app changes nothing', () => {

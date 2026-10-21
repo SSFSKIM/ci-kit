@@ -368,9 +368,10 @@ it opened, never another machine's.
   its network was up. The comment and the close failed, nothing tried them again, and the open alert stopped MAWS's
   `ci-gate.sh` from pushing Mac jobs until it was closed by hand. Now the state keeps the issue (`phase=closed`), and
   every watcher read with no dialog tries again: the comment unless it went through, then the close. The file goes once
-  the close does; closing an issue someone already closed counts, and an issue `gh` cannot find (deleted) leaves
-  nothing to close. The episode itself has closed, so the runner is released at once, and jobs run while the close is
-  owed.
+  the close does; closing an issue someone already closed counts. A close that fails is settled only when a list of the
+  sandbox's open `ci-kit-alert` issues, what MAWS reads, goes through without it (deleted, or its label taken off).
+  `gh`'s `Could not resolve to an issue` alone proves nothing: GitHub says it too of an issue the token cannot see.
+  The episode itself has closed, so the runner is released at once, and jobs run while the close is owed.
 - **A dialog while a close is owed**, seen by the watcher or a job, tries the close first. Once it goes through, the
   dialog starts an episode of its own, with its own first-seen time, source and alert. While it cannot, a new alert
   could not be opened either, and the open one is right again, so the episode reopens with it: the alert keeps the
