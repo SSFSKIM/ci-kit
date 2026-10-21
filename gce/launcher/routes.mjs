@@ -10,8 +10,14 @@ export function createHandler({ serve, say }) {
     if (path === '/request') {
       const asked = await requestOf(req).catch(() => null);
       say('INFO', `tick request${asked?.repo ? `: ${asked.repo} job ${asked.job}` : ''}`, { request: asked });
-      serve('requested').catch(() => {}); // a failed tick is logged by tick(); the minute tick reconciles
-      return json(res, 202, { requested: true });
+      // Answered when the tick that serves it has ended: an open request is what keeps the instance's CPU allocated
+      // while that tick runs. Any answer acknowledges the push. A failed tick was logged by tick(), and Pub/Sub's
+      // retry would only add a tick to an outage the minute tick already retries; a dropped one is the budget's call.
+      try {
+        return json(res, 200, await serve('requested'));
+      } catch (err) {
+        return json(res, 200, { failed: err.message });
+      }
     }
     if (path !== '/tick') return json(res, 404, { error: `no ${path}` });
     try {

@@ -357,13 +357,28 @@ GitHub App ci-kit-runners ──workflow_job──▶ ci-kit-webhook (public) �
 - **The path to the launcher.** Cloud Run's internal ingress admits a Pub/Sub push subscription of the same project
   calling the service's `run.app` URL; Cloud Run then checks the push's OIDC token (`ci-kit-launcher@`, audience the
   launcher's URL) like the scheduler's. A message older than 10 min is dropped; a failed push is retried after 10–60 s.
-- **The launcher** answers a push 202 at once and runs the tick it asked for: at once when idle; when a tick is
-  running, every request arriving meanwhile, scheduled or pushed, is served by one more tick after it (at most one
-  pending); ticks start at least 10 s apart; and while the App's remaining GitHub budget is under 20% of its limit, a
-  tick that only pushes asked for is dropped (logged `requested tick dropped`), so the minute tick alone serves. Since
-  the tick runs after its push is answered, the service has CPU always allocated (instance-based billing, about $1.64
-  a day; it fit in the free tier before). A scheduled request waits for the tick that serves it, so a failed tick
-  still fails Cloud Scheduler's execution and the alert.
+  The subscription's ack deadline is 300 s, since a push is answered only when its tick has ended (next item).
+- **The launcher** runs the tick a push asks for at once when idle; when a tick is running, every request arriving
+  meanwhile, scheduled or pushed, is served by one more tick after it (at most one pending); ticks start at least
+  10 s apart; and while the App's remaining GitHub budget is under 20% of its limit, a tick that only pushes asked for
+  is dropped (logged `requested tick dropped`), so the minute tick alone serves. Every request is answered when the
+  tick that serves it has ended (a push 200 with the tick's outcome, `dropped` or `failed`; the scheduler 200 or 500,
+  so a failed tick still fails its execution and the alert). An open request is what keeps a Cloud Run instance's
+  CPU allocated under request-based billing, so the launcher stays in the free tier.
+- **The ack deadline.** A push that arrives while a tick runs is served by the next tick, never dropped and never
+  held past it, so the subscription's ack deadline outlives the worst case: the running tick (~100 s: launches stop
+  starting at its 45 s budget, an insert already started waits up to 40 s more, then its tail; the longest of 4,283
+  ticks in the 3 days to 2026-10-21 took 77 s), the 10 s spacing, the next tick (~100 s) and a cold start (~10 s):
+  220 s. The deadline is 300 s, Cloud Run's request timeout for the launcher. A push held past it is cut and
+  redelivered, which costs one more tick, never a job.
+- **Pub/Sub's push window.** Pub/Sub narrows how many pushes it has outstanding when answers take over a second, and
+  these take a tick's length. A burst can then reach the launcher a few pushes at a time, and the ones held back
+  arrive as ticks end, each starting or joining the next tick. Every tick reads every queued job, so a job is
+  launched by the first tick that starts after it was queued, whichever push started that tick. A held-back push can
+  start that tick only once a push ahead of it is answered, at the end of the running tick, which is when a pending
+  tick would have started anyway; it is later only by Pub/Sub's dispatch of the next push (not measured). What the
+  window can cost is ticks: at worst one per held-back push, inside the 10 s spacing and the 20% budget rule. A tick's
+  `requests` field shows how many pushes each tick served.
 - **Nothing new to keep correct.** A requested tick is an ordinary tick. A lost, duplicated, forged-and-refused or
   late delivery, or a dropped request, costs at most the minute until the scheduled tick, never a job; a replayed
   genuine delivery costs one tick, inside the 10 s spacing.

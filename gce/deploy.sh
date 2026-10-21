@@ -13,7 +13,7 @@
 #   bake               the Cloud Run job ci-kit-bake, built from this checkout
 #   bake-schedule      the Scheduler job ci-kit-bake-weekly, which runs the bake every Sunday at 18:00 UTC
 #   launcher           the Cloud Run service ci-kit-launcher, built from this checkout: no public ingress, one
-#                      instance, CPU always allocated, 300 s per request; requests are many at a time, ticks one
+#                      instance, 300 s per request; requests are many at a time, ticks one
 #   launcher-schedule  the Scheduler job ci-kit-launcher-tick, which calls the launcher every minute with an OIDC token
 #   webhook            the public Cloud Run service ci-kit-webhook (the App's webhook receiver), the Pub/Sub topic
 #                      ci-kit-tick-requests it publishes to, and the push subscription that asks the launcher for a
@@ -123,17 +123,15 @@ LAUNCHER=ci-kit-launcher
 launcher() {
   # Buildpack images keep node in their layers, off the bare PATH: the CNB `launcher` sets up the layers' environment
   # and then runs the command (the same holds for the bake job above).
-  # Requests are many at a time (spec 2026-10-21 M4): a requested tick's pushes arrive while a tick runs, and the
-  # process coalesces them (gce/launcher/ticker.mjs), so concurrency only has to admit them; ticks stay one at a time.
-  # CPU is always allocated (instance-based billing): a push is answered at once, since Pub/Sub narrows its push
-  # window when answers take over a second, and the tick it asked for runs after the answer, which request-based
-  # billing would starve of CPU. The minute tick keeps the one instance alive, so it bills all day: about $1.64 a day
-  # for 1 vCPU and 512 MiB at us-central1's instance-based rates (catalog 2026-10-21: $0.000018 a vCPU-second,
-  # $0.000002 a GiB-second), where request-based billing kept the launcher in the free tier.
+  # Request-based billing: a tick a minute of a few seconds' work stays in the free tier.
+  # Requests are many at a time (spec 2026-10-21 M4): the webhook's pushes arrive while a tick runs, and the process
+  # coalesces them (gce/launcher/ticker.mjs), so concurrency only has to admit them; ticks stay one at a time. Every
+  # request, scheduled or pushed, is answered when the tick that serves it has ended, so a request is open, and the
+  # CPU allocated, for every tick's whole run.
   g run deploy "$LAUNCHER" --source="$KIT" --region="$REGION" --service-account="$SA" \
     --command=launcher --args=node,gce/launcher/server.mjs --set-env-vars="CI_KIT_COMMIT=$COMMIT" --labels=ci-kit=launcher \
     --no-allow-unauthenticated --ingress=internal --min-instances=0 --max-instances=1 --concurrency=80 \
-    --no-cpu-throttling --timeout=300 --cpu=1 --memory=512Mi
+    --cpu-throttling --timeout=300 --cpu=1 --memory=512Mi
   # Cloud Scheduler calls it as the service account, and so does Pub/Sub's push (webhook); nothing else may.
   g run services add-iam-policy-binding "$LAUNCHER" --region="$REGION" \
     --member="serviceAccount:$SA" --role=roles/run.invoker > /dev/null
@@ -189,10 +187,15 @@ webhook() {
     --ingress=all --no-invoker-iam-check --min-instances=0 --max-instances=3 --concurrency=80 \
     --timeout=30 --cpu=1 --memory=256Mi
 
-  # A request older than 10 min (Pub/Sub's shortest retention) is dropped: the minute tick has served its job by then.
-  # The launcher answers a push at once, so the 10 s ack deadline is only for a launcher that is starting up.
+  # The launcher answers a push when the tick that serves it has ended, and a push that arrives while a tick runs is
+  # served by the next one, so the ack deadline must outlive the worst case: the running tick (~100 s: launches stop
+  # starting at its 45 s budget, an insert already started waits up to 40 s more, then the tick's tail; the longest of
+  # 4,283 ticks in the 3 days to 2026-10-21 took 77 s), the 10 s spacing, the next tick (~100 s again) and a cold
+  # start (~10 s): 220 s. 300 s, Cloud Run's request timeout here, covers it with 80 s to spare; a push held past it
+  # is cut by Cloud Run and redelivered, which costs one more tick, never a job. A request older than 10 min (Pub/Sub's
+  # shortest retention) is dropped: the minute tick has served its job by then.
   local push=(--push-endpoint="$url/request" --push-auth-service-account="$SA" --push-auth-token-audience="$url"
-    --ack-deadline=10 --message-retention-duration=10m --expiration-period=never --min-retry-delay=10s --max-retry-delay=60s)
+    --ack-deadline=300 --message-retention-duration=10m --expiration-period=never --min-retry-delay=10s --max-retry-delay=60s)
   if g pubsub subscriptions describe "$SUBSCRIPTION" > /dev/null 2>&1; then
     g pubsub subscriptions update "$SUBSCRIPTION" "${push[@]}" > /dev/null
   else

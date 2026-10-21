@@ -5,8 +5,8 @@
 //                  of the tick that serves it. A tick that cannot read Compute Engine or the ledger answers 500, which
 //                  Cloud Scheduler logs as a failed execution and the Monitoring alert counts.
 //   POST /request  the Pub/Sub push subscription ci-kit-tick-requests-launcher, one message per pool job queued
-//                  (gce/webhook): answered 202 at once, so Pub/Sub's push window stays open, and served by the next
-//                  tick. The service runs with CPU always allocated, since that tick runs after the answer.
+//                  (gce/webhook): answered when the tick that serves it has ended, so the request keeps the
+//                  instance's CPU allocated (request-based billing) for that tick's whole run.
 // Both are the same full tick (launcher.mjs), run one at a time with at most one pending (ticker.mjs).
 // It runs as ci-kit-launcher@: Compute Engine through the metadata server's token, the App's id and key from Secret
 // Manager, and the configs from the kit's main (source.mjs). Clients live as long as the instance, so their ETags
