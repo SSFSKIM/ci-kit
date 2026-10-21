@@ -1289,6 +1289,15 @@ hold-aware plan send them to the guest, which this spec leaves open.
   Its review (reviewer-medium) found that the contract certified a workflow with a raw timing bound outside
   `MEASURED_E2E` (`e2e:presentations`' scale-gate open, at most 1,000 ms), which the switch-based contract test missed;
   the fix moves or gates every such bound and makes the test catch the class.
+- 2026-10-21 (late, V3's review fix, confirmed by CI-opt): **a host instance on a Mac with the lane reads as a loaded
+  host.** MAWS's latency budget reads the load once, at a test's start, and a guest can boot after that read, so no
+  dynamic read covers the test's span; the budget now treats `CI_KIT_VM_LANE=1` as loaded, and `install.sh --vm` sets
+  it in every host instance's `.env` (V2d). The cost: every budgeted functional bound on the mini is held to its 5x
+  ceiling while the lane is installed, M2's trade for shared instances; `MEASURED_E2E` stays the latency check, and its
+  jobs run under the measured claim that keeps the guest out. The alternative that lost: leave budgeted host bounds to
+  V4's evidence, group by group, which leaves a bound unprotected from the lane's install until that evidence exists.
+  The same fix made the contract test catch the class (a raw time bound in a spec a non-measured job runs fails it
+  unless it is behind its group's switch, through the budget, or a listed liveness bound on the product's own timers).
 
 ## Surprises & Discoveries
 
