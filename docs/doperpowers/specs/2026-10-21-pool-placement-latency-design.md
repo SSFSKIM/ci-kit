@@ -57,6 +57,23 @@ toward the boot alone, and below it for the jobs a warm runner covers.
   - [x] (2026-10-21 15:57Z) Step 2: a c4d-highcpu-2 on hyperdisk-balanced in us-west4-a, from the current ready image,
     ran a real sandbox job (exit:0); VM, disk and runner gone. Insert accepted → RUNNING 23.2 s, RUNNING → started
     28.9 s (one sample; C3D's accepted → RUNNING is ~7.6 s, a finding step 4's ~18 C4D starts settle).
+  - [x] (2026-10-21 16:29Z) Step 3: #73 merged 16:10Z (f26f726); `deploy.sh bake`; manual bake ci-kit-bake-md6wc built
+    in us-west4, smoke-1 c4d-highcpu-2@us-west4-a ok, smoke-2 c3d-highcpu-4@us-central1-a ok, real job on c4d-2 passed,
+    image `ci-kit-runner-20261021-161209-fa1d-f26f726b` ready.
+  - [x] (2026-10-21 17:2xZ) Step 4: arm b (MAWS b2d286cea), three runs each side, all green, 22457 tests each, every
+    job's VM in the arm's placement (Acceptance 2 met on the 3-vs-3 rule):
+
+    | | C3D (cp-b9..11, before) | C4D (cp-c4d1..3, after) | gain |
+    |---|---|---|---|
+    | static job (cpus-4) | 463 s (443–478) | 335 s (323–346) | 128 s, C3D spread 35 |
+    | unit job (cpus-8) | 570 s (516–572) | 427 s (387–506) | 143 s, C3D spread 56 |
+    | probes job (cpus-2; C3D side on e2) | 60 s (60–66) | 34 s (32–35) | 26 s |
+    | plan → last job | 657 s (590–664) | 532 s (486–559) | 125 s |
+    | insert accepted → job started, per VM | 48.4 s (n=9) | 37.4 s (n=9) | 11 s |
+
+    Against all nine C3D arm b runs of the day (critical-path b1–b3, b6–b8 and these), unit's gain (median 494 → 427)
+    is inside C3D's 486–572 spread; static's (447 → 335) is well outside it. Runs 39630493322, 39630507852,
+    39630519998 / 39635358119, 39636927897, 39638465062.
 - [ ] M3 — The tick and the boot. (2026-10-21) Built, rebased onto M1+M2, reviewer-medium clean after one fix wave,
   ci-gate green; PR to CI-opt. Its proofs over a day of rows follow the launcher deploy and the bake after merge.
 - [ ] M4 — Launch on GitHub's `workflow_job` webhook.
