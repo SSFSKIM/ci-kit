@@ -1,7 +1,7 @@
 // The GCE launcher's decisions (spec §3a The launcher, VM lifecycle; I12), as pure functions over recorded Compute
 // Engine and Actions API shapes. launcher.mjs observes, decides through these, and acts. Times are epoch ms.
 import { randomBytes } from 'node:crypto';
-import { refusal, machineCpus } from '../bake/plan.mjs';
+import { refusal, machineCpus, subnetworkOf } from '../bake/plan.mjs';
 import { workDir } from '../../pool/agent/docker.mjs';
 
 const MIN = 60_000;
@@ -55,6 +55,7 @@ export function viewInstance(i) {
     cpus: Number(i.labels?.['ci-kit-cpus']) || null,
     provisioning: i.labels?.['ci-kit-provisioning'] ?? null,
     config: i.labels?.['ci-kit-config'] ?? null,
+    diskType: i.labels?.['ci-kit-disk'] ?? null, // null on a VM launched before placements
     raw: i,
   };
 }
@@ -69,7 +70,7 @@ export const isGce = (r) => r?.labels?.['ci-kit'] === 'gce';
 // queued: queued pool jobs of served repos, each with `repo`. instances: viewInstance()s of every ci-kit=gce instance.
 // runners: Map repo → Map runner name → runner, for each repo whose listing succeeded; a repo without one gets nothing.
 // complete: false when the instance listing missed a zone; nothing is admitted then, since the vCPUs in flight and
-// the coverage are unknown. A launch reserves the largest machine its walk could land on (machine_fallback).
+// the coverage are unknown. A launch reserves the largest machine its walk could land on (any placement's).
 export function planLaunches({ queued, instances, runners, now, cfg, complete = true }) {
   if (!complete) return { launches: [], waiting: [...queued], unservable: [] };
   const idleMs = cfg.idle_runner_minutes * MIN;
@@ -90,7 +91,7 @@ export function planLaunches({ queued, instances, runners, now, cfg, complete = 
   const ordered = [...queued].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at) || a.id - b.id);
   for (const job of ordered) {
     if (!runners.has(job.repo)) continue;
-    const cpus = jobCpus(job.labels, cfg.machines);
+    const cpus = jobCpus(job.labels, cfg.placements[0].machines); // every placement names every size
     if (cpus === null) {
       unservable.push(job);
       continue;
@@ -111,20 +112,57 @@ export function planLaunches({ queued, instances, runners, now, cfg, complete = 
   return { launches, waiting, unservable };
 }
 
-export const largestMachineCpus = (cpus, cfg) =>
-  Math.max(...[cfg.machines[cpus], cfg.machine_fallback?.[cpus]].filter(Boolean).map(machineCpus));
+export const largestMachineCpus = (cpus, cfg) => Math.max(...cfg.placements.map((p) => machineCpus(p.machines[cpus])));
 
-// The attempts for a size, in order: its machine as spot in every configured zone, then on demand in every zone, then
-// its fallback machine (machine_fallback) the same way.
+// The attempts for a size, in order (spec 2026-10-21, The walk): spot in every zone of the first placement, then of the
+// next, and so on; then on demand in the same order. An attempt (machine, zone, provisioning) is made once, however
+// many placements name it (the old form's fallback placement repeats the sizes it does not name).
 export function placements(cpus, cfg) {
-  const machines = [cfg.machines[cpus], cfg.machine_fallback?.[cpus]].filter((m, i, all) => m && all.indexOf(m) === i);
-  return machines.flatMap((machine) => ['spot', 'standard'].flatMap((provisioning) => cfg.zones.map((zone) => ({ machine, provisioning, zone }))));
+  const seen = new Set();
+  const out = [];
+  for (const provisioning of ['spot', 'standard']) {
+    for (const placement of cfg.placements) {
+      const machine = placement.machines[cpus];
+      for (const zone of placement.zones) {
+        const key = `${machine}|${zone}|${provisioning}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ machine, provisioning, zone, placement });
+      }
+    }
+  }
+  return out;
 }
 
+const familyOf = (machine) => machine.split('-')[0];
+
+// What a quota refusal ran out of, from the metric and region its message names (Compute Engine words it "Quota
+// 'C4D_CPUS' exceeded.  Limit: 50.0 in region us-west4."; the all-regions quota "... globally."): a family's CPUs
+// by (region, family), any other regional quota (CPUS, instances, addresses, disk capacity) by region, the
+// all-regions CPUs everywhere. A PREEMPTIBLE_ quota binds spot requests only. A refusal that names nothing is taken
+// as the machine's family's. vcpus: the refused machine's; a request smaller than it may still fit.
+export function quotaScope(err, attempt) {
+  const message = err?.message ?? '';
+  const vcpus = machineCpus(attempt.machine);
+  const region = /in region ([a-z0-9-]+)/.exec(message)?.[1] ?? attempt.placement.region;
+  const metric = /Quota '([A-Z0-9_]+)' exceeded/.exec(message)?.[1];
+  if (!metric) return { region, family: familyOf(attempt.machine), vcpus };
+  const spot = metric.startsWith('PREEMPTIBLE_') ? { spot: true } : {};
+  const base = metric.replace(/^PREEMPTIBLE_/, '');
+  if (base === 'CPUS_ALL_REGIONS' || / globally/.test(message)) return { ...spot, vcpus };
+  const family = /^([A-Z0-9]+)_CPUS$/.exec(base)?.[1];
+  return family ? { region, family: family.toLowerCase(), ...spot, vcpus } : { region, ...spot, vcpus };
+}
+
+// Whether a remembered refusal covers an attempt: in its scope, and of the same or more vCPUs.
+export const quotaBlocks = (memory, attempt) => memory.some((q) =>
+  (!q.region || q.region === attempt.placement.region) && (!q.family || q.family === familyOf(attempt.machine)) &&
+  (!q.spot || attempt.provisioning === 'spot') && machineCpus(attempt.machine) >= q.vcpus);
+
 // What a failed insert means. 'capacity' (ZONE_RESOURCE_POOL_EXHAUSTED*: this zone, this provisioning) and 'quota'
-// (the region's, for the machine's family) are definite refusals. 'failed': nothing was created and trying elsewhere
-// would not help (the operation finished with another error, or the request was refused outright). 'unknown': the
-// insert may have been accepted (a timeout, a lost response, a 5xx, a wait call that failed).
+// (a region's or the project's, as its message names it: quotaScope) are definite refusals. 'failed': nothing was
+// created and trying elsewhere would not help (the operation finished with another error, or the request was refused
+// outright). 'unknown': the insert may have been accepted (a timeout, a lost response, a 5xx, a wait call that failed).
 export function insertOutcome(err) {
   const why = refusal(err);
   if (why) return why;
@@ -133,25 +171,27 @@ export function insertOutcome(err) {
   return 'unknown';
 }
 
-// Walks the placements until one creates the VM. Capacity moves to the next placement; quota skips the machine's
-// remaining placements. An unknown outcome is reconciled (through the zone's operation) before anything else is
-// tried, and if it stays unknown the walk stops: two zones must never both hold this allocation's VM.
+// Walks the attempts until one creates the VM. Capacity moves to the next zone. A quota refusal is remembered in
+// `quota` (the tick's memory, quotaScope) and every attempt it covers is skipped, here and in the tick's later walks.
+// An unknown outcome is reconciled (through the zone's operation) before anything else is tried, and if it stays
+// unknown the walk stops: two zones must never both hold this allocation's VM.
 // attempt(p) resolves once created and throws the insert's error; reconcile(p, err) resolves to an outcome. No new
 // attempt starts at or past `deadline` (the tick's budget): the walk stops with 'deadline', having created nothing.
 // Returns {placement, tried, stop: 'exhausted'|'failed'|'unknown'|'deadline' when no placement, quota: true if any
 // refused it}.
-export async function walkPlacements(list, { attempt, reconcile, now = Date.now, deadline = Infinity }) {
+export async function walkPlacements(list, { attempt, reconcile, now = Date.now, deadline = Infinity, quota: memory = [] }) {
   const tried = [];
-  let skip = null;
   let quota = false;
   for (const p of list) {
-    if (p.machine === skip) continue;
+    if (quotaBlocks(memory, p)) continue;
     if (now() >= deadline) return { placement: null, tried, stop: 'deadline', quota };
     let outcome;
+    let error = null;
     try {
       await attempt(p);
       outcome = 'created';
     } catch (err) {
+      error = err;
       outcome = insertOutcome(err);
       if (outcome === 'unknown') outcome = await reconcile(p, err);
     }
@@ -160,7 +200,7 @@ export async function walkPlacements(list, { attempt, reconcile, now = Date.now,
     if (outcome === 'capacity') continue;
     if (outcome === 'quota') {
       quota = true;
-      skip = p.machine;
+      memory.push(quotaScope(error, p));
       continue;
     }
     return { placement: null, tried, stop: outcome, quota };
@@ -168,10 +208,11 @@ export async function walkPlacements(list, { attempt, reconcile, now = Date.now,
   return { placement: null, tried, stop: 'exhausted', quota };
 }
 
-// The job VM (spec §3a VM lifecycle step 2, I12). No service account; the kit's subnetwork with an ephemeral external
-// address; the JIT config in metadata `ci-kit-jit` with guest attributes on; a run limit after which Compute Engine
-// deletes the VM; a boot disk that goes with it. `config` is the commit of the gce.json the launcher runs.
-export function jobInstance({ alloc, zone, machine, provisioning, repo, cpus, image, jit, cfg, config }) {
+// The job VM (spec §3a VM lifecycle step 2, I12). No service account; its placement's subnetwork with an ephemeral
+// external address; the JIT config in metadata `ci-kit-jit` with guest attributes on; a run limit after which Compute
+// Engine deletes the VM; a boot disk of the placement's type that goes with it, named in the label `ci-kit-disk` so the
+// ledger prices it (the instance resource does not say). `config` is the commit of the gce.json the launcher runs.
+export function jobInstance({ alloc, zone, machine, provisioning, placement, repo, cpus, image, jit, cfg, config }) {
   const name = instanceName(alloc);
   const diskLabels = { 'ci-kit': 'gce', 'ci-kit-alloc': alloc };
   const scheduling = { instanceTerminationAction: 'DELETE', maxRunDuration: { seconds: String(cfg.max_run_minutes * 60) }, automaticRestart: false };
@@ -180,14 +221,14 @@ export function jobInstance({ alloc, zone, machine, provisioning, repo, cpus, im
     machineType: `zones/${zone}/machineTypes/${machine}`,
     labels: {
       ...diskLabels, 'ci-kit-repo': repoLabel(repo), 'ci-kit-cpus': String(cpus), 'ci-kit-provisioning': provisioning,
-      'ci-kit-config': config.slice(0, 8),
+      'ci-kit-config': config.slice(0, 8), 'ci-kit-disk': placement.disk_type,
     },
     disks: [{
       boot: true,
       autoDelete: true,
-      initializeParams: { diskName: name, sourceImage: image, diskSizeGb: String(cfg.disk_gb), diskType: `zones/${zone}/diskTypes/pd-balanced`, labels: diskLabels },
+      initializeParams: { diskName: name, sourceImage: image, diskSizeGb: String(cfg.disk_gb), diskType: `zones/${zone}/diskTypes/${placement.disk_type}`, labels: diskLabels },
     }],
-    networkInterfaces: [{ subnetwork: `regions/${cfg.region}/subnetworks/${cfg.subnetwork}`, accessConfigs: [{ type: 'ONE_TO_ONE_NAT', name: 'External NAT' }] }],
+    networkInterfaces: [{ subnetwork: subnetworkOf(placement), accessConfigs: [{ type: 'ONE_TO_ONE_NAT', name: 'External NAT' }] }],
     serviceAccounts: [],
     metadata: { items: [{ key: 'enable-guest-attributes', value: 'TRUE' }, { key: 'ci-kit-jit', value: jit }] },
     scheduling: provisioning === 'spot'

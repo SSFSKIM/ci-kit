@@ -8,7 +8,10 @@ import { GceError } from '../../lib/gce.mjs';
 const ZONE_URL = (zone) => `https://www.googleapis.com/compute/v1/projects/ssfskim-ci-kit/zones/${zone}`;
 const httpError = (status, message = `HTTP ${status}`) => Object.assign(new Error(message), { status });
 
-export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: true } }, images } = {}) {
+// zones: the zones an aggregated listing returns a scope for (every zone of the project, as the real one does).
+const ZONES = ['us-central1-a', 'us-central1-b', 'us-central1-c', 'us-central1-f', 'us-west4-a', 'us-west4-b', 'us-west4-c', 'europe-west4-a'];
+
+export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: true } }, images, zones = ZONES } = {}) {
   let clock = start;
   let nextId = 1;
   const g = {
@@ -39,10 +42,14 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
   const gce = {
     instances: async () => [...g.instances, ...g.foreign].map((i) => structuredClone(i)),
     disks: async () => g.disks.map((d) => structuredClone(d)),
-    // hooks.unreachable: a zone the aggregated listings cannot reach this time (its resources are missing).
+    // hooks.unreachable: a zone the aggregated listings cannot reach this time (its resources are missing, and it is not
+    // among the zones read whole).
     listInstances: async () => {
       const hidden = hooks.unreachable;
-      return { items: [...g.instances, ...g.foreign].filter((i) => !hidden || !i.zone.endsWith(hidden)).map((i) => structuredClone(i)), complete: !hidden };
+      return {
+        items: [...g.instances, ...g.foreign].filter((i) => !hidden || !i.zone.endsWith(hidden)).map((i) => structuredClone(i)),
+        complete: !hidden, zones: new Set(zones.filter((z) => z !== hidden)),
+      };
     },
     listDisks: async () => ({ items: g.disks.filter((d) => !hooks.unreachable || !d.zone.endsWith(hooks.unreachable)).map((d) => structuredClone(d)), complete: !hooks.unreachable }),
     images: async () => g.images.map((i) => structuredClone(i)),

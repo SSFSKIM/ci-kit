@@ -46,31 +46,67 @@ test('an abandoned allocation (no VM) costs nothing and has no seconds', () => {
   assert.match(renderRow(final), /\| - \| - \| abandoned \|$/);
 });
 
-test('dollars: vCPU and memory at the machine family\'s spot or on-demand rate, plus the address and the disk, at least a minute', () => {
+const C3D = { machine: 'c3d-highcpu-4', zone: 'us-central1-a', diskType: 'pd-balanced', diskGb: 50 };
+test('dollars: vCPU and memory at the machine family\'s spot or on-demand rate in its region, plus the address and the disk, at least a minute', () => {
   // c3d-highcpu-4 spot: 4 vCPU × 0.00715 + 8 GiB × 0.00096 + IP 0.0025 = 0.03878 $/h; disk 50 GiB × 0.10 / 730 h.
-  const hour = dollars({ machine: 'c3d-highcpu-4', provisioning: 'spot', seconds: 3600, diskGb: 50 });
+  const hour = dollars({ ...C3D, provisioning: 'spot', seconds: 3600 });
   assert.ok(Math.abs(hour - (0.03878 + 50 * 0.1 / 730)) < 1e-9, String(hour));
-  assert.equal(dollars({ machine: 'c3d-highcpu-4', provisioning: 'spot', seconds: 10, diskGb: 50 }), dollars({ machine: 'c3d-highcpu-4', provisioning: 'spot', seconds: 60, diskGb: 50 }));
-  assert.ok(dollars({ machine: 'c3d-highcpu-4', provisioning: 'standard', seconds: 3600, diskGb: 50 }) > hour * 3);
-  assert.ok(dollars({ machine: 'e2-highcpu-2', provisioning: 'spot', seconds: 3600, diskGb: 50 }) > 0);
-  assert.equal(dollars({ machine: 'n9-mystery-4', provisioning: 'spot', seconds: 60, diskGb: 50 }), null);
+  assert.equal(dollars({ ...C3D, provisioning: 'spot', seconds: 10 }), dollars({ ...C3D, provisioning: 'spot', seconds: 60 }));
+  assert.ok(dollars({ ...C3D, provisioning: 'standard', seconds: 3600 }) > hour * 3);
+  assert.ok(dollars({ ...C3D, machine: 'e2-highcpu-2', provisioning: 'spot', seconds: 3600 }) > 0);
+  assert.equal(dollars({ ...C3D, machine: 'n9-mystery-4', provisioning: 'spot', seconds: 60 }), null);
+  // A row from before placements names no disk type: its VM booted from pd-balanced.
+  assert.equal(dollars({ ...C3D, diskType: undefined, provisioning: 'spot', seconds: 3600 }), hour);
+});
+
+test('dollars: a c4d VM in us-west4 at the catalog\'s C4D rates there, on Hyperdisk Balanced with its default performance', () => {
+  // c4d-highcpu-8: 8 vCPU and 15 GiB (C4D memory is priced per GB, 10^9 bytes). Hyperdisk Balanced's defaults for 50 GiB
+  // are 3,300 IOPS and 215 MiB/s, of which the first 3,000 and 140 are in the capacity price.
+  const gb = 15 * 1.073741824;
+  const disk = (50 * 0.09 + 300 * 0.006 + 75 * 0.045) / 730;
+  const vm = { machine: 'c4d-highcpu-8', zone: 'us-west4-b', diskType: 'hyperdisk-balanced', diskGb: 50, seconds: 3600 };
+  const spot = dollars({ ...vm, provisioning: 'spot' });
+  assert.ok(Math.abs(spot - (8 * 0.0062 + gb * 0.000661 + 0.0025 + disk)) < 1e-9, String(spot));
+  const standard = dollars({ ...vm, provisioning: 'standard' });
+  assert.ok(Math.abs(standard - (8 * 0.036834 + gb * 0.00393707 + 0.005 + disk)) < 1e-9, String(standard));
+  assert.ok(dollars({ ...vm, machine: 'c4d-highcpu-2', provisioning: 'spot' }) > 0);
+  // No rate for the family in that region, or for the disk type there: unpriced, never guessed.
+  assert.equal(dollars({ ...vm, zone: 'europe-west4-a', provisioning: 'spot' }), null);
+  assert.equal(dollars({ ...C3D, zone: 'us-west4-a', provisioning: 'spot', seconds: 60 }), null);
+  assert.equal(dollars({ ...vm, diskType: 'pd-balanced', provisioning: 'spot' }), null);
+});
+
+test('a running row records its VM\'s disk type; the final row is priced with it', () => {
+  const launching = launchRow({ alloc: 'tb0abc0001', repo: SBX, cpus: 8, at: T0, config: 'abcdef0123' });
+  const running = runningRow(launching, { zone: 'us-west4-a', machine: 'c4d-highcpu-8', provisioning: 'spot', diskType: 'hyperdisk-balanced', created: T0 });
+  assert.equal(running.diskType, 'hyperdisk-balanced');
+  const final = finalRow(running, { end: 'done', deleted: T0 + 3600_000, diskGb: 50 });
+  assert.equal(final.dollars, Math.round(dollars({ machine: 'c4d-highcpu-8', zone: 'us-west4-a', provisioning: 'spot', diskType: 'hyperdisk-balanced', diskGb: 50, seconds: 3600 }) * 1e4) / 1e4);
+  // A VM seen without its disk label (launched before placements) keeps what the row knew.
+  assert.equal(runningRow(running, { ...INST, diskType: null }).diskType, 'hyperdisk-balanced');
 });
 
 test('the daily line totals the day\'s final rows (by deletion time), projects the month, and names the config commit', () => {
   const day = '2026-10-16';
-  const mk = (alloc, deleted, end, seconds, dollarsSpent) => ({ alloc, state: 'final', deleted: new Date(deleted).toISOString(), end, seconds, dollars: dollarsSpent });
+  const mk = (alloc, deleted, end, seconds, dollarsSpent, machine = 'c3d-highcpu-4', zone = 'us-central1-a') =>
+    ({ alloc, state: 'final', deleted: new Date(deleted).toISOString(), end, seconds, dollars: dollarsSpent, ...(seconds === null ? {} : { machine, zone }) });
   const rows = [
     mk('a', T0, 'done', 300, 0.01),
-    mk('b', T0 + 3600_000, 'preempted', 100, 0.002),
+    mk('b', T0 + 3600_000, 'preempted', 100, 0.002, 'c4d-highcpu-8', 'us-west4-c'),
     mk('c', T0, 'abandoned', null, null),
     mk('d', Date.parse('2026-10-15T23:59:59Z'), 'done', 999, 1),
+    mk('f', T0, 'done', 60, null, 'n9-mystery-4', 'us-central1-b'),
     { alloc: 'e', state: 'running' },
   ];
   const line = dailyLine(rows, day, 'abcdef0123');
-  assert.deepEqual(line, { day, vms: 2, seconds: 400, dollars: 0.012, month: 0.36, ends: { done: 1, preempted: 1, abandoned: 1 }, config: 'abcdef01' });
+  assert.deepEqual(line, {
+    day, vms: 3, seconds: 460, dollars: 0.012, month: 0.36, ends: { done: 2, preempted: 1, abandoned: 1 }, config: 'abcdef01',
+    families: { 'c3d@us-central1': { vms: 1, dollars: 0.01 }, 'c4d@us-west4': { vms: 1, dollars: 0.002 }, 'n9@us-central1': { vms: 1, dollars: 0, unpriced: 1 } },
+  });
   const text = renderDaily(line);
   assert.match(text, /^<!-- ci-kit-gce-daily \{"day":"2026-10-16"/);
-  assert.match(text, /2 VMs, 400 VM-seconds, \$0\.0120; projected month \$0\.36/);
+  assert.match(text, /3 VMs, 460 VM-seconds, \$0\.0120; projected month \$0\.36/);
+  assert.match(text, /By family@region: c3d@us-central1 1 VMs \$0\.0100, c4d@us-west4 1 VMs \$0\.0020, n9@us-central1 1 VMs \$0\.0000 \(1 unpriced\)\./);
   assert.deepEqual([...dailyDays([{ body: text }, { body: 'x' }])], [day]);
 });
 

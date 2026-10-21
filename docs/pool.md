@@ -226,7 +226,28 @@ the two files list no repo twice fails). Ensure prints `result=gce` for a GCE re
 | the VM's job unit and smoke check | `gce/vm/` (`ci-kit-gce-job.service`, `job.mjs`, `run.mjs`, `smoke.sh`) |
 | Compute Engine and Secret Manager client | `lib/gce.mjs` |
 | deploy | `gce/deploy.sh` |
-| config | `pool/config/gce.json` (I12) |
+| config | `pool/config/gce.json` (I12; placements below) |
+
+**Placements.** `gce.json` lists where the launcher may create a VM as an ordered list, `placements` (spec
+`2026-10-21-pool-placement-latency-design.md`): each a region and machine family with its `zones`, `subnetwork`, a
+machine for every size (`machines`: 2, 4, 8, 16) and the boot `disk_type`.
+
+```json
+"placements": [
+  {"region": "us-west4", "subnetwork": "ci-kit-us-west4", "zones": ["us-west4-a", "us-west4-b", "us-west4-c"],
+   "machines": {"2": "c4d-highcpu-2", "4": "c4d-highcpu-4", "8": "c4d-highcpu-8", "16": "c4d-highcpu-16"},
+   "disk_type": "hyperdisk-balanced"},
+  {"region": "us-central1", "subnetwork": "ci-kit-us-central1",
+   "zones": ["us-central1-a", "us-central1-b", "us-central1-c", "us-central1-f"],
+   "machines": {"2": "c3d-highcpu-4", "4": "c3d-highcpu-4", "8": "c3d-highcpu-8", "16": "c3d-highcpu-16"},
+   "disk_type": "pd-balanced"}
+]
+```
+
+The order is speed first; reordering is a commit on main, read by the next tick. The launcher still reads the old
+form (`region`, `subnetwork`, `zones`, `machines`, `machine_fallback`) until main carries the new one: its machines
+as one placement on `pd-balanced`, and `machine_fallback` as a second placement in the same region
+(`gce/launcher/config.mjs`). `pool/config/gce.json` is in the old form until the us-west4 placement goes live (M2).
 
 **The launcher.** Cloud Scheduler's `ci-kit-launcher-tick` POSTs to `ci-kit-launcher` every minute with an OIDC
 token; the service has no public ingress (`--ingress=internal`, IAM-only), runs one instance at a time, one request
@@ -246,22 +267,27 @@ and GitHub. A tick:
 
 A launch writes the `launching` row, mints the JIT config (runner name = instance name, labels `self-hosted`,
 `ci-kit-pool`, `cpus-N`, `ci-kit-gce`, work folder `/var/lib/ci-kit/cache/work/<instance>`), then creates
-`ci-kit-gce-<allocation id>` from the newest image labelled `ci-kit-ready=true`. It tries the size's machine as spot
-in each zone of `zones` in order, then on demand in each zone, then `machine_fallback` the same way.
-`ZONE_RESOURCE_POOL_EXHAUSTED*` moves to the next zone; a quota refusal skips the machine and ends the tick's
-launches (the job waits in GitHub's queue); an insert whose outcome is unknown is settled through its zone operation
-before any other zone is tried, and if it stays unknown the walk stops and the cleanup rules settle it. The VM:
-no service account, the JIT config in metadata `ci-kit-jit`, `maxRunDuration` = `max_run_minutes` with a `DELETE`
-action, a `pd-balanced` boot disk of `disk_gb` that goes with it, labels `ci-kit=gce`, `ci-kit-alloc`,
-`ci-kit-repo=<owner>--<repo>`, `ci-kit-cpus`, `ci-kit-provisioning=spot|standard` and `ci-kit-config=<gce.json
-commit, 8>`.
+`ci-kit-gce-<allocation id>` from the newest image labelled `ci-kit-ready=true`. It walks the placements: the
+size's machine as spot in each zone of the first placement, then of the next, and so on; then on demand in the same
+order (an attempt two placements share is made once). `ZONE_RESOURCE_POOL_EXHAUSTED*` moves to the next zone. A quota
+refusal is remembered for the rest of the tick, scoped to what its message names: a family's CPUs (`C4D_CPUS`) by
+region and family, any other regional quota (`CPUS`, `INSTANCES`, `IN_USE_ADDRESSES`, disk capacity) by region,
+`CPUS_ALL_REGIONS` everywhere, a `PREEMPTIBLE_` one for spot only; every later attempt in that scope of the same or
+more vCPUs is skipped, in this walk and the tick's later ones, since a smaller VM may still fit. A launch whose every
+attempt is so ruled out makes no runner or row and its job waits in GitHub's queue; no other launch stops. An insert
+whose outcome is unknown is settled through its zone operation before any other zone is tried, and if it stays
+unknown the walk stops and the cleanup rules settle it. The VM: no service account, its placement's subnetwork, the
+JIT config in metadata `ci-kit-jit`, `maxRunDuration` = `max_run_minutes` with a `DELETE` action, a boot disk of the
+placement's `disk_type` and `disk_gb` that goes with it, labels `ci-kit=gce`, `ci-kit-alloc`,
+`ci-kit-repo=<owner>--<repo>`, `ci-kit-cpus`, `ci-kit-provisioning=spot|standard`, `ci-kit-disk=<disk type>` and
+`ci-kit-config=<gce.json commit, 8>`.
 
 Allocation ids are the launch minute in base36 (5 characters) and 5 random ones (about 60 million a minute), so a
-runner's age is read from its name, never more than the real one: the runners API gives no creation time.
-Admission reserves the largest machine a launch could land on (an `e2-highcpu-2` job reserves 4, its fallback
-`c3d-highcpu-4`'s), and no placement attempt starts once the tick's 45 s budget is spent; the job waits for the
-next tick. An attempt already started waits for its operation up to 40 s whatever the budget, since giving up early
-only defers what the operation decides. Up to 16 launches run at once, so a burst launches in one round.
+runner's age is read from its name, never more than the real one: the runners API gives no creation time. Admission
+reserves the largest machine a launch could land on in any placement (a `cpus-2` job reserves 4 when any placement
+gives size 2 a `c3d-highcpu-4`), and no placement attempt starts once the tick's 45 s budget is spent; the job waits
+for the next tick. An attempt already started waits for its operation up to 40 s whatever the budget, since giving up
+early only defers what the operation decides. Up to 16 launches run at once, so a burst launches in one round.
 
 Cleanup, every tick:
 - a VM whose job unit reported `ci-kit/job=exit:<code>` (or `failed:<step>`) is deleted on that tick, without
@@ -281,11 +307,11 @@ Cleanup, every tick:
 
 Deletes are not waited for: the row goes `deleting` (with its end) just before the delete call, and the next tick
 finds the VM gone and finalizes it. A VM missing from the listing is confirmed with a direct read before its row is
-finalized, since another tick may have just created it. When the aggregated listing reports a zone unreachable,
-the tick launches nothing and does nothing that rests on something being absent (finalizing a vanished VM's row,
-unregistering a runner with no VM); when GCE's operation history cannot be read, a vanished VM's row waits rather
-than being called `orphan`. Runners are listed for every repo with a row in the ledger's window, so a repo that has
-left `gce.json` is still cleaned until its last runner is gone.
+finalized, since another tick may have just created it. When the aggregated listing (one call over every zone) did not
+read a placement's zone whole (unreachable, partial, or absent), the tick launches nothing and does nothing that rests
+on something being absent (finalizing a vanished VM's row, unregistering a runner with no VM); when GCE's operation
+history cannot be read, a vanished VM's row waits rather than being called `orphan`. Runners are listed for every repo
+with a row in the ledger's window, so a repo that has left `gce.json` is still cleaned until its last runner is gone.
 
 **Overlap.** Two ticks can run at once (Cloud Run can briefly exceed one instance; a deploy overlaps two revisions).
 Nothing depends on it never happening: deletes and unregisters treat 404 as done, rows are keyed by allocation and
@@ -331,12 +357,12 @@ the label again before it acts.
   MAWS's contents (`WARM_SCOPE` in `pool/bake/warm.mjs`), in its metadata; the image is made from its disk, never
   from its metadata.
 
-**The network.** Every builder, smoke VM and job VM sits on the subnetwork `ci-kit-us-central1` (10.64.0.0/20) of
-the VPC `ci-kit`, named in `gce.json` (`network`, `subnetwork`), with an ephemeral external address for outbound
-traffic. The VPC has no firewall rule: GCE's implied rules deny all ingress and allow all egress. The project's
-`default` network is never used, since its stock rules open ssh and RDP to the internet. `gce/deploy.sh network`
-creates both idempotently and fails if any rule allows ingress into `ci-kit`. Networks and firewall rules take no
-labels; the names carry the kit's. To check:
+**The network.** Every builder, smoke VM and job VM sits on its placement's subnetwork of the VPC `ci-kit`
+(`ci-kit-us-central1`, 10.64.0.0/20; `network` and each placement's `subnetwork` in `gce.json`), with an ephemeral
+external address for outbound traffic. The VPC has no firewall rule: GCE's implied rules deny all ingress and allow
+all egress. The project's `default` network is never used, since its stock rules open ssh and RDP to the internet.
+`gce/deploy.sh network` creates both idempotently and fails if any rule allows ingress into `ci-kit`. Networks and
+firewall rules take no labels; the names carry the kit's. To check:
 
 ```
 gcloud compute networks list --project=ssfskim-ci-kit
@@ -351,26 +377,30 @@ CI_KIT_COMMIT=$(git rev-parse HEAD) node gce/bake/bake.mjs     # default commit:
 ```
 
 1. It deletes builders and smoke VMs any bake left more than 2 h ago.
-2. It creates `ci-kit-gce-builder-<run id>` (the run id is UTC seconds plus four random characters, so two bakes
-   never share one; on demand: `e2-standard-4`, else `n2d-standard-4` when E2 is refused,
-   zones in `gce.json` order) from `ubuntu-2404-lts-amd64`. Its startup script (`gce/bake/builder.sh`) installs
-   Docker, clones the kit at the commit, runs `pool/bake/prepare.sh` (Node, the runner image, the caches), requires
-   every cache warmed, installs and enables `ci-kit-gce-job.service`, cleans the disk, reports
-   `ci-kit/bake=ok` (or `failed:<step>`) as a guest attribute, and powers off. GCE deletes a builder still running
-   at 45 min.
+2. It creates `ci-kit-gce-builder-<run id>` (the run id is UTC seconds plus four random characters, so two bakes never
+   share one; on demand: `e2-standard-4`, else `n2d-standard-4` when E2 is refused, on `pd-balanced`; the placements
+   and their zones in `gce.json` order) from `ubuntu-2404-lts-amd64`. Its startup script (`gce/bake/builder.sh`)
+   installs Docker, clones the kit at the commit, runs `pool/bake/prepare.sh` (Node, the runner image, the caches),
+   requires every cache warmed, installs and enables `ci-kit-gce-job.service`, cleans the disk, reports
+   `ci-kit/bake=ok` (or `failed:<step>`) as a guest attribute, and powers off. GCE deletes a builder still running at
+   45 min.
 3. Only on `ok` and power-off within 30 min, it images the builder's disk into the family, labelled
    `ci-kit-ready=false`, and deletes the builder.
-4. It boots `ci-kit-gce-builder-<run id>-smoke` from the image on the `cpus-2` machine (its fallback when E2 is
-   refused), with metadata `ci-kit-smoke=<vCPUs>` in place of a JIT config. The job unit runs `gce/vm/smoke.sh` in a
-   job container: vCPUs, user, isolation, the runner, Node 22 and 24, every warmed cache, the work directory, DNS,
-   egress, and the metadata server refused. It reports `ci-kit/smoke=ok|failed:<check>` and powers off.
-5. On a pass the image is labelled `ci-kit-ready=true`; the launcher uses only ready images (never
+4. In each placement in turn it boots `ci-kit-gce-builder-<run id>-smoke-<n>` from the image on the placement's
+   subnetwork and disk type, on its `cpus-2` machine (the next size's when that is refused), so an image that does not
+   boot on a placement's family is never ready, with metadata `ci-kit-smoke=<vCPUs>` in place of a JIT config. The job
+   unit runs `gce/vm/smoke.sh` in a job container: vCPUs, user, isolation, the runner, Node 22 and 24, every warmed
+   cache, the work directory, DNS, egress, and the metadata server refused. It reports
+   `ci-kit/smoke=ok|failed:<check>` and powers off.
+5. It runs the real job on a VM booted from the image in the first placement that takes it. When every smoke VM
+   and the real job passed, the image is labelled `ci-kit-ready=true`; the launcher uses only ready images (never
    `getFromFamily`, which would return an unready one). On any failure the bake deletes its own image.
 6. On every exit it deletes its instances, and keeps the two newest ready images (unready images of other runs
    are dropped once 2 h old). It deletes an image only while that image carries its `ci-kit-run` label: an image
    insert refused because the name exists leaves the existing image alone.
 
-The Cloud Run job `ci-kit-bake` runs the same script as `ci-kit-launcher@`, at main's head: `gce/deploy.sh bake`
+The Cloud Run job `ci-kit-bake` runs the same script as `ci-kit-launcher@`, at main's head, with the `gce.json` it was
+deployed with (not main's: a placement change reaches the bake through `gce/deploy.sh bake`): `gce/deploy.sh bake`
 deploys it, and `gce/deploy.sh bake-schedule` adds the weekly run (Sunday 18:00 UTC). To run it now:
 `gcloud run jobs execute ci-kit-bake --region=us-central1 --project=ssfskim-ci-kit`. The first ready image,
 `ci-kit-runner-20261016-100502-b4fc88e2`, was baked from the Mac (2026-10-16, 12.5 min: builder 8 min, image 1 min,
@@ -444,10 +474,15 @@ per allocation:
   rule), `abandoned` (no VM was created: every zone refused, quota, or a crash before the insert), `orphan` (a VM
   the launcher had no row for, or one that vanished before its run limit with no preemption recorded: deleted by a
   hand outside the launcher).
-- `seconds` runs from the VM's creation to its deletion, `$` at the rates in `gce/launcher/ledger.mjs` (us-central1,
-  2026-10-16), the address and the disk included.
+- `seconds` runs from the VM's creation to its deletion, `$` at the rates in `gce/launcher/ledger.mjs` by region and
+  family (c3d and e2 in us-central1, 2026-10-16; c4d in us-west4, the Cloud Billing catalog on 2026-10-21, SKU ids
+  beside the table), the address and the disk by region and type included (Hyperdisk Balanced with the IOPS and
+  throughput its defaults provision above the free baseline). A VM in a region, family or disk type with no rate
+  there shows `-`. The row's JSON carries the disk type (`diskType`; a row without one is from before placements,
+  on `pd-balanced`).
 - The daily line, `**GCE pool, <day> (UTC):** …`, totals the day's VMs, seconds and dollars, projects the month at
-  that rate, and names the gce.json commit the launcher ran.
+  that rate, gives each family@region's VMs and dollars (and how many it could not price), and names the gce.json
+  commit the launcher ran.
 - A writer reads a row's comment again just before updating it, and drops the write if the comment is already as
   far along; a final row is never rewritten. Issue comments have no compare-and-swap, so during an overlap of two
   ticks a row is eventually final rather than finalized once: a stale write that lands in the milliseconds after
@@ -489,7 +524,7 @@ through Cloud Quotas:
   once until granted);
 - 2026-10-16: the first grants;
 - never granted: E2 per-family stays at its default 24 (asked 64, refused twice), so at most 12 `cpus-2` VMs run on E2
-  and the rest fall back to `c3d-highcpu-4` (`machine_fallback`).
+  and the rest fall back to `c3d-highcpu-4` (`machine_fallback`; in the new form E2 leaves the pool).
 
 A `cpus-2` job reserves its fallback's 4 vCPUs in the launcher's count, so the C3D VMs in flight never pass 192.
 `PREEMPTIBLE_CPUS` is 0, so spot VMs count against the ordinary CPU quotas. To check:

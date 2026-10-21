@@ -4,14 +4,15 @@
 // Nothing is kept between ticks: state lives in GCE labels, the ledger and GitHub, so every tick can act as the
 // first, and two overlapping ticks (Cloud Run can briefly run two) stay correct: deletes and unregisters treat 404
 // as done, ledger rows are keyed by allocation and only move forward, and an over-launch leaves idle runners that the
-// idle rule removes. The project's vCPU quota is the hard cap; a quota refusal ends the tick's launches.
+// idle rule removes. Quota is the hard cap: a refusal is remembered for the rest of the tick, scoped to what ran out
+// (logic.mjs quotaScope), and later launches skip what it covers; one with nothing left to try waits in GitHub's queue.
 import { GceError } from '../../lib/gce.mjs';
 import { createAlerts } from '../../pool/lib/alerts.mjs';
 import { queuedPoolJobs } from '../../pool/agent/logic.mjs';
 import { staleBakeInstances } from '../bake/plan.mjs';
-import { servedRepos } from './config.mjs';
+import { servedRepos, placementZones } from './config.mjs';
 import {
-  allocationId, instanceName, repoLabel, viewInstance, isGce, planLaunches, placements, insertOutcome, walkPlacements,
+  allocationId, instanceName, repoLabel, viewInstance, isGce, planLaunches, placements, quotaBlocks, insertOutcome, walkPlacements,
   jobInstance, jitRequest, newestReadyImage, reviewInstances, reviewRows, orphanRunners, orphanDisks, reportable,
 } from './logic.mjs';
 import { launchRow, runningRow, withJob, finalRow, dailyLine } from './ledger.mjs';
@@ -82,9 +83,11 @@ export class Launcher {
       this.gce.instances('labels.ci-kit=gce-builder'),
     ]);
     const instances = listing.items.filter(isGce).map(viewInstance);
-    // A zone the listing missed hides its VMs: nothing is admitted, and nothing is cleaned up for being absent.
-    const complete = listing.complete;
-    if (!complete) this.log('the instance listing missed a zone: no launches, and no cleanup by absence, this tick');
+    // A placement's zone the listing missed hides its VMs: nothing is admitted, and nothing is cleaned up for being
+    // absent. A zone outside every placement holds none of ours, and its outage does not stop the pool.
+    const missing = placementZones(this.cfg).filter((z) => !listing.zones.has(z));
+    const complete = missing.length === 0;
+    if (!complete) this.log(`the instance listing missed ${missing.join(', ')}: no launches, and no cleanup by absence, this tick`);
     const rowOf = new Map(rows.map((r) => [r.alloc, r]));
 
     // Runners are listed for every repo something of ours belongs to: served repos, and every repo with a row in the
@@ -119,7 +122,8 @@ export class Launcher {
         this.log(`jobs of ${repo}: ${err.message}`);
       }
     }
-    return { served, instances, complete, disks: disks.items, builders, rows, rowOf, byLabel, runners, demand, queued, jobs };
+    // quota: the tick's memory of quota refusals (logic.mjs quotaScope), shared by its launches.
+    return { served, instances, complete, disks: disks.items, builders, rows, rowOf, byLabel, runners, demand, queued, jobs, quota: [] };
   }
 
   repoOf(seen, view) {
@@ -333,25 +337,31 @@ export class Launcher {
       this.log(`no ready image in family ${this.cfg.image_family}; ${plan.launches.length} job(s) wait`);
       return;
     }
+    // A quota refusal stops no launch but the ones it covers (spec 2026-10-21, The launch queue): each launch skips
+    // what the tick's memory says is out of quota, and one with nothing left waits in GitHub's queue.
     const queue = [...plan.launches];
-    let stop = false;
     const worker = async () => {
-      while (queue.length && !stop && this.now() < deadline) {
+      while (queue.length && this.now() < deadline) {
         const result = await this.launch(queue.shift(), image, { seen, deadline }).catch((err) => {
           this.log(`launch: ${err.message}`);
           return {};
         });
         if (result.name) out.launched.push(result.name);
-        if (result.quota) stop = true; // the region is out of quota: the rest wait in GitHub's queue
       }
     };
     await Promise.all(Array.from({ length: Math.min(PARALLEL_LAUNCHES, queue.length) }, worker));
   }
 
-  // One allocation (spec §3a VM lifecycle 1–2): the launching row, then the JIT config, then the walk over zones,
-  // spot then on demand. A definite refusal everywhere unregisters the runner and abandons the row at once; an
-  // outcome that stays unknown leaves both for the cleanup rules, so a VM that does appear later is still served.
+  // One allocation (spec §3a VM lifecycle 1–2): the launching row, then the JIT config, then the walk over the
+  // placements' zones, spot everywhere then on demand; a size the tick's quota memory rules out everywhere makes none.
+  // A definite refusal everywhere unregisters the runner and abandons the row at once; an outcome that stays unknown
+  // leaves both for the cleanup rules, so a VM that does appear later is still served.
   async launch({ repo, cpus, job }, image, { seen, deadline }) {
+    const attempts = placements(cpus, this.cfg);
+    if (attempts.every((p) => quotaBlocks(seen.quota, p))) {
+      this.log(`job ${job.id} in ${repo} waits: quota refused every placement for its size this tick`);
+      return {};
+    }
     const at = this.now();
     let alloc = allocationId(at, this.random);
     while (seen.rowOf.has(alloc)) alloc = allocationId(at, this.random); // ids are random: never reuse one in the ledger
@@ -370,30 +380,30 @@ export class Launcher {
     // The tick's deadline stops new attempts; an attempt already started waits for its operation up to its own
     // deadline, since giving up early saves nothing (the operation runs on) and only defers what it decides. An
     // operation that outlives that wait is uncertain, reconciled now, and if still unsettled left for the next tick.
-    const result = await walkPlacements(placements(cpus, this.cfg), {
+    const result = await walkPlacements(attempts, {
       attempt: (p) => this.gce.insertInstance(p.zone, jobInstance({
         alloc, ...p, repo, cpus, image: image.selfLink, jit: jit.encoded_jit_config, cfg: this.cfg, config: this.config,
       }), { deadlineMs: this.insertDeadlineMs }),
       reconcile: (p, err) => this.reconcileInsert(p.zone, name, err),
-      now: this.now, deadline,
+      now: this.now, deadline, quota: seen.quota,
     });
     const tried = result.tried.map((t) => `${t.machine}/${t.provisioning}@${t.zone}: ${t.outcome}`).join(', ');
     if (result.placement) {
       const p = result.placement;
       this.log(`launched ${name} (${p.machine}, ${p.provisioning}, ${p.zone}) for job ${job.id} in ${repo}${result.tried.length > 1 ? ` after ${tried}` : ''}`);
-      await this.write(runningRow(row, { ...p, created: this.now() }));
-      return { name, quota: result.quota };
+      await this.write(runningRow(row, { ...p, diskType: p.placement.disk_type, created: this.now() }));
+      return { name };
     }
     if (result.stop === 'unknown') {
       this.log(`${name}: insert outcome unknown (${tried}); the next ticks settle it`);
-      return { quota: result.quota };
+      return {};
     }
     this.log(`${name}: not created (${result.stop}: ${tried}); job ${job.id} waits`);
     await this.gh.deleteRunner(repo, jit.runner.id).catch((err) => {
       if (err.status !== 404) this.log(`unregister ${name}: ${err.message}; the orphan-runner rule retries`);
     });
     await this.write(finalRow(row, { end: 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb }));
-    return { quota: result.quota };
+    return {};
   }
 
   // An insert whose outcome is unknown, settled through its zone operation before another zone is tried: the

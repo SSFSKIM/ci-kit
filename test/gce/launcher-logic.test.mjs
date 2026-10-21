@@ -13,6 +13,7 @@ import {
 import { parseGceConfig, servedRepos } from '../../gce/launcher/config.mjs';
 
 const CFG = parseGceConfig(readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
+const MACHINES = CFG.placements[0].machines;
 const SBX = 'SSFSKIM/ci-kit-sandbox';
 const MAWS = 'SSFSKIM/MAWS';
 const T0 = Date.parse('2026-10-16T12:00:00Z');
@@ -53,21 +54,21 @@ test('the repo label is owner--name, lowercased, within GCE\'s label alphabet', 
 
 test('a job is served only with exactly one known cpus-N and labels its runner will carry', () => {
   assert.deepEqual(runnerLabels(8), ['self-hosted', 'ci-kit-pool', 'cpus-8', 'ci-kit-gce']);
-  assert.equal(jobCpus(L(8), CFG.machines), 8);
-  assert.equal(jobCpus([...L(2), 'ci-kit-gce'], CFG.machines), 2);
-  assert.equal(jobCpus(['Self-Hosted', 'ci-kit-pool', 'cpus-4'], CFG.machines), 4, 'GitHub matches labels case-insensitively');
-  assert.equal(jobCpus(['self-hosted', 'ci-kit-pool'], CFG.machines), null);
-  assert.equal(jobCpus([...L(4), 'cpus-8'], CFG.machines), null);
-  assert.equal(jobCpus(L(3), CFG.machines), null);
-  assert.equal(jobCpus([...L(4), 'gpu'], CFG.machines), null, 'a label the runner lacks would never match it');
-  assert.equal(jobCpus(['self-hosted', 'cpus-4'], CFG.machines), null);
+  assert.equal(jobCpus(L(8), MACHINES), 8);
+  assert.equal(jobCpus([...L(2), 'ci-kit-gce'], MACHINES), 2);
+  assert.equal(jobCpus(['Self-Hosted', 'ci-kit-pool', 'cpus-4'], MACHINES), 4, 'GitHub matches labels case-insensitively');
+  assert.equal(jobCpus(['self-hosted', 'ci-kit-pool'], MACHINES), null);
+  assert.equal(jobCpus([...L(4), 'cpus-8'], MACHINES), null);
+  assert.equal(jobCpus(L(3), MACHINES), null);
+  assert.equal(jobCpus([...L(4), 'gpu'], MACHINES), null, 'a label the runner lacks would never match it');
+  assert.equal(jobCpus(['self-hosted', 'cpus-4'], MACHINES), null);
 });
 
 test('viewInstance reads the fields the launcher decides on', () => {
   const v = viewInstance(instance({ alloc: A(1), machine: 'e2-highcpu-2', cpus: 2 }));
   assert.deepEqual({ ...v, raw: undefined }, {
     name: `ci-kit-gce-${A(1)}`, alloc: A(1), zone: 'us-central1-a', machine: 'e2-highcpu-2', vcpus: 2, status: 'RUNNING',
-    created: T0 - 2 * MIN, repoLabel: 'ssfskim--ci-kit-sandbox', cpus: 2, provisioning: 'spot', config: null, raw: undefined,
+    created: T0 - 2 * MIN, repoLabel: 'ssfskim--ci-kit-sandbox', cpus: 2, provisioning: 'spot', config: null, diskType: null, raw: undefined,
   });
 });
 
@@ -122,12 +123,12 @@ test('a job with no servable labels is passed over and reported, not launched', 
 });
 
 // Placement order.
-test('placements: the machine in every zone as spot, then on demand, then its fallback machine the same way', () => {
+test('placements: on the old form, the machine in every zone as spot, then its fallback as spot, then both on demand', () => {
   const two = placements(2, CFG).map((p) => `${p.machine}/${p.provisioning}@${p.zone.slice(-1)}`);
   assert.deepEqual(two, [
     'e2-highcpu-2/spot@a', 'e2-highcpu-2/spot@b', 'e2-highcpu-2/spot@c', 'e2-highcpu-2/spot@f',
-    'e2-highcpu-2/standard@a', 'e2-highcpu-2/standard@b', 'e2-highcpu-2/standard@c', 'e2-highcpu-2/standard@f',
     'c3d-highcpu-4/spot@a', 'c3d-highcpu-4/spot@b', 'c3d-highcpu-4/spot@c', 'c3d-highcpu-4/spot@f',
+    'e2-highcpu-2/standard@a', 'e2-highcpu-2/standard@b', 'e2-highcpu-2/standard@c', 'e2-highcpu-2/standard@f',
     'c3d-highcpu-4/standard@a', 'c3d-highcpu-4/standard@b', 'c3d-highcpu-4/standard@c', 'c3d-highcpu-4/standard@f',
   ]);
   assert.equal(placements(8, CFG).length, 8);
@@ -166,10 +167,10 @@ test('capacity moves to the next zone, and after every zone refused spot the sam
   const script = Object.fromEntries(['a', 'b', 'c', 'f'].map((z) => [`c3d-highcpu-8/spot@${z}`, cap()]));
   const { tried, result } = await walk(8, script);
   assert.deepEqual(tried, ['c3d-highcpu-8/spot@a', 'c3d-highcpu-8/spot@b', 'c3d-highcpu-8/spot@c', 'c3d-highcpu-8/spot@f', 'c3d-highcpu-8/standard@a']);
-  assert.deepEqual(result.placement, { machine: 'c3d-highcpu-8', provisioning: 'standard', zone: 'us-central1-a' });
+  assert.deepEqual(result.placement, { machine: 'c3d-highcpu-8', provisioning: 'standard', zone: 'us-central1-a', placement: CFG.placements[0] });
 });
 
-test('a quota refusal skips the machine (quota is per region) and moves to its fallback; with none left the walk is exhausted', async () => {
+test('a quota refusal skips the machine\'s family in its region and moves to the fallback\'s; with none left the walk is exhausted', async () => {
   const quota = () => new GceError(403, 'quota', ['quotaExceeded']);
   const { tried, result } = await walk(2, { 'e2-highcpu-2/spot@a': quota(), 'c3d-highcpu-4/spot@a': quota() });
   assert.deepEqual(tried, ['e2-highcpu-2/spot@a', 'c3d-highcpu-4/spot@a']);
@@ -205,13 +206,13 @@ test('any other failure stops the walk as a failure', async () => {
 test('a job VM: spot with a DELETE run limit, no service account, the JIT config in metadata, I12 labels, the kit subnetwork', () => {
   const body = jobInstance({
     alloc: A(1), zone: 'us-central1-b', machine: 'c3d-highcpu-8', provisioning: 'spot', repo: SBX, cpus: 8,
-    image: 'projects/ssfskim-ci-kit/global/images/ci-kit-runner-x', jit: 'JITCONFIG', cfg: CFG, config: 'abcdef0123456789',
+    image: 'projects/ssfskim-ci-kit/global/images/ci-kit-runner-x', jit: 'JITCONFIG', placement: CFG.placements[0], cfg: CFG, config: 'abcdef0123456789',
   });
   assert.equal(body.name, `ci-kit-gce-${A(1)}`);
   assert.equal(body.machineType, 'zones/us-central1-b/machineTypes/c3d-highcpu-8');
   assert.deepEqual(body.labels, {
     'ci-kit': 'gce', 'ci-kit-alloc': A(1), 'ci-kit-repo': 'ssfskim--ci-kit-sandbox', 'ci-kit-cpus': '8',
-    'ci-kit-provisioning': 'spot', 'ci-kit-config': 'abcdef01',
+    'ci-kit-provisioning': 'spot', 'ci-kit-config': 'abcdef01', 'ci-kit-disk': 'pd-balanced',
   });
   assert.deepEqual(body.serviceAccounts, []);
   assert.deepEqual(body.scheduling, {
@@ -224,7 +225,7 @@ test('a job VM: spot with a DELETE run limit, no service account, the JIT config
   assert.equal(disk.initializeParams.sourceImage, 'projects/ssfskim-ci-kit/global/images/ci-kit-runner-x');
   assert.deepEqual(body.metadata.items, [{ key: 'enable-guest-attributes', value: 'TRUE' }, { key: 'ci-kit-jit', value: 'JITCONFIG' }]);
   assert.equal(body.networkInterfaces[0].subnetwork, 'regions/us-central1/subnetworks/ci-kit-us-central1');
-  const std = jobInstance({ alloc: A(1), zone: 'us-central1-b', machine: 'c3d-highcpu-8', provisioning: 'standard', repo: SBX, cpus: 8, image: 'i', jit: 'j', cfg: CFG, config: 'bundled' });
+  const std = jobInstance({ alloc: A(1), zone: 'us-central1-b', machine: 'c3d-highcpu-8', provisioning: 'standard', placement: CFG.placements[0], repo: SBX, cpus: 8, image: 'i', jit: 'j', cfg: CFG, config: 'bundled' });
   assert.equal(std.scheduling.provisioningModel, 'STANDARD');
   assert.equal(std.scheduling.instanceTerminationAction, 'DELETE');
   assert.equal(std.labels['ci-kit-provisioning'], 'standard');
