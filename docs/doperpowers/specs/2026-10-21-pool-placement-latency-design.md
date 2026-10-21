@@ -321,8 +321,10 @@ refusal, not the 16-worker limit. Resource trouble is a small share of the tail,
    the pool's limits: 10 of the day's 16 quota refusals, and the 8-VM ceiling of every new region. pnpm and apt open
    many connections at once, so the NAT allocates ports dynamically, well above the 64-per-VM default (minimum 1024,
    maximum 65536 per VM, sized from the burst proof), and logs errors only. Cost: $0.0014 per
-   VM-hour (the gateway) and $0.045 per GB processed (about $0.012 for a VM's ~260 MB of downloads), against the $0.0025 per hour an in-use external IPv4 costs a spot VM today ($0.005 on demand);
-   the ledger prices both, and the day's GB through each NAT goes on the daily line. The alternative, waiting on the
+   VM-hour for the gateway (capped at $0.044 an hour per region from 32 VMs up), $0.005 an hour per auto-allocated NAT
+   address, and $0.045 per GB processed (about $0.012 for a VM's ~260 MB of downloads), against the $0.0025 per hour an in-use external IPv4 costs a spot VM today ($0.005 on demand);
+   each row carries the gateway's VM-hours; the NAT addresses' hours and the day's GB per region go on the daily
+   line (the counts step), since neither belongs to one VM. The alternative, waiting on the
    two address raises, is out of the pool's hands (both have reconciled at a partial grant for hours).
 2. **More spot placements on today's grants.** After C4D us-west4, in this order: C4D us-central1 (24; the existing
    subnet), C4D us-east1 (24; b, c, d), C4D us-east4 (24; a, b, c), C4D us-east5 (24; a, b, c), C3D us-central1
