@@ -524,8 +524,10 @@ per allocation:
 - `node gce/latency-report.mjs [--since <ISO>] [--until <ISO>] [--repo <owner/name>]` (default: the last 24 h) reads
   the rows and the launcher's tick lines (Cloud Logging, gcloud's default account) and prints the median and p10–p90
   of each stage of a job's wait: queued → next tick, tick start → insert accepted (the tick's first VM's
-  creation), tick start → first insert sent, insert accepted → RUNNING, RUNNING → job started, and queued →
-  started. A row or tick without a stage's fields (written before M3) is left out of that stage.
+  creation), tick start → first insert sent, insert accepted → RUNNING, RUNNING → job started, insert accepted →
+  job started (M3's target, each VM's own), and queued → started; then the VM stages again for each machine type.
+  Rows on rotated ledger issues closed since the window began are read too. A row or tick without a stage's fields
+  (written before M3) is left out of that stage.
 - `node gce/tools/boot-sample.mjs --image <name> [--region <r>] [--machine <m>] [--count 5] [--parallel 2] [--out <dir>]`
   times job VMs from an image through the bake's real-job path (one `bake-check` job per sample in ci-kit-sandbox,
   on its own JIT runner) in one placement: `--region`'s (default: the first), on its zones, subnetwork and boot disk
