@@ -73,7 +73,9 @@ After this work:
 
 - [x] (2026-10-21 06:3xZ) Spec written; owner's direction recorded.
 - [x] (2026-10-21 07:0xZ) Adversarial review: seven findings, all taken (Decision Log).
-- [ ] M1 — MAWS writes and uploads unit's JUnit report.
+- [x] (2026-10-21 08:2xZ) M1 — MAWS writes and uploads unit's JUnit report: MAWS #99, merge 4d34b1d12. Class 1a
+  pool green 39557488356 (22,360 cases = the `Tests` line; upload 1 s); unit:darwin green on the mini 39559203378
+  (`test-results-unit-darwin-1`); an injected upload error left its step green (39555148333).
 - [ ] M2 — ci-kit's collector and the sandbox store.
 - [ ] M3 — Labels and reports (starts when the store holds ≥ 14 days).
 - [ ] M4 — Selection for iteration runs (with the MAWS architect).
