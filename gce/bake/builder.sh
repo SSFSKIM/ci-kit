@@ -55,28 +55,40 @@ step=warm-check
 [ "$WARM_OK" = 1 ]
 
 step=unit
-install -m 0644 /opt/ci-kit/gce/vm/ci-kit-gce-job.service /etc/systemd/system/
+install -m 0644 /opt/ci-kit/gce/vm/ci-kit-gce-job.service /opt/ci-kit/gce/vm/ci-kit-gce-instance.service /etc/systemd/system/
 systemctl daemon-reload
-# Enabled, not started: it runs on the VMs made from this disk, never on the builder.
-systemctl enable ci-kit-gce-job.service
+# Enabled, not started: they run on the VMs made from this disk, never on the builder.
+systemctl enable ci-kit-gce-job.service ci-kit-gce-instance.service
 echo "$KIT_SHA" > /var/lib/ci-kit/kit-commit
 
-# A job VM needs cloud-init for two things: its network, which the GCE datasource renders per instance in the local
-# and network stages, and growing its root filesystem to the disk it was given. Every other module, and the config and
-# final stages whole, would run beside the job's start for nothing (spec M3, The boot).
+# A job VM boots without cloud-init (spec M3, The boot): its network stages ran ahead of sysinit.target, which every
+# service waits for, Docker and the job included. What a job VM needed from it is replaced: the network by a netplan
+# that runs DHCP on any ethernet interface (the one cloud-init wrote here matches this builder's MAC address only;
+# virtio-net and gVNIC both come up as en*), the root's growth to the VM's disk and the hostname by
+# ci-kit-gce-instance.service. The guest agent, not cloud-init, serves the metadata and guest attributes.
 step=boot
-cat > /etc/cloud/cloud.cfg.d/99-ci-kit.cfg <<'CFG'
-cloud_init_modules: [growpart, resizefs]
-cloud_config_modules: []
-cloud_final_modules: []
-CFG
-systemctl mask cloud-config.service cloud-final.service
+touch /etc/cloud/cloud-init.disabled
+rm -f /etc/netplan/50-cloud-init.yaml
+cat > /etc/netplan/90-ci-kit.yaml <<'YAML'
+network:
+  version: 2
+  ethernets:
+    ci-kit-en:
+      match: {name: "en*"}
+      dhcp4: true
+    ci-kit-eth:
+      match: {name: "eth*"}
+      dhcp4: true
+YAML
+chmod 600 /etc/netplan/90-ci-kit.yaml
 
 step=clean
 apt-get clean
 docker image prune --force > /dev/null
 # A VM made from this disk gets its own machine id, and none of this boot's logs.
 cloud-init clean --logs --machine-id
+# The builder's name would otherwise be every job VM's; ci-kit-gce-instance.service sets the instance's.
+: > /etc/hostname
 journalctl --rotate > /dev/null 2>&1 || true
 journalctl --vacuum-time=1s > /dev/null 2>&1 || true
 sync

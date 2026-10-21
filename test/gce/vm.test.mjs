@@ -66,6 +66,32 @@ test('the unit powers the VM off at once however the job ends (no orderly shutdo
   assert.match(unit, /^WantedBy=multi-user\.target$/m);
 });
 
+// Pool M3, The boot: the image disables cloud-init, so the VM's own unit does what a job VM needed from it.
+test('the job waits for the VM\'s own setup: its root grown to its disk and its hostname set to the instance name', () => {
+  const job = readFileSync(new URL('../../gce/vm/ci-kit-gce-job.service', import.meta.url), 'utf8');
+  assert.match(job, /^Requires=ci-kit-gce-instance\.service$/m);
+  assert.match(job, /^After=.*\bci-kit-gce-instance\.service\b/m);
+  const unit = readFileSync(new URL('../../gce/vm/ci-kit-gce-instance.service', import.meta.url), 'utf8');
+  assert.match(unit, /^Type=oneshot$/m);
+  assert.match(unit, /^ExecStart=\/opt\/ci-kit\/gce\/vm\/instance\.sh$/m);
+  const script = readFileSync(new URL('../../gce/vm/instance.sh', import.meta.url), 'utf8');
+  assert.match(script, /growpart/);
+  assert.match(script, /resize2fs/);
+  assert.match(script, /NOCHANGE/, 'a root that already fills its disk is not a failure');
+  assert.match(script, /computeMetadata\/v1\/instance\/name/);
+  assert.match(script, /hostnamectl set-hostname/);
+});
+
+test('the image boots without cloud-init: disabled, the builder\'s MAC-bound netplan replaced by one for any ethernet name', () => {
+  const builder = readFileSync(new URL('../../gce/bake/builder.sh', import.meta.url), 'utf8');
+  assert.match(builder, /^touch \/etc\/cloud\/cloud-init\.disabled$/m);
+  assert.match(builder, /^rm -f \/etc\/netplan\/50-cloud-init\.yaml$/m);
+  assert.match(builder, /match: \{name: "en\*"\}/);
+  assert.match(builder, /^systemctl enable ci-kit-gce-job\.service ci-kit-gce-instance\.service$/m);
+  assert.match(builder, /^: > \/etc\/hostname$/m);
+  assert.match(builder, /^apt-get purge -y snapd$/m);
+});
+
 test('the smoke script checks the image, the caches and the isolation, and prints one verdict', () => {
   const script = readFileSync(new URL('../../gce/vm/smoke.sh', import.meta.url), 'utf8');
   for (const check of ['cpus', 'user', 'isolation', 'runner', 'node22', 'node24', 'warm', 'pnpm-store', 'workdir', 'dns', 'egress', 'metadata-refused']) {

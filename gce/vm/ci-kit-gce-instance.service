@@ -1,0 +1,14 @@
+[Unit]
+Description=ci-kit GCE job VM: root grown to the disk, hostname from the instance (in place of cloud-init; spec M3)
+# The metadata server is reached through the network DHCP configures.
+After=network-online.target
+Wants=network-online.target
+Before=ci-kit-gce-job.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/ci-kit/gce/vm/instance.sh
+
+[Install]
+WantedBy=multi-user.target

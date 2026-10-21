@@ -1,8 +1,10 @@
 [Unit]
 Description=ci-kit GCE job: this VM's one job container, then power off (spec §3a)
-After=docker.service network-online.target
+After=docker.service network-online.target ci-kit-gce-instance.service
 Wants=network-online.target
 Requires=docker.service
+# A job never starts on a root still the image's size: ci-kit-gce-instance.service grows it (spec M3, The boot).
+Requires=ci-kit-gce-instance.service
 # The VM exists for one job. However the unit ends, the guest powers off at once, and the launcher deletes the stopped
 # VM. No orderly shutdown: the disk is discarded with the VM, the result is already reported (ci-kit/job), and an
 # orderly poweroff took about 85 s of billed time between the job's end and the VM's deletion (A13, 2026-10-16).

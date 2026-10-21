@@ -430,13 +430,21 @@ gcloud compute instances list --project=ssfskim-ci-kit --filter='labels.ci-kit:*
 gcloud compute disks list --project=ssfskim-ci-kit --filter='labels.ci-kit:*'
 ```
 
-**The boot** (spec M3). The builder purges snapd (no job uses a snap, and snapd seeded itself on the first boot of
-every disk made from the image, beside the job's start), pins it out, and keeps cloud-init only for what a job VM
-needs from it: its network, which the GCE datasource renders per instance (the local and network stages), and growing
-the root filesystem to the VM's disk (`growpart`, `resizefs`). Every other module goes, and `cloud-config.service` and
-`cloud-final.service` are masked (the config stage restarted chrony and cron beside the job's start). The network
-stage still gates the job: it is ordered before `sysinit.target`, which every ordinary service waits for, dockerd
-included. `gce/deploy.sh base` turns on the project's serial port logging to Cloud Logging, so a deleted VM's boot
+**The boot** (spec M3). Job VMs boot without cloud-init. Its network stages were ordered before `sysinit.target`,
+which every service waits for, Docker and the job unit included, and they took 5–10 s of every boot. The builder
+disables it (`/etc/cloud/cloud-init.disabled`; the builder itself, stock Ubuntu, still ran it) and replaces what a job
+VM needed from it:
+- the network: the netplan cloud-init wrote matched the builder's MAC address only; `/etc/netplan/90-ci-kit.yaml` runs
+  DHCP on any `en*` (or `eth*`) interface, which covers virtio-net and gVNIC (C3D's comes up as `ens3`);
+- the root's growth: the image is the builder's 30 GB disk and a job VM's is `disk_gb`. `ci-kit-gce-instance.service`
+  (`gce/vm/instance.sh`, which the job unit requires) runs `growpart` and `resize2fs`, and names the host after the
+  instance (the builder's `/etc/hostname` is emptied). It prints `ci-kit instance: root <size> on <disk>, hostname
+  <name>` to the console.
+
+The guest agent, not cloud-init, serves the metadata and guest attributes. snapd is purged (no job uses a snap, and it
+seeded itself on the first boot of every disk made from the image) and pinned out.
+
+`gce/deploy.sh base` turns on the project's serial port logging to Cloud Logging, so a deleted VM's boot
 can be read there:
 `gcloud logging read 'logName="projects/ssfskim-ci-kit/logs/serialconsole.googleapis.com%2Fserial_port_1_output" AND resource.labels.instance_id="<id>"' --project=ssfskim-ci-kit`.
 
