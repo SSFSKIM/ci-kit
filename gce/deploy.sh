@@ -7,9 +7,10 @@
 #                      service account ci-kit-webhook (no role here: webhook grants its two), and serial port logging, so
 #                      a VM deleted after a failed boot leaves its console in Cloud Logging
 #   network            the VPC ci-kit and a subnetwork for each placement of pool/config/gce.json (gce/subnets.mjs: a new
-#                      one takes the first free /20 of 10.64.0.0/16; one that exists is left alone), with no firewall
-#                      rule: GCE's implied rules deny all ingress and allow all egress. It then checks that no rule
-#                      allows ingress into it.
+#                      one takes the first free /20 of 10.64.0.0/16; one that exists keeps its range), each with Private
+#                      Google Access, and in each placement region a Cloud Router ci-kit-router with a Cloud NAT
+#                      ci-kit-nat: pool and bake VMs have no external address. No firewall rule: GCE's implied rules
+#                      deny all ingress and allow all egress. It then checks that no rule allows ingress into it.
 #   bake               the Cloud Run job ci-kit-bake, built from this checkout
 #   bake-schedule      the Scheduler job ci-kit-bake-weekly, which runs the bake every Sunday at 18:00 UTC
 #   launcher           the Cloud Run service ci-kit-launcher, built from this checkout: no public ingress, one
@@ -18,8 +19,8 @@
 #   webhook            the public Cloud Run service ci-kit-webhook (the App's webhook receiver), the Pub/Sub topic
 #                      ci-kit-tick-requests it publishes to, and the push subscription that asks the launcher for a
 #                      tick. Needs the launcher deployed and the webhook secret created by the owner (docs/pool.md, GCE)
-#   alert              a log-based metric of failed ci-kit-launcher-tick executions and an alert policy on it, mailed
-#                      to CI_KIT_ALERT_EMAIL (default: the project's owner)
+#   alert              log-based metrics and alert policies, mailed to CI_KIT_ALERT_EMAIL (default: the project's
+#                      owner): failed ci-kit-launcher-tick executions, VMs whose runner never came online, NAT drops
 #   app-hook           points the GitHub App's webhook at ci-kit-webhook with the secret (gce/tools/app-hook.mjs); run
 #                      it after webhook's first deploy and after each rotation of the secret
 # The App's secrets (ci-kit-app-id, ci-kit-app-key, readable by ci-kit-launcher only) and the webhook secret
@@ -67,8 +68,15 @@ base() {
 # the internet and allow ingress inside the network (spec §3a Network: no inbound rules). Networks and firewall rules
 # take no labels; the names carry the kit's.
 NETWORK=ci-kit
+ROUTER=ci-kit-router
+NAT=ci-kit-nat
+# NAT ports a VM gets, by dynamic allocation: at least the minimum from its first connection, more as it opens them
+# (pnpm and apt open many at once), up to the maximum (65536: one whole NAT address). Provisional: M6's burst proof
+# (20 cpus-2 jobs in one tick, the NAT's dropped-packet metrics) sizes them. Powers of 2, minimum under maximum.
+NAT_MIN_PORTS_PER_VM=1024
+NAT_MAX_PORTS_PER_VM=65536
 network() {
-  local subnet region taken range subnets
+  local subnet region taken range subnets pga
   g compute networks describe "$NETWORK" > /dev/null 2>&1 ||
     g compute networks create "$NETWORK" --subnet-mode=custom \
       --description='ci-kit: pool and bake VMs (spec 3a); no ingress rules, egress by the implied rule'
@@ -78,19 +86,45 @@ network() {
   # gcloud reads no stdin in the loop, whose own input is the list.
   subnets=$(node "$KIT/gce/subnets.mjs" list) || die "cannot read the placements' subnetworks from pool/config/gce.json"
   [ -n "$subnets" ] || die "pool/config/gce.json names no subnetwork"
+  # Pool and bake VMs have no external address (spec 2026-10-21 M6): they reach Google APIs by Private Google Access on
+  # their subnetwork, and everything else (GitHub, apt, npm) through their region's Cloud NAT, below.
   while read -r subnet region; do
-    g compute networks subnets describe "$subnet" --region="$region" > /dev/null 2>&1 < /dev/null && continue
+    if pga=$(g compute networks subnets describe "$subnet" --region="$region" --format='value(privateIpGoogleAccess)' 2> /dev/null < /dev/null); then
+      [ "$pga" = True ] || g compute networks subnets update "$subnet" --region="$region" --enable-private-ip-google-access < /dev/null
+      continue
+    fi
     taken=$(g compute networks subnets list --network="$NETWORK" --format='value(ipCidrRange)' < /dev/null)
     # shellcheck disable=SC2086 # one argument per range
     range=$(node "$KIT/gce/subnets.mjs" free $taken) || die "no free range in the network $NETWORK for $subnet"
     g compute networks subnets create "$subnet" --network="$NETWORK" --region="$region" --range="$range" \
-      --description='ci-kit: pool and bake VMs' < /dev/null
+      --enable-private-ip-google-access --description='ci-kit: pool and bake VMs' < /dev/null
   done <<< "$subnets"
+  # A Cloud Router and its Cloud NAT in each placement region, for every range of the region's subnetworks (the network
+  # holds the pool's only). Google allocates the NAT's addresses as ports run short, so no address quota bounds the
+  # pool. Ports by dynamic allocation (NAT_MIN_PORTS_PER_VM above), which needs endpoint-independent mapping off. Only
+  # dropped connections are logged (a VM short of ports; the alert part mails them). A NAT that exists is updated to
+  # these settings, never recreated.
+  local nat=(--auto-allocate-nat-external-ips --nat-all-subnet-ip-ranges
+    --enable-dynamic-port-allocation --no-enable-endpoint-independent-mapping
+    --min-ports-per-vm="$NAT_MIN_PORTS_PER_VM" --max-ports-per-vm="$NAT_MAX_PORTS_PER_VM"
+    --enable-logging --log-filter=ERRORS_ONLY)
+  local regions
+  read -r -a regions <<< "$(cut -d' ' -f2 <<< "$subnets" | sort -u | tr '\n' ' ')"
+  for region in "${regions[@]}"; do
+    g compute routers describe "$ROUTER" --region="$region" > /dev/null 2>&1 ||
+      g compute routers create "$ROUTER" --network="$NETWORK" --region="$region" \
+        --description='ci-kit: Cloud NAT for pool and bake VMs, which have no external address'
+    if g compute routers nats describe "$NAT" --router="$ROUTER" --region="$region" > /dev/null 2>&1; then
+      g compute routers nats update "$NAT" --router="$ROUTER" --region="$region" "${nat[@]}"
+    else
+      g compute routers nats create "$NAT" --router="$ROUTER" --region="$region" "${nat[@]}"
+    fi
+  done
   local open
   open=$(g compute firewall-rules list --format='value(name,network.basename(),direction,disabled,allowed[].map().firewall_rule().list())' |
     awk -F'\t' -v net="$NETWORK" '$2 == net && $3 == "INGRESS" && $4 != "True" && $5 != "" { print $1 }')
   [ -z "$open" ] || die "network $NETWORK has rules allowing ingress: $open"
-  echo "deploy: network ok ($NETWORK; no ingress allowed)"
+  echo "deploy: network ok ($NETWORK; no ingress allowed; egress through $NAT in each placement region)"
   g compute networks subnets list --network="$NETWORK" --format='value(name,ipCidrRange)' | sed 's/^/deploy:   subnetwork /'
 
 }
@@ -212,42 +246,64 @@ app_hook() {
   node "$KIT/gce/tools/app-hook.mjs" "$hook"
 }
 
-# A launcher that is down leaves stopped VMs to cost their disks and the ledger's daily line missing (spec §3a
-# Lifetime bounds): three failed ticks within 10 minutes mail the owner. Metrics, channels and policies take no
-# resource labels everywhere; their names carry the kit's, and the policy and channel carry ci-kit user labels.
-ALERT_METRIC=ci-kit-launcher-tick-failed
+# Failures that mail the owner, each a log-based metric and an alert policy on it. Metrics, channels and policies take
+# no resource labels everywhere; their names carry the kit's, and the policies and channel carry ci-kit user labels.
+# - A launcher that is down leaves stopped VMs to cost their disks and the ledger's daily line missing (spec §3a
+#   Lifetime bounds): three failed ticks within 10 minutes.
+# - A VM whose runner never came online (spec 2026-10-21 M6): it booted but cannot reach GitHub, and its job waits on
+#   another VM; the launcher logs it at ERROR each tick (launcher.mjs reportNeverOnline). Any in 10 minutes.
+# - A connection a pool NAT dropped (M6): a VM out of ports, or the NAT out of addresses. The NAT logs drops only
+#   (network). Any in 10 minutes.
 alert() {
-  local email=${CI_KIT_ALERT_EMAIL:-kimmi@l1ngual.com} channel policy
-  g logging metrics describe "$ALERT_METRIC" > /dev/null 2>&1 ||
-    g logging metrics create "$ALERT_METRIC" \
-      --description='ci-kit: failed executions of the Scheduler job ci-kit-launcher-tick (spec 3a)' \
-      --log-filter='resource.type="cloud_scheduler_job" AND resource.labels.job_id="ci-kit-launcher-tick" AND severity>=ERROR'
+  local email=${CI_KIT_ALERT_EMAIL:-kimmi@l1ngual.com} channel
   # Only resource names are kept from gcloud's output: its first alpha or beta call may install those components and
   # print the installer's lines to stdout.
   channel=$(g beta monitoring channels list --filter="displayName=\"ci-kit owner\"" --format='value(name)' | grep '^projects/' | head -1 || true)
   [ -n "$channel" ] || channel=$(g beta monitoring channels create --display-name='ci-kit owner' --type=email \
     --channel-labels="email_address=$email" --user-labels=ci-kit=alert --format='value(name)' | grep '^projects/' | head -1)
   [ -n "$channel" ] || die "no notification channel"
-  policy=$(g alpha monitoring policies list --filter='displayName="ci-kit launcher ticks failing"' --format='value(name)' | grep '^projects/' | head -1 || true)
-  if [ -z "$policy" ]; then
-    local file
-    file=$(mktemp)
-    cat > "$file" <<JSON
-{"displayName": "ci-kit launcher ticks failing",
- "documentation": {"content": "Cloud Scheduler's ci-kit-launcher-tick failed 3 times in 10 minutes: the GCE launcher (Cloud Run ci-kit-launcher in ssfskim-ci-kit) is not reconciling. Stopped pool VMs cost their disks until it is back. Read its logs: gcloud run services logs read ci-kit-launcher --region=us-central1 --project=ssfskim-ci-kit. docs/pool.md, GCE.", "mimeType": "text/markdown"},
- "userLabels": {"ci-kit": "alert"},
- "combiner": "OR",
- "conditions": [{"displayName": "failed ticks",
-   "conditionThreshold": {"filter": "metric.type=\"logging.googleapis.com/user/$ALERT_METRIC\" AND resource.type=\"cloud_scheduler_job\"",
-     "aggregations": [{"alignmentPeriod": "600s", "perSeriesAligner": "ALIGN_SUM", "crossSeriesReducer": "REDUCE_SUM"}],
-     "comparison": "COMPARISON_GT", "thresholdValue": 2, "duration": "0s", "trigger": {"count": 1}}}],
- "alertStrategy": {"autoClose": "3600s"},
- "notificationChannels": ["$channel"]}
-JSON
-    g alpha monitoring policies create --policy-from-file="$file" > /dev/null
-    rm -f "$file"
-  fi
-  echo "deploy: alert ok (metric $ALERT_METRIC, mailed to $email)"
+  alert_on_log ci-kit-launcher-tick-failed cloud_scheduler_job 2 'ci-kit launcher ticks failing' \
+    'ci-kit: failed executions of the Scheduler job ci-kit-launcher-tick (spec 3a)' \
+    'resource.type="cloud_scheduler_job" AND resource.labels.job_id="ci-kit-launcher-tick" AND severity>=ERROR' \
+    "Cloud Scheduler's ci-kit-launcher-tick failed 3 times in 10 minutes: the GCE launcher (Cloud Run ci-kit-launcher in ssfskim-ci-kit) is not reconciling. Stopped pool VMs cost their disks until it is back. Read its logs: gcloud run services logs read ci-kit-launcher --region=us-central1 --project=ssfskim-ci-kit. docs/pool.md, GCE."
+  alert_on_log ci-kit-runner-never-online cloud_run_revision 0 'ci-kit pool VM runners never online' \
+    'ci-kit: pool VMs RUNNING for over 3 min whose runner never came online (spec 2026-10-21 M6)' \
+    'resource.type="cloud_run_revision" AND resource.labels.service_name="ci-kit-launcher" AND severity>=ERROR AND jsonPayload.event="runner-never-online"' \
+    "A pool VM has been RUNNING for over 3 minutes and its runner never came online: it booted but cannot reach GitHub, and its job waits for another VM. The usual cause is egress: its region's Cloud NAT (ci-kit-nat on ci-kit-router) missing, misconfigured or out of ports. The launcher's ERROR entries name the VM, zone and region: gcloud logging read 'jsonPayload.event=\"runner-never-online\"' --project=ssfskim-ci-kit --freshness=1h. Then gce/deploy.sh network. docs/pool.md, GCE, The network."
+  alert_on_log ci-kit-nat-dropped nat_gateway 0 'ci-kit NAT dropping connections' \
+    "ci-kit: connections ci-kit-nat dropped (spec 2026-10-21 M6)" \
+    'resource.type="nat_gateway" AND resource.labels.gateway_name="ci-kit-nat" AND jsonPayload.allocation_status="DROPPED"' \
+    "A pool Cloud NAT (ci-kit-nat) dropped connections in the last 10 minutes: a VM ran out of NAT ports, or the NAT could not allocate an address. Jobs may fail to reach GitHub, apt or npm. Read the drops: gcloud logging read 'resource.type=\"nat_gateway\" AND jsonPayload.allocation_status=\"DROPPED\"' --project=ssfskim-ci-kit --freshness=1h, and the NAT's dropped_sent_packets_count by reason in Cloud Monitoring. The port settings are in gce/deploy.sh network. docs/pool.md, GCE, The network."
+  echo "deploy: alert ok (ticks failing, runners never online, NAT drops; mailed to $email)"
+}
+
+# alert_on_log METRIC RESOURCE THRESHOLD TITLE DESCRIPTION FILTER DOC: the log-based metric METRIC of the entries FILTER
+# matches, and the policy TITLE mailing $channel when more than THRESHOLD of them fall in 10 minutes. Each is created
+# once, found by its name; one that exists is left as it is.
+alert_on_log() {
+  local metric=$1 resource=$2 threshold=$3 title=$4 description=$5 filter=$6 doc=$7 policy file
+  g logging metrics describe "$metric" > /dev/null 2>&1 ||
+    g logging metrics create "$metric" --description="$description" --log-filter="$filter"
+  policy=$(g alpha monitoring policies list --filter="displayName=\"$title\"" --format='value(name)' | grep '^projects/' | head -1 || true)
+  [ -z "$policy" ] || return 0
+  file=$(mktemp)
+  # shellcheck disable=SC2016 # a JavaScript template literal, not the shell's
+  node -e '
+    const [title, doc, metric, resource, threshold, channel] = process.argv.slice(1);
+    console.log(JSON.stringify({
+      displayName: title,
+      documentation: { content: doc, mimeType: "text/markdown" },
+      userLabels: { "ci-kit": "alert" },
+      combiner: "OR",
+      conditions: [{ displayName: metric, conditionThreshold: {
+        filter: `metric.type="logging.googleapis.com/user/${metric}" AND resource.type="${resource}"`,
+        aggregations: [{ alignmentPeriod: "600s", perSeriesAligner: "ALIGN_SUM", crossSeriesReducer: "REDUCE_SUM" }],
+        comparison: "COMPARISON_GT", thresholdValue: Number(threshold), duration: "0s", trigger: { count: 1 } } }],
+      alertStrategy: { autoClose: "3600s" },
+      notificationChannels: [channel],
+    }));' "$title" "$doc" "$metric" "$resource" "$threshold" "$channel" > "$file"
+  g alpha monitoring policies create --policy-from-file="$file" > /dev/null
+  rm -f "$file"
 }
 
 [ $# -gt 0 ] || set -- base network bake bake-schedule launcher launcher-schedule webhook alert

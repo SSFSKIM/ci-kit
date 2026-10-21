@@ -9,6 +9,7 @@ export const RUNNER_ORPHAN_MS = 5 * MIN; // a runner with no instance (a crash b
 export const ABANDON_MS = 10 * MIN; // a launching row with no instance and no runner
 export const OVERAGE_GRACE_MS = 5 * MIN; // past max_run_minutes, which Compute Engine should have enforced
 export const DISK_ORPHAN_MS = 10 * MIN; // a disk is attached as its instance is created; give that time
+export const RUNNER_ONLINE_MS = 3 * MIN; // a VM's runner is online ~16 s after it starts (M3); this is far past that
 const DONE_STATUSES = new Set(['TERMINATED']);
 
 // Allocation ids: 10 lowercase base36 characters, the launch minute (5; good until 2084) then 5 random (36^5, about
@@ -76,11 +77,34 @@ export function claimedInstances({ jobs, rows, reports }) {
   ]);
 }
 
+// A VM whose runner never came online (spec 2026-10-21 M6): RUNNING for over RUNNER_ONLINE_MS while its JIT runner,
+// registered at launch, reads offline and has taken no job. It booted but cannot reach GitHub (its region's NAT
+// missing, misconfigured or out of ports), so it covers no job, and the launcher reports it. A runner that went
+// offline before taking a job reads the same, and is as broken. r: its runner; claimed: claimedInstances().
+const neverOnline = (i, r, now, claimed) =>
+  Boolean(r) && r.status !== 'online' && !r.busy && !claimed.has(i.name) && i.status === 'RUNNING' && i.running !== null && now - i.running > RUNNER_ONLINE_MS;
+
+// Each instance's runner, from runners (Map repo → Map runner name → runner); undefined when its repo's listing failed.
+function runnerLookup(runners) {
+  const repoByLabel = new Map([...runners.keys()].map((r) => [repoLabel(r), r]));
+  return (i) => {
+    const repo = repoByLabel.get(i.repoLabel);
+    return { repo, runner: repo && runners.get(repo).get(i.name) };
+  };
+}
+
+// The instances neverOnline() names, for the launcher to log at ERROR.
+export function runnersNeverOnline({ instances, runners, now, claimed = new Set() }) {
+  const of = runnerLookup(runners);
+  return instances.filter((i) => neverOnline(i, of(i).runner, now, claimed));
+}
+
 // Which queued jobs get a VM now (spec §3a Demand). Demand is keyed by (repo, size): a servable job's labels are
 // determined by its size. Each key's unclaimed instances (runner registered and not busy, younger than
-// idle_runner_minutes, its runner never having taken a job) cover one queued job each; a busy or claimed instance
-// covers nothing. The rest launch oldest first while the vCPUs in flight stay at or under max_vcpus; a job that does
-// not fit holds the line (first in, first out, as on the Hetzner box), and the rest wait in GitHub's queue.
+// idle_runner_minutes, its runner never having taken a job, and not neverOnline()) cover one queued job each; a busy
+// or claimed instance covers nothing. The rest launch oldest first while the vCPUs in flight stay at or under
+// max_vcpus; a job that does not fit holds the line (first in, first out, as on the Hetzner box), and the rest wait in
+// GitHub's queue.
 // queued: queued pool jobs of served repos, each with `repo`. instances: viewInstance()s of every ci-kit=gce instance.
 // runners: Map repo → Map runner name → runner, for each repo whose listing succeeded; a repo without one gets nothing.
 // claimed: claimedInstances(). complete: false when the instance listing missed a zone; nothing is admitted then,
@@ -90,16 +114,17 @@ export function claimedInstances({ jobs, rows, reports }) {
 export function planLaunches({ queued, instances, runners, now, cfg, complete = true, claimed = new Set() }) {
   if (!complete) return { launches: [], waiting: [...queued], unservable: [] };
   const idleMs = cfg.idle_runner_minutes * MIN;
-  const repoByLabel = new Map([...runners.keys()].map((r) => [repoLabel(r), r]));
+  const of = runnerLookup(runners);
   const key = (repo, cpus) => `${repo.toLowerCase()}|${cpus}`;
   const cover = new Map();
   let inflight = 0;
   for (const i of instances) {
     if (DONE_STATUSES.has(i.status)) continue;
     inflight += i.vcpus;
-    const repo = repoByLabel.get(i.repoLabel);
-    const r = repo && runners.get(repo).get(i.name);
-    if (r && !r.busy && !claimed.has(i.name) && now - i.created < idleMs) cover.set(key(repo, i.cpus), (cover.get(key(repo, i.cpus)) ?? 0) + 1);
+    const { repo, runner: r } = of(i);
+    if (r && !r.busy && !claimed.has(i.name) && now - i.created < idleMs && !neverOnline(i, r, now, claimed)) {
+      cover.set(key(repo, i.cpus), (cover.get(key(repo, i.cpus)) ?? 0) + 1);
+    }
   }
   const launches = [];
   const waiting = [];
@@ -224,10 +249,12 @@ export async function walkPlacements(list, { attempt, reconcile, now = Date.now,
   return { placement: null, tried, stop: 'exhausted', quota };
 }
 
-// The job VM (spec §3a VM lifecycle step 2, I12). No service account; its placement's subnetwork with an ephemeral
-// external address; the JIT config in metadata `ci-kit-jit` with guest attributes on; a run limit after which Compute
-// Engine deletes the VM; a boot disk of the placement's type that goes with it, named in the label `ci-kit-disk` so the
-// ledger prices it (the instance resource does not say). `config` is the commit of the gce.json the launcher runs.
+// The job VM (spec §3a VM lifecycle step 2, I12). No service account; its placement's subnetwork and no external
+// address (spec 2026-10-21 M6: it reaches GitHub, apt and npm through its region's Cloud NAT, gce/deploy.sh network,
+// so the region's address quota does not bound the pool); the JIT config in metadata `ci-kit-jit` with guest
+// attributes on; a run limit after which Compute Engine deletes the VM; a boot disk of the placement's type that goes
+// with it, named in the label `ci-kit-disk` so the ledger prices it (the instance resource does not say). `config` is
+// the commit of the gce.json the launcher runs.
 export function jobInstance({ alloc, zone, machine, provisioning, placement, repo, cpus, image, jit, cfg, config }) {
   const name = instanceName(alloc);
   const diskLabels = { 'ci-kit': 'gce', 'ci-kit-alloc': alloc };
@@ -244,7 +271,7 @@ export function jobInstance({ alloc, zone, machine, provisioning, placement, rep
       autoDelete: true,
       initializeParams: { diskName: name, sourceImage: image, diskSizeGb: String(cfg.disk_gb), diskType: `zones/${zone}/diskTypes/${placement.disk_type}`, labels: diskLabels },
     }],
-    networkInterfaces: [{ subnetwork: subnetworkOf(placement), accessConfigs: [{ type: 'ONE_TO_ONE_NAT', name: 'External NAT' }] }],
+    networkInterfaces: [{ subnetwork: subnetworkOf(placement) }],
     serviceAccounts: [],
     metadata: { items: [{ key: 'enable-guest-attributes', value: 'TRUE' }, { key: 'ci-kit-jit', value: jit }] },
     scheduling: provisioning === 'spot'

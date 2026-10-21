@@ -15,7 +15,7 @@ import { queuedPoolJobs } from '../../pool/agent/logic.mjs';
 import { staleBakeInstances } from '../bake/plan.mjs';
 import { servedRepos, placementZones } from './config.mjs';
 import {
-  allocationId, instanceName, repoLabel, viewInstance, isGce, planLaunches, placements, quotaBlocks, insertOutcome, walkPlacements,
+  allocationId, instanceName, repoLabel, viewInstance, isGce, planLaunches, runnersNeverOnline, placements, quotaBlocks, insertOutcome, walkPlacements,
   jobInstance, jitRequest, newestReadyImage, reviewInstances, reviewRows, orphanRunners, orphanDisks, reportable, claimedInstances,
 } from './logic.mjs';
 import { planPrelaunches } from './prelaunch.mjs';
@@ -29,13 +29,15 @@ const zoneOf = (r) => r.zone.split('/').pop();
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
 const iso = (ms) => new Date(ms).toISOString();
 
-// deps: {gce, gh, ledger, cfg, config, poolRepos, now, log, random, alert}
+// deps: {gce, gh, ledger, cfg, config, poolRepos, now, log, error, random, alert}; error(message, fields) logs at ERROR
+// what a log-based alert watches (gce/deploy.sh alert), log otherwise.
 // cfg: the gce.json it runs, config: that file's commit; poolRepos: the repo names in pool.json (one file per repo).
 export class Launcher {
   constructor(deps) {
     Object.assign(this, deps);
     this.now ??= Date.now;
     this.log ??= () => {};
+    this.error ??= (message) => this.log(message);
     this.alert ??= createAlerts(this.gh, this.cfg.ledger.repo, { log: this.log });
     this.budgetMs ??= TICK_BUDGET_MS;
     this.insertDeadlineMs ??= INSERT_DEADLINE_MS;
@@ -390,9 +392,23 @@ export class Launcher {
     }
   }
 
+  // A VM that booted but whose runner never came online covers no job (logic.mjs neverOnline), and is logged at ERROR
+  // each tick until the idle rule removes it: its region's NAT may be missing, misconfigured or out of ports (spec M6).
+  reportNeverOnline(seen) {
+    const now = this.now();
+    for (const v of runnersNeverOnline({ instances: seen.instances, runners: seen.runners, now, claimed: seen.claimed })) {
+      const region = v.zone.replace(/-[a-z]$/, '');
+      const runningSeconds = Math.round((now - v.running) / 1000);
+      this.error(`runner never online: ${v.name} (${v.machine}@${v.zone}) has run ${runningSeconds} s and its runner is offline; ` +
+        `it covers no job. Its egress may be broken: check the Cloud NAT of ${region}`,
+      { event: 'runner-never-online', instance: v.name, zone: v.zone, region, runningSeconds });
+    }
+  }
+
   // ── launches ───────────────────────────────────────────────────────────────────────────────────────────────────
 
   async launchAll(seen, out, deadline) {
+    this.reportNeverOnline(seen);
     const plan = planLaunches({
       queued: seen.queued, instances: seen.instances, runners: seen.demand, now: this.now(), cfg: this.cfg, complete: seen.complete, claimed: seen.claimed,
     });
