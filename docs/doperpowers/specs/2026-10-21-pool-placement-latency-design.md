@@ -107,6 +107,11 @@ toward the boot alone, and below it for the jobs a warm runner covers.
   - Acceptance 4 (a day's median queued → started ≤ 50 s) is read from `latency-report.mjs` after a day of traffic.
 - [ ] M5 — Pre-launch of a run's gate VMs (the owner chose it 2026-10-21; no warm runner). (2026-10-21) Built, reviewer-medium clean after one fix wave, ci-gate green; PR to
   CI-opt. Deploy (`launcher` + `webhook`) on CI-opt's go; Acceptance 5 is read from the live numbers.
+- [ ] M6 — Stock-out and quota resilience. Sized from the day's data (2026-10-21); approved by CI-opt 18:5xZ with
+  NAT (Decision Log). Hyperdisk raises filed. Build order: NAT, proved in us-central1 first; then the race and the
+  counts; then the placements.
+  Follow-up outside M6's proof (CI-opt): the tick's preparation before its first allocation, 5.1 s at 18:45 and 6.2 s
+  to the first insert, brought to M3's ≤ 5 s.
 
 ## Acceptance
 
@@ -261,6 +266,95 @@ demand leaves no pool resources". If the owner chooses it, it gets its own desig
 retiring states, replenishment, unregister-before-delete rotation, a lifetime that lets a claimed job finish, and
 the A13 amendment.
 
+### Stock-out and quota resilience (M6, candidate)
+
+**What the day showed** (2026-10-21 00:00–18:34Z; split at 14:25Z, when placements went live; research read the
+launcher logs, Compute's audit log, the ledger and every pool job of the three served repos):
+
+| | before placements | placements live |
+|---|---:|---:|
+| pool jobs queued → started > 90 s | 224 / 491 | 32 / 121 |
+| of those, no refusal and no unknown insert in their VM's walk | 211 | 28 |
+| capacity refusals (all C3D, us-central1-a 8 of 9) | 3 | 5 |
+| quota refusals (us-west4: `IN_USE_ADDRESSES` 10, C4D family 6) | 0 | 16 |
+| inserts whose outcome stayed unknown in the tick | 11 | 4 |
+
+The tail was the old path: admission bursts against `max_vcpus` (one job waited 459 s before its allocation) and
+the tick and boot that M3, M4 and M5 replace. Resource trouble is a small share, and it is not where the priors put
+it:
+
+- **No job waited on quota.** Every quota-refused walk created its VM in C3D us-central1 the same tick.
+- **The address quota binds before any CPU quota.** Every VM takes an external IPv4 (`ONE_TO_ONE_NAT` in
+  `jobInstance` and the bake). us-west4 holds 8 addresses (64 asked, reconciling), us-central1 32 (64 asked,
+  reconciling), and each default region 8. A C4D placement in us-west4 therefore stops at 8 VMs whatever its 50
+  vCPUs; a new region does the same.
+- **An unknown outcome is a slow insert, not a lost one.** All 15 settled as created; their operations took 41–121 s,
+  where an ordinary insert is accepted in 8–15 s. After 14:25Z all four followed a C4D quota refusal and a
+  us-central1-a stock-out, so they landed on the busiest C3D zone. The walk stops at an unknown outcome (two zones
+  must never hold one allocation's VM), so the job waits the whole slow insert.
+- **Spot was never refused everywhere**, so the on-demand half of the walk never ran; zero C4D stock-outs.
+
+**Where the slow jobs' time went** (every pool job over 90 s queued → started, through 18:52Z, joined through the
+runner that actually ran it; a: queued → the tick that launched its VM, b: tick start → the successful insert, c:
+Compute's insert operation, d: operation done → job started; medians, seconds; `/tmp/slowjobs/` on the MacBook):
+
+| window (queued) | slow / started | a | b | c | d |
+|---|---:|---:|---:|---:|---:|
+| 00:00–14:25 (old path) | 224 / 491 | 49.0 (p90 178.6) | 13.9 | 11.7 | 29.8 |
+| 14:25–17:03 (before M3) | 19 / 38 | 50.4 | 13.0 | 12.7 | 28.4 |
+| 17:03–18:04 (M3 live) | 2 / 38 | 50.8 | 9.4 | 21.8 | 15.5 |
+| 18:04–18:52 (M4, M5 from 18:44) | 11 / 77 | 83.6 | 6.0 | 9.7 | 16.6 |
+
+The tail was waiting for the tick: the minute tick before M4, and before 14:25 admission against `max_vcpus` (24
+jobs behind 1–4 waiting ticks, median 395.5 s). Of the 11 after M4, nine queued during the secret-rotation test,
+when deliveries were refused on purpose, and two at M4's rollout; none queued after 18:20:53. With M3 in, d is boot
+to listener ~16 s and GitHub's assignment ~1 s. **The insert time is Compute's, not ours:** a tick's inserts reach
+Compute within 0.4–0.9 s of each other (allocation → insert, ledger write and JIT minting included, 1.2–1.9 s), and
+the operations then take 6–25 s each (18:45's six: 7.5–14.2 s); late inserts in a batch are retries after a quota
+refusal, not the 16-worker limit. Resource trouble is a small share of the tail, as the counts above say.
+
+**The design, in the order it pays:**
+
+1. **No external addresses: Cloud NAT per placement region.** Job and bake VMs drop `accessConfigs`; `deploy.sh
+   network` adds a Cloud Router and a Cloud NAT (auto-allocated IPs, dynamic port allocation, Private Google Access on
+   the subnet so Google APIs bypass the NAT) in every region a placement names. This removes `IN_USE_ADDRESSES` from
+   the pool's limits: 10 of the day's 16 quota refusals, and the 8-VM ceiling of every new region. pnpm and apt open
+   many connections at once, so the NAT allocates ports dynamically, well above the 64-per-VM default (minimum 1024,
+   maximum 65536 per VM, sized from the burst proof), and logs errors only. Cost: $0.0014 per
+   VM-hour for the gateway (capped at $0.044 an hour per region from 32 VMs up), $0.005 an hour per auto-allocated NAT
+   address, and $0.045 per GB processed (about $0.012 for a VM's ~260 MB of downloads), against the $0.0025 per hour an in-use external IPv4 costs a spot VM today ($0.005 on demand);
+   each row carries the gateway's VM-hours; the NAT addresses' hours and the day's GB per region go on the daily
+   line (the counts step), since neither belongs to one VM. The alternative, waiting on the
+   two address raises, is out of the pool's hands (both have reconciled at a partial grant for hours).
+2. **More spot placements on today's grants.** After C4D us-west4, in this order: C4D us-central1 (24; the existing
+   subnet), C4D us-east1 (24; b, c, d), C4D us-east4 (24; a, b, c), C4D us-east5 (24; a, b, c), C3D us-central1
+   (192), C3D us-east1 and us-east4 (24 each). us-south1 and us-west2 offer no C4D; south1 no C3D either. C4D spot
+   CPU costs $0.0138/vCPU-h in us-central1 and us-east1 ($0.0174 in us-east4), about twice C3D's. A new region needs
+   its subnet (`deploy.sh network` picks the next free /20) and a Hyperdisk raise: its default `HDB-TOTAL-GB` is
+   500, ten 50 GB boot disks, which binds once addresses no longer do (us-west4's 4096 was granted in full; the same
+   raise is filed for each new C4D region with the change). `max_vcpus` becomes the placements' sum, 386, under the
+   512 all-regions grant. The bake's smoke VM runs once per placement, so each image's first use in a region is the
+   bake's, never a job's; the smoke's insert time per region is logged to settle whether that first use costs
+   anything.
+3. **An insert unsettled after 20 s races a second VM.** The first allocation keeps waiting on its own operation, as
+   today; the walk does not move it. A new allocation of the same size (its own row, name and JIT runner) is
+   launched from the next attempt of the walk, another zone and preferably another region, and its row carries
+   `race: {of: <root alloc>}`. A race child never races, so a group is one original and one child; an unresolved
+   original keeps its `max_vcpus` reservation and counts as cover for its demand until reconciled, whether or not the
+   listing shows its instance, and suppresses another race for that demand across ticks (overlapping ticks remain the
+   parent spec's accepted overlap). The race spends `max_vcpus` like any launch and runs only after every queued
+   job's first launch, as pre-launch does. Both JIT runners are minted before their inserts and either may take any
+   matching job, so outcomes are observed, not assumed: first claim (which VM), both claimed, neither claimed,
+   unresolved; the jobs each VM ran are kept apart from the demand that triggered the race, and a first claim is not
+   reported as latency saved. An unclaimed VM is removed by the idle rule, as a pre-launched one is. The 20 s
+   trigger is provisional: the 15 slow inserts of the day are those that outlived the 40 s wait, not every insert
+   over 20 s, so every insert's send → done time is logged and the threshold is re-sized from that distribution.
+4. **The on-demand half of the walk stays as it is** (CI-opt's prior (a)): it already follows spot in every
+   placement, and the day gave it no case. A race may land on it when spot attempts are used up.
+5. **Counts on the tick summary and the daily line** (prior (c)): refusals by kind, metric and zone; slow inserts
+   with their settle time; races started, won and unclaimed with their cost; on-demand launches; GB through NAT. The
+   next sizing reads these, not a research pass over raw logs.
+
 ## Plan of Work
 
 ### M1 — Placements in the launcher, the bake and the ledger
@@ -318,6 +412,34 @@ As designed above, after M3 (its ledger rows are the shape's input) and M4 (the 
 first-job event). Proof: for a MAWS run whose plan runs on `ubuntu-slim`, its gate VMs' inserts are logged before its
 pool jobs are queued; Acceptance 5 over a day; unclaimed pre-launched VMs and their cost on the ledger's daily line,
 reported to the owner.
+
+### M6 — Stock-out and quota resilience (candidate; not built until CI-opt approves)
+
+1. NAT: `deploy.sh network` creates router, NAT and Private Google Access for every placement region; `jobInstance`
+   and the bake's VMs (builder, smoke, check: one helper) drop `accessConfigs`. Order: `network` (NAT beside the
+   existing external IPs), `bake` deploy, a smoke VM in us-central1 without an external IP, then the launcher.
+2. The race: `logic.mjs` (the race attempt from the walk), `launcher.mjs` (an insert pending past 20 s starts it,
+   after queued launches), `ledger.mjs` (`race` on the row with the insert's send and done times; outcomes on the
+   daily line). Tests: a pending insert races the next zone of another placement; the first allocation is never
+   walked; a child never races; an unresolved original absent from the listing keeps its reservation and suppresses
+   a repeat race; a restart; two timers in one tick; pre-launch competing for admission.
+3. Counts on the tick summary and the daily line, NAT GB priced.
+4. Hyperdisk raises filed for the new C4D regions; `gce.json` adds the placements in the order above, `max_vcpus`
+   their sum. Rollout so no placement is published before it can serve (the launcher reads `gce.json` from main every
+   tick): `deploy.sh network` from the placement PR's checkout (additive: subnets, routers, NATs) and a smoke VM in
+   each new placement from that checkout, before the PR merges; then merge, `deploy.sh bake` from main, one complete
+   bake by hand. Rolling the list back leaves subnets and NATs in place while VMs drain.
+5. Broken egress is detected, not inferred: a VM RUNNING past a few minutes whose runner never came online is logged
+   at ERROR and stops counting as cover (an offline JIT registration counts today); an alert on it, and one on the
+   NAT's allocation failures. A controlled egress failure (a smoke VM in a region without NAT) shows the detection.
+
+Proof: NAT first, in us-central1: a smoke VM there without an external IP passes before the launcher deploys. Then a
+sandbox burst of 20 cpus-2 jobs launches in one tick with no address refusal, every VM without an external IP, every
+job green (it reaches GitHub, apt and npm through NAT), and the NAT's metrics show no packet dropped for want of
+ports, with the peak ports per VM recorded (the 1024–65536 dynamic range is provisional until then); the egress
+failure test shows its alert; the bake log shows a smoke VM in every placement; a
+day's counts on the daily line, and no pool job over 90 s queued → started with a refusal or a slow insert in its
+VM's walk.
 
 ## Verification
 
@@ -484,6 +606,28 @@ reported to the owner.
   costs at most one idle window of its shape (~$0.08 on C4D spot); the daily line reports pre-launched and unclaimed
   VMs and their cost.
 
+- 2026-10-21 (M6 candidate): **M6 is sized to the day, not to the priors.** The stock-out prior (a standard
+  placement as last resort) had no case to serve: spot was never refused everywhere, and every quota-refused walk
+  landed in C3D the same tick. What cost time was the external address quota (8 a region) and slow inserts that the
+  walk must wait out. So M6 removes the address dimension (Cloud NAT), adds C4D placements on default grants, and
+  races a slow insert with a second allocation rather than moving the first one. That keeps "two zones never hold
+  one allocation's VM". Alternatives considered: waiting on the address raises (out of the pool's control; both
+  partial and reconciling for hours); falling through an unknown outcome (a duplicate VM for one allocation, the
+  rule M1 keeps); always-on standard VMs (no observed case).
+
+- 2026-10-21 (CI-opt, M6): **Cloud NAT now; this supersedes "Cloud NAT only if the address quota does not keep
+  pace".** That entry's trigger has fired: the address cap binds (10 of the day's 16 quota refusals) and both raises
+  have stalled at partial grants (us-west4 8 of 64, us-central1 32 of 64). NAT also lifts the ceiling in every region
+  a placement adds, and VMs without a public IP are the better posture. Its cost (the gateway per VM-hour, about
+  $0.012 a VM in processing) is reported on the daily line. Hyperdisk Balanced raises to 4096 GB are filed for
+  us-central1, us-east1, us-east4 and us-east5, so disks do not become the next ceiling.
+
+- 2026-10-21 (M6, adversarial review on c070dbc: 1 P1, 4 P2, all taken): placements publish only after their region
+  is provisioned and smoked from the PR's checkout; a race group is one original and one child, unresolved
+  originals keep their reservation and cover; race outcomes are observed (first claim, both, neither, unresolved);
+  never-online runners are an ERROR, not cover, with alerts on them and on NAT allocation failure; the 20 s trigger
+  and the NAT port range are provisional, re-sized from logged insert times and the burst's peak port use.
+
 ## Surprises & Discoveries
 
 - 2026-10-21 (CI-opt): the first version of this spec and the owner's first standby question assumed a pool hop for
@@ -505,6 +649,10 @@ reported to the owner.
 - 2026-10-21 (M3): `lib/gce.mjs` `accessToken()` cached gcloud's token for 30 min whatever its own expiry, which
   killed a local bake with a 401 (friction #68); fixed on this branch. `get-serial-port-output` returned an empty body
   late in a VM's life; the job VM's setup and job now write to the serial console directly, stamped with the uptime.
+
+- 2026-10-21 (M6 research): both address preferences sit at partial grants, still reconciling: us-west4 8 of
+  64, us-central1 32 of 64. A default region's `HDB-TOTAL-GB` is 500 (us-west4 was raised to 4096). Every unknown
+  insert of the day settled as created, after 41–121 s.
 
 ## Outcomes & Retrospective
 
