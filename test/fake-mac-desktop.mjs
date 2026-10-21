@@ -108,15 +108,20 @@ fi
 if [[ $1 == issue && $2 == create ]]; then echo https://github.com/SSFSKIM/ci-kit-sandbox/issues/42; fi`);
   const processes = file('runner');
   writeFileSync(processes, runner);
+  // A shared instance n's runner (desktop.instance) reads from runner-actions-runner-maws-<n>, stopped through its agent.
   executable(join(bin, 'launchctl'), `printf '%s\\n' "$*" >> '${file('launchctl.calls')}'
 [[ $1 == "\${FAKE_LAUNCHCTL_HANG:-}" ]] && { ${hangs(dir).replace(/\n/g, '; ')}; }
+states='${processes}'
+[[ \${3:-} == *-[0-9]* ]] && states='${processes}'-actions-runner-maws-\${3##*-}
 case $1 in
-  kill) [[ $(head -1 '${processes}') != idle* ]] || echo stopped >'${processes}' ;;
+  kill) [[ $(head -1 "$states") != idle* ]] || echo stopped >"$states" ;;
   *) exit 64 ;;
 esac`);
   executable(join(bin, 'python3'), `printf '%s\\n' "$*" >> '${file('python.calls')}'
-state=$(head -1 '${processes}')
-if (($(grep -c '' '${processes}') > 1)); then tail -n +2 '${processes}' >'${processes}.next'; mv '${processes}.next' '${processes}'; fi
+states='${processes}'
+[[ -f '${processes}'-\${3##*/} ]] && states='${processes}'-\${3##*/}
+state=$(head -1 "$states")
+if (($(grep -c '' "$states") > 1)); then tail -n +2 "$states" >"$states.next"; mv "$states.next" "$states"; fi
 case $state in
   idle*) echo "$state" ;;
   busy) echo 'busy 4242' ;;
@@ -186,6 +191,8 @@ esac`);
     hook: (output, options) => run('desktop-check.sh', output, options),
     watch: (output, options) => run('dialog-watch.sh', output, options),
     runner: (state) => writeFileSync(processes, state),
+    // A shared instance, ~/actions-runner-maws-<n>, whose runner reads as state does.
+    instance: (n, state) => { mkdirSync(file(`actions-runner-maws-${n}`), { recursive: true }); writeFileSync(`${processes}-actions-runner-maws-${n}`, state); },
     // Holds the dialog state's lock, as a hook mid-alert would, until the returned function is called; it returns once
     // the lock is free again.
     holdLock() {

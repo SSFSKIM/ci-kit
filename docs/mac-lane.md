@@ -1,14 +1,18 @@
 # The mac lane
 
-Each Mac in the lane runs one GitHub Actions runner for `SSFSKIM/MAWS`, so MAWS's macOS-bound gates (its Electron e2e
+Each Mac in the lane runs GitHub Actions runners for `SSFSKIM/MAWS`, so MAWS's macOS-bound gates (its Electron e2e
 above all) run there instead of on the MacBook. The design is §4 of the
-[spec](doperpowers/specs/2026-10-15-ci-kit-design.md); the contract is I10.
+[spec](doperpowers/specs/2026-10-15-ci-kit-design.md); the contract is I10. A Mac's runners are its
+[instances](#instances-and-the-shared-hold): the exclusive one, which runs each job alone on the desktop, and the shared
+ones a machine opts into, which run beside each other
+([design](doperpowers/specs/2026-10-21-mac-lane-concurrency-design.md)).
 
 | | The mini | The second Mac |
 |---|---|---|
 | Machine | Mac mini, M2 Pro, 16 GB, macOS 27.0, the owner's | a rented cloud Mac mini ([Adding a Mac](#adding-a-mac)) |
 | Reached as | `ssh mini`, user `new` | `ssh <host>`, user `new`; VNC for the owner |
 | Runner | `ci-kit-mac-mini` | `ci-kit-mac-<name>` |
+| Shared runners | `ci-kit-mac-mini-<n>`, n ≥ 2, once installed | `ci-kit-mac-<name>-<n>`, likewise |
 | `CI_KIT_MACHINE` (messages, alert) | `mini`: "on the mini" | `<name>`: "on the <name>" |
 | Alert credentials | the owner's own `gh` login | `~/.config/ci-kit/alert-token`: can only write issues on `SSFSKIM/ci-kit-sandbox` |
 | Other runners | `actions-runner-ida-solution` (another repository's, independent and untouched) | none |
@@ -19,20 +23,22 @@ On every machine:
 |---|---|
 | Session | `new`'s logged-in GUI session |
 | Registration | `SSFSKIM/MAWS`, at repository level, non-ephemeral |
-| Labels | `self-hosted`, `macOS`, `ARM64` (what MAWS's `gate.yml` targets), `ci-kit-mac` |
-| Directory | `~/actions-runner-maws` (work directory `~/actions-runner-maws/_work`) |
-| LaunchAgent | `com.ssfskim.ci-kit.mac-runner` — RunAtLoad, KeepAlive, `ProcessType` Interactive, Aqua session only; its program is the hooks' `runner-hold.sh`, which execs the runner's `runsvc.sh` unless the dialog watcher holds the runner |
-| Hooks | `~/actions-runner-maws/ci-kit/hooks/job-started.sh` (the desktop check, then the sweep), `job-completed.sh` (the [drain](#the-drain)'s job end, then the sweep), copied from `mac/hooks/` |
-| Dialog watcher | `com.ssfskim.ci-kit.dialog-watch` — RunAtLoad, every 60 s, `ProcessType` Background, Aqua session only; runs the hooks' `dialog-watch.sh` ([below](#the-dialog-watcher)) |
-| Logs | `~/Library/Logs/ci-kit/mac-runner-hooks.log` (the hooks and the watcher), `mac-runner.out.log` / `.err.log` (the runner), `dialog-watch.err.log`, `~/actions-runner-maws/_diag/` |
-| State | `~/Library/Logs/ci-kit/dialog-alert.state` (the dialog episode), `runner-drained` (the watcher's hold on the runner) |
+| Labels | the exclusive instance: `self-hosted`, `macOS`, `ARM64` (what MAWS's `gate.yml` targets), `ci-kit-mac`; a shared instance: `ci-kit-mac-shared` alone |
+| Directory | the exclusive instance: `~/actions-runner-maws` (work directory `~/actions-runner-maws/_work`); shared instance n: `~/actions-runner-maws-<n>` |
+| LaunchAgent | `com.ssfskim.ci-kit.mac-runner` (shared instance n: `com.ssfskim.ci-kit.mac-runner-<n>`) — RunAtLoad, KeepAlive, `ProcessType` Interactive, Aqua session only; its program is the instance's own `runner-hold.sh`, which execs the runner's `runsvc.sh` unless the dialog watcher holds the runners |
+| Hooks | `<instance>/ci-kit/hooks/job-started.sh` (admission on a Mac with shared instances, the desktop check, then the sweep), `job-completed.sh` (the [drain](#the-drain)'s job end, then the sweep, then the admission's release), a full copy from `mac/hooks/` in each instance |
+| Dialog watcher | `com.ssfskim.ci-kit.dialog-watch`, one per machine — RunAtLoad, every 60 s, `ProcessType` Background, Aqua session only; runs the exclusive instance's `dialog-watch.sh` ([below](#the-dialog-watcher)) |
+| Logs | `~/Library/Logs/ci-kit/mac-runner-hooks.log` (the hooks and the watcher, every instance's), `mac-runner.out.log` / `.err.log` (the exclusive runner; shared instance n's are `mac-runner-<n>.*`), `dialog-watch.err.log`, `<instance>/_diag/` |
+| State | `~/Library/Logs/ci-kit/dialog-alert.state` (the dialog episode), `runner-drained` (the watcher's hold on every runner); with shared instances, `desktop.lock`, `shared-hold`, `shared-running-<n>` and `shared-hold.alert` ([the shared hold](#instances-and-the-shared-hold)) |
 
 **Why a LaunchAgent.** Electron windows need a WindowServer, which only the user's GUI session has; a LaunchDaemon runs
-outside it. **Why one runner per machine.** Concurrency is one per machine: e2e groups contend for the desktop (focus,
-pointer, clipboard). Every runner of the lane carries the same labels, so GitHub gives each job to whichever machine is
-idle, and one run's groups can split across the machines (the jobs API's `runner_name` says where each ran). SSFSKIM is
-a user account, which has no runner groups, and the lane has no per-machine label: to keep jobs off a machine, disable
-its agent (below).
+outside it. **Why one exclusive runner per machine.** e2e groups contend for the desktop (focus, pointer, clipboard), so
+a job that has not been shown to be safe beside another runs alone: on the machine's exclusive instance, the only one
+carrying the labels MAWS's jobs ask for. Every exclusive runner of the lane carries the same labels, so GitHub gives
+each job to whichever machine is idle, and one run's groups can split across the machines (the jobs API's
+`runner_name` says where each ran). SSFSKIM is a user account, which has no runner groups, and the lane has no
+per-machine label: to keep jobs off a machine, disable its agents (below). Groups shown to be safe beside each other
+ask for `ci-kit-mac-shared` instead and run on the shared instances ([below](#instances-and-the-shared-hold)).
 
 **Never other repositories' code.** The runners are registered to MAWS alone, and the kit's planner refuses the `mac`
 lane on a public repository, so no stranger's fork can reach the lane's machines.
@@ -64,11 +70,14 @@ gh api repos/SSFSKIM/MAWS/actions/runners --jq '.runners[]|[.name,.status,.busy]
 #   expect: ci-kit-mac-mini  online  false
 ```
 
-Registering (a new machine, or the mini again after a removal) pipes a token and names the runner:
+Registering (a new machine, or the mini again after a removal) pipes a token and names the runner, and adding shared
+instances pipes a token for theirs:
 
 ```bash
 gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token \
   | ssh mini '~/Developer/GitHub/ci-kit/mac/install.sh --name ci-kit-mac-mini'
+gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token \
+  | ssh mini '~/Developer/GitHub/ci-kit/mac/install.sh --shared 2'   # ci-kit-mac-mini-2 and -3, installed disabled
 ```
 
 - **The token** is read from stdin only while the runner is unregistered, and handed to the runner's `config.sh`
@@ -79,10 +88,21 @@ gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token
   `.runner` and refuses a different `--name`; renaming is a removal and a new registration. The part after
   `ci-kit-mac-` is the machine's short name, which the hooks' messages and alert use ("on the mini"). It must be
   lowercase letters, digits and `-`, because the alert title carries it ([the contract](#the-alert-title)); `install.sh`
-  refuses any other name before anything changes.
-- **Re-running** (no token, no name) refreshes the hooks, the runner's `.env` and `.path`, and both LaunchAgents, and
-  reloads them, the watcher's first. It refuses while a job runs, because reloading the agent kills the job; a job is
-  a process whose executable is the runner's `Runner.Worker` (`runner-state.py`, below). While the watcher holds the
+  refuses any other name before anything changes. A new machine's short name, or that of one with shared instances,
+  may not end in `-<number>`: `ci-kit-mac-mini-2` is the mini's first shared runner, and `--replace` would let a
+  machine named `mini-2` take it over.
+- **Shared instances.** `--shared <n>` sets their count: instances 2 to n+1, each named `ci-kit-mac-<machine>-<i>`
+  after the machine and registered with `--labels ci-kit-mac-shared --no-default-labels`, so it carries that label
+  alone. One token on stdin registers every instance that needs it. Without `--shared`, a re-run keeps the count
+  installed (the shared LaunchAgents), and a machine with none has none: sharing is opted into. Lowering the count
+  unloads the extra instances and removes their LaunchAgents; their registrations and directories stay, as an
+  uninstall leaves them.
+- **Re-running** (no token, no name) refreshes every instance's hooks, `.env` and `.path`, and every LaunchAgent, and
+  reloads them, the watcher's first. It refuses while a job runs on any instance, because reloading an agent kills its
+  job; a job is a process whose executable is that instance's `Runner.Worker` (`runner-state.py`, below). The
+  exclusive instance ends enabled, as before. **A shared instance keeps the enabled state launchd has for it**
+  (`launchctl print-disabled`; a state that cannot be read counts as disabled), and a new one is installed disabled,
+  so a refresh never turns a shared instance on or off: that is done per instance (below). While the watcher holds the
   runner, the install loads it held and says so (`loaded, held by the dialog watcher (…)`) instead of waiting for it
   to listen: it starts when the episode closes. New hooks and the optional
   compiled cursor helper are staged and checked in a sibling directory. Darwin's atomic `RENAME_SWAP` exchanges
@@ -97,31 +117,39 @@ gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token
 - **The runner version** is pinned with its checksum in `install.sh` for the first install; after that the runner
   updates itself, as GitHub requires.
 - **Environment.** `.env` sets `LANG=en_US.UTF-8` (the mini's locale is Korean, and jobs parse tool output), the two
-  hook variables, and `CI_KIT_MACHINE`, the machine's short name. `.path` is Homebrew's tools, then the system's.
+  hook variables (each instance's own copy of the hooks), and `CI_KIT_MACHINE`, the machine's short name, the same in
+  every instance. A shared instance's adds `CI_KIT_SHARED_DESKTOP=1`, which its jobs read to know the desktop has
+  neighbours (MAWS's latency budgets treat the host as loaded under it). `.path` is Homebrew's tools, then the
+  system's.
 
-Disable and enable (the runner stays registered; GitHub shows it offline, and removes a self-hosted runner after 14
-days offline). Disabling boots the agent out, which kills a running job: do it while the runners list shows the
-machine's runner `busy` false. The watcher never loads, unloads, enables or disables the agent, so a disabled runner
-stays off whatever its [drain](#the-drain) does.
+Disable and enable, one instance at a time (the runner stays registered; GitHub shows it offline, and removes a
+self-hosted runner after 14 days offline). Disabling boots the agent out, which kills a running job: do it while the
+runners list shows that runner `busy` false. The watcher never loads, unloads, enables or disables an agent, so a
+disabled runner stays off whatever its [drain](#the-drain) does. **A hold, a human's or a coordinator's, covers every
+instance**: boot out and disable each agent, `com.ssfskim.ci-kit.mac-runner` and every
+`com.ssfskim.ci-kit.mac-runner-<n>`, and bring back only those that were enabled.
 
 ```bash
-host=mini   # the machine's ssh host
-ssh $host 'launchctl bootout gui/$(id -u)/com.ssfskim.ci-kit.mac-runner; launchctl disable gui/$(id -u)/com.ssfskim.ci-kit.mac-runner'
-ssh $host 'launchctl enable gui/$(id -u)/com.ssfskim.ci-kit.mac-runner; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ssfskim.ci-kit.mac-runner.plist'
+host=mini agent=com.ssfskim.ci-kit.mac-runner   # the machine's ssh host; a shared instance's is com.ssfskim.ci-kit.mac-runner-<n>
+ssh $host "launchctl bootout gui/\$(id -u)/$agent; launchctl disable gui/\$(id -u)/$agent"
+ssh $host "launchctl enable gui/\$(id -u)/$agent; launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/$agent.plist"
+ssh $host 'launchctl print-disabled gui/$(id -u) | grep ci-kit'   # which agents are enabled
 ```
 
-`install.sh --disabled` installs or refreshes with the runner's agent left disabled. The watcher runs in every mode:
+`install.sh --disabled` installs or refreshes with every runner's agent left disabled. The watcher runs in every mode:
 a machine kept off CI still reports a dialog.
 
 Remove, one machine at a time (`config.sh remove` deletes only the registration that machine holds). `--uninstall`
-unloads and removes both LaunchAgents and the watcher's hold, and refuses while a job runs:
+unloads and removes every instance's LaunchAgent and the watcher's, the watcher's hold and the shared hold, and refuses
+while a job runs on any instance:
 
 ```bash
 host=mini   # the machine's ssh host
 ssh $host '~/Developer/GitHub/ci-kit/mac/install.sh --uninstall'
-gh api -X POST repos/SSFSKIM/MAWS/actions/runners/remove-token --jq .token \
-  | ssh $host 'read -r t; cd ~/actions-runner-maws && ACTIONS_RUNNER_INPUT_TOKEN=$t ./config.sh remove'
-ssh $host 'rm -rf ~/actions-runner-maws'
+for dir in actions-runner-maws actions-runner-maws-2; do   # every instance's directory
+  gh api -X POST repos/SSFSKIM/MAWS/actions/runners/remove-token --jq .token \
+    | ssh $host "read -r t; cd ~/$dir && ACTIONS_RUNNER_INPUT_TOKEN=\$t ./config.sh remove && cd && rm -rf ~/$dir"
+done
 ```
 
 A rented Mac being given back also loses the janitor and the alert token; revoke the token on GitHub once no machine
@@ -132,6 +160,10 @@ ssh $host '~/Developer/GitHub/ci-kit/host/install.sh --uninstall; rm -f ~/.confi
 ```
 
 ## The job hooks
+
+Every instance runs its own copy of the hooks, and each hook acts on the instance that runs it: the sweep finds its
+work directory from where its copy sits. On a Mac with shared instances, the job-started hook first admits the job to
+the desktop ([the shared hold](#instances-and-the-shared-hold)); on one without, it is the hook described here.
 
 **A system dialog in front fails the job at once.** Before anything else, the job-started hook
 (`mac/hooks/desktop-check.sh`) reads the frontmost app with `lsappinfo`. If it is `UserNotificationCenter`,
@@ -252,7 +284,8 @@ any process the computer-use read finds. Posture and hooks-log failures never af
 
 Before each job and after it, the hooks kill every process of the runner's user that a job left behind:
 
-- a process that **runs from** the work directory: a path under `~/actions-runner-maws/_work/` in its command line
+- a process that **runs from** the instance's work directory: a path under `~/actions-runner-maws/_work/` (a shared
+  instance's `~/actions-runner-maws-<n>/_work/`) in its command line
   (the job's Electron and its helpers, the Node of the runner's tool cache, vitest, Playwright);
 - a process that **sits in** it: its working directory is under it;
 - every **descendant** of those, wherever it sits (an app's pty shell in `/tmp` is the app's).
@@ -340,6 +373,94 @@ same on every refused job, and is fixed on the machine. No read starts after the
 the bound and one read. The wait counts toward the job's `timeout-minutes`, which the caller sizes for the bound and the
 measured run together.
 
+## Instances and the shared hold
+
+A Mac's jobs run one at a time on its **exclusive instance**, and, once the machine has **shared instances**
+(`install.sh --shared <n>`), the jobs that ask for them run beside each other there. The design is the
+[concurrency spec](doperpowers/specs/2026-10-21-mac-lane-concurrency-design.md).
+
+**Admission is by labels.** The exclusive instance carries today's labels, so every job written for the lane reaches
+only it: an old commit's workflow, a rerun, a group nobody classified, a measured or foreground group. A shared instance
+carries `ci-kit-mac-shared` alone, with none of the runner's defaults, so a job reaches it only if it asks for that
+label, and nothing asking for `self-hosted`, `macOS` or `ARM64` can. **What a calling repository does to opt a group
+in:** run it on `runs-on: [ci-kit-mac-shared]` (MAWS: its `MAC_SHARED_E2E` list), only once a trial has shown its
+results unchanged beside neighbours; and give such a job a `timeout-minutes` that covers the shared wait below as well
+as its run. Every other job keeps its labels and runs alone. **What such a job may rely on:** its runner environment
+sets `CI_KIT_SHARED_DESKTOP=1`, which no exclusive job's does, and its runner's name, `RUNNER_NAME`, is
+`ci-kit-mac-<machine>-<n>`, ending in `-<n>`, the instance's number (2 and above); `install.sh` keeps the short name of
+a machine with shared instances from ending in `-<number>` itself. MAWS gives each instance its own window origin and
+build cache by that number.
+
+**Exclusive and shared jobs never overlap.** Both kinds of job-started hook decide under one lock,
+`~/Library/Logs/ci-kit/desktop.lock` (flock(2) through perl, which the kernel releases with its holder, so a process
+killed while holding it leaves no lock behind), so no job's check can be overtaken by another's write:
+
+- **A shared job** writes its instance's running marker, `shared-running-<n>`, once no hold is up, and then runs
+  today's start. While the shared hold is up, or the dialog watcher holds the runners (`runner-drained`), it parks in
+  its hook, checking each second, for at most `CI_KIT_SHARED_WAIT` minutes (60, in the runner's environment); past
+  that it is refused, naming the hold:
+
+  ```
+  ci-kit: shared runner 2 on the mini waited 60 min to start (an exclusive job, run 18742 job e2e, holds the desktop since 2026-10-21T10:02:11Z) — rerun
+  ```
+
+- **An exclusive job** raises the shared hold, `shared-hold`, so no shared job starts until it ends, and waits for
+  the running ones: until no running marker names a live worker, for at most `CI_KIT_EXCLUSIVE_WAIT` minutes (10).
+  It then sweeps every shared instance's work directory, so nothing a dead or finished shared job left runs beside
+  it, sparing every live job worker and what it started (a shared job parked in its own hook sits in its workspace).
+  A worker is known by the kernel's path of its executable (`runner-state.py --workers`), never by a command line,
+  which `ps` prints unquoted; and the sweep is the exclusive instance's own copy, given that work directory, so a
+  shared instance an install left half-way, without its hooks, stops nothing.
+  Then it runs today's start. Past its bound, or when a sweep fails, it is refused:
+
+  ```
+  ci-kit: the shared runners on the mini did not make way for an exclusive job (after 10 min: shared runner 2: run 18740 job e2e (worker 51234)); waited 600 s — rerun
+  ```
+
+- **A marker names a job** by its run, its job and its worker: the `Runner.Worker` that runs the hooks, by its pid and
+  the start time the kernel gives it, so a reused pid or a reboot cannot pass for it. A running marker whose worker is
+  gone is stale, and counts for nothing.
+
+**A claim is kept until the job's end.** A running marker written, or the hold raised, is released only by the job's
+job-completed hook, after its own sweep, whatever became of its start. A refused job-started hook fails its step, but
+the job's steps whose condition runs after a failure (`failure()`, `always()`, `!cancelled()`, `cancelled()`) still
+run, and the runner runs the job-completed hook at the end of every job (both are pre- and post-job steps with
+`always()`, actions/runner `JobExtension.cs`). **The contract for a calling repository:** a step that can run after a
+failed start must not use the desktop. MAWS pins this in its own tests.
+
+**Recovery.**
+- **A failed sweep keeps the claim.** At an exclusive job's start or end, the hold stays up, and no shared job starts
+  beside what it left. A shared job's marker goes stale with its worker, and the next exclusive job's sweep tries
+  that work directory again.
+- **A crashed exclusive job** (its worker died, so its job-completed hook never ran) leaves the hold naming a dead
+  worker. The dialog watcher reconciles it at each read: under the lock, it sweeps the exclusive instance's work
+  directory, sparing every live worker (the next job may have started), and drops the hold. A sweep that fails keeps
+  the hold up and opens one issue in `SSFSKIM/ci-kit-sandbox`, closed once no hold is up. Its title,
+  `ci-kit alert: shared hold stuck on <machine> since <minute>: …`, is outside [the dialog alerts'
+  pattern](#the-alert-title), so MAWS's `ci-gate.sh` does not take it for a dialog. The exclusive instance's next job,
+  finding such a hold, does the same under the lock before raising its own.
+- **After a reboot** every wrapper starts its runner (only the dialog watcher's marker holds one), and the markers left
+  on disk name workers that are gone: the stale running markers count for nothing, and the hold is reconciled by the
+  watcher or the next exclusive job.
+
+**Every step goes to the log**, as `shared-hold` lines in the hooks log and in the job's log: the hold raised, each
+job waited for, each stale marker, the sweeps, the admission and how long it waited, a parked job and its admission,
+each refusal, each release.
+
+**What it costs.** A shared job can be given to its runner during an exclusive job; it prepares (its workspace and
+action downloads, "Set up job") and parks in its hook, at most one per shared instance at a time. An exclusive job
+waits for running shared jobs to end, at most its bound, and the exclusive instance runs no shared job.
+
+**With no shared instance** (no `~/actions-runner-maws-<n>` directory) the hooks take no lock, write no marker and log
+no admission line: they are the hooks this page described before shared instances.
+
+Check by hand:
+
+```bash
+ssh mini 'cat ~/Library/Logs/ci-kit/shared-hold ~/Library/Logs/ci-kit/shared-running-* 2>/dev/null; grep shared-hold ~/Library/Logs/ci-kit/mac-runner-hooks.log | tail -5'
+#   expect, between jobs: no output from the markers
+```
+
 ## The dialog watcher
 
 The job hook sees a dialog only when a job starts. On 2026-10-17 securityd crashed, and a SecurityAgent keychain-unlock
@@ -405,12 +526,13 @@ second, who opened it (the watcher, or a refused job and its run id), the source
 
 With two runners on the same labels, a machine whose hook refuses every job in seconds draws most of the queue and fails
 it, while the healthy machine is busy with one job (2026-10-17, the mini alone: 14 jobs refused in three minutes). So
-while an episode is open, the watcher holds the runner, and stops it between jobs. Queued jobs then go to the other
+while an episode is open, the watcher holds every runner of the machine, the exclusive and the shared ones, and stops
+each between its jobs. Queued jobs then go to the other
 machine, or wait. On a single machine, the drain turns refusals into queued jobs, which run once the dialog is
 dismissed and the episode closes.
 
-- **The hold** is the marker `~/Library/Logs/ci-kit/runner-drained`, written when the episode opens. The runner's
-  LaunchAgent runs `runner-hold.sh`, which execs the runner's `runsvc.sh` only once the marker is absent, and otherwise
+- **The hold** is the marker `~/Library/Logs/ci-kit/runner-drained`, written when the episode opens. Every instance's
+  LaunchAgent runs its own `runner-hold.sh`, which execs the runner's `runsvc.sh` only once the marker is absent, and otherwise
   waits, checking every 5 s. Absent means the lookup says no such file, a missing directory included. A marker that
   cannot be looked up, behind a directory that is not searchable for instance, holds the runner too, and the wrapper
   logs why. KeepAlive, RunAtLoad and a reboot can therefore start only the waiting wrapper, never the runner. The
@@ -422,7 +544,8 @@ dismissed and the episode closes.
   later, twice in a row (09:58:58 → 09:59:00, 09:59:07 → 09:59:09), while the drain waited for its 60 s tick: both
   were refused. So the runner is stopped at one of two moments.
   - **When its job ends.** The job-completed hook runs inside the job's worker, as the job's last step and before the
-    worker reports the job's result, so it never stops the runner itself. It starts `dialog-watch.sh --job-end`,
+    worker reports the job's result, so it never stops the runner itself. It starts its own instance's
+    `dialog-watch.sh --job-end`, which stops that instance's runner,
     detached from the job: its own session, outside the workspace, without the job's `RUNNER_TRACKING_ID` (the worker
     kills what still carries it after the last step) and without the hook's output, which the worker waits on. That
     process sees the worker exit as it happens (`runner-state.py --wait`, a kqueue), and the hook returns only once it
@@ -430,12 +553,13 @@ dismissed and the episode closes.
     GitHub before it exits, so if the marker exists then, it stops the runner at once: tens of milliseconds, against
     the 2 s the listener takes to acquire the next job. Held or not is decided at the exit, so an episode that opens
     while a job finishes counts; without the marker it does nothing and logs nothing.
-  - **When it is confirmed idle.** On a watcher read with the hold on and the runner idle, the watcher reads again
-    5 s later and stops the runner only if the two reads match (idle, below). Any difference waits for the next
-    read.
-- **Idle** is what `runner-state.py` reads from the kernel's executable paths of this user's processes (`proc_pidpath`,
-  `bin` resolved, since a runner that updated itself runs from `bin.<version>`): the listener runs and no process is
-  `~/actions-runner-maws/bin/Runner.Worker`. A command line, `argv[0]` or working directory naming that path does not
+  - **When it is confirmed idle.** On a watcher read with the hold on, the watcher reads every instance; when any is
+    idle it reads those again 5 s later and stops each whose two reads match (idle, below). Any difference waits for
+    the next read.
+- **Idle** is what `runner-state.py` reads, for one instance, from the kernel's executable paths of this user's
+  processes (`proc_pidpath`, `bin` resolved, since a runner that updated itself runs from `bin.<version>`): the
+  instance's listener runs and no process is its `bin/Runner.Worker` (`~/actions-runner-maws/bin/Runner.Worker` for the
+  exclusive instance). A command line, `argv[0]` or working directory naming that path does not
   count. A process whose path cannot be read (its file was deleted or replaced) counts as a job when the kernel still
   names it `Runner.Worker`. A read that fails or times out counts as a job too: the runner is left alone, and the
   watcher asks again next minute. An idle read also carries the length of the listener's newest diag log
@@ -444,7 +568,7 @@ dismissed and the episode closes.
   which delays a stop by one read. Two matching idle reads therefore saw no job running and none given in between.
   On 2026-10-18 at 09:59:18 the drain stopped the mini on a single idle read in the second it was given a job, and the
   job stayed in progress on the offline runner.
-- **Releasing.** When the episode closes, the watcher removes the marker, and the wrapper starts the runner within
+- **Releasing.** When the episode closes, the watcher removes the marker, and every wrapper starts its runner within
   5 s. A marker left while no episode is pending or open goes at the next read. The watcher writes and removes the
   marker under the episode's lock, in the same step as its read, so it never releases a runner for an episode a job
   hook has just opened.
@@ -457,8 +581,9 @@ dismissed and the episode closes.
   exit) is logged, and the next confirmed idle read stops the runner. If the stop reaches the listener before it has
   noticed the worker's exit, its line for that job in `mac-runner.out.log` says `Canceled`; GitHub keeps the result the
   worker reported.
-- Every hold, stop, release and job left alone is a `dialog-watch … drain:` line in the hooks log. The wrapper's own
-  `runner-hold:` lines are in `mac-runner.out.log`.
+- Every hold, stop, release and job left alone is a `dialog-watch … drain:` line in the hooks log, naming a shared
+  instance as `shared runner <n>`. Each wrapper's own `runner-hold:` lines are in its instance's
+  `mac-runner[-<n>].out.log`.
 
 **Cheap and bounded.** A read with no dialog and no episode costs two `lsappinfo` calls, 5 s deadline each, and writes
 nothing. Every other external call has its own supervised deadline, which kills and reaps it even when it ignores
@@ -506,10 +631,16 @@ ssh mini 'xattr -p com.apple.quarantine /Applications/LibreOffice.app'
 
 ## Adding a Mac
 
-A second machine runs a second runner with the same labels, so MAWS's `[self-hosted, macOS, ARM64]` jobs go to
-whichever machine is idle. Below, `<host>` is the MacBook's `ssh` host for it and `<name>` its short name, a lowercase
-word of letters, digits and `-`: the runner is `ci-kit-mac-<name>`, and its refusals and alert say "on the <name>", so
-pick a word that reads there.
+A second machine runs a second exclusive runner with the same labels, so MAWS's `[self-hosted, macOS, ARM64]` jobs go
+to whichever machine is idle. Below, `<host>` is the MacBook's `ssh` host for it and `<name>` its short name, a
+lowercase word of letters, digits and `-`, not ending in `-<number>` (a shared runner's name does): the runner is
+`ci-kit-mac-<name>`, and its refusals and alert say "on the <name>", so pick a word that reads there.
+
+**The instance count.** A new machine starts with its exclusive instance alone. Shared instances are added once the
+machine is accepted (step 5), with `install.sh --shared <n>` and a registration token as in
+[Install](#install-update-remove); they are installed disabled, and enabled per instance for a trial and then for good
+([Instances and the shared hold](#instances-and-the-shared-hold)). Memory sets the count: two shared jobs at once fit
+16 GB by estimate, and a third needs a trial's memory reads.
 
 **The machine.** Apple silicon, 16 GB or more (the mini is an M2 Pro with 16 GB), macOS 27 like the mini (27.0).
 

@@ -11,7 +11,7 @@ const repo = fileURLToPath(new URL('../', import.meta.url));
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'ci-kit-install-')));
 after(() => rmSync(root, { recursive: true, force: true }));
 const python = spawnSync('python3', ['-I', '-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).stdout.trim();
-const hookFiles = ['job-started.sh', 'job-completed.sh', 'desktop-check.sh', 'desktop-posture.sh', 'dialog.sh', 'dialog-watch.sh', 'runner-hold.sh', 'runner-state.py', 'sweep.mjs', 'strays.mjs', 'terminate.mjs'];
+const hookFiles = ['job-started.sh', 'job-completed.sh', 'desktop-check.sh', 'desktop-posture.sh', 'dialog.sh', 'dialog-watch.sh', 'runner-hold.sh', 'runner-state.py', 'sweep.mjs', 'strays.mjs', 'terminate.mjs', 'instances.sh', 'shared-hold.sh'];
 const watchAgent = 'com.ssfskim.ci-kit.dialog-watch';
 const runnerAgent = 'com.ssfskim.ci-kit.mac-runner';
 const macOnly = { skip: process.platform !== 'darwin' };
@@ -28,8 +28,14 @@ function fixture({ registered = 'ci-kit-mac-mini' } = {}) {
   const executable = (path, body) => { writeFileSync(path, `#!/bin/bash\n${body}\n`); chmodSync(path, 0o755); };
   const fake = (name, body) => executable(join(bin, name), body);
   // A runner bootstrapped reports in its log.
+  // launchd keeps which agents are enabled (print-disabled prints it); each runner bootstrapped reports in its log.
   fake('launchctl', `echo "$*" >> "$HOME/launchctl.calls"
-[[ $1 == bootstrap && $3 == *${runnerAgent}.plist ]] && echo 'Listening for Jobs' >> "$HOME/Library/Logs/ci-kit/mac-runner.out.log"
+db=$HOME/launchctl.db
+case $1 in
+  enable | disable) label=\${2##*/}; { grep -vF "\\"$label\\" " "$db" 2>/dev/null; echo "\\"$label\\" => \${1}d"; } >"$db.tmp"; mv "$db.tmp" "$db" ;;
+  print-disabled) printf 'disabled services = {\n'; [[ -f $db ]] && sed 's/^/\t/' "$db"; printf '}\n'; exit 0 ;;
+esac
+if [[ $1 == bootstrap && $3 == *${runnerAgent}*.plist ]]; then log=\${3##*/}; log=\${log%.plist}; echo 'Listening for Jobs' >> "$HOME/Library/Logs/ci-kit/\${log#com.ssfskim.ci-kit.}.out.log"; fi
 [[ $1 != print ]]`);
   fake('plutil', 'exit 0');
   fake('pgrep', 'exit 1');
@@ -59,12 +65,18 @@ exec /bin/cp "$@"`);
   const runner = join(home, 'actions-runner-maws');
   mkdirSync(join(runner, 'bin'), { recursive: true });
   // A registration records its arguments and whether the token came through the environment, then writes .runner.
-  executable(join(runner, 'config.sh'), `printf '%s\\n' "$@" > "$HOME/config.args"
+  // An instance's runner files. A registration records its arguments (in the instance, and the last in HOME) and whether
+  // the token came through the environment, then writes .runner.
+  const instance = (dir, registeredAs) => {
+    mkdirSync(join(dir, 'bin'), { recursive: true });
+    executable(join(dir, 'config.sh'), `printf '%s\\n' "$@" > "$HOME/config.args"; cp "$HOME/config.args" config.args
 printf '%s' "\${ACTIONS_RUNNER_INPUT_TOKEN-}" > "$HOME/config.token"
 while (($# > 0)); do [[ $1 == --name ]] && name=$2; shift; done
 printf '\\xef\\xbb\\xbf{"agentName": "%s"}' "$name" > .runner`);
-  executable(join(runner, 'bin/runsvc.sh'), 'echo fixture-runner');
-  if (registered) writeFileSync(join(runner, '.runner'), dotRunner(registered));
+    executable(join(dir, 'bin/runsvc.sh'), 'echo fixture-runner');
+    if (registeredAs) writeFileSync(join(dir, '.runner'), dotRunner(registeredAs));
+  };
+  instance(runner, registered);
   const hooks = join(runner, 'ci-kit/hooks');
   mkdirSync(hooks, { recursive: true });
   for (const file of [...hookFiles, 'cursor-park', 'obsolete']) writeFileSync(join(hooks, file), `old ${file}\n`);
@@ -73,7 +85,9 @@ printf '\\xef\\xbb\\xbf{"agentName": "%s"}' "$name" > .runner`);
   const run = (script = 'mac/install.sh', args = ['--disabled'], extra = {}, input = '') => spawnSync('/bin/bash', [join(kit, script), ...args], {
     encoding: 'utf8', timeout: 15_000, env: { ...env, ...extra }, input,
   });
-  return { home, kit, bin, env, runner, hooks, executable, run, snapshot };
+  // Shared instance n's runner files, registered as given (null: not yet).
+  const shared = (n, registeredAs = null) => { const dir = join(home, `actions-runner-maws-${n}`); instance(dir, registeredAs); return dir; };
+  return { home, kit, bin, env, runner, hooks, executable, run, snapshot, shared };
 }
 
 // run-node.sh needs only bash builtins, so its PATH can be one empty directory: unlike /usr/bin:/bin, it cannot
@@ -393,4 +407,160 @@ test('--uninstall unloads and removes both LaunchAgents and the marker, and keep
   assert.ok(existsSync(join(f.runner, '.runner')));
   assertNewHooks(f);
   assert.equal(f.run(undefined, ['--uninstall', '--name', 'ci-kit-mac-mini']).status, 2, '--uninstall takes nothing else');
+});
+
+// Shared instances (--shared, mac/hooks/instances.sh).
+const sharedAgent = (n) => `${runnerAgent}-${n}`;
+const argsOf = (dir) => readFileSync(join(dir, 'config.args'), 'utf8').trim().split('\n');
+// The labels a runner registers with: the defaults (self-hosted, macOS, ARM64) unless --no-default-labels, then --labels.
+function labelsOf(args) {
+  const own = args[args.indexOf('--labels') + 1].split(',');
+  return args.includes('--no-default-labels') ? own : ['self-hosted', 'macOS', 'ARM64', ...own];
+}
+// GitHub gives a job to a runner that carries every label the job asks for, case-insensitively.
+const reaches = (runsOn, labels) => [runsOn].flat().every((label) => labels.some((own) => own.toLowerCase() === label.toLowerCase()));
+
+test('--shared 2 registers two shared instances, named after the machine, each with its own hooks and environment, installed disabled', macOnly, () => {
+  const f = fixture();
+  const dirs = [f.shared(2), f.shared(3)];
+  const result = f.run(undefined, ['--shared', '2'], {}, 'registration-token-123\n');
+  assert.equal(result.status, 0, result.stderr);
+  const domain = `gui/${uidOf()}`;
+  dirs.forEach((dir, i) => {
+    const n = i + 2;
+    const args = argsOf(dir);
+    assert.equal(args[args.indexOf('--name') + 1], `ci-kit-mac-mini-${n}`);
+    // A contract (docs/mac-lane.md): under CI_KIT_SHARED_DESKTOP=1, MAWS reads the instance from RUNNER_NAME's last -<n>.
+    assert.equal(/-([0-9]+)$/.exec(args[args.indexOf('--name') + 1])?.[1], String(n));
+    assert.ok(!args.some((arg) => arg.includes('registration-token-123')), 'the token is not an argument');
+    assert.equal(readFileSync(join(dir, '.env'), 'utf8'), [
+      'LANG=en_US.UTF-8', `ACTIONS_RUNNER_HOOK_JOB_STARTED=${dir}/ci-kit/hooks/job-started.sh`,
+      `ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${dir}/ci-kit/hooks/job-completed.sh`, 'CI_KIT_MACHINE=mini', 'CI_KIT_SHARED_DESKTOP=1', '',
+    ].join('\n'));
+    for (const file of hookFiles) assert.equal(readFileSync(join(dir, 'ci-kit/hooks', file), 'utf8'), readFileSync(join(f.kit, 'mac/hooks', file), 'utf8'), `${n}: ${file}`);
+    const plist = readPlist(join(f.home, `Library/LaunchAgents/${sharedAgent(n)}.plist`));
+    assert.equal(plist.Label, sharedAgent(n));
+    assert.deepEqual(plist.ProgramArguments, ['/bin/bash', join(dir, 'ci-kit/hooks/runner-hold.sh')]);
+    assert.equal(plist.WorkingDirectory, dir);
+    assert.equal(plist.StandardOutPath, join(f.home, `Library/Logs/ci-kit/mac-runner-${n}.out.log`));
+    assert.ok(calls(f).includes(`disable ${domain}/${sharedAgent(n)}`));
+    assert.ok(!calls(f).includes(`bootstrap ${domain} ${join(f.home, `Library/LaunchAgents/${sharedAgent(n)}.plist`)}`), 'a new shared instance starts disabled');
+    assert.match(result.stdout, new RegExp(`installed, disabled: ci-kit-mac-mini-${n} \\(${sharedAgent(n)}\\) is not loaded`));
+  });
+  // The exclusive instance is today's.
+  assert.equal(readFileSync(join(f.runner, '.env'), 'utf8'), envFile(f, 'mini'));
+  assert.equal(readPlist(join(f.home, `Library/LaunchAgents/${runnerAgent}.plist`)).StandardOutPath, join(f.home, 'Library/Logs/ci-kit/mac-runner.out.log'));
+  assert.match(result.stdout, /running: ci-kit-mac-mini listens for jobs of https:\/\/github.com\/SSFSKIM\/MAWS\n/);
+  assertNewHooks(f);
+});
+
+test('a shared runner carries ci-kit-mac-shared alone: no job written for the exclusive instance, nor a bare self-hosted one, reaches it', macOnly, () => {
+  const f = fixture({ registered: null });
+  const dir = f.shared(2);
+  const result = f.run(undefined, ['--name', 'ci-kit-mac-mini', '--shared', '1'], {}, 'registration-token-123\n');
+  assert.equal(result.status, 0, result.stderr);
+  const exclusive = labelsOf(argsOf(f.runner));
+  const shared = labelsOf(argsOf(dir));
+  assert.deepEqual(shared, ['ci-kit-mac-shared']);
+  for (const runsOn of [['self-hosted', 'macOS', 'ARM64'], ['self-hosted', 'macOS', 'ARM64', 'ci-kit-mac'], 'self-hosted', ['self-hosted'], ['macOS'], ['self-hosted', 'ci-kit-mac-shared']]) {
+    assert.ok(!reaches(runsOn, shared), `${runsOn} must not reach a shared runner`);
+  }
+  assert.ok(reaches(['ci-kit-mac-shared'], shared));
+  assert.ok(reaches(['self-hosted', 'macOS', 'ARM64'], exclusive), "today's jobs reach the exclusive instance");
+  assert.ok(!reaches(['ci-kit-mac-shared'], exclusive), 'a shared job never reaches the exclusive instance');
+});
+
+test('a re-run keeps the installed count and each shared instance\'s enabled state; --shared lowers it, keeping registrations', macOnly, () => {
+  const f = fixture();
+  const dirs = [f.shared(2), f.shared(3)];
+  assert.equal(f.run(undefined, ['--shared', '2'], {}, 'registration-token-123\n').status, 0);
+  const domain = `gui/${uidOf()}`;
+  const plist = (n) => join(f.home, `Library/LaunchAgents/${sharedAgent(n)}.plist`);
+  // A trial window: shared runner 2 enabled by hand.
+  spawnSync(join(f.bin, 'launchctl'), ['enable', `${domain}/${sharedAgent(2)}`], { env: f.env });
+  rmSync(join(f.home, 'launchctl.calls'));
+  const refresh = f.run(undefined, []);
+  assert.equal(refresh.status, 0, refresh.stderr);
+  assert.ok(calls(f).includes(`bootstrap ${domain} ${plist(2)}`), 'the enabled one is reloaded');
+  assert.ok(calls(f).includes(`disable ${domain}/${sharedAgent(3)}`) && !calls(f).includes(`bootstrap ${domain} ${plist(3)}`), 'the disabled one stays off');
+  assert.match(refresh.stdout, /running: ci-kit-mac-mini-2 listens for jobs of https:\/\/github.com\/SSFSKIM\/MAWS that ask for ci-kit-mac-shared/);
+  // A state launchd cannot report counts as disabled.
+  rmSync(join(f.home, 'launchctl.db'));
+  rmSync(join(f.home, 'launchctl.calls'));
+  assert.equal(f.run(undefined, []).status, 0);
+  assert.ok(!calls(f).some((call) => call.startsWith(`bootstrap ${domain} ${plist(2)}`)));
+  // Down to one: the third's agent goes, its registration and directory stay.
+  rmSync(join(f.home, 'launchctl.calls'));
+  const lowered = f.run(undefined, ['--shared', '1']);
+  assert.equal(lowered.status, 0, lowered.stderr);
+  assert.ok(calls(f).includes(`bootout ${domain}/${sharedAgent(3)}`));
+  assert.equal(existsSync(plist(3)), false);
+  assert.ok(existsSync(join(dirs[1], '.runner')));
+  assert.match(lowered.stdout, new RegExp(`removed: ${sharedAgent(3)} is unloaded and its LaunchAgent removed; its registration and ${dirs[1]} stay`));
+  rmSync(join(f.home, 'launchctl.calls'));
+  assert.equal(f.run(undefined, []).status, 0);
+  assert.ok(!calls(f).some((call) => call.includes(sharedAgent(3))), 'a re-run keeps the lowered count');
+  // --disabled turns every instance off.
+  assert.equal(f.run(undefined, ['--disabled']).status, 0);
+  for (const agent of [runnerAgent, sharedAgent(2)]) assert.ok(calls(f).includes(`disable ${domain}/${agent}`), agent);
+});
+
+test('shared names: a machine short name ending in -<number> is refused, and so is a shared instance registered under another name', macOnly, () => {
+  for (const [registered, args, input, refusal] of [
+    [null, ['--name', 'ci-kit-mac-mini-2'], 'registration-token-123\n', /short name, 'mini-2', ends in -<number>/],
+    ['ci-kit-mac-rental-1', ['--shared', '1'], 'registration-token-123\n', /short name, 'rental-1', ends in -<number>/],
+  ]) {
+    const f = fixture({ registered });
+    const before = f.snapshot();
+    const result = f.run(undefined, args, {}, input);
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, refusal);
+    assert.deepEqual(f.snapshot(), before);
+    assert.equal(existsSync(join(f.home, 'launchctl.calls')), false);
+  }
+  // Already registered with no shared instance, such a name keeps working as it did.
+  assert.equal(fixture({ registered: 'ci-kit-mac-rental-1' }).run(undefined, ['--disabled']).status, 0);
+  const f = fixture();
+  f.shared(2, 'ci-kit-mac-other-2');
+  const result = f.run(undefined, ['--shared', '1']);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /actions-runner-maws-2 is registered as 'ci-kit-mac-other-2', not ci-kit-mac-mini-2/);
+  assert.match(f.run(undefined, ['--shared', '9']).stderr, /--shared takes a count of shared instances, 0 to 8/);
+});
+
+test('a job on a shared instance refuses a re-run and an uninstall; --uninstall removes every instance\'s agent', macOnly, async () => {
+  const f = fixture();
+  const dir = f.shared(2);
+  assert.equal(f.run(undefined, ['--shared', '1'], {}, 'registration-token-123\n').status, 0);
+  const worker = join(dir, 'bin/Runner.Worker');
+  copyFileSync(process.execPath, worker, constants.COPYFILE_FICLONE);
+  const job = spawn(worker, ['-e', "console.log('running'); setTimeout(() => {}, 30_000)"], { stdio: ['ignore', 'pipe', 'ignore'] });
+  try {
+    await once(job.stdout, 'data');
+    for (const args of [[], ['--uninstall']]) {
+      const result = f.run(undefined, args);
+      assert.equal(result.status, 1, `${args}: ${result.stderr}`);
+      assert.match(result.stderr, /a job is running on shared runner 2; re-run when every instance is idle/);
+    }
+  } finally {
+    job.kill('SIGKILL');
+    await once(job, 'exit');
+  }
+  rmSync(join(f.home, 'launchctl.calls'));
+  const result = f.run(undefined, ['--uninstall']);
+  assert.equal(result.status, 0, result.stderr);
+  const domain = `gui/${uidOf()}`;
+  assert.deepEqual(calls(f).filter((call) => call.startsWith('bootout')), [`bootout ${domain}/${watchAgent}`, `bootout ${domain}/${runnerAgent}`, `bootout ${domain}/${sharedAgent(2)}`]);
+  for (const agent of [runnerAgent, sharedAgent(2)]) assert.equal(existsSync(join(f.home, `Library/LaunchAgents/${agent}.plist`)), false);
+  assert.match(result.stdout, new RegExp(`uninstalled: ${watchAgent} and ${runnerAgent}, ${sharedAgent(2)} are unloaded and removed`));
+  assert.ok(existsSync(join(dir, '.runner')));
+});
+
+test('an install with no shared instance asks launchd nothing new and lays down nothing shared', macOnly, () => {
+  const f = fixture();
+  const result = f.run(undefined, []);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(!calls(f).some((call) => call.startsWith('print-disabled') || call.includes(`${runnerAgent}-`)), calls(f).join('\n'));
+  assert.ok(!readdirSync(f.home).some((name) => name.startsWith('actions-runner-maws-')));
+  assert.equal(result.stdout.match(/^ci-kit mac: (running|installed|loaded)/gm).length, 1);
 });

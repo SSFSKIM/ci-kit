@@ -10,9 +10,11 @@
 #   dismissed prompt came back within a minute, twice), and its alert with it: a close that fails is tried again at
 #   each read until it goes through (2026-10-20: it failed while the network came up after a reboot, and the open alert
 #   held every Mac job until it was closed by hand).
-# - While the episode is open the runner is held (a marker its LaunchAgent's wrapper waits on) and stopped between
-#   jobs: when its job ends, or once it is confirmed idle. Queued jobs then go to another Mac or wait instead of each
-#   being refused here in seconds. The episode's close releases it.
+# - While the episode is open every instance's runner is held (a marker each LaunchAgent's wrapper waits on) and stopped
+#   between jobs: when its job ends, or once it is confirmed idle. Queued jobs then go to another Mac or wait instead of
+#   each being refused here in seconds. The episode's close releases them.
+# - While the shared hold is up (shared-hold.sh), each read reconciles it: a crashed exclusive job's hold is dropped
+#   once its work directory is swept.
 #
 # `dialog-watch.sh --job-end <pid> [<ready file>]` is the drain at one job's end, started by job-completed.sh (job_end
 # below).
@@ -23,9 +25,9 @@ log_tag='dialog-watch'
 here=$(dirname "$0")
 # shellcheck source=dialog.sh
 source "$here/dialog.sh"
+# shellcheck source=instances.sh
+source "$here/instances.sh"
 
-runner_agent=com.ssfskim.ci-kit.mac-runner
-runner_dir=$HOME/actions-runner-maws
 drain_marker=$ci_kit_logs/runner-drained
 domain=gui/$(id -u)
 
@@ -94,11 +96,11 @@ first_read() {
   log "frontmost is $name: a system dialog; the episode opens if the next read sees it too"
 }
 
-# What the runner is doing: `busy <pid>…`, `idle <listener log> <size>` or `stopped` (runner-state.py, which reads the
-# kernel's executable paths, never a command line). Only idle lets the drain stop it, and only on two matching reads;
-# anything else, a failure included, leaves it be.
-runner_state() {
-  bounded 10 python3 -I "$here/runner-state.py" "$runner_dir" 2>/dev/null
+# What an instance's runner is doing: `busy <pid>…`, `idle <listener log> <size>` or `stopped` (runner-state.py, which
+# reads the kernel's executable paths, never a command line). Only idle lets the drain stop it, and only on two
+# matching reads; anything else, a failure included, leaves it be.
+runner_state() { # <instance root>
+  bounded 10 python3 -I "$here/runner-state.py" "$1" 2>/dev/null
 }
 
 # The drain. A runner whose hook refuses every job in seconds draws most of the queue and fails it, while another Mac
@@ -132,11 +134,13 @@ hold() { # under the episode lock: the hold follows the episode as it stands now
     fi
   fi
 }
-stop_runner() { # <why>
-  if bounded 10 launchctl kill SIGTERM "$domain/$runner_agent" >/dev/null 2>&1; then
-    log "drain: stopped the runner ($1); it waits for the episode to close"
+stop_runner() { # <instance root> <why>
+  local agent
+  agent=$(instance_agent "$1")
+  if bounded 10 launchctl kill SIGTERM "$domain/$agent" >/dev/null 2>&1; then
+    log "drain: stopped $(instance_title "$1") ($2); it waits for the episode to close"
   else
-    log "drain: SIGTERM to $runner_agent failed or timed out; retrying at the next read"
+    log "drain: SIGTERM to $agent failed or timed out; retrying at the next read"
   fi
 }
 # An idle read alone does not show that no job is coming: a job the listener has just been offered has no worker for
@@ -145,38 +149,50 @@ stop_runner() { # <why>
 # logged as they happen. A stop right after the second read reaches the listener before it can acquire a job offered
 # since. Any difference waits for a later read.
 idle_gap=${CI_KIT_IDLE_GAP:-5}
+# Every instance at once: one read of each, then, when any reads idle, one gap and a second read of those.
 stop_idle() { # outside the lock: only the watcher closes an episode, so the hold outlasts this
-  local runner again
-  runner=$(runner_state) || runner="failed ($?)"
-  case $runner in
-    stopped) ;;
-    idle*)
-      sleep "$idle_gap"
-      again=$(runner_state) || again="failed ($?)"
-      if [[ $again == "$runner" ]]; then
-        stop_runner "no job running or offered on two reads $idle_gap s apart"
-      else
-        log "drain: two reads $idle_gap s apart differ ($runner, then ${again:-no answer}): a job may be on its way; the runner stops at a later read"
-      fi
-      ;;
-    busy*) log "drain: a job is running ($runner); the runner stops when it ends" ;;
-    *) log "drain: could not tell whether a job is running: ${runner:-no answer}; the runner is left running" ;;
-  esac
+  local roots=() first=() root i again idle=''
+  roots=("$lane_root")
+  while IFS= read -r root; do roots+=("$root"); done < <(shared_instances)
+  for i in "${!roots[@]}"; do
+    root=${roots[i]}
+    first[i]=$(runner_state "$root") || first[i]="failed ($?)"
+    case ${first[i]} in
+      stopped) ;;
+      idle*) idle=1 ;;
+      busy*) log "drain: a job is running$(on_instance "$root") (${first[i]}); $(instance_title "$root") stops when it ends" ;;
+      *) log "drain: could not tell whether a job is running$(on_instance "$root"): ${first[i]:-no answer}; $(instance_title "$root") is left running" ;;
+    esac
+  done
+  [[ -n $idle ]] || return 0
+  sleep "$idle_gap"
+  for i in "${!roots[@]}"; do
+    root=${roots[i]}
+    [[ ${first[i]} == idle* ]] || continue
+    again=$(runner_state "$root") || again="failed ($?)"
+    if [[ $again == "${first[i]}" ]]; then
+      stop_runner "$root" "no job running or offered on two reads $idle_gap s apart"
+    else
+      log "drain: two reads $idle_gap s apart differ (${first[i]}, then ${again:-no answer}): a job may be on its way; $(instance_title "$root") stops at a later read"
+    fi
+  done
 }
 # The drain at a job's end. job-completed.sh, which runs inside the job's worker before the worker reports the job's
 # result, starts this detached, with its parent: the worker, and a ready file it waits on until the watch is armed, so
 # the worker cannot exit unseen. The worker reports the result and then exits, and this sees the exit as it happens
 # (runner-state.py --wait). If the runner is held then, it is stopped at once: the listener
 # shuts down well before it can acquire the job it asks for next, and the job that ended has already reported. Held or
-# not is decided at the exit, so an episode that opens while the job finishes counts too.
+# not is decided at the exit, so an episode that opens while the job finishes counts too. The instance is the one whose
+# hooks started this (job-completed.sh runs its own copy).
 job_end() { # <pid of the job's worker> [<ready file>]
-  local ended deadline=${CI_KIT_JOB_END_WAIT:-600}
-  ended=$(bounded "$deadline" python3 -I "$here/runner-state.py" "$runner_dir" --wait "$1" ${2:+"$2"} 2>/dev/null) ||
+  local ended deadline=${CI_KIT_JOB_END_WAIT:-600} root
+  root=$(instance_root "$here") || root=$lane_root
+  ended=$(bounded "$deadline" python3 -I "$here/runner-state.py" "$root" --wait "$1" ${2:+"$2"} 2>/dev/null) ||
     ended="failed ($?)"
   [[ -e $drain_marker ]] || return 0
   case $ended in
-    exited) stop_runner "its job ended while it was held" ;;
-    *) log "drain: the end of this job could not be watched (${ended:-no answer}); the next idle read stops the runner" ;;
+    exited) stop_runner "$root" "its job ended while it was held" ;;
+    *) log "drain: the end of this job could not be watched (${ended:-no answer}); the next idle read stops $(instance_title "$root")" ;;
   esac
 }
 if [[ ${1:-} == --job-end ]]; then
@@ -201,4 +217,8 @@ if [[ -e $dialog_state || -e $drain_marker ]] || is_dialog; then
   fi
 fi
 [[ -z $held ]] || stop_idle
+# The shared hold: a crashed exclusive job's is reconciled, and the alert of one that stayed stuck closed once it is down.
+if [[ -e $shared_hold || -e $ci_kit_logs/shared-hold.alert ]]; then
+  bounded 300 "$here/shared-hold.sh" reconcile >/dev/null || log "shared hold: the reconcile failed or timed out ($?)"
+fi
 exit 0

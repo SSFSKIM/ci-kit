@@ -435,6 +435,23 @@ test('an idle read stops the runner only when a second read the gap later matche
   assert.match(confirmed.log, /drain: stopped the runner \(no job running or offered on two reads 1 s apart\)/);
 });
 
+test('a dialog holds every instance: each idle one is stopped on two matching reads, a busy one is left to its job\'s end', () => {
+  const d = desktop();
+  d.instance(2, 'idle Runner_20261021-100000-utc.log 4096');
+  d.instance(3, 'busy');
+  d.watch(security, { at: 0 });
+  const run = d.watch(security, { at: 60 });
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(run.launchctl, [kill, `${kill}-2`]);
+  assert.match(run.log, /drain: stopped the runner \(no job running or offered on two reads 0 s apart\)/);
+  assert.match(run.log, /drain: stopped shared runner 2 \(no job running or offered on two reads 0 s apart\); it waits for the episode to close/);
+  assert.match(run.log, /drain: a job is running on shared runner 3 \(busy 4242\); shared runner 3 stops when it ends/);
+  assert.deepEqual(run.python.map((call) => call.split('/').at(-1)), ['actions-runner-maws', 'actions-runner-maws-2', 'actions-runner-maws-3', 'actions-runner-maws', 'actions-runner-maws-2']);
+  // When its job ends, the next read stops it.
+  writeFileSync(join(d.dir, 'runner-actions-runner-maws-3'), 'idle Runner_20261021-100000-utc.log 512');
+  assert.deepEqual(d.watch(security, { at: 120 }).launchctl, [kill, `${kill}-2`, `${kill}-3`]);
+});
+
 test('the hold is released only after the third clear read', () => {
   let run = clearReads(opened(), 2);
   assert.notEqual(run.marker, null, 'still held on two clear reads');
@@ -673,6 +690,33 @@ test('runner-state.py reads the kernel\'s executable paths: decoys never count, 
   }
 });
 
+test('runner-state.py --workers: every job worker of any runner by the kernel\'s executable path, whatever its command line', macOnly, async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'ci-kit workers ')));
+  const copy = (path) => { mkdirSync(dirname(path), { recursive: true }); copyFileSync(process.execPath, path, constants.COPYFILE_FICLONE); return path; };
+  const children = [];
+  const running = async (file, options = {}) => {
+    const child = spawn(file, ['-e', "console.log('running'); setTimeout(() => {}, 30_000)"], { stdio: ['ignore', 'pipe', 'ignore'], ...options });
+    children.push(child);
+    await once(child.stdout, 'data');
+    return child.pid;
+  };
+  try {
+    // Workers: under a path with spaces (ps prints it unquoted), and a runner that updated itself (bin.<version>).
+    const spaced = await running(copy(join(dir, 'actions runner/bin/Runner.Worker')));
+    const updated = await running(copy(join(dir, 'actions-runner-maws-2/bin.2.339.0/Runner.Worker')));
+    // Not workers: a process whose argv[0] or arguments name one.
+    const decoys = [await running(process.execPath, { argv0: join(dir, 'x/Runner.Worker') }), await running(process.execPath, { cwd: dir })];
+    const result = spawnSync('python3', ['-I', join(hooks, 'runner-state.py'), '--workers'], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const pids = result.stdout.trim().split(' ').map(Number);
+    for (const pid of [spaced, updated]) assert.ok(pids.includes(pid), `${pid} in ${result.stdout}`);
+    for (const pid of decoys) assert.ok(!pids.includes(pid), `${pid} is not a worker`);
+  } finally {
+    for (const child of children) child.kill('SIGKILL');
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // The drain at a job's end, against real processes. A stand-in Runner.Worker (a clone of node at the runner's worker
 // path) runs the installed job-completed.sh as the mini's runner did (its Worker_*.log of 2026-10-18): as its own child,
 // `/bin/bash -e <hook>`, in the job's workspace, with the job's RUNNER_TRACKING_ID, its output piped and waited for. Once the hook's output closes, the
@@ -698,16 +742,16 @@ const waiters = (hooksDir, worker) => spawnSync('ps', ['-axo', 'pid=,pgid=,comma
   .filter((line) => line.includes(` ${hooksDir}/dialog-watch.sh --job-end ${worker} `))
   .map((line) => line.trim().split(/\s+/).slice(0, 2).map(Number));
 
-async function jobEnd({ held = true, whileFinishing = () => {}, finishing = 400, standIn = true, env = {} } = {}) {
+async function jobEnd({ held = true, whileFinishing = () => {}, finishing = 400, standIn = true, env = {}, instance = 'actions-runner-maws' } = {}) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), 'ci-kit-job-end-')));
-  const runner = join(home, 'actions-runner-maws');
+  const runner = join(home, instance);
   const installed = join(runner, 'ci-kit/hooks');
   const workspace = join(runner, '_work/MAWS/MAWS');
   const logs = join(home, 'Library/Logs/ci-kit');
   const fakes = join(home, 'fakes');
   const temp = join(home, 'tmp');
   for (const dir of [installed, workspace, logs, fakes, temp, join(runner, 'bin')]) mkdirSync(dir, { recursive: true });
-  for (const file of ['job-completed.sh', 'dialog.sh', 'dialog-watch.sh', 'runner-state.py']) copyFileSync(join(hooks, file), join(installed, file));
+  for (const file of ['job-completed.sh', 'dialog.sh', 'dialog-watch.sh', 'runner-state.py', 'instances.sh']) copyFileSync(join(hooks, file), join(installed, file));
   const script = (path, body) => { writeFileSync(path, `#!/bin/bash\n${body}\n`); chmodSync(path, 0o755); };
   script(join(installed, 'desktop-posture.sh'), 'exit 0');
   script(join(fakes, 'node'), 'echo "sweep $*"'); // the sweep's selection is mac-strays' to test
@@ -777,6 +821,12 @@ test('a held runner is stopped when its job ends: after the worker reports and e
   // The hook returns only once the worker is watched, so even a worker that exits the moment the hook closes is seen.
   const abrupt = await jobEnd({ finishing: 0 });
   assert.deepEqual(abrupt.stops.map((stop) => stop.call), [`kill SIGTERM gui/${uid}/${runnerAgent}`], abrupt.log);
+});
+
+test('a held shared runner is stopped at its own job end, through its own agent', macOnly, async () => {
+  const run = await jobEnd({ instance: 'actions-runner-maws-2' });
+  assert.deepEqual(run.stops.map((stop) => stop.call), [`kill SIGTERM gui/${uid}/${runnerAgent}-2`], run.log + run.errors);
+  assert.match(run.log, /drain: stopped shared runner 2 \(its job ended while it was held\); it waits for the episode to close/);
 });
 
 test('the job-end decision is the marker at the worker\'s exit: an episode opening while the job finishes stops it, one closing does not', macOnly, async () => {

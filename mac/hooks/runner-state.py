@@ -1,5 +1,5 @@
-# What the runner in the directory given is doing, from this user's processes, for the dialog watcher's drain
-# (docs/mac-lane.md). Prints one line:
+# What the runner in the directory given, any instance of the lane, is doing, from this user's processes: for
+# install.sh, the dialog watcher's drain and the shared hold (docs/mac-lane.md). Prints one line:
 #
 #   busy <pid>...      a job runs: a process whose executable is exactly <dir>/bin/Runner.Worker
 #   idle <log> <size>  the listener runs (<dir>/bin/Runner.Listener) and no job does. <log> is the listener's newest
@@ -19,7 +19,13 @@
 # watch is armed, or there is nothing to watch, it writes `armed` to the ready file given, so the caller can know that
 # an exit from then on is seen. The caller sets the deadline.
 #
-# Run as python3 -I runner-state.py <runner dir> [--wait <pid> [<ready file>]].
+# With --workers instead of a directory, it prints the pids of every job worker of this user, of any runner: each
+# process whose executable, by the kernel's path, is named Runner.Worker (or that the kernel names so, or names
+# nothing, when its path cannot be read), space-separated on one line, empty when there is none. A sweep of a _work
+# other than its own job's spares them and what they started (sweep.mjs --spare-workers), so a command line, which
+# any process sets and ps prints unquoted, never decides it.
+#
+# Run as python3 -I runner-state.py <runner dir> [--wait <pid> [<ready file>]], or python3 -I runner-state.py --workers.
 import ctypes
 import errno
 import os
@@ -32,9 +38,12 @@ WORKER = b'Runner.Worker'
 
 def main():
     runner = sys.argv[1]
+    every = runner == '--workers'
     # A runner that updated itself has bin -> bin.<version>; the kernel reports the resolved path.
     worker = os.fsencode(os.path.realpath(os.path.join(runner, 'bin', 'Runner.Worker')))
     listener = os.fsencode(os.path.realpath(os.path.join(runner, 'bin', 'Runner.Listener')))
+    if every:  # any runner's worker: by the executable's name, the kernel's path's last component
+        worker, listener = None, None
     libproc = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
     path = ctypes.create_string_buffer(4096)  # PROC_PIDPATHINFO_MAXSIZE
     name = ctypes.create_string_buffer(256)
@@ -42,6 +51,8 @@ def main():
     def is_worker(pid):  # (whether pid is, or may be, a job; its path when readable). ProcessLookupError once gone
         ctypes.set_errno(0)
         if libproc.proc_pidpath(pid, path, ctypes.sizeof(path)) > 0:
+            if every:
+                return os.path.basename(path.value) == WORKER, path.value
             return path.value == worker, path.value
         if ctypes.get_errno() == errno.ESRCH:
             raise ProcessLookupError(pid)
@@ -81,6 +92,8 @@ def main():
         if job:
             jobs.append(pid)
         listening = listening or seen == listener
+    if every:
+        return ' '.join(map(str, jobs))
     if jobs:
         return ' '.join(['busy', *map(str, jobs)])
     if not listening:

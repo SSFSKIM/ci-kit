@@ -1,5 +1,5 @@
 #!/bin/bash
-# ACTIONS_RUNNER_HOOK_JOB_COMPLETED of the mac runner (I10): after a job, kill and log what it left under the runner's
+# ACTIONS_RUNNER_HOOK_JOB_COMPLETED of every instance of the mac lane (I10): after a job, kill and log what it left under the runner's
 # work directory, the orphaned test processes that once loaded the MacBook. Before that, it hands the job's end to the
 # dialog watcher's drain (dialog-watch.sh --job-end), which stops the runner once the job is over if the watcher holds
 # it, so a held runner takes no job after this one.
@@ -28,4 +28,17 @@ here=$(dirname "$0")
   done
   [[ -z $ready ]] || rm -f "$ready"
 } || true
+# On a Mac with shared instances, the job's admission (shared-hold.sh) goes once its sweep has gone through: the
+# exclusive instance's hold, or a shared instance's running marker. After a failed sweep the exclusive hold stays up, so
+# no shared job starts beside what the job left, and the dialog watcher reconciles it; a shared marker goes stale with
+# its worker, and the next exclusive job's sweep tries again.
+# shellcheck source=instances.sh
+source "$here/instances.sh"
+if [[ -n $(shared_instances) ]]; then
+  lane=exclusive
+  if shared_number "$(instance_root "$here")" >/dev/null; then lane=shared; fi
+  node "$here/sweep.mjs" job-completed || exit
+  "$here/shared-hold.sh" "$lane-end" "$PPID" || true
+  exit 0
+fi
 exec node "$here/sweep.mjs" job-completed
