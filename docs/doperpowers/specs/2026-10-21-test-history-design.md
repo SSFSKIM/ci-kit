@@ -83,7 +83,7 @@ After this work:
   Reconstructed membership equals the log's `Tests` line on three runs (22,360; 22,360; 22,454).
 - [ ] M3 — Labels and reports (starts when the store holds ≥ 14 days).
 - [ ] M4 — Selection for iteration runs (with the MAWS architect).
-- [ ] M5 — Unit overhead experiment (independent; any time).
+- [ ] M5 — Unit overhead experiment: written 2026-10-21 08:2xZ (arms S, C, D, I); running.
 - [ ] M6 — The `ci-kit:optimize` skill.
 
 ## Design
@@ -195,15 +195,24 @@ proposal:
 - The full suite still runs on every landing candidate, so what selection misses is caught before master. Selection
   can miss what the module graph cannot see: fixtures, config, JSON read at run time, build output.
 
-**Overhead (M5).** In MAWS, 56% of vitest's worker time is import, transform and environment setup, not tests (10-21:
-tests 44%, import 27%, transform 16%, environment 12%). Vitest 5 itself prints that `renderer-compiled`'s transforms
-are "re-done on every run" and suggests `fsModuleCache`. The experiment measures the options vitest offers without
-dropping a test, each as a class 1a run on the pool against the same tree:
-- `fsModuleCache` with a cache the pool persists;
-- dependency optimization for the web projects;
-- `isolate: false` for node projects whose suites pass with it.
+**Overhead (M5).** In MAWS, 55% of vitest's worker time is import, transform and environment setup, not tests (run
+39564672977: `Duration 414.16s (tests 45%, import 27%, transform 15%, environment 12%)`). Vitest 5 itself prints that
+`renderer-compiled`'s transforms are "re-done on every run" and suggests `fsModuleCache`. The run also has a tail that
+is not overhead at all: vitest's default sequencer queues files project by project in name order, so the two
+`-timing` projects run last, and their two `App.test.tsx` (42 s and 44 s) run nearly alone. The last other file
+finished at +370 s and the run at +414 s, with 2 to 4 of 8 workers busy in between (Surprises).
 
-An option is adopted only with a green run and a measured gain. The repo's architect lands it.
+The experiment measures options that change how the suite runs, never which tests run. Each option is an arm on a
+scratch commit off one master commit, run unit-only on the pool:
+- **S, schedule:** a sequencer that starts the longest files first, across projects;
+- **C, transform cache:** `fsModuleCache`, first as a ceiling (two runs in one job, the second warm), then with a cache
+  the pool can supply to a fresh VM, built only if the ceiling is worth it;
+- **D, dependency optimization** for the happy-dom projects;
+- **I, `isolate: false`** for the node projects whose suites pass with it.
+
+An option is adopted only with green runs and a measured gain (M5 has the rule). The repo's architect lands it.
+Running the renderer suites under the React Compiler only, dropping the plain `renderer` project, is not an M5 option:
+it changes what is tested. It goes to the architect as a proposal with M5's numbers.
 
 **The skill (M6).** `skills/optimize/SKILL.md` in ci-kit's plugin. It carries the method #96 used:
 1. measure each job's time and cost;
@@ -292,12 +301,88 @@ Proof:
 - After merge, a `workflow_dispatch` of `test-history.yml` writes the first day's files, and its log shows counts only.
 - For one run, the reconstructed membership's size equals that job's `Tests` line (passed plus skipped).
 
-### M3–M6
+### M5 — Unit overhead experiment
+
+At the end, MAWS's `unit` job is shorter by a measured amount and runs the same tests in the same projects. Every arm's
+numbers are in this spec, adopted or not, and the adopted arms are one MAWS PR the architect lands.
+
+Method:
+- **One base.** `B` is MAWS master when the experiment starts. Each arm is one scratch commit on `B`, in its own
+  worktree.
+- **Runs.** `scripts/ci-gate.sh <worktree> --gates unit --class1a pool --label m5-<arm>-<n>`, with the script from a
+  fresh worktree (the old clone's copy lacks `--class1a`). At most two runs at once, because the pool also serves
+  MAWS's landings. Each arm, the baseline included, gets three runs; a run that ci-gate reruns after a GCE preemption
+  counts once, by its final attempt.
+- **Measures per run:**
+  - the test step's `Duration` line with its breakdown;
+  - the test step's and the job's wall time (the jobs API's step times);
+  - the `Test Files` and `Tests` lines;
+  - the schedule, from the per-file `✓` lines' log timestamps: when the last file outside the `-timing` projects
+    finished, and when the run ended.
+- **Comparison.** Against the baseline arm's median from the same base, never older runs: VMs vary, and master's suite
+  grows daily.
+- No full suite runs on the MacBook (its load makes them slow; friction #18). One focused file while writing an arm is
+  fine.
+
+Arms:
+- **S, schedule.** `test.sequence.sequencer`, a subclass of vitest's `BaseSequencer` whose `sort` keeps the base rules
+  (failed first, then longer, then larger) but drops the grouping by project. A fresh VM has no results cache, so the
+  base falls back to file size. If size does not put both `App.test.tsx` early (check in the schedule), the sequencer
+  puts the `-timing` projects' files first: the config itself names them as the whole-app and real-time suites.
+- **C, transform cache.**
+  - *Ceiling first.* The arm's test step runs the suite twice with `fsModuleCache` on, into an empty cache: the first
+    run shows the cost of writing the cache, the second the warm run.
+  - If the warm run beats the baseline by less than 10%, C stops there, recorded.
+  - Otherwise, choose how a fresh VM gets a cache, measure the restore, and run it as the arm. The candidates:
+    - baked into the pool image by ci-kit's warm step (weekly);
+    - `actions/cache`, saved from a run on master's ref (a `ci/` ref's cache is visible only to that ref; check whether
+      any run uses master's ref);
+    - anything better found.
+  - How long a cache stays useful is measured from master's history over the last 14 days. Vitest drops the whole cache
+    when the lockfile changes, and every module's key includes the content of `vitest.config.ts` and the files it
+    imports, so count the commits that changed either.
+  - *Correctness.* Vitest's key covers the module's id and content, the environment's resolved config, plugin names,
+    the config file and its imports, and the lockfile. It does not cover tsconfig or any other file a transform reads,
+    so the cache a VM receives must be keyed on those too.
+  - One scratch run shows that a source file changed after the cache was built runs as changed: a planted failing
+    assertion fails.
+- **D, dependency optimization** for the happy-dom projects. This is vitest's `deps.optimizer`, under whichever key
+  vitest 5 applies to happy-dom's environment.
+- **I, `isolate: false`** for `node` and `artifacts`.
+  - Files that fail without isolation move to an isolated project the config names, if they are few (at most about 5%
+    of the project's files); otherwise I stops, recorded.
+  - Isolation leaks depend on which files share a worker, and that varies from run to run. So I also needs one green run
+    under `--sequence.shuffle`. Its three green runs are the minimum, not proof: a flake traced to I after landing
+    reverts it.
+
+Adoption rule:
+- An arm is adopted when:
+  - its three runs are green;
+  - its `Test Files` and `Tests` lines equal the baseline's;
+  - its median test step beats the baseline's by more than the baseline's own spread (max − min) and by at least 15 s.
+- The adopted arms then run together as one commit, three green runs. The PR reports that gain against the baseline.
+- The config also reaches `unit:darwin` on the mini. The PR gets one `unit:darwin` run before landing, scheduled
+  through the mini's coordinator, as #99's was.
+
+Deliverables:
+- A MAWS PR from a fresh branch on current master, holding only the adopted arms, each with its comment in the config
+  or gate.yml. Its body carries the table (each arm's median, spread and counts) and the class 1a pool run, green. It
+  goes to the architect, who lands it.
+- If C's delivery needs ci-kit (the bake), a ci-kit PR, reviewed by `doperpowers:reviewer-medium`.
+- A proposal to the architect, separate from the PR, on running the renderer suites under the compiler only, with the
+  numbers. It changes what is tested, so it is theirs to decide.
+
+Cost: about 15 to 20 unit-only runs at about $0.014 each, under $0.50 of GCE.
+
+Proof:
+- Every arm's row is in Surprises & Discoveries, adopted or not.
+- The combined commit's three runs are green, and the PR's class 1a pool run is green.
+
+### M3, M4, M6
 
 Each is written here in full when its condition holds:
 - M3 when the store holds 14 days;
 - M4 when the architect has agreed the landing rule;
-- M5 at any free slot (it needs only pool runs);
 - M6 after M3–M5.
 
 ## Verification
@@ -305,7 +390,10 @@ Each is written here in full when its condition holds:
 - Spec: one adversarial review (`doperpowers:adversarial-reviewer`), done (Decision Log).
 - M1: class 1a on the pool plus the fault injection, then the MAWS architect lands it.
 - M2: `doperpowers:reviewer-medium` on the PR before merge.
-- M3–M6: named when each is written.
+- M5: the numbers are checked by the spec's owner against the run logs; the MAWS PR is landed by the architect; a ci-kit
+  PR, if C needs one, gets `doperpowers:reviewer-medium`. No separate spec review: M5 is an experiment whose every
+  adoption is gated on green runs and the architect.
+- M3, M4, M6: named when each is written.
 
 ## Decision Log
 
@@ -328,6 +416,15 @@ Each is written here in full when its condition holds:
   can test sibling commits. `compare` then says `diverged`, and the later run has no previous run. As built, M3 would
   label such a failure `unresolved`. The likely fix is a `rewritten` relation whose paths come from the merge base (a
   superset of what changed). Decide it when M3 is written, with real lines to check it against.
+
+- 2026-10-21 (M5 written): **arms and rule.** The arms change how the suite runs, never which tests run. S
+  (schedule) was added after reading a run's per-file timestamps; it is the cheapest arm and carries no test risk. C is
+  measured as a ceiling before any delivery is built, because delivering a cache to a fresh VM needs either ci-kit's
+  bake or a master-ref save, and neither is worth building for a small ceiling. I needs a shuffled run on top of three
+  greens, because isolation leaks depend on which files share a worker. The strongest alternative was to measure every
+  arm in one combined run. It lost because one run cannot attribute a gain or a failure to an arm. Running the renderer
+  suites only under the compiler would save the most (`renderer`'s 256 s of summed test time), but it drops a tested
+  configuration, so it goes to the architect as a proposal, not as an arm.
 
 ## Surprises & Discoveries
 
@@ -355,6 +452,17 @@ Each is written here in full when its condition holds:
 - 2026-10-21: Unit's duration grows about 2.5× faster than its test count (295 → 469 s against 18.0k → 22.3k tests,
   10-18 → 10-21). Heavy suites are being added, and per-file overhead dominates (above). The 100 slowest files are 55%
   of file time. The two `App.test.tsx` runs (plain and compiled) are 91 s.
+
+- 2026-10-21 (M5 prep): **the longest files run last.** Run 39564672977's per-file lines, by log timestamp:
+  - each project's files finish in a block, in project-name order (`artifacts` first, `renderer-compiled-timing` and
+    `renderer-timing` last);
+  - the last file outside the `-timing` projects finished at +370 s;
+  - the two `App.test.tsx` finished at +412 s and +414 s, with test times of 42 s and 44 s, so they started at about
+    +370 s with at most 4 of 8 workers busy around them.
+
+  The cause is vitest 5's `BaseSequencer.sort`: it orders by project name before duration or size. Also seen: the first
+  `renderer-compiled` file finished 16 s after the last `renderer` file. The likely cause is the React Compiler's
+  transforms, unverified.
 
 ## Outcomes & Retrospective
 
