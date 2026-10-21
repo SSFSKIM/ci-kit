@@ -83,9 +83,11 @@ export class Launcher {
       this.gce.instances('labels.ci-kit=gce-builder'),
     ]);
     const instances = listing.items.filter(isGce).map(viewInstance);
-    // A placement's zone the listing missed hides its VMs: nothing is admitted, and nothing is cleaned up for being
-    // absent. A zone outside every placement holds none of ours, and its outage does not stop the pool.
-    const missing = placementZones(this.cfg).filter((z) => !listing.zones.has(z));
+    // A zone the listing missed may hide our VMs: nothing is admitted, and nothing is cleaned up for being absent. Ours
+    // live in the placements' zones and in the zones of the rows not yet final (a VM outlives a placement removed or
+    // rolled back from gce.json); a zone outside both holds none of ours, and its outage does not stop the pool.
+    const ours = new Set([...placementZones(this.cfg), ...rows.filter((r) => r.state !== 'final' && r.zone).map((r) => r.zone)]);
+    const missing = [...ours].filter((z) => !listing.zones.has(z));
     const complete = missing.length === 0;
     if (!complete) this.log(`the instance listing missed ${missing.join(', ')}: no launches, and no cleanup by absence, this tick`);
     const rowOf = new Map(rows.map((r) => [r.alloc, r]));

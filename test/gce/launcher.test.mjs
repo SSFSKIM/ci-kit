@@ -688,3 +688,24 @@ test('placements: the listing is complete only when it read every placement\'s z
   assert.equal((await launcher.tick()).launched.length, 1);
   assert.deepEqual(placed(w), ['c4d-highcpu-4@us-west4']);
 });
+
+test('placements (review): a zone a live row names counts toward completeness, though no placement names it any more', async () => {
+  // A busy 4-vCPU VM in us-west4; gce.json rolls back to us-central1 only; us-west4-a is unreachable.
+  const { w, launcher, make } = setup({ cfg: { ...NEW_CFG, max_vcpus: 4 } });
+  const job = w.sim.queue(SBX, L(4));
+  await launcher.tick();
+  const [name] = vms(w);
+  assert.equal(w.sim.vm(name).zone.split('/').pop(), 'us-west4-a');
+  w.sim.boot(SBX, name);
+  w.sim.take(SBX, name, job);
+  const central = make({ cfg: { ...CFG, placements: [CENTRAL], max_vcpus: 4 } });
+  w.sim.queue(SBX, L(4));
+  w.hooks.unreachable = 'us-west4-a';
+  w.advance(MIN);
+  assert.deepEqual((await central.tick()).launched, [], 'the hidden VM still counts: nothing is admitted over max_vcpus');
+  delete w.hooks.unreachable;
+  w.advance(MIN);
+  const out = await central.tick();
+  assert.deepEqual(out.launched, []);
+  assert.equal(out.waiting, 1, 'once the listing is whole, the busy VM holds the 4 vCPUs and the job waits');
+});

@@ -308,7 +308,8 @@ Cleanup, every tick:
 Deletes are not waited for: the row goes `deleting` (with its end) just before the delete call, and the next tick
 finds the VM gone and finalizes it. A VM missing from the listing is confirmed with a direct read before its row is
 finalized, since another tick may have just created it. When the aggregated listing (one call over every zone) did not
-read a placement's zone whole (unreachable, partial, or absent), the tick launches nothing and does nothing that rests
+read whole (unreachable, partial, or absent) a placement's zone or the zone of a row not yet final (a VM outlives a
+placement removed from `gce.json`), the tick launches nothing and does nothing that rests
 on something being absent (finalizing a vanished VM's row, unregistering a runner with no VM); when GCE's operation
 history cannot be read, a vanished VM's row waits rather than being called `orphan`. Runners are listed for every repo
 with a row in the ledger's window, so a repo that has left `gce.json` is still cleaned until its last runner is gone.
