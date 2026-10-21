@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+	<testsuite name="outer" time="0.006726" disabled="0" errors="0" tests="4" failures="1" skipped="2" hostname="runner-1">
+		<testcase name="passes" time="0.000885" classname="test"/>
+		<testsuite name="inner" time="0.000825" disabled="0" errors="0" tests="1" failures="1" skipped="0" hostname="runner-1">
+			<testcase name="fails" time="0.000706" classname="test" failure="one is not &amp;quot;two&amp;quot;">
+				<failure type="testCodeFailure" message="one is not &amp;quot;two&amp;quot;">
+Error [ERR_TEST_FAILURE]: one is not "two"
+
+1 !== 2
+
+    at TestContext.&lt;anonymous> (file:///work/a.test.mjs:5:58)
+				</failure>
+			</testcase>
+		</testsuite>
+		<testcase name="skipped one" time="0.003333" classname="test">
+			<skipped type="skipped" message="true"/>
+		</testcase>
+		<testcase name="todo one" time="0.000060" classname="test">
+			<skipped type="todo" message="true"/>
+		</testcase>
+	</testsuite>
+	<testcase name="top level" time="0.000149" classname="test"/>
+	<!-- tests 5 -->
+	<!-- pass 2 -->
+	<!-- fail 1 -->
+	<!-- duration_ms 85.346916 -->
+</testsuites>
