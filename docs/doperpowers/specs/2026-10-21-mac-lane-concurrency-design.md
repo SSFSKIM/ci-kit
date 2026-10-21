@@ -50,6 +50,8 @@ roughly twice the Mac lane's throughput without a second Mac.
 - [x] (2026-10-21 ~10:1xZ) Second adversarial review (astra), of the second draft (shared listeners stopped by a
   wrapper hold and a drain): two P1s and two P2s, all taken; admission moved into the hooks under one lock (Decision
   Log).
+- [x] (2026-10-21 ~10:2xZ) Third adversarial review (astra), of the lock: two P1s and one P2, all taken (Decision
+  Log).
 - [ ] M1 — ci-kit: instances, admission in the hooks, per-instance identity.
 - [ ] M2 — MAWS: the shared-state fixes and the routing of proven-shared groups.
 - [ ] M3 — Install on the mini: one exclusive and two shared instances, shared ones disabled.
@@ -74,17 +76,16 @@ job, by the labels a job asks for:
 (kernel-released, as `dialog.sh` uses), guards the shared hold and the running markers. Each side checks and writes
 while holding it, so no check can be overtaken between its read and its write.
 - **A shared job's start.** It takes the lock. If neither the shared hold nor the dialog drain's marker
-  (`runner-drained`) is up, it writes its running marker, releases the lock, and runs today's start. A start refused
-  later (dialog, Terminal, sweep) removes its own marker. Otherwise it releases the lock and retries about once a
-  second. The job is parked in its
-  hook and has run no step. Past the shared wait bound (60 min, an input), it refuses with a `ci-kit: … rerun` line
-  naming the hold.
+  (`runner-drained`) is up, it writes its running marker, releases the lock, and runs today's start. Otherwise it
+  releases the lock and retries about once a second. The job is parked in its hook and has run no step. Past the
+  shared wait bound (60 min, an input), it refuses with a `ci-kit: … rerun` line naming the hold.
 - **A shared job's end.** It sweeps its own instance, then removes its marker under the lock.
 - **An exclusive job's start,** before its desktop check:
   1. It raises the hold under the lock, naming its run id, job id and `Runner.Worker` (pid and start time). From then
      on no shared job is admitted, so a waiting exclusive job cannot be starved.
   2. It waits until no live running marker remains. A marker whose `Runner.Worker` is gone (pid and start time) is
-     stale. The wait is bounded (10 min, an input); past it, the hook drops the hold and refuses with a rerun line.
+     stale. The wait is bounded (10 min, an input); past it, the hook refuses with a rerun line and keeps the hold
+     until its end hook.
   3. It sweeps what finished or dead shared jobs left running. Every live shared `Runner.Worker` and its descendants
      are spared: by then each is parked, or in its end hook after its own sweep. A hook runs as a child of its worker,
      with its working directory in the job's workspace, so the sweep would otherwise select a parked hook. Everything
@@ -92,6 +93,16 @@ while holding it, so no check can be overtaken between its read and its write.
   4. It runs today's start: the dialog check, Terminal to the front, the cursor park, its own sweep.
 - **An exclusive job's end.** It sweeps its own instance, then drops the hold. A failed own sweep keeps the hold up
   for the watcher's reconcile (Recovery).
+
+**A refusal is not an abort, so a claim lasts to the job's end.** A job-started hook that fails only fails its step.
+Later steps conditioned on `failure()`, `always()`, `!cancelled()` or `cancelled()` still run (actions/runner
+v2.338.0, `ScriptHandler.cs` and `StepsRunner.cs`). So:
+- A start refused after admission keeps its claim (a shared job its marker, an exclusive job the hold) until its end
+  hook releases it. A refusal can come from the dialog check, Terminal, the sweep, or the exclusive wait bound.
+- A shared job refused at its bound holds no claim. Its post-refusal steps can run beside the exclusive job.
+- The lane's contract therefore covers steps that can run after a failed start: they must not use the desktop.
+  `docs/mac-lane.md` states it, and MAWS pins it with a test over its Mac jobs (M2). Today those steps are artifact
+  uploads, or are gated on a step that runs only after admission.
 
 The exclusive job starts on a desktop where no neighbour runs a step and none has left anything running, and no
 neighbour can start one until it ends. A measured job's `settle` reads a desktop that stays as it read, apart from
@@ -104,9 +115,17 @@ their LaunchAgent wrapper and a drain at each job's end. Its second review showe
   records the result: a job left in progress on an offline runner, or a cancelled one.
 
 **The cost:** a shared job can be assigned while an exclusive job runs. Its preparation then happens beside the
-exclusive job, before it parks. On the mini that preparation (`Set up job`) is 3–4 s of light disk and network work.
-There is at most one such preparation per shared instance per exclusive job. Round one's objection to hooks, that a
-neighbour's preparation reaches a measured job, is real but bounded to that.
+exclusive job, before it parks:
+- **Typically:** on the mini that preparation (`Set up job`) is 3–4 s of light disk and network work, once per shared
+  instance per exclusive job.
+- **It can recur.** A preparation that fails ends its job without reaching the hook, which frees the listener for
+  the next queued shared job. A parked job that is cancelled frees it too. Action downloads retry up to three times,
+  20 minutes each (actions/runner `ActionManager.cs`, `JobRunner.cs`).
+- **What M4 must show.** Round one's objection to hooks, that a neighbour's preparation reaches a measured job, is
+  therefore real but unbounded in its failure cases. M4 tests it: measured groups beside cold preparation, a download
+  failure, and a cancel-and-replace burst, each inside its solo spread.
+- **If M4 cannot show that,** shared instances are not enabled while measured groups can run. Sharing then waits for
+  a design that isolates before setup.
 
 **Shared instances.** A shared instance's start, once admitted, is today's: the dialog check, Terminal to the front
 (harmless to proven-shared groups, which do not need key), the cursor park, and the sweep of its own `_work`. Two
@@ -127,9 +146,16 @@ shared jobs simply run.
 - The hold and every running marker name a `Runner.Worker` by pid and start time, so PID reuse or a reboot cannot pass
   for one.
 - **A dead shared job.** Its marker is stale and admits nothing. The exclusive start sweeps what it left running.
-- **A crashed exclusive job.** The dialog watcher, which already reads the runner every minute, reconciles: when the
-  hold names a job and the exclusive instance has had no `Runner.Worker` for two matching reads, it sweeps that
-  instance's `_work` and drops the hold. A hold whose sweep fails stays up, and the shared jobs stay parked. The watcher
+- **Every sweep spares every live `Runner.Worker` tree,** of any instance, taken from the sweep's own process
+  snapshot. That covers the exclusive start's sweep and the reconcile's.
+- **A crashed exclusive job.** Two matching idle reads do not reserve the exclusive instance, whose listener can start
+  the next job at any moment. So recovery runs under the admission lock: it revalidates that the hold's owner is dead,
+  sweeps, and drops the hold. A new exclusive job cannot pass admission meanwhile, and the sweep spares its live
+  worker.
+  - An exclusive start that finds a stale hold reconciles it itself, under the lock, then raises its own.
+  - The dialog watcher, which already reads the runner every minute, reconciles a stale hold when no new exclusive job
+    comes.
+  - A hold whose sweep fails stays up, and the shared jobs stay parked. The watcher
   logs it and opens one alert issue (`ci-kit alert: shared hold stuck on <machine> since <minute> …`, a title outside
   MAWS's dialog-alert pattern), which it closes once no hold is up. Rather than admit a neighbour, the lane falls back
   to one job at a time.
@@ -226,6 +252,9 @@ exist. Nothing on the mini changes in M1.
     spared;
   - both bounds' refusals;
   - a crashed exclusive job reconciled, and a failed sweep keeping the hold, with the alert opened and closed;
+  - the third review's interleaving: second idle read, then the next exclusive worker starts, then the recovery sweep.
+    The new worker and its hook survive;
+  - a start refused after admission, and an exclusive bound refusal, each keeping its claim until its end hook;
   - a process killed while holding the lock, leaving no lock;
   - a reboot (markers on disk, no workers alive);
   - each instance's sweep killing only its own leftovers while the other instance's job runs;
@@ -245,6 +274,8 @@ At the end:
   other Mac job to today's labels;
 - exclusive Mac jobs' timeouts carry the 10-minute bound (30 → 40, measured 45 → 55). A group routed shared gets its
   own budget plus the 60-minute shared bound, pinned by a test while the list is empty;
+- a test pins the lane's contract: every step of a Mac job that can run after a failed start is an artifact upload, or
+  is gated on a step that runs only after admission;
 - the e2e build cache is per runner, and the clipboard lock path is machine-wide;
 - windows open at a per-instance origin, and the budgets read `CI_KIT_SHARED_DESKTOP`.
 
@@ -273,6 +304,9 @@ In a window agreed with the MAWS architect, quiet flag down, nothing else of any
 3. Then the frequent quiet groups, each through Design's evidence list.
 4. An old commit's exclusive Mac jobs, one functional and one measured, admitted while shared jobs run: each finishes
    within its old timeout, and the measured one's timings stay inside their solo spread.
+5. Measured groups beside shared preparation: cold preparation, a download failure, and a cancel-and-replace burst of
+   shared jobs during the measured interval. Each measured timing stays inside its solo spread, or sharing is not
+   enabled while measured groups can run (Design, the cost).
 
 Run scratch MAWS commits that put the groups under trial on `MAC_SHARED_E2E` (never merged as such).
 - Record every run's id, its partner, the overlap, the front-app log and the memory samples in Surprises.
@@ -357,6 +391,24 @@ Only if M4's and M5's memory reads show room: install it, and run the three-way 
   - the exclusive sweep spares live shared workers and their descendants;
   - each shared instance keeps its enabled state across a re-install;
   - a stuck hold opens one alert issue.
+- 2026-10-21 (third review, all taken): **claims last to the job's end, and recovery runs under the lock.** The third
+  adversarial review (astra) of the lock found:
+  1. P1: a refused hook is not an abort. Later `failure()`/`always()`/`!cancelled()` steps run, so a start refused
+     after dropping its claim could run work beside a neighbour.
+  2. P1: crash recovery swept after two idle reads but outside the lock, and could kill the next exclusive job started
+     in between. It was reproduced on a pure process table against `selectStrays`.
+  3. P2: preparation beside an exclusive job recurs in failure cases (failed initialization, cancellation, download
+     retries), so the "once, 3–4 s" bound held only in the common case.
+
+  The fixes:
+  - Claims are held until the end hook.
+  - The contract for post-refusal steps, pinned by MAWS.
+  - Recovery runs under the lock, and every sweep spares all live workers.
+  - M4 evidence for measured groups beside preparation bursts, with a stated fallback.
+
+  The alternative considered: ending a refused job at the runner level, for example by killing its own
+  `Runner.Worker`. M1's builder checks the runner source for whether that ends the job with no further steps. It is
+  adopted only on that evidence.
 - 2026-10-21: **`tool-time-heavy-live` stays exclusive** while it is in `MEASURED_E2E`, though its code is safe beside
   others. Dropping it from that list is MAWS's call.
 
