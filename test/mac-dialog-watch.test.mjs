@@ -102,6 +102,98 @@ test('clear reads more than 150 s apart start the count over', () => {
   assert.deepEqual([late.state.phase, late.state.clear, late.state.clear_since], ['open', '1', iso(T0 + 400)]);
 });
 
+// 2026-10-20: after a reboot the episode closed before the network was up. Its clear comment and its close failed,
+// nothing tried them again, and the open alert held every Mac job (MAWS's ci-gate.sh) until it was closed by hand.
+// owing(): an episode open since T0 whose third clear read, at T0 + 240, could not close its alert.
+const owing = (options) => clearReads(opened(options), 2).watch(terminal, { ghExit: 1 });
+
+test('an alert whose close fails stays owed and is tried at each read until it goes through; the hold goes at once, and jobs pass', () => {
+  const failed = owing();
+  const cleared = iso(T0 + 240);
+  assert.equal(failed.status, 0, failed.stderr);
+  assert.deepEqual([failed.state.phase, failed.state.issue, failed.state.cleared, failed.state.commented], ['closed', alertURL, cleared, '']);
+  assert.match(failed.log, /dialog alert clear comment failed or timed out/);
+  assert.match(failed.log, /dialog alert close failed or timed out; the alert stays open until a later read closes it/);
+  assert.equal(failed.marker, null, 'the hold goes with the dialog, not with its alert');
+  assert.match(failed.log, /drain: released the runner: the episode closed/);
+  // A job meanwhile is let through and leaves the owed close as it is.
+  const job = failed.again(terminal, { at: 250 });
+  assert.equal(job.status, 0, job.stderr);
+  assert.equal(job.state.phase, 'closed');
+  assert.equal(job.ghCalls.length, 3, 'the job hook makes no gh call for it');
+  // Each read tries again. One whose comment goes through and whose close does not leaves only the close owed.
+  const still = job.watch(terminal, { at: 300, ghExit: 1 });
+  assert.deepEqual([still.state.phase, still.ghCalls.length], ['closed', 5]);
+  const half = still.watch(terminal, { ghFail: 'close' });
+  assert.deepEqual([half.state.phase, half.state.commented], ['closed', iso(T0 + 360)]);
+  const done = half.watch(terminal);
+  assert.equal(done.status, 0, done.stderr);
+  assert.equal(done.stateText, null);
+  const pair = [['comment', alertURL], ['close', alertURL]];
+  assert.deepEqual(done.ghCalls.map((call) => call.slice(1, 3)), [['create', '--repo'], ...pair, ...pair, ...pair, ['close', alertURL]]);
+  for (const call of done.ghCalls.filter((call) => call[1] === 'comment')) {
+    assert.equal(argValue(call, '--body'), `cleared at ${cleared}: no dialog in front on 3 reads in a row since ${iso(T0 + 120)}`);
+  }
+  assert.ok(done.log.includes(`frontmost is 터미널: the alert ${alertURL} of the episode of SecurityAgent since ${iso(T0)}, which closed at ${cleared}, is closed`), done.log);
+  assert.equal(done.watch(terminal).ghCalls.length, done.ghCalls.length, 'nothing is owed after it');
+});
+
+test('a dialog while an alert close is owed: the close is tried first; once it goes through the dialog is a new episode, and while it cannot the episode reopens with the alert still open', () => {
+  // GitHub unreachable: the alert can be neither closed nor joined by a second one, so the open one carries the dialog.
+  const back = owing().watch(notification, { ghExit: 1 });
+  assert.equal(back.status, 0, back.stderr);
+  assert.deepEqual([back.state.phase, back.state.issue, back.state.name, back.state.since, back.state.clear, back.state.cleared],
+    ['open', alertURL, 'SecurityAgent', iso(T0), '0', '']);
+  assert.ok(back.log.includes(`frontmost is UserNotificationCenter: the alert ${alertURL} of the episode of SecurityAgent since ${iso(T0)} is still open; the episode reopens with it`), back.log);
+  assert.notEqual(back.marker, null, 'the runner is held again');
+  const closed = clearReads(back);
+  assert.equal(closed.stateText, null);
+  assert.equal(creates(closed).length, 1, 'one alert for both');
+  assert.deepEqual(closed.ghCalls.slice(-2).map((call) => call.slice(1, 3)), [['comment', alertURL], ['close', alertURL]]);
+  // GitHub back: the old alert closes, and the dialog starts an episode of its own, with its own time and alert.
+  const fresh = owing().watch(notification);
+  assert.deepEqual([fresh.state.phase, fresh.state.name, fresh.state.since], ['pending', 'UserNotificationCenter', iso(T0 + 300)]);
+  assert.deepEqual(fresh.ghCalls.slice(-2).map((call) => call.slice(1, 3)), [['comment', alertURL], ['close', alertURL]]);
+  assert.equal(fresh.marker, null);
+  const own = fresh.watch(notification);
+  assert.equal(own.state.phase, 'open');
+  assert.equal(creates(own).length, 2);
+  assert.equal(argValue(creates(own)[1], '--title'), `ci-kit alert: mini: UserNotificationCenter since ${minute(T0 + 300)}`);
+  // A refused job follows the same rule.
+  const reopened = owing().again(notification, { at: 270, ghExit: 1 });
+  assert.equal(reopened.status, 1);
+  assert.ok(reopened.stderr.includes(`(UserNotificationCenter: source unknown) holds focus on the mini since ${minute(T0)} — dismiss`), reopened.stderr);
+  assert.deepEqual([reopened.state.phase, reopened.state.issue, reopened.state.since, creates(reopened).length], ['open', alertURL, iso(T0), 1]);
+  const renewed = owing().again(notification, { at: 270 });
+  assert.equal(renewed.status, 1);
+  assert.ok(renewed.stderr.includes(`holds focus on the mini since ${minute(T0 + 270)} — dismiss`), renewed.stderr);
+  assert.deepEqual([renewed.state.phase, renewed.state.since, creates(renewed).length], ['open', iso(T0 + 270), 2]);
+  assert.match(argValue(creates(renewed)[1], '--body'), /Opened by: a refused job \(run 123456\)\n/);
+});
+
+test('an alert issue that no longer exists owes nothing: the state goes, and a dialog after it is a new episode', () => {
+  // Deleted by hand, say. Owed for ever, it would also take in every later dialog, which would then alert nobody.
+  const gone = owing().watch(terminal, { ghGone: true });
+  assert.equal(gone.status, 0, gone.stderr);
+  assert.equal(gone.stateText, null);
+  assert.ok(gone.log.includes(`dialog alert ${alertURL} no longer exists; nothing is left to close`), gone.log);
+  const fresh = owing().watch(notification, { ghGone: true });
+  assert.deepEqual([fresh.state.phase, fresh.state.name, fresh.state.since], ['pending', 'UserNotificationCenter', iso(T0 + 300)]);
+});
+
+test('a state file the version before wrote still loads: its episode closes on the clear reads it has left, and a failed close is kept', () => {
+  const d = desktop();
+  mkdirSync(join(d.dir, 'Library/Logs/ci-kit'), { recursive: true });
+  writeFileSync(join(d.dir, 'Library/Logs/ci-kit/dialog-alert.state'),
+    `phase=open\nname=loginwindow\nsince=${iso(T0 - 600)}\nat=${T0}\nsource=source unknown\nissue=${alertURL}\nclear=2\nclear_since=${iso(T0 - 60)}\n`);
+  const failed = d.watch(terminal, { at: 60, ghExit: 1 });
+  assert.deepEqual([failed.state.phase, failed.state.name, failed.state.since, failed.state.issue, failed.state.cleared],
+    ['closed', 'loginwindow', iso(T0 - 600), alertURL, iso(T0 + 60)]);
+  const done = d.watch(terminal);
+  assert.equal(done.stateText, null);
+  assert.equal(argValue(done.ghCalls[2], '--body'), `cleared at ${iso(T0 + 60)}: no dialog in front on 3 reads in a row since ${iso(T0 - 60)}`);
+});
+
 test('an unreadable frontmost app changes nothing', () => {
   const d = desktop({ status: 3 });
   const run = d.watch('', { at: 0 });

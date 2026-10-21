@@ -9,6 +9,11 @@
 #   phase=pending  the watcher saw a dialog on one read; its next read opens the episode if that dialog is still there
 #   phase=open     the alert issue (issue=, empty when its creation failed) names name= since= and source=; the watcher
 #                  closes it after three consecutive reads (clear=) that see no dialog
+#   phase=closed   the episode closed at cleared=, but its alert's close failed: the issue is still open. Each watcher
+#                  read that sees no dialog tries again, the clear comment unless commented= says when it went through,
+#                  then the close, and the file goes once the close does. A close owed holds no runner and refuses no
+#                  job. A dialog seen meanwhile tries the close first; while it cannot, the episode reopens
+#                  (reopen_episode).
 #
 # Reads count as consecutive while they are at most reads_apart seconds apart (at= is the watcher's last read).
 #
@@ -208,7 +213,8 @@ alert_gh() ( # a subshell, so GH_TOKEN reaches this gh call and nothing else
 # The episode's state, read into st_* and written back whole. A missing or unreadable file is no episode.
 load_state() {
   local key value
-  st_phase='' st_name='' st_since='' st_at=0 st_source='' st_issue='' st_clear=0 st_clear_since=''
+  st_phase='' st_name='' st_since='' st_at=0 st_source='' st_issue='' st_clear=0 st_clear_since='' st_cleared=''
+  st_commented=''
   [[ -f $dialog_state ]] || return 0
   while IFS='=' read -r key value; do
     case $key in
@@ -220,6 +226,8 @@ load_state() {
       issue) st_issue=$value ;;
       clear) st_clear=$value ;;
       clear_since) st_clear_since=$value ;;
+      cleared) st_cleared=$value ;;
+      commented) st_commented=$value ;;
     esac
   done <"$dialog_state" 2>/dev/null || true
   # A state file from before the watcher holds only the URL of the issue its episode opened (empty when the creation
@@ -238,9 +246,9 @@ load_state() {
 }
 save_state() {
   mkdir -p "$ci_kit_logs" &&
-    printf 'phase=%s\nname=%s\nsince=%s\nat=%s\nsource=%s\nissue=%s\nclear=%s\nclear_since=%s\n' \
+    printf 'phase=%s\nname=%s\nsince=%s\nat=%s\nsource=%s\nissue=%s\nclear=%s\nclear_since=%s\ncleared=%s\ncommented=%s\n' \
       "$st_phase" "$st_name" "$st_since" "$st_at" "$st_source" "$st_issue" "$st_clear" "$st_clear_since" \
-      >"$dialog_state.tmp" &&
+      "$st_cleared" "$st_commented" >"$dialog_state.tmp" &&
     mv -f "$dialog_state.tmp" "$dialog_state"
 }
 drop_state() {
@@ -287,6 +295,7 @@ alert_title() {
 start_episode() { # <first seen>
   dialog_source || true
   st_phase=open st_name=$dialog st_since=$1 st_at=$now_epoch st_source=$source st_issue='' st_clear=0 st_clear_since=''
+  st_cleared='' st_commented=''
   save_state
 }
 alert_episode() { # <who opened it>
@@ -305,13 +314,59 @@ alert_episode() { # <who opened it>
   fi
   rm -f "$out" || true
 }
+# Closes the episode (the watcher's third clear read) and then its alert issue. An open alert refuses the machine's
+# jobs in MAWS's ci-gate.sh, so a close that fails is owed, never dropped (2026-10-20: the comment and the close failed
+# while the network came up after a reboot, and the alert held every Mac job until it was closed by hand).
 close_episode() {
+  st_phase=closed st_cleared=$now st_commented=''
+  close_alert || true
+}
+# What the closed episode owes its alert: the clear comment, unless it went through, then the close. True, with the
+# file gone, once the close has gone through; gh's close of an issue someone has already closed goes through too, and
+# an issue gh cannot find (deleted, say) leaves nothing to close. A comment that fails beside a close that goes through
+# is not tried again: the close is what MAWS reads.
+close_alert() {
+  local err owed=''
   if [[ -n $st_issue ]]; then
     read_alert_token
-    alert_gh issue comment "$st_issue" --repo "$alert_repo" \
-      --body "cleared at $now: no dialog in front on $clear_reads reads in a row since $st_clear_since" >/dev/null 2>&1 ||
-      log "dialog alert clear comment failed or timed out" || true
-    alert_gh issue close "$st_issue" --repo "$alert_repo" >/dev/null 2>&1 || log "dialog alert close failed or timed out" || true
+    if [[ -z $st_commented ]]; then
+      if alert_gh issue comment "$st_issue" --repo "$alert_repo" \
+        --body "cleared at $st_cleared: no dialog in front on $clear_reads reads in a row since $st_clear_since" >/dev/null 2>&1; then
+        st_commented=$now
+      else
+        log "dialog alert clear comment failed or timed out" || true
+      fi
+    fi
+    err=$(mktemp) || err=/dev/null
+    if alert_gh issue close "$st_issue" --repo "$alert_repo" >/dev/null 2>"$err"; then
+      :
+    elif grep -q 'Could not resolve to an issue' "$err" 2>/dev/null; then
+      log "dialog alert $st_issue no longer exists; nothing is left to close" || true
+    else
+      log "dialog alert close failed or timed out; the alert stays open until a later read closes it" || true
+      owed=1
+    fi
+    [[ $err == /dev/null ]] || rm -f "$err" || true
+    if [[ -n $owed ]]; then
+      save_state || true
+      return 1
+    fi
   fi
   drop_state || true
+}
+# A later read's try at an owed close (phase=closed). True, with the file gone, once it has gone through.
+retry_close() {
+  close_alert || return 1
+  log "frontmost is $name: the alert $st_issue of the episode of $st_name since $st_since, which closed at $st_cleared, is closed" ||
+    true
+}
+# A dialog in front while the alert's close is owed. The close is tried first: once it goes through (false, the file
+# gone), the dialog is a new episode's, with its own time, source and alert. While it cannot, GitHub would most likely
+# refuse a second alert too, and the open one is right again: the episode reopens with it (true, the state set and left
+# for the caller to save), keeping its name, time and source, so that alert closes when this dialog is gone.
+reopen_episode() {
+  retry_close && return 1
+  log "frontmost is $name: the alert $st_issue of the episode of $st_name since $st_since is still open; the episode reopens with it" ||
+    true
+  st_phase=open st_clear=0 st_clear_since='' st_cleared='' st_commented=''
 }
