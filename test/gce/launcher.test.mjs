@@ -709,3 +709,29 @@ test('placements (review): a zone a live row names counts toward completeness, t
   assert.deepEqual(out.launched, []);
   assert.equal(out.waiting, 1, 'once the listing is whole, the busy VM holds the 4 vCPUs and the job waits');
 });
+
+test('placements (review): while a live row names no zone (its running write failed), any zone the listing missed blocks admission', async () => {
+  // A C4D insert succeeds but its running row is never written: the row stays launching, with no zone.
+  const { w, make } = setup({ cfg: { ...NEW_CFG, max_vcpus: 4 } });
+  const real = createGceLedger(w.github, CFG.ledger, { now: w.now });
+  const failing = { ...real, upsert: async (row, opts) => {
+    if (row.state === 'running') throw new Error('ledger write failed');
+    return real.upsert(row, opts);
+  } };
+  w.sim.queue(SBX, L(4));
+  await make({ ledger: failing }).tick();
+  const [name] = vms(w);
+  assert.equal(w.sim.vm(name).zone.split('/').pop(), 'us-west4-a');
+  assert.equal(only(rows(w)).state, 'launching');
+  // gce.json rolls back to us-central1 only, and us-west4-a is unreachable.
+  const central = make({ cfg: { ...CFG, placements: [CENTRAL], max_vcpus: 4 } });
+  w.sim.queue(SBX, L(4));
+  w.hooks.unreachable = 'us-west4-a';
+  w.advance(MIN);
+  assert.deepEqual((await central.tick()).launched, [], 'a zoneless live row: the whole listing must be read');
+  delete w.hooks.unreachable;
+  w.advance(MIN);
+  const out = await central.tick();
+  assert.deepEqual(out.launched, []);
+  assert.equal(out.waiting, 1, 'the VM, seen again, holds the 4 vCPUs');
+});

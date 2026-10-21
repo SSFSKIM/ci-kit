@@ -85,9 +85,13 @@ export class Launcher {
     const instances = listing.items.filter(isGce).map(viewInstance);
     // A zone the listing missed may hide our VMs: nothing is admitted, and nothing is cleaned up for being absent. Ours
     // live in the placements' zones and in the zones of the rows not yet final (a VM outlives a placement removed or
-    // rolled back from gce.json); a zone outside both holds none of ours, and its outage does not stop the pool.
-    const ours = new Set([...placementZones(this.cfg), ...rows.filter((r) => r.state !== 'final' && r.zone).map((r) => r.zone)]);
+    // rolled back from gce.json); a zone outside both holds none of ours, and its outage does not stop the pool. A
+    // live row with no zone (a launching row whose running write failed after its insert) could be anywhere: while one
+    // exists, every zone of the listing must be read whole.
+    const live = rows.filter((r) => r.state !== 'final');
+    const ours = new Set([...placementZones(this.cfg), ...live.filter((r) => r.zone).map((r) => r.zone)]);
     const missing = [...ours].filter((z) => !listing.zones.has(z));
+    if (live.some((r) => !r.zone) && !listing.complete) missing.push('a zone (a live row names none)');
     const complete = missing.length === 0;
     if (!complete) this.log(`the instance listing missed ${missing.join(', ')}: no launches, and no cleanup by absence, this tick`);
     const rowOf = new Map(rows.map((r) => [r.alloc, r]));
