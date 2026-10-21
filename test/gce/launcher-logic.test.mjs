@@ -11,8 +11,9 @@ import {
   jobInstance, reportable,
 } from '../../gce/launcher/logic.mjs';
 import { parseGceConfig, servedRepos } from '../../gce/launcher/config.mjs';
+import { ONE_REGION_CFG } from './config-fixtures.mjs';
 
-const CFG = parseGceConfig(readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
+const CFG = ONE_REGION_CFG;
 const MACHINES = CFG.placements[0].machines;
 const SBX = 'SSFSKIM/ci-kit-sandbox';
 const MAWS = 'SSFSKIM/MAWS';
@@ -123,7 +124,7 @@ test('a job with no servable labels is passed over and reported, not launched', 
 });
 
 // Placement order.
-test('placements: on the old form, the machine in every zone as spot, then its fallback as spot, then both on demand', () => {
+test('placements: the machine in every zone as spot, then its fallback as spot, then both on demand', () => {
   const two = placements(2, CFG).map((p) => `${p.machine}/${p.provisioning}@${p.zone.slice(-1)}`);
   assert.deepEqual(two, [
     'e2-highcpu-2/spot@a', 'e2-highcpu-2/spot@b', 'e2-highcpu-2/spot@c', 'e2-highcpu-2/spot@f',
@@ -359,8 +360,9 @@ test('a repo listed in both gce.json and pool.json is served by neither (by the 
 
 test('the kit\'s own pool.json and gce.json list no repo twice', () => {
   const pool = JSON.parse(readFileSync(new URL('../../pool/config/pool.json', import.meta.url), 'utf8')).repos.map((r) => r.repo);
-  const gce = CFG.repos.map((r) => r.repo);
-  assert.deepEqual(servedRepos(CFG.repos, pool).both, [], `in both files: ${gce.filter((g) => pool.some((p) => p.toLowerCase() === g.toLowerCase()))}`);
+  const shipped = parseGceConfig(readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
+  const gce = shipped.repos.map((r) => r.repo);
+  assert.deepEqual(servedRepos(shipped.repos, pool).both, [], `in both files: ${gce.filter((g) => pool.some((p) => p.toLowerCase() === g.toLowerCase()))}`);
 });
 
 test('the GCE config is validated: unknown keys and missing fields are refused, naming them', () => {

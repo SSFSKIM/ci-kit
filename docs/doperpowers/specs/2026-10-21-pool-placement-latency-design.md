@@ -49,9 +49,14 @@ toward the boot alone, and below it for the jobs a warm runner covers.
 
 - [x] (2026-10-21 12:2xZ) Quota preferences filed: C4D us-west4 192 (granted 0 at filing), instances us-west4 64
   (24), addresses us-west4 64 (8), Hyperdisk Balanced us-west4 4096 GB (500), all-regions CPUs 256 → 512.
-- [ ] M1 — Placements in the launcher, the bake and the ledger. (2026-10-21) Built, reviewer-medium clean after two
-  fix waves, ci-gate green; PR open, awaiting CI-opt's merge and the go for `gce/deploy.sh launcher`.
+- [x] (2026-10-21 14:32Z) M1 — Placements in the launcher, the bake and the ledger. Merged as #71 (25012fa),
+  reviewer-medium clean after two fix waves; deployed 14:25Z as ci-kit-launcher-00010-kp5 on the old-form config:
+  ticks served live MAWS traffic with nothing waiting, and sandbox run 39617013317 (nproc, cpus-4) was served.
 - [ ] M2 — us-west4 C4D placement live, measured against C3D.
+  - [x] (2026-10-21 15:5xZ) Step 1: `gce/deploy.sh network` created `ci-kit-us-west4`, 10.64.16.0/20.
+  - [x] (2026-10-21 15:57Z) Step 2: a c4d-highcpu-2 on hyperdisk-balanced in us-west4-a, from the current ready image,
+    ran a real sandbox job (exit:0); VM, disk and runner gone. Insert accepted → RUNNING 23.2 s, RUNNING → started
+    28.9 s (one sample; C3D's accepted → RUNNING is ~7.6 s, a finding step 4's ~18 C4D starts settle).
 - [ ] M3 — The tick and the boot.
 - [ ] M4 — Launch on GitHub's `workflow_job` webhook.
 - [ ] M5 — Pre-launch of a run's gate VMs (the owner chose it 2026-10-21; no warm runner).
@@ -343,6 +348,13 @@ reported to the owner.
   the catalog does (C3D and E2 per GiB); Hyperdisk Balanced priced with the IOPS and throughput its defaults provision
   above the free baseline. The daily line breaks VMs and dollars down by `family@region`, stable across reorders. The
   c3d and e2 us-central1 rates stay at their 10-16 values (today's catalog: c3d spot core 0.00679, RAM 0.000912).
+
+- 2026-10-21 (M2): **One subnetwork per placement, from `gce.json`.** `gce/deploy.sh network` creates each
+  placement's subnetwork (deduplicated by region and name) in the first free /20 of 10.64.0.0/16 (`gce/subnets.mjs`),
+  leaving existing ones alone, so a new placement needs no script edit; the range is not a config key, since the
+  placement shape is fixed. A failed placement list stops the deploy (both from reviewer-medium). Tests read fixed
+  configs (`test/gce/config-fixtures.mjs`), so a reorder commit on main cannot change what a test means; one test
+  holds the shipped file to the spec's shape without pinning its order.
 
 ## Surprises & Discoveries
 

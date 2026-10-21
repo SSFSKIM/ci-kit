@@ -10,16 +10,15 @@ import {
   refusedOutright,
 } from '../../gce/bake/plan.mjs';
 import { runBake } from '../../gce/bake/bake.mjs';
-import { parseGceConfig } from '../../gce/launcher/config.mjs';
+import { WEST, CENTRAL, ONE_REGION_CFG } from './config-fixtures.mjs';
 import { vmMode } from '../../gce/vm/run.mjs';
 import { GceError } from '../../lib/gce.mjs';
 import { fakeGce, fakeSandbox, instanceShape, imageShape, FOREIGN } from './fake-gce.mjs';
 
-const CFG = parseGceConfig(readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
+const CFG = ONE_REGION_CFG;
 const SHA = 'a'.repeat(40);
 const RUN = '20261016-094500-k3x9';
 const SUBNET = 'regions/us-central1/subnetworks/ci-kit-us-central1';
-const CENTRAL = CFG.placements[0];
 const MIN = 60_000;
 
 test('a builder is ok only once it reported ok and powered off', () => {
@@ -281,7 +280,7 @@ test('a builder machine refused for quota falls back to the next machine; capaci
   ]);
 });
 
-test('on the old form, a smoke VM per placement: the cpus-2 machine, then the next size\'s when E2 is refused; and the fallback placement\'s', async () => {
+test('one region, two placements: a smoke VM each: the cpus-2 machine, then the next size\'s when E2 is refused; and the fallback placement\'s', async () => {
   const gce = fakeGce({ insertErrors: ['', 'QUOTA_EXCEEDED'], scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
   await bake(gce);
   const smokes = gce.calls.filter((c) => c.startsWith(`insert ci-kit-gce-builder-${RUN}-smoke`));
@@ -295,11 +294,7 @@ test('on the old form, a smoke VM per placement: the cpus-2 machine, then the ne
 });
 
 // The new form (spec 2026-10-21): C4D us-west4 first, C3D us-central1 second.
-const WEST = {
-  region: 'us-west4', subnetwork: 'ci-kit-us-west4', zones: ['us-west4-a', 'us-west4-b', 'us-west4-c'],
-  machines: { 2: 'c4d-highcpu-2', 4: 'c4d-highcpu-4', 8: 'c4d-highcpu-8', 16: 'c4d-highcpu-16' }, disk_type: 'hyperdisk-balanced',
-};
-const NEW_CFG = { ...CFG, placements: [WEST, { ...CENTRAL, machines: { ...CENTRAL.machines, 2: 'c3d-highcpu-4' } }] };
+const NEW_CFG = { ...CFG, placements: [WEST, CENTRAL] };
 const bakeNew = (gce, gh = fakeSandbox({ run: OK_RUN })) => runBake(gce, { cfg: NEW_CFG, sha: SHA, runId: RUN, token: 'ghs_x', gh, script: '#!/bin/bash\n', ...clock(), log: () => {} });
 const disk = (b) => b.disks[0].initializeParams.diskType.split('/').pop();
 

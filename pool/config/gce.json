@@ -1,8 +1,12 @@
 {"repos":[{"repo":"SSFSKIM/ci-kit-sandbox"},{"repo":"SSFSKIM/MAWS"},{"repo":"SSFSKIM/manim-master"}],
- "project":"ssfskim-ci-kit","region":"us-central1","network":"ci-kit","subnetwork":"ci-kit-us-central1",
- "zones":["us-central1-a","us-central1-b","us-central1-c","us-central1-f"],
- "machines":{"2":"e2-highcpu-2","4":"c3d-highcpu-4","8":"c3d-highcpu-8","16":"c3d-highcpu-16"},
- "machine_fallback":{"2":"c3d-highcpu-4"},
+ "project":"ssfskim-ci-kit","network":"ci-kit",
+ "placements":[
+  {"region":"us-west4","subnetwork":"ci-kit-us-west4","zones":["us-west4-a","us-west4-b","us-west4-c"],
+   "machines":{"2":"c4d-highcpu-2","4":"c4d-highcpu-4","8":"c4d-highcpu-8","16":"c4d-highcpu-16"},
+   "disk_type":"hyperdisk-balanced"},
+  {"region":"us-central1","subnetwork":"ci-kit-us-central1","zones":["us-central1-a","us-central1-b","us-central1-c","us-central1-f"],
+   "machines":{"2":"c3d-highcpu-4","4":"c3d-highcpu-4","8":"c3d-highcpu-8","16":"c3d-highcpu-16"},
+   "disk_type":"pd-balanced"}],
  "disk_gb":50,"max_run_minutes":120,"max_vcpus":192,
  "image_family":"ci-kit-runner","idle_runner_minutes":10,
  "ledger":{"repo":"SSFSKIM/ci-kit-sandbox","issue_title":"pool ledger"}}
