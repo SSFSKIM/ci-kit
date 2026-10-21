@@ -1,10 +1,11 @@
 #!/bin/bash
 # Deploys the GCE backend's control plane (spec §3a, I12) into ssfskim-ci-kit, idempotently, from the MacBook with
 # gcloud's default account. No GCP credential exists anywhere else.
-#   gce/deploy.sh [base] [network] [bake] [bake-schedule] [launcher] [launcher-schedule] [alert]
-#                  (no argument: all of them, in that order)
-#   base               the APIs, the service account ci-kit-launcher, its compute role on the project, and serial
-#                      port logging, so a VM deleted after a failed boot leaves its console in Cloud Logging
+#   gce/deploy.sh [base] [network] [bake] [bake-schedule] [launcher] [launcher-schedule] [webhook] [alert] [app-hook]
+#                  (no argument: all of them but app-hook, in that order)
+#   base               the APIs, the service account ci-kit-launcher and its compute role on the project, the receiver's
+#                      service account ci-kit-webhook (no role here: webhook grants its two), and serial port logging, so
+#                      a VM deleted after a failed boot leaves its console in Cloud Logging
 #   network            the VPC ci-kit and a subnetwork for each placement of pool/config/gce.json (gce/subnets.mjs: a new
 #                      one takes the first free /20 of 10.64.0.0/16; one that exists is left alone), with no firewall
 #                      rule: GCE's implied rules deny all ingress and allow all egress. It then checks that no rule
@@ -12,18 +13,26 @@
 #   bake               the Cloud Run job ci-kit-bake, built from this checkout
 #   bake-schedule      the Scheduler job ci-kit-bake-weekly, which runs the bake every Sunday at 18:00 UTC
 #   launcher           the Cloud Run service ci-kit-launcher, built from this checkout: no public ingress, one
-#                      instance, one request at a time, 300 s per request
+#                      instance, 300 s per request; requests are many at a time, ticks one
 #   launcher-schedule  the Scheduler job ci-kit-launcher-tick, which calls the launcher every minute with an OIDC token
+#   webhook            the public Cloud Run service ci-kit-webhook (the App's webhook receiver), the Pub/Sub topic
+#                      ci-kit-tick-requests it publishes to, and the push subscription that asks the launcher for a
+#                      tick. Needs the launcher deployed and the webhook secret created by the owner (docs/pool.md, GCE)
 #   alert              a log-based metric of failed ci-kit-launcher-tick executions and an alert policy on it, mailed
 #                      to CI_KIT_ALERT_EMAIL (default: the project's owner)
-# The App's secrets (ci-kit-app-id, ci-kit-app-key, readable by the service account only) are created by hand:
-# docs/pool.md, GCE. Deploy from a clean checkout of a commit on GitHub: the services record it as CI_KIT_COMMIT.
+#   app-hook           points the GitHub App's webhook at ci-kit-webhook with the secret (gce/tools/app-hook.mjs); run
+#                      it after webhook's first deploy and after each rotation of the secret
+# The App's secrets (ci-kit-app-id, ci-kit-app-key, readable by ci-kit-launcher only) and the webhook secret
+# (ci-kit-webhook-secret, readable by ci-kit-webhook only) are created by hand: docs/pool.md, GCE. Deploy from a clean
+# checkout of a commit on GitHub: the services record it as CI_KIT_COMMIT.
 set -euo pipefail
 PROJECT=ssfskim-ci-kit
 REGION=us-central1
 SA_NAME=ci-kit-launcher
 SA="$SA_NAME@$PROJECT.iam.gserviceaccount.com"
 KIT=$(cd "$(dirname "$0")/.." && pwd)
+WEBHOOK_SA_NAME=ci-kit-webhook
+WEBHOOK_SA="$WEBHOOK_SA_NAME@$PROJECT.iam.gserviceaccount.com"
 
 g() { gcloud --project="$PROJECT" --quiet "$@"; }
 die() { echo "deploy: $*" >&2; exit 1; }
@@ -31,9 +40,14 @@ die() { echo "deploy: $*" >&2; exit 1; }
 base() {
   g services enable compute.googleapis.com secretmanager.googleapis.com run.googleapis.com \
     cloudscheduler.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com \
-    logging.googleapis.com monitoring.googleapis.com
+    logging.googleapis.com monitoring.googleapis.com pubsub.googleapis.com
   g iam service-accounts describe "$SA" > /dev/null 2>&1 ||
     g iam service-accounts create "$SA_NAME" --display-name='ci-kit launcher and bake'
+  # The public receiver's own identity, apart from the launcher's: it may read the webhook secret (granted by the
+  # owner with the secret) and publish to one topic (webhook), and nothing else. Created here so that the owner can
+  # grant it the secret before the receiver's first deploy.
+  g iam service-accounts describe "$WEBHOOK_SA" > /dev/null 2>&1 ||
+    g iam service-accounts create "$WEBHOOK_SA_NAME" --display-name='ci-kit webhook receiver'
   # Create, label and delete the backend's instances, disks and images. VMs get no service account, so the account
   # needs no actAs on any other.
   g projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$SA" \
@@ -46,7 +60,7 @@ base() {
     --role=roles/run.builder --condition=None > /dev/null
   # A job VM's console is the only record of its boot, and the VM is deleted minutes after its job (spec M3).
   g compute project-info add-metadata --metadata=serial-port-logging-enable=TRUE > /dev/null
-  echo "deploy: base ok ($SA; serial port logging on)"
+  echo "deploy: base ok ($SA, $WEBHOOK_SA; serial port logging on)"
 }
 
 # Every pool VM and bake VM sits here, never on the project's default network, whose stock rules open ssh and RDP to
@@ -109,12 +123,16 @@ LAUNCHER=ci-kit-launcher
 launcher() {
   # Buildpack images keep node in their layers, off the bare PATH: the CNB `launcher` sets up the layers' environment
   # and then runs the command (the same holds for the bake job above).
-  # Request-based billing: a tick a minute of well under a second's work stays in the free tier.
+  # Request-based billing: a tick a minute of a few seconds' work stays in the free tier.
+  # Requests are many at a time (spec 2026-10-21 M4): the webhook's pushes arrive while a tick runs, and the process
+  # coalesces them (gce/launcher/ticker.mjs), so concurrency only has to admit them; ticks stay one at a time. Every
+  # request, scheduled or pushed, is answered when the tick that serves it has ended, so a request is open, and the
+  # CPU allocated, for every tick's whole run.
   g run deploy "$LAUNCHER" --source="$KIT" --region="$REGION" --service-account="$SA" \
     --command=launcher --args=node,gce/launcher/server.mjs --set-env-vars="CI_KIT_COMMIT=$COMMIT" --labels=ci-kit=launcher \
-    --no-allow-unauthenticated --ingress=internal --min-instances=0 --max-instances=1 --concurrency=1 \
-    --timeout=300 --cpu=1 --memory=512Mi
-  # Cloud Scheduler calls it as the service account, which may invoke it and nothing else may.
+    --no-allow-unauthenticated --ingress=internal --min-instances=0 --max-instances=1 --concurrency=80 \
+    --cpu-throttling --timeout=300 --cpu=1 --memory=512Mi
+  # Cloud Scheduler calls it as the service account, and so does Pub/Sub's push (webhook); nothing else may.
   g run services add-iam-policy-binding "$LAUNCHER" --region="$REGION" \
     --member="serviceAccount:$SA" --role=roles/run.invoker > /dev/null
   echo "deploy: launcher ok (kit ${COMMIT:0:8})"
@@ -129,6 +147,69 @@ launcher_schedule() {
     --schedule='* * * * *' --time-zone=Etc/UTC --http-method=POST --uri="$url/tick" \
     --oidc-service-account-email="$SA" --oidc-token-audience="$url" --attempt-deadline=300s > /dev/null
   echo "deploy: launcher schedule ok (every minute → $url/tick)"
+}
+
+# The webhook path (spec 2026-10-21 M4): GitHub → ci-kit-webhook (public; the signature is its gate) → Pub/Sub topic
+# ci-kit-tick-requests → push subscription → the launcher's /request, which internal ingress admits: Cloud Run counts
+# a Pub/Sub push subscription of the same project, to the service's run.app URL, as internal. The push carries an OIDC
+# token of ci-kit-launcher@, the launcher's one invoker; Pub/Sub's service agent mints it through its project role
+# (roles/pubsub.serviceAgent holds iam.serviceAccounts.getOpenIdToken). The receiver can publish and nothing else: it
+# cannot invoke the launcher itself.
+WEBHOOK=ci-kit-webhook
+WEBHOOK_SECRET=ci-kit-webhook-secret
+TOPIC=ci-kit-tick-requests
+SUBSCRIPTION=ci-kit-tick-requests-launcher
+webhook() {
+  local url hook reader
+  # The secret is the owner's to create and grant (Secret Manager writes are human-only); Cloud Run's deploy would
+  # refuse a secret its service account cannot read, with a less useful message.
+  g secrets describe "$WEBHOOK_SECRET" > /dev/null 2>&1 ||
+    die "no secret $WEBHOOK_SECRET: the owner creates it and grants it to $WEBHOOK_SA (docs/pool.md, GCE, The webhook)"
+  reader=$(g secrets get-iam-policy "$WEBHOOK_SECRET" --flatten='bindings[].members' \
+    --filter="bindings.role=roles/secretmanager.secretAccessor AND bindings.members=serviceAccount:$WEBHOOK_SA" \
+    --format='value(bindings.members)')
+  [ -n "$reader" ] || die "$WEBHOOK_SA cannot read $WEBHOOK_SECRET: the owner grants it (docs/pool.md, GCE, The webhook)"
+  url=$(g run services describe "$LAUNCHER" --region="$REGION" --format='value(status.url)')
+  [ -n "$url" ] || die "the launcher is not deployed (gce/deploy.sh launcher)"
+
+  g pubsub topics describe "$TOPIC" > /dev/null 2>&1 || g pubsub topics create "$TOPIC" --labels=ci-kit=webhook
+  g pubsub topics add-iam-policy-binding "$TOPIC" --member="serviceAccount:$WEBHOOK_SA" \
+    --role=roles/pubsub.publisher > /dev/null
+
+  # Public: GitHub delivers from its own addresses. The org's domain-restricted sharing refuses an allUsers invoker,
+  # so the invoker IAM check is off instead (Cloud Run's way for that case). The secret is a volume, which Cloud Run
+  # reads from Secret Manager on each read: a rotated secret is live without a deploy. A few instances bound what a
+  # flood of forged deliveries can cost; GitHub waits 10 s for an answer.
+  g run deploy "$WEBHOOK" --source="$KIT" --region="$REGION" --service-account="$WEBHOOK_SA" \
+    --command=launcher --args=node,gce/webhook/server.mjs --labels=ci-kit=webhook \
+    --set-env-vars="CI_KIT_COMMIT=$COMMIT,CI_KIT_TOPIC=projects/$PROJECT/topics/$TOPIC,CI_KIT_WEBHOOK_SECRET_FILE=/secrets/webhook/secret" \
+    --set-secrets="/secrets/webhook/secret=$WEBHOOK_SECRET:latest" \
+    --ingress=all --no-invoker-iam-check --min-instances=0 --max-instances=3 --concurrency=80 \
+    --timeout=30 --cpu=1 --memory=256Mi
+
+  # The launcher answers a push when the tick that serves it has ended, and a push that arrives while a tick runs is
+  # served by the next one, so the ack deadline must outlive the worst case: the running tick (~100 s: launches stop
+  # starting at its 45 s budget, an insert already started waits up to 40 s more, then the tick's tail; the longest of
+  # 4,283 ticks in the 3 days to 2026-10-21 took 77 s), the 10 s spacing, the next tick (~100 s again) and a cold
+  # start (~10 s): 220 s. 300 s, Cloud Run's request timeout here, covers it with 80 s to spare; a push held past it
+  # is cut by Cloud Run and redelivered, which costs one more tick, never a job. A request older than 10 min (Pub/Sub's
+  # shortest retention) is dropped: the minute tick has served its job by then.
+  local push=(--push-endpoint="$url/request" --push-auth-service-account="$SA" --push-auth-token-audience="$url"
+    --ack-deadline=300 --message-retention-duration=10m --expiration-period=never --min-retry-delay=10s --max-retry-delay=60s)
+  if g pubsub subscriptions describe "$SUBSCRIPTION" > /dev/null 2>&1; then
+    g pubsub subscriptions update "$SUBSCRIPTION" "${push[@]}" > /dev/null
+  else
+    g pubsub subscriptions create "$SUBSCRIPTION" --topic="$TOPIC" "${push[@]}" --labels=ci-kit=webhook > /dev/null
+  fi
+  hook=$(g run services describe "$WEBHOOK" --region="$REGION" --format='value(status.url)')
+  echo "deploy: webhook ok ($hook → $TOPIC → $url/request; kit ${COMMIT:0:8})"
+}
+
+app_hook() {
+  local hook
+  hook=$(g run services describe "$WEBHOOK" --region="$REGION" --format='value(status.url)')
+  [ -n "$hook" ] || die "the receiver is not deployed (gce/deploy.sh webhook)"
+  node "$KIT/gce/tools/app-hook.mjs" "$hook"
 }
 
 # A launcher that is down leaves stopped VMs to cost their disks and the ledger's daily line missing (spec §3a
@@ -169,7 +250,7 @@ JSON
   echo "deploy: alert ok (metric $ALERT_METRIC, mailed to $email)"
 }
 
-[ $# -gt 0 ] || set -- base network bake bake-schedule launcher launcher-schedule alert
+[ $# -gt 0 ] || set -- base network bake bake-schedule launcher launcher-schedule webhook alert
 for part in "$@"; do
   case $part in
     base) base ;;
@@ -178,7 +259,9 @@ for part in "$@"; do
     bake-schedule) bake_schedule ;;
     launcher) launcher ;;
     launcher-schedule) launcher_schedule ;;
+    webhook) webhook ;;
     alert) alert ;;
-    *) die "unknown part $part (base, network, bake, bake-schedule, launcher, launcher-schedule, alert)" ;;
+    app-hook) app_hook ;;
+    *) die "unknown part $part (base, network, bake, bake-schedule, launcher, launcher-schedule, webhook, alert, app-hook)" ;;
   esac
 done

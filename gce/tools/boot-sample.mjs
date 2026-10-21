@@ -9,9 +9,9 @@
 // It samples one placement of gce.json: --region's (default: the first), on its zones, subnetwork and boot disk type,
 // with --machine (default: the placement's size-4 machine).
 // Every VM and runner it made is gone when it ends. A quota refusal stops it: the pool shares the quota.
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { createGce, accessToken } from '../../lib/gce.mjs';
 import { createAppTokens } from '../../lib/github-app.mjs';
 import { createGitHub } from '../../lib/github.mjs';
@@ -203,7 +203,8 @@ async function main(argv) {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Both sides canonical: argv[1] is the path as typed, the module URL is resolved through symlinks.
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   main(process.argv.slice(2)).catch((err) => {
     console.error(err.message);
     process.exit(1);

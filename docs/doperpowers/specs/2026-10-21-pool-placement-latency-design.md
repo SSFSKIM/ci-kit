@@ -52,7 +52,7 @@ toward the boot alone, and below it for the jobs a warm runner covers.
 - [x] (2026-10-21 14:32Z) M1 — Placements in the launcher, the bake and the ledger. Merged as #71 (25012fa),
   reviewer-medium clean after two fix waves; deployed 14:25Z as ci-kit-launcher-00010-kp5 on the old-form config:
   ticks served live MAWS traffic with nothing waiting, and sandbox run 39617013317 (nproc, cpus-4) was served.
-- [ ] M2 — us-west4 C4D placement live, measured against C3D.
+- [x] (2026-10-21 17:28Z) M2 — us-west4 C4D placement live, measured against C3D. Acceptance 1–3 met (below).
   - [x] (2026-10-21 15:5xZ) Step 1: `gce/deploy.sh network` created `ci-kit-us-west4`, 10.64.16.0/20.
   - [x] (2026-10-21 15:57Z) Step 2: a c4d-highcpu-2 on hyperdisk-balanced in us-west4-a, from the current ready image,
     ran a real sandbox job (exit:0); VM, disk and runner gone. Insert accepted → RUNNING 23.2 s, RUNNING → started
@@ -74,9 +74,21 @@ toward the boot alone, and below it for the jobs a warm runner covers.
     Against all nine C3D arm b runs of the day (critical-path b1–b3, b6–b8 and these), unit's gain (median 494 → 427)
     is inside C3D's 486–572 spread; static's (447 → 335) is well outside it. Runs 39630493322, 39630507852,
     39630519998 / 39635358119, 39636927897, 39638465062.
-- [ ] M3 — The tick and the boot. (2026-10-21) Built, rebased onto M1+M2, reviewer-medium clean after one fix wave,
-  ci-gate green; PR to CI-opt. Its proofs over a day of rows follow the launcher deploy and the bake after merge.
-- [ ] M4 — Launch on GitHub's `workflow_job` webhook.
+  - [x] (2026-10-21 17:28Z) Acceptance 1, live, on M3's launcher (00011-4hq): a 10-job sandbox burst (run
+    39644005773) launched in one tick (17:28:12–17:28:43): 8 VMs in us-west4-a (C4D), the region's 8 addresses, and
+    the 2 refused there fell through to c3d-highcpu-4 spot in us-central1-a in the same tick. The refusal's text (the
+    insert operation's error): `Quota 'IN_USE_ADDRESSES' exceeded.  Limit: 8.0 in region us-west4.` (code
+    `QUOTA_EXCEEDED`, limitName `IN-USE-ADDRESSES-per-project-region`), which M1's parser scopes to the region.
+    us-west4's fall-through point is min(C4D vCPUs, 8 VMs) until its address grant grows; no C4D_CPUS refusal yet.
+- [ ] M3 — The tick and the boot. Merged as #74 (5e4dfb4); deployed 17:03Z (launcher ci-kit-launcher-00011-4hq),
+  17:24Z (image ci-kit-runner-20261021-171029-sszz-5e4dfb42: no cloud-init, zsh and fonts; smoke on c4d-2 and c3d-4
+  ok) and 17:27Z (`deploy.sh base`: serial port logging). First insert 3.1–4.2 s into a launch tick; the first job on
+  the new image went insert accepted → started in 26.1 s on c4d-highcpu-4. MAWS on the new image (CI-opt's run
+  39644078413, class 1a on master 057db0320 with MAWS #109): green, unit 1/4 logs `apt: zsh already installed`, setup
+  12–19 s per unit shard against 36 s (C4D, old image, 39638465062) and 52 s (C3D, 39630519998); plan → last 294 s
+  against #108's 310 s (on C3D, the burst holding us-west4; one sample). The day-of-rows proofs remain.
+- [ ] M4 — Launch on GitHub's `workflow_job` webhook. (2026-10-21) Built, reviewer-high clean after two fix waves, ci-gate green; PR to
+  CI-opt. Deploy follows the merge and the owner's secret and App steps; its proofs follow the deploy.
 - [ ] M5 — Pre-launch of a run's gate VMs (the owner chose it 2026-10-21; no warm runner).
 
 ## Acceptance
@@ -276,9 +288,10 @@ cover fix's test reproduces 119166794835's sequence; A13 clauses hold.
 ### M4 — Launch on the webhook
 
 As designed above. Proof: a burst of webhook deliveries against the deployed services (not only the in-process
-handler) produces one coalesced tick per burst; at the receiver, a forged signature gets 401 and starts no tick; at the launcher, an
+handler) produces at most one requested tick per 10 s with none lost, every job queued before a tick starts served by
+it; at the receiver, a forged signature gets 401 and starts no tick; at the launcher, an
 unauthenticated POST and one with a wrong identity are refused by Cloud Run (403) before the code runs; a burst of
-same-size jobs between scheduled ticks is launched by one coalesced requested tick; a webhook dropped on purpose
+same-size jobs between scheduled ticks is launched by requested ticks before the next scheduled one; a webhook dropped on purpose
 (the secret rotated mid-test) still gets its job served by the minute tick; a day's median queued → started ≤ 50 s
 from `latency-report.mjs` (Acceptance 4).
 
@@ -412,6 +425,29 @@ reported to the owner.
 - 2026-10-21 (CI-opt): **The job image carries zsh and MAWS's fonts** (`fonts-noto-cjk`, `fonts-inter`,
   `fonts-jetbrains-mono`), which MAWS's setup apt-installed at job time (~35 s on each job's critical path, and a
   Launchpad 503 failed a unit shard); the smoke check fails an image without them.
+
+- 2026-10-21 (M4): **Receiver → launcher through a Pub/Sub push subscription**, not VPC egress: Cloud Run's
+  internal ingress admits same-project Pub/Sub pushes to the `run.app` URL, and the public receiver then holds only
+  `pubsub.publisher` on one topic, never the launcher's invoker role or a seat in the pool's network. The push
+  identity is `ci-kit-launcher@`, the launcher's one existing invoker. The receiver is public through
+  `--no-invoker-iam-check` (the org's domain-restricted sharing refuses `allUsers`) and reads the served repos from
+  the config bundled at its deploy. Paths split by caller: `/tick` (Scheduler, waits for its tick, so a failed tick
+  still alerts), `/request` (pushes), 404 otherwise.
+- 2026-10-21 (plan-executor, CI-opt approved): **No always-allocated CPU.** The first build answered pushes 202 at
+  once and ran the requested tick after the answer, which under request-based billing has no CPU, so it moved the
+  launcher to instance-based billing (~$1.64/day, out of the free tier). It lost because it buys nothing: a push is
+  instead answered when the tick that serves it ends (ack deadline 300 s against a worst case of ~220 s: a running
+  tick ~100 s, the 10 s spacing, the next tick ~100 s, a cold start). Pub/Sub's slow start then holds back only pushes
+  that would coalesce into the pending tick anyway, which cannot start before the running one ends, so no tick starts
+  later; the cost is at most a few extra requested ticks per burst, bounded by the spacing and the rate-budget rule.
+  The burst proof reads accordingly (CI-opt, 2026-10-21): at most one requested tick per 10 s, none lost, every job
+  queued before a tick starts served by it; "exactly one tick per burst" was never what latency depends on.
+
+- 2026-10-21 (M4, after reviewer-high): **The receiver bounds what an unsigned or forged flood can cost.** A
+  missing or malformed `X-Hub-Signature-256` gets 401 before the body or the secret is read; the secret (a mounted
+  `latest` volume, which Cloud Run reads through from Secret Manager) is kept 60 s, read by one caller at a time, at
+  most once per 10 s counted from each read's start, failed reads included; a mismatch re-reads only a copy at least
+  10 s old, so a rotation is picked up within seconds. With no good copy a delivery gets 503 and GitHub redelivers.
 
 ## Surprises & Discoveries
 

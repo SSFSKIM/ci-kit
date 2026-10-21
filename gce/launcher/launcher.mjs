@@ -1,6 +1,6 @@
 // The GCE launcher's reconciliation (spec §3a The launcher): one tick, with every outside effect injected so the
-// orchestration is testable. server.mjs runs a tick per Cloud Scheduler call. The decisions are in logic.mjs; this
-// file observes (Compute Engine, GitHub, the ledger), decides through logic.mjs, and acts.
+// orchestration is testable. server.mjs runs ticks for Cloud Scheduler and the webhook (ticker.mjs). The decisions
+// are in logic.mjs; this file observes (Compute Engine, GitHub, the ledger), decides through logic.mjs, and acts.
 // Nothing is kept between ticks: state lives in GCE labels, the ledger and GitHub, so every tick can act as the
 // first, and two overlapping ticks (Cloud Run can briefly run two) stay correct: deletes and unregisters treat 404
 // as done, ledger rows are keyed by allocation and only move forward, and an over-launch leaves idle runners that the
