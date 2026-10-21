@@ -150,6 +150,8 @@ test('the shipped gce.json is the spec\'s pool: C4D us-west4 and C3D us-central1
   assert.deepEqual(shipped.placements.find((p) => p.region === 'us-west4'), WEST);
   assert.deepEqual(shipped.placements.find((p) => p.region === 'us-central1'), CENTRAL);
   assert.equal(shipped.placements.some((p) => Object.values(p.machines).some((m) => m.startsWith('e2-'))), false);
-  const rest = ({ repos: _, placements: __, ...others }) => others; // the served repos change by commit
+  // The served repos change by commit, and max_vcpus follows the granted quotas (docs/pool.md, Quotas and budget).
+  const rest = ({ repos: _, placements: __, max_vcpus: ___, ...others }) => others;
+  assert.ok(Number.isInteger(shipped.max_vcpus) && shipped.max_vcpus > 0);
   assert.deepEqual(rest(shipped), rest(COMMON), 'every other key keeps its value');
 });

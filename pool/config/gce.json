@@ -7,6 +7,6 @@
   {"region":"us-central1","subnetwork":"ci-kit-us-central1","zones":["us-central1-a","us-central1-b","us-central1-c","us-central1-f"],
    "machines":{"2":"c3d-highcpu-4","4":"c3d-highcpu-4","8":"c3d-highcpu-8","16":"c3d-highcpu-16"},
    "disk_type":"pd-balanced"}],
- "disk_gb":50,"max_run_minutes":120,"max_vcpus":192,
+ "disk_gb":50,"max_run_minutes":120,"max_vcpus":242,
  "image_family":"ci-kit-runner","idle_runner_minutes":10,
  "ledger":{"repo":"SSFSKIM/ci-kit-sandbox","issue_title":"pool ledger"}}
