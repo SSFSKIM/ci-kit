@@ -173,6 +173,7 @@ test('a line with no report holds provenance only', () => {
   const line = buildRunLine(prov(), null, 'missing');
   assert.equal(line.report, 'missing');
   assert.equal(line.artifact, null);
+  assert.equal(line.shards, null); // an unsharded job's line
   assert.equal(line.membership, null);
   assert.equal(line.tested, 't');
   assert.equal(line.selection, null);

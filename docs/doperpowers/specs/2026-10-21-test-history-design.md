@@ -589,6 +589,20 @@ Each is written here in full when its condition holds:
     - the explicit form is `ids`, chosen when its serialized UTF-8 size is smaller than the delta's;
     - new skipped sets carry a hash, and old lines' skipped deltas without one are checked by count only;
     - the existing store (8 lines, 6 reports, 112,440 memberships) reconstructs with the new readers.
+- 2026-10-21 (shards, ci-kit #69): **the collector reads a sharded job as one line.** MAWS shards `unit` across VMs for
+  wall time: a matrix of jobs `unit <k>/<n>`, each uploading `test-results-unit-<k>of<n>-<attempt>`. Unsharded runs
+  (`--affected` iterations, and every run before the switch) keep `unit` and `test-results-unit-<attempt>` and read as
+  before. An attempt's n shards make one line of `unit`, so bases, durations, selection and the change links run across
+  the switch:
+  - its report is the union of the shards', each checked against the job that ran it;
+  - it carries the earliest start, the latest completion and the worst conclusion; `shards` holds each shard's job,
+    attempt, id, runner, times, conclusion and artifact;
+  - it waits while a shard runs; it is `missing` when every shard ran its tests and an artifact is absent; an attempt in
+    which a shard did not run its tests has none; mixed shard counts are refused;
+  - a shard a re-run copied into the attempt is the job it copies, the shard in the latest earlier attempt where it is
+    no copy, and its report is that attempt's artifact (CI-opt's decision). ci-gate reruns a preempted job alone, and
+    with n shards a run is n times as likely to meet a preemption, so refusing copies would lose too many runs. A copy
+    is part of its attempt's verdict; an artifact of any other attempt never stands in for a shard.
 
 ## Surprises & Discoveries
 

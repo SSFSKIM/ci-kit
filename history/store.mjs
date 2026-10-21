@@ -47,7 +47,9 @@ export function openStore(root, repo) {
   return {
     lines: () => [...held.values()],
     line: (key) => held.get(key) ?? null,
-    artifactIds: () => new Set(lines.filter((l) => l.artifact).map((l) => l.artifact.id)),
+    // An artifact is known to the line of the attempt that uploaded it only: a line that copied a shard from an
+    // earlier attempt leaves that attempt's artifact listed, so the earlier attempt is still taken if it has no line.
+    artifactIds: () => new Set(lines.flatMap((l) => [l.artifact, ...(l.shards ?? []).filter((s) => s.attempt === l.attempt).map((s) => s.artifact)]).filter(Boolean).map((a) => a.id)),
     base: (day, job) => getGz(gzPath('base', day, job)),
     setBase: (day, job, base) => setGz(gzPath('base', day, job), base),
     durations: (day, job) => getGz(gzPath('durations', day, job)),

@@ -2,8 +2,10 @@
 // The test-history collector (test history spec, Design "Collector"):
 //   node history/collect.mjs [--repo <owner/name>] --store <dir>
 // For each repo in history/repos.json (or the one named), it records every gate job's JUnit report into the store
-// directory: one run line per (run, attempt, job), the day's base and durations. It is idempotent by (run, attempt,
-// job). Authentication is the ci-kit GitHub App's when CI_KIT_APP_ID and CI_KIT_APP_KEY are set, else gh's token.
+// directory: one run line per (run, attempt, job), the day's base and durations. A job a matrix shards, `<job> <k>/<n>`
+// uploading `test-results-<slug>-<k>of<n>-<attempt>`, makes one line of `<job>` from all n shards of the attempt.
+// It is idempotent by (run, attempt, job). Authentication is the ci-kit GitHub App's when CI_KIT_APP_ID and
+// CI_KIT_APP_KEY are set, else gh's token.
 // It prints one count line per repo and never a test's name, file or message: the repos it reads may be private.
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -15,11 +17,48 @@ import { createGitHub, ghToken, GitHubError } from '../lib/github.mjs';
 import { createAppTokens } from '../lib/github-app.mjs';
 import { parseJUnit } from './junit.mjs';
 import { previousRun, resolveTested, startedBefore } from './provenance.mjs';
-import { buildBase, buildDurations, buildRunLine, jobSlug, lineKey, reportWithinJob, summarize } from './record.mjs';
+import { buildBase, buildDurations, buildRunLine, jobSlug, lineArtifacts, lineKey, reportWithinJob, summarize } from './record.mjs';
 import { dayOf, openStore } from './store.mjs';
 
 const DAY = 86_400_000;
 const ARTIFACT = /^test-results-(.+)-(\d+)$/;
+const SHARD_JOB = /^(.+) ([1-9]\d*)\/([1-9]\d*)$/;
+const SHARD_SLUG = /^(.+)-([1-9]\d*)of([1-9]\d*)$/;
+
+// A job's name → { job, n }: a job of the reporting set (n null), or one of its n shards, `<job> <k>/<n>`; else null.
+const jobPart = (name, reporting) => {
+  if (reporting.has(name)) return { job: name, n: null };
+  const m = SHARD_JOB.exec(name);
+  return m && reporting.has(m[1]) ? { job: m[1], n: Number(m[3]) } : null;
+};
+
+// An artifact's name → { job, k, n, attempt } likewise, by slug: `test-results-<slug>[-<k>of<n>]-<attempt>`.
+const artifactPart = (name, bySlug) => {
+  const m = ARTIFACT.exec(name);
+  if (!m) return null;
+  const attempt = Number(m[2]);
+  if (bySlug.has(m[1])) return { job: bySlug.get(m[1]), k: null, n: null, attempt };
+  const s = SHARD_SLUG.exec(m[1]);
+  return s && bySlug.has(s[1]) ? { job: bySlug.get(s[1]), k: Number(s[2]), n: Number(s[3]), attempt } : null;
+};
+
+const mixedCounts = (forms) => new Error(`history: the attempt has the job in more than one shard count (${[...forms].map((n) => String(n ?? 'unsharded')).sort().join(', ')})`);
+
+const artifactName = (job, attempt, k = null, n = null) => `test-results-${jobSlug(job)}${n === null ? '' : `-${k}of${n}`}-${attempt}`;
+
+// Job conclusions, worst first; one not named here counts as worse than any of them.
+const CONCLUSIONS = ['failure', 'timed_out', 'cancelled', 'action_required', 'stale', 'neutral', 'skipped', 'success'];
+const worst = (conclusions) => conclusions.reduce((w, c) => (CONCLUSIONS.indexOf(c) < CONCLUSIONS.indexOf(w) ? c : w));
+
+// An attempt's shards as the one job they make up: no id or runner of its own (the line holds each shard's), the
+// earliest start, the latest completion and the worst conclusion.
+const logicalJob = (shards) => ({
+  id: null,
+  runner_name: null,
+  conclusion: worst(shards.map((j) => j.conclusion)),
+  started_at: shards.map((j) => j.started_at).sort()[0],
+  completed_at: shards.map((j) => j.completed_at).sort().at(-1),
+});
 
 // The upload step runs only when the job's test step ran (spec, Transport), so its having run is how a job without
 // an artifact is told apart from one whose tests never started, or one from before the job uploaded at all.
@@ -95,25 +134,38 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
 
   // 1. New artifacts, newest first, down to the 8 days an artifact can live (7, and a margin). Every pass lists
   //    them all, so an artifact a pass could not take (its job still running, its download failed) is listed
-  //    again by the next, however many newer ones were stored meanwhile.
+  //    again by the next, however many newer ones were stored meanwhile. A shard's artifact is found with the rest
+  //    of its set (3.), and also takes again a later attempt of its run that copied the shard and is `missing` it.
+  //    One naming another shard count than its attempt's recorded line is refused.
   const items = new Map(); // lineKey → { run, attempt, job, artifact }
   const known = store.artifactIds();
+  const waiting = store.lines().filter((l) => l.report === 'missing' && l.shards);
   const cutoff = now - 8 * DAY;
   for (let page = 1; ; page += 1) {
     const { artifacts } = await gh.artifactsPage(repo, page);
     for (const a of artifacts) {
-      const m = ARTIFACT.exec(a.name);
-      const job = m && bySlug.get(m[1]);
-      if (!job || a.expired || known.has(a.id)) continue;
-      const key = `${a.workflow_run.id}/${Number(m[2])}/${job}`;
-      if (store.line(key) && store.line(key).report !== 'missing') continue; // a re-upload of a job already recorded
-      items.set(key, { run: a.workflow_run.id, attempt: Number(m[2]), job, artifact: a });
+      const part = artifactPart(a.name, bySlug);
+      if (!part || a.expired || known.has(a.id)) continue;
+      const key = `${a.workflow_run.id}/${part.attempt}/${part.job}`;
+      const held = store.line(key);
+      if (held && held.report !== 'missing') { // a re-upload of a job already recorded
+        const recorded = held.shards?.length ?? null;
+        if (recorded !== part.n) errors.push(`run ${a.workflow_run.id} attempt ${part.attempt} ${part.job}: ${mixedCounts([recorded, part.n]).message}`);
+        continue;
+      }
+      const item = items.get(key) ?? { run: a.workflow_run.id, attempt: part.attempt, job: part.job, artifact: null };
+      if (part.n === null) item.artifact = a;
+      items.set(key, item);
+      for (const l of waiting) {
+        if (l.run !== a.workflow_run.id || l.job !== part.job || l.attempt <= part.attempt || l.shards[part.k - 1]?.attempt !== part.attempt) continue;
+        if (!items.has(lineKey(l))) items.set(lineKey(l), { run: l.run, attempt: l.attempt, job: l.job, artifact: null });
+      }
     }
     if (artifacts.length < 100 || artifacts.some((a) => Date.parse(a.created_at) < cutoff)) break;
   }
 
   // 2. The last 3 days' jobs in the reporting set that ran their tests and have no line: their artifact if the
-  //    listing missed it, else a `missing` line.
+  //    listing missed it, else a `missing` line. A shard that ran its tests brings in its job, whose set 3. gathers.
   for (const run of await gh.runsCreatedSince(repo, new Date(now - 3 * DAY).toISOString())) {
     for (let attempt = 1; attempt <= run.run_attempt; attempt += 1) {
       let attemptJobs;
@@ -124,11 +176,16 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
         continue;
       }
       for (const job of attemptJobs) {
-        const key = `${run.id}/${attempt}/${job.name}`;
-        if (!reporting.has(job.name) || job.status !== 'completed' || carriedOver(job) || !uploadRan(job)) continue;
+        const part = jobPart(job.name, reporting);
+        if (!part || job.status !== 'completed' || carriedOver(job) || !uploadRan(job)) continue;
+        const key = `${run.id}/${attempt}/${part.job}`;
         if (items.has(key) || store.line(key)) continue;
+        if (part.n !== null) {
+          items.set(key, { run: run.id, attempt, job: part.job, artifact: null });
+          continue;
+        }
         try {
-          const name = `test-results-${jobSlug(job.name)}-${attempt}`;
+          const name = artifactName(job.name, attempt);
           const artifact = (await artifactsOf(run.id)).find((a) => a.name === name && !a.expired && !known.has(a.id)) ?? null;
           items.set(key, { run: run.id, attempt, job: job.name, artifact });
         } catch (err) {
@@ -139,14 +196,53 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
   }
 
   // 3. Each item's run and job, in the order the jobs completed, so a day's base is its first unselected report.
+  //    A sharded job is taken once all n shards of the attempt completed. A shard a re-run copied into the attempt
+  //    (GitHub composes the attempt's verdict from the copy) is the job it copies: the shard in the latest earlier
+  //    attempt where it is no copy, whose report is that attempt's artifact. A shard that did not run its tests
+  //    leaves the attempt without a line, as an unsharded job that did not run its tests has none; any other
+  //    attempt's artifact never stands in for a shard. An attempt whose jobs and unexpired artifacts in the run's own
+  //    listing name more than one shard count (unsharded included) is refused.
   const work = [];
   for (const item of items.values()) {
     try {
       const run = await runOf(item.run);
-      const job = (await jobsOf(item.run, item.attempt)).find((j) => j.name === item.job);
-      if (!job) throw new Error('history: the attempt has no job of that name');
-      if (job.status !== 'completed') continue; // the next pass takes it
-      work.push({ ...item, runInfo: run, jobInfo: job });
+      const mine = (await jobsOf(item.run, item.attempt)).filter((j) => jobPart(j.name, reporting)?.job === item.job);
+      const artifacts = await artifactsOf(item.run);
+      const parts = artifacts.filter((a) => !a.expired).map((a) => artifactPart(a.name, bySlug)).filter((p) => p?.job === item.job && p.attempt === item.attempt);
+      const forms = new Set([...mine.map((j) => jobPart(j.name, reporting).n), ...parts.map((p) => p.n)]);
+      if (forms.size > 1) throw mixedCounts(forms);
+      const [n] = forms;
+      if (n === null) {
+        const job = mine.find((j) => j.name === item.job);
+        if (!job) throw new Error('history: the attempt has no job of that name');
+        if (job.status !== 'completed') continue; // the next pass takes it
+        work.push({ ...item, runInfo: run, jobInfo: job, shards: null });
+        continue;
+      }
+      const shards = [];
+      for (let k = 1; k <= n; k += 1) {
+        const job = mine.find((j) => j.name === `${item.job} ${k}/${n}`);
+        if (!job) throw new Error(`history: the attempt has no shard ${k} of ${n}`);
+        shards.push(job);
+      }
+      if (shards.some((j) => j.status !== 'completed')) continue; // the next pass takes it
+      const ran = [];
+      for (const shard of shards) {
+        let [job, attempt] = [shard, item.attempt];
+        while (job && carriedOver(job) && attempt > 1) {
+          attempt -= 1;
+          job = (await jobsOf(item.run, attempt)).find((j) => j.name === shard.name);
+        }
+        ran.push({ job, attempt });
+      }
+      if (ran.some(({ job }) => !job || carriedOver(job) || !uploadRan(job))) continue;
+      const set = ran.map(({ job, attempt }, i) => ({
+        job,
+        attempt,
+        artifact: artifacts.find((a) => a.name === artifactName(item.job, attempt, i + 1, n) && !a.expired) ?? null,
+      }));
+      if (set.some((s) => !s.artifact) && store.line(lineKey(item))) continue; // still short, and already `missing`
+      work.push({ ...item, runInfo: run, jobInfo: logicalJob(set.map((s) => s.job)), shards: set });
     } catch (err) {
       errors.push(`run ${item.run} attempt ${item.attempt} ${item.job}: ${describe(err)}`);
     }
@@ -164,7 +260,7 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
     }
   }
 
-  async function lineFor({ runInfo: run, attempt, job: name, jobInfo: job, artifact }) {
+  async function lineFor({ runInfo: run, attempt, job: name, jobInfo: job, artifact, shards }) {
     const prov = {
       run: run.id,
       attempt,
@@ -179,28 +275,36 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
       conclusion: job.conclusion,
       started: job.started_at,
       completed: job.completed_at,
+      shards: shards && shards.map(({ job: j, attempt: at, artifact: a }) => ({
+        job: j.name, attempt: at, jobId: j.id, runner: j.runner_name || null, conclusion: j.conclusion, started: j.started_at, completed: j.completed_at, artifact: a,
+      })),
     };
-    if (!artifact) return buildRunLine(prov, null, 'missing');
+    // The report is the union of the shards' reports, each one checked against the job that ran it; an absent
+    // artifact makes the job's line `missing`, which gives way to the full set should the rest turn up.
+    const parts = shards ?? [{ job, artifact }];
+    if (parts.some((p) => !p.artifact)) return buildRunLine(prov, artifact, 'missing');
     // Only the artifact's own fault makes its report unparseable: a defective archive, one with no XML, XML the
     // parser rejects. Any other failure is the item's: it writes nothing, and the next pass tries it again.
-    const zip = await gh.artifactZip(repo, artifact.id);
-    let xml;
-    try {
-      xml = readZip(zip);
-    } catch (err) {
-      if (err instanceof ArchiveDefect) return buildRunLine(prov, artifact, 'unparseable');
-      throw err;
+    const read = [];
+    for (const p of parts) {
+      const zip = await gh.artifactZip(repo, p.artifact.id);
+      let xml;
+      try {
+        xml = readZip(zip);
+      } catch (err) {
+        if (err instanceof ArchiveDefect) return buildRunLine(prov, artifact, 'unparseable');
+        throw err;
+      }
+      if (xml.length === 0) return buildRunLine(prov, artifact, 'unparseable');
+      try {
+        read.push({ job: p.job, reports: xml.map(parseJUnit) });
+      } catch (err) {
+        if (/^junit: /.test(err?.message ?? '')) return buildRunLine(prov, artifact, 'unparseable');
+        throw err;
+      }
     }
-    if (xml.length === 0) return buildRunLine(prov, artifact, 'unparseable');
-    let reports;
-    try {
-      reports = xml.map(parseJUnit);
-    } catch (err) {
-      if (/^junit: /.test(err?.message ?? '')) return buildRunLine(prov, artifact, 'unparseable');
-      throw err;
-    }
-    if (!reportWithinJob(reports, job)) return buildRunLine(prov, artifact, 'rejected');
-    const summary = summarize(reports);
+    if (!read.every((r) => reportWithinJob(r.reports, r.job))) return buildRunLine(prov, artifact, 'rejected');
+    const summary = summarize(read.flatMap((r) => r.reports));
     const day = dayOf(job.completed_at);
     let base = store.base(day, name);
     if (!base && prov.selection === null) {
@@ -272,7 +376,7 @@ export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), read
     store.add(line);
     counts.lines += 1;
     counts[line.report] += 1;
-    if (line.artifact) counts.artifacts += 1;
+    counts.artifacts += lineArtifacts(line).length;
     counts.failures += line.failed?.length ?? 0;
   }
   for (const line of replacing) store.replace(line);
