@@ -10,8 +10,8 @@
 #   bake.sh --retire <VM>
 #
 # THE HOLD. --bake, --register, --trial and --promote check it before anything else and refuse without it: a
-# vm-hold.<owner> in ~/Library/Logs/ci-kit whose first line starts "maintenance" (CI-opt writes `maintenance since
-# <time>`), no vm-reserved (a job clone may run while it stands), and the launcher's agent com.ssfskim.ci-kit.vm-lane
+# vm-hold.<owner> in ~/Library/Logs/ci-kit whose first line starts "maintenance" (CI-opt writes it through
+# `vm/hold.sh hold <owner> maintenance`, under desktop.lock: `maintenance since <time>`), no vm-reserved (a job clone may run while it stands), and the launcher's agent com.ssfskim.ci-kit.vm-lane
 # not loaded (launchctl print), with no launcher holding vm-lane.lock. Each then holds vm-lane.lock itself for its run,
 # so a launcher started out of order waits for the step instead of recovering beside it. Those that boot a VM (--bake,
 # --register, --trial) also refuse while any maws-vm-* VM runs, and with less than CI_KIT_VM_DISK_RESERVE GB (40) free
@@ -151,7 +151,7 @@ hold_check() {
     IFS= read -r line <"$file" 2>/dev/null || line=''
     [[ $line == maintenance* ]] && owners+="${owners:+, }${file##*/vm-hold.} ($line)"
   done
-  [[ -n $owners ]] || refuse "no maintenance hold: write $ci_kit_logs/vm-hold.<session> ('maintenance since <time>') first"
+  [[ -n $owners ]] || refuse "no maintenance hold: run $here/hold.sh hold <session> maintenance first"
   exists "$reserved_file"
   case $? in
     0) refuse "a reservation stands ($(head -1 "$reserved_file" 2>/dev/null || echo unreadable)): wait for the lane's guest to go" ;;

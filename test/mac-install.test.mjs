@@ -609,7 +609,7 @@ test('--vm installs the launcher disabled, the kit laid out as mac/ is, the slot
   const kit = join(f.home, 'ci-kit-vm/kit');
   assert.deepEqual(tree(kit), tree(join(f.kit, 'mac')));
   for (const file of tree(join(f.kit, 'mac'))) assert.equal(readFileSync(join(kit, file), 'utf8'), readFileSync(join(f.kit, 'mac', file), 'utf8'), file);
-  for (const file of ['vm/lane.sh', 'vm/bake.sh', 'vm/guest/kickoff.sh', 'vm/guest/hooks/job-started.sh', 'vm/guest/hooks/desktop-check.sh', 'hooks/desktop-posture.sh']) {
+  for (const file of ['vm/lane.sh', 'vm/bake.sh', 'vm/hold.sh', 'vm/guest/kickoff.sh', 'vm/guest/hooks/job-started.sh', 'vm/guest/hooks/desktop-check.sh', 'hooks/desktop-posture.sh']) {
     assert.ok(statSync(join(kit, file)).mode & 0o111, file);
   }
   assert.deepEqual(readdirSync(join(f.home, 'ci-kit-vm')).sort(), ['kit', 'trials', 'vm', 'vm-trial']);

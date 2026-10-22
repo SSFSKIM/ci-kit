@@ -188,6 +188,8 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/disk3s5
       writeFileSync(join(vmHome, 'trials', candidate), `trial of ${candidate}\n${Object.entries({ candidate, trial: 'maws-vm-trial-x', run: '7', attempt: '1', job: '4242', conclusion: 'success', ...fields }).map(([k, v]) => `${k}=${v}`).join('\n')}\n`);
     },
     hold(content) { writeFileSync(join(logs, 'vm-hold.ci-opt'), `${content}\n`); },
+    // The coordinator's hold.sh, from the same kit.
+    holdSh: (args) => spawnSync('/bin/bash', [join(mac, 'vm/hold.sh'), ...args], { encoding: 'utf8', timeout: 60_000, env: { ...base, CI_KIT_VM_HOLD_WAIT: '5' } }),
     identity(slot) { for (const file of identities) writeFileSync(join(vmHome, slot, 'identity', file), `${slot} ${file}\n`); },
     jobs(run, attempt, jobs) { writeFileSync(join(home, `gh/jobs-${run}-${attempt}.json`), JSON.stringify({ total_count: jobs.length, jobs })); },
     mark(name, content = '') {
@@ -244,6 +246,19 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
         assert.deepEqual(f.calls(), [], `${what}, ${args}: no Tart call`);
       }
     }
+  });
+
+  test('the maintenance hold hold.sh writes is the one every step accepts; its release is a refusal again', async () => {
+    const f = fixture({ hold: null });
+    const held = f.holdSh(['hold', 'ci-opt', 'maintenance']);
+    assert.equal(held.status, 0, held.stdout + held.stderr);
+    assert.match(held.stdout, /ci-kit vm hold: held: \S+\/vm-hold\.ci-opt \(maintenance\)\nci-kit vm hold: no guest\n$/);
+    const step = f.run(['--promote', CANDIDATE]);
+    assert.match(step.stdout, /held for maintenance by ci-opt \(maintenance since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\); no reservation, the launcher booted out/);
+    assert.equal(f.holdSh(['release', 'ci-opt']).status, 0);
+    const refused = f.run(['--promote', CANDIDATE]);
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /refused: no maintenance hold: run \S+\/hold\.sh hold <session> maintenance first/);
   });
 
   test('a launcher running with its agent booted out holds vm-lane.lock, and every step refuses for it', async () => {

@@ -441,7 +441,7 @@ if ((vm == 1)); then
   kit_staged=$(mktemp -d "$VM_HOME/.kit.XXXXXX")
   cp -R "$here/." "$kit_staged/"
   find "$kit_staged/hooks" "$kit_staged/vm" -name '*.sh' -exec chmod +x {} +
-  for file in vm/lane.sh vm/lane-reads.sh vm/tart.sh vm/bake.sh vm/provision.sh vm/guest/guest.sh vm/guest/diag.sh \
+  for file in vm/lane.sh vm/lane-reads.sh vm/tart.sh vm/bake.sh vm/hold.sh vm/provision.sh vm/guest/guest.sh vm/guest/diag.sh \
     vm/guest/kickoff.sh vm/guest/wrapper.sh vm/guest/hooks/common.sh vm/guest/hooks/job-started.sh \
     vm/guest/hooks/job-completed.sh vm/guest/hooks/desktop-check.sh hooks/cursor-park.swift hooks/window-list.swift \
     install.sh "${hook_files[@]/#/hooks/}"; do

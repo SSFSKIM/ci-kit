@@ -510,7 +510,7 @@ into per machine (`install.sh --vm`), and a Mac without it has none of what foll
 | Job clone | `maws-vm-job-vm-<time>`, an APFS copy of the golden image (seconds; it holds only what the job writes), run with `tart run --no-graphics --no-clipboard` (its pasteboard is never the host's) and four directory shares: the kit and the slot's identity read-only, its `out/` and `cache/` read-write. |
 | Slot | `~/ci-kit-vm/vm/`: `identity/` (the runner's `.runner`, `.credentials`, `.credentials_rsaparams`, copied into each clone and never baked), `out/` (what the guest writes back: its markers, `_diag`, its hooks log), `cache/` (MAWS's e2e build cache). The trial slot, `~/ci-kit-vm/vm-trial/`, is the same for a candidate's trial and serves nothing else. |
 | In the guest | `mac/vm/guest/`: `kickoff.sh` (run by `tart exec`, which is gRPC to the Tart guest agent, never the guest's address) makes the clone the slot's runner and starts `wrapper.sh`, which runs `run.sh --once`, writes the `out/` markers (its header is the protocol), answers the idle stop and powers the guest off; `hooks/` is the guest's start and end, cut down: the display and dialog check, Terminal in front, the posture line with `vm=` and `clone=`, no sweep, no alert, no `gh`. |
-| State | in `~/Library/Logs/ci-kit`, each file replaced whole, written under `desktop.lock`: `vm-reserved` (the slot's reservation), `vm-hold.<owner>` (the holds), `vm-claim.<worker>` (host jobs keeping the guest out), `vm-pause` (the guard's), and the launcher's own `vm-failures` and `vm-lane.alert.<kind>`. |
+| State | in `~/Library/Logs/ci-kit`, each file replaced whole, written under `desktop.lock`: `vm-reserved` (the slot's reservation), `vm-hold.<owner>` (the holds, written and removed by `mac/vm/hold.sh`), `vm-claim.<worker>` (host jobs keeping the guest out), `vm-pause` (the guard's), and the launcher's own `vm-failures` and `vm-lane.alert.<kind>`. |
 | Logs | `vm-lane.log` (every decision, every boot's reads, the guard's samples, each clone's `out/` folded in at its end), `vm-run.log` (the clones' `tart run` output), `vm-out/<clone>/` (the last 20 clones' `out/`), `vm-bake.log` (the maintenance procedure's transcript); the guest's hook lines land in `mac-runner-hooks.log`. |
 
 **The reservation.** `vm-reserved` means "a job clone of this slot may be running", whatever became of the launcher
@@ -588,8 +588,13 @@ admit anything else: a measured job, a timed hold and the maintenance procedure 
   clone that refuses twice shows an image fault.
 
 **Holds have owners, and keep each other.** A hold is a file of its own, `~/Library/Logs/ci-kit/vm-hold.<owner>`,
-written and removed by its owner alone (CI-opt names it after the session that booked the mini); the lane is held while
-any exists, so one owner's release never drops another's. The first line says its kind. Each hold is logged once per
+written and removed by its owner alone (CI-opt names it after the session that booked the mini), always through the
+installed kit's `vm/hold.sh`; the lane is held while any exists, so one owner's release never drops another's.
+`hold.sh` writes and removes a hold under `desktop.lock`, the lock the launcher's boot holds from its read of the holds
+through its reservation's write, so a hold is either seen by a boot, which then boots nothing, or written after that
+boot's reservation, which its wait then sees. A file written by hand has neither guarantee: it can land between the
+boot's read and its reservation, and a wait for the reservation's absence then reports no guest while one boots. The
+owner is a name (`[A-Za-z0-9][A-Za-z0-9._-]*`), refused otherwise, so it never reaches a shell as anything but a word. The first line says its kind. Each hold is logged once per
 change, and alerted after 6 h (`ci-kit alert: vm lane on <machine> held by <owner> since <minute>`). The booking a
 session makes through CI-opt says which kind it needs:
 - **Untimed** (cua's functional sessions): CI-opt takes the host's instances down as for any hold (below) and leaves
@@ -598,12 +603,14 @@ session makes through CI-opt says which kind it needs:
   reservation to go, then the host's instances; at release the marker is removed first, then the instances come back.
 
   ```bash
-  owner=<session>   # the booking session's name: one file per owner
-  ssh mini "printf 'timed since %s\n' \$(date -u +%Y-%m-%dT%H:%M:%SZ) > ~/Library/Logs/ci-kit/vm-hold.$owner"
-  ssh mini 'until [ ! -e ~/Library/Logs/ci-kit/vm-reserved ]; do sleep 15; done; echo no guest'
-  #   expect: no guest   (at most the running bound; in practice the guest job's own length and its boot)
+  owner=<session>   # the booking session's name: one file per owner, [A-Za-z0-9][A-Za-z0-9._-]*
+  ssh mini "~/ci-kit-vm/kit/vm/hold.sh hold $owner timed"
+  #   expect: ci-kit vm hold: held: …/vm-hold.<owner> (timed), then ci-kit vm hold: no guest
+  #   (at most the running bound; in practice the guest job's own length and its boot). Exit 1, "not clear after …",
+  #   means a guest is still there: the hold stays; run `hold.sh wait` until it says no guest.
   # … take the host's instances down, as for any hold; the session runs …
-  ssh mini "rm -f ~/Library/Logs/ci-kit/vm-hold.$owner"   # at release, before the instances come back
+  ssh mini "~/ci-kit-vm/kit/vm/hold.sh release $owner"   # at release, before the instances come back
+  #   expect: ci-kit vm hold: released: …/vm-hold.<owner>
   ```
 
   A hold script that forgets the marker gets a guest beside its bench.
@@ -681,7 +688,7 @@ recovers or releases while it runs. It is run on invalidation, never on a schedu
 LibreOffice version wanting its first-run window again. A refresh takes the mini for its length, as a timed hold does.
 
 `bake.sh` checks the hold before every step but `--retire`, and refuses without it: a `vm-hold.<owner>` whose first
-line starts `maintenance`, no `vm-reserved`, the launcher's agent not loaded (`launchctl print`), and no launcher
+line starts `maintenance` (`hold.sh hold <owner> maintenance` writes `maintenance since <time>`), no `vm-reserved`, the launcher's agent not loaded (`launchctl print`), and no launcher
 holding `vm-lane.lock`. It holds that lock itself for each step, so a launcher bootstrapped out of order waits for the
 step. The steps that boot a VM also refuse while any `maws-vm-*` VM runs, and under the disk reserve. Each step prints
 what it did and logs it to `vm-bake.log`; each is safe to run again: nothing is deleted without a verified stop
@@ -692,15 +699,13 @@ the install refuses during maintenance, and an install already under way holds `
 kit, so a step started then refuses until it is done), so the candidate is provisioned with the kit the lane will run. In the
 commands, `owner` is the session's name, as for a timed hold, and `cand` the candidate's name `--bake` prints.
 
-1. **The hold.** Write the marker, wait for the guest to go, take the host's instances down as for any hold, and boot
-   the launcher out:
+1. **The hold.** Write the marker and wait for the guest to go (`hold.sh`, which waits for no reservation and no
+   `maws-vm-*` VM running), take the host's instances down as for any hold, and boot the launcher out:
 
    ```bash
    owner=<session>
-   ssh mini "printf 'maintenance since %s\n' \$(date -u +%Y-%m-%dT%H:%M:%SZ) > ~/Library/Logs/ci-kit/vm-hold.$owner"
-   ssh mini 'until [ ! -e ~/Library/Logs/ci-kit/vm-reserved ]; do sleep 15; done; echo no guest'
-   ssh mini "tart list --format json | python3 -c 'import json,sys; print([v[\"Name\"] for v in json.load(sys.stdin) if v[\"Name\"].startswith(\"maws-vm-\") and v[\"Running\"]])'"
-   #   expect: no guest, then []
+   ssh mini "~/ci-kit-vm/kit/vm/hold.sh hold $owner maintenance"
+   #   expect: ci-kit vm hold: held: …/vm-hold.<owner> (maintenance), then ci-kit vm hold: no guest
    # take the host's instances down (Disable and enable, above: every com.ssfskim.ci-kit.mac-runner*), noting which were enabled
    ssh mini 'launchctl bootout gui/$(id -u)/com.ssfskim.ci-kit.vm-lane; launchctl print gui/$(id -u)/com.ssfskim.ci-kit.vm-lane >/dev/null 2>&1 || echo booted out'
    #   expect: booted out
@@ -781,7 +786,7 @@ commands, `owner` is the session's name, as for a timed hold, and `cand` the can
 
 7. **Release**, in this order: bring the launcher back (`launchctl bootstrap gui/$(id -u)
    ~/Library/LaunchAgents/com.ssfskim.ci-kit.vm-lane.plist`, if its agent is enabled), remove your hold
-   (`rm ~/Library/Logs/ci-kit/vm-hold.$owner`), and bring back the host's instances that were enabled. The launcher's
+   (`ssh mini "~/ci-kit-vm/kit/vm/hold.sh release $owner"`), and bring back the host's instances that were enabled. The launcher's
    start reconciles job clones only and boots from the pointer's VM from then on, naming the golden at every boot.
 
 8. **Retire** the old golden after the first green production job from the new one (`vm-lane.log` names the golden at

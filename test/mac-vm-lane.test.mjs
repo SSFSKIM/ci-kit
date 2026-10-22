@@ -49,6 +49,12 @@ case $command in
   list)
     [[ $* == '--format json' ]] || exit 64
     [[ ! -e $t/fail-list ]] || { echo 'Error: list failed' >&2; exit 1; }
+    # block-locked-list <n>: the n-th list made while desktop.lock is held (the launcher's recovery, then its boots)
+    # waits for list-go.
+    if [[ -e $t/block-locked-list ]] && ! perl -MFcntl=:flock -e 'open(my $f, ">>", shift) or exit 0; exit(flock($f, LOCK_EX | LOCK_NB) ? 0 : 1)' "$HOME/Library/Logs/ci-kit/desktop.lock"; then
+      n=$(( $(cat "$t/locked-lists" 2>/dev/null || echo 0) + 1 )); echo $n > "$t/locked-lists"
+      if ((n == $(cat "$t/block-locked-list"))); then touch "$t/list-waiting"; until [[ -e $t/list-go ]]; do sleep 0.05; done; fi
+    fi
     sep=''; printf '['
     for dir in "$vms"/*/; do
       [[ -d $dir ]] || continue
@@ -200,7 +206,19 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/disk3s5
       jobs.forEach((labels, i) => writeFileSync(join(home, `gh/jobs-${runs[i]}.json`),
         JSON.stringify({ total_count: 1, jobs: [{ id: 9000 + i, run_id: runs[i], status: 'queued', labels }] })));
     },
-    flag: (name, on = true) => on ? writeFileSync(join(home, 'tart', name), '') : rmSync(join(home, 'tart', name), { force: true }),
+    flag: (name, on = true) => on === false ? rmSync(join(home, 'tart', name), { force: true }) : writeFileSync(join(home, 'tart', name), on === true ? '' : `${on}\n`),
+    // The coordinator's hold.sh, as run over ssh: its output so far, and its exit.
+    holdCommand(args, extra = {}) {
+      const child = spawn('/bin/bash', [join(mac, 'vm/hold.sh'), ...args], {
+        stdio: ['ignore', 'pipe', 'pipe'], env: { ...base, CI_KIT_VM_TICK: '0.2', ...extra },
+      });
+      host.push(child);
+      let output = '';
+      child.stdout.on('data', (chunk) => { output += chunk; });
+      child.stderr.on('data', (chunk) => { output += chunk; });
+      const exited = once(child, 'exit').then(([code]) => code);
+      return { output: () => output, exited };
+    },
     ghFlag: (name, on = true) => on === false ? rmSync(join(home, 'gh', name), { force: true }) : writeFileSync(join(home, 'gh', name), on === true ? '' : `${on}\n`),
     log: () => text(join(logs, 'vm-lane.log')) ?? '',
     hooksLog: () => text(join(logs, 'mac-runner-hooks.log')) ?? '',
@@ -517,6 +535,54 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     assert.equal(m.reserved(), null);
     assert.deepEqual(m.clones(), []);
     assert.ok(m.lockFree());
+    await finish(m, a);
+  });
+
+  // THE COORDINATOR'S HOLD (hold.sh), under desktop.lock as the boot's read of the holds is.
+  test('a hold written while a boot sits between its hold read and its reservation write waits for that boot\'s guest: it is never reported clear with a guest coming', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    m.flag('block-locked-list', 2);
+    const a = m.start();
+    await m.until(() => existsSync(join(m.home, 'tart/list-waiting')), 'the boot paused in its locked list');
+    assert.equal(m.reserved(), null, 'no reservation yet');
+    const hold = m.holdCommand(['hold', 'bench-1', 'timed'], { CI_KIT_VM_HOLD_WAIT: '600' });
+    await sleep(1500);
+    assert.equal(existsSync(join(m.logs, 'vm-hold.bench-1')), false, 'the hold waits for the boot\'s lock');
+    assert.doesNotMatch(hold.output(), /no guest/);
+    m.flag('list-go');
+    const clone = await m.booted();
+    await m.until(() => /waiting: a reservation stands/.test(hold.output()), 'the hold waiting on the reservation');
+    assert.match(readFileSync(join(m.logs, 'vm-hold.bench-1'), 'utf8'), /^timed since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\n$/);
+    await m.listening(clone);
+    await m.assigned(clone);
+    await m.job(clone);
+    assert.doesNotMatch(hold.output(), /no guest/, 'not clear while the guest runs');
+    await m.finished(clone);
+    assert.equal(await hold.exited, 0);
+    assert.match(hold.output(), /ci-kit vm hold: no guest\n$/);
+    await m.waitLog(/no boot: bench-1: timed since /);
+    await finish(m, a);
+  });
+
+  test('hold.sh: a wait past its bound reports the guest still there and keeps the hold; a release removes its owner\'s hold alone; an owner that is not a name is refused', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const a = m.start();
+    const clone = await m.booted();
+    await m.listening(clone);
+    const hold = m.holdCommand(['hold', 'bench-1', 'timed'], { CI_KIT_VM_HOLD_WAIT: '1' });
+    assert.equal(await hold.exited, 1);
+    assert.match(hold.output(), /not clear after 1 s: a reservation stands \(reserved since \S+: vm=maws-vm-job-/);
+    assert.ok(existsSync(join(m.logs, 'vm-hold.bench-1')), 'the hold stays');
+    writeFileSync(join(m.logs, 'vm-hold.cua-2'), 'untimed since 2026-10-21T12:00:00Z\n');
+    assert.equal(await m.holdCommand(['release', 'bench-1']).exited, 0);
+    assert.equal(existsSync(join(m.logs, 'vm-hold.bench-1')), false);
+    assert.ok(existsSync(join(m.logs, 'vm-hold.cua-2')), 'another owner\'s hold stays');
+    const bad = m.holdCommand(['hold', 'x;touch $HOME/owned', 'timed']);
+    assert.equal(await bad.exited, 2);
+    assert.match(bad.output(), /refused: the owner 'x;touch \$HOME\/owned' is not a name/);
+    assert.equal(readdirSync(m.logs).filter((name) => name.startsWith('vm-hold.') && name !== 'vm-hold.cua-2').length, 0);
+    assert.equal(existsSync(join(m.home, 'owned')), false);
+    assert.equal(await m.holdCommand(['hold', 'bench-1', 'forever']).exited, 2);
     await finish(m, a);
   });
 
@@ -897,7 +963,7 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     m.flag('fail-kickoff-late');
     const a = m.start();
     const clone = await m.booted();
-    await m.waitLog(new RegExp(`${clone}: kickoff.sh failed: Error: rpc error: code = DeadlineExceeded, and its wrapper may run; asked the wrapper to stop`));
+    await m.waitLog(new RegExp(`${clone}: kickoff.sh failed: Error: rpc error: code = DeadlineExceeded; asked the wrapper to stop`));
     assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
     assert.equal(m.failures().total_image, '1');
     m.mark('stopped', 'at=2026-10-21T12:04:00Z');
@@ -1070,7 +1136,11 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     for (let n = 1; n <= 3; n++) {
       const clone = await m.booted();
       m.mark('session-conflict', 'at=2026-10-21T12:00:40Z');
-      await m.waitLog(new RegExp(`${clone}: the slot's session was not let go within 1 s; teardown`));
+      // Its wrapper runs: the bound asks it to stop, and its answer ends the guest.
+      await m.waitLog(new RegExp(`${clone}: the slot's session was not let go within 1 s; asked the wrapper to stop`));
+      m.mark('stopped', 'at=2026-10-21T12:04:00Z');
+      m.mark('done', '0');
+      m.powerOff(clone);
       await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
     }
     assert.equal(m.failures().total_session, '3');
