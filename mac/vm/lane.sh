@@ -16,7 +16,9 @@
 #   kicking     `tart exec <clone> …/kickoff.sh <slot> <clone>`, run beside the loop, then until out/listening or
 #               out/session-conflict, at most CI_KIT_VM_KICKOFF s (60) from the kickoff. An exec that fails is read
 #               against out/ first: the wrapper's markers go on as they would, a wrapper that may run with nothing
-#               assigned is given up through the handshake, and only a clone where none can run fails at once
+#               assigned is given up through the handshake, and only a clone where none can run fails at once. A
+#               wrapper that started no runner (out/unfit: no .path, the display off the image's mode) is an `image`
+#               failure naming its reason
 #   session     the listener found the slot's last session open: until out/listening (or out/assigned, a job taken
 #               all the same), at most CI_KIT_VM_SESSION s (300); past it a `session` failure, counted apart from
 #               `image`. A bound passed before a job (the kickoff's, the session's) gives the guest up through the
@@ -70,10 +72,12 @@
 #      the desktop lock: clear only when it exits 0 and prints nothing);
 #   4. no guest exists: vm-reserved absent, and Tart lists no maws-vm-* running (a maintenance VM keeps the lane shut,
 #      logged once per change and alerted after CI_KIT_VM_MAINTENANCE_ALERT s, 600);
-#   5. the memory guard and the disk reserve admit: pressure 1, available at least CI_KIT_VM_MEMORY_FLOOR % (37: a 4 GB
-#      guest's share of 16 GB plus 12 points), swap not grown since the last read at least CI_KIT_VM_SWAP_GAP s (60)
-#      older, and the volume of ~/.tart (CI_KIT_VM_TART_HOME) with at least CI_KIT_VM_DISK_RESERVE GB (40) free; a read
-#      that fails admits nothing;
+#   5. the memory guard and the disk reserve admit: pressure 1, available at least CI_KIT_VM_MEMORY_FLOOR % (60, V1's
+#      measure on the mini: a busy 4 GB guest moved the available figure at most 8 points, 24 with a host e2e job
+#      beside it, and pressure 2 began at 35-41 %, so a boot at 60 keeps the host above the warn boundary with a host
+#      job beside; a 3 GB surge beside the guest left 53 %, which 60 keeps from booting, as the floor is meant to),
+#      swap not grown since the last read at least CI_KIT_VM_SWAP_GAP s (60) older, and the volume of ~/.tart
+#      (CI_KIT_VM_TART_HOME) with at least CI_KIT_VM_DISK_RESERVE GB (40) free; a read that fails admits nothing;
 #   6. the host's main display is at @2x (cursor-park --describe through CI_KIT_CURSOR_PARK, the exclusive instance's
 #      installed helper by default), since the guest takes its density from it at boot;
 #   7. CI_KIT_VM_LANE_MODE is always (the default), or hold-only with every host instance held or stopped;
@@ -166,7 +170,7 @@ stop_timeout=$(whole "${CI_KIT_VM_STOP_TIMEOUT:-}" 30)
 spawn_check=$(whole "${CI_KIT_VM_SPAWN_CHECK:-}" 1)
 sample_every=$(whole "${CI_KIT_VM_SAMPLE:-}" 15)
 swap_gap=$(whole "${CI_KIT_VM_SWAP_GAP:-}" 60)
-memory_floor=$(whole "${CI_KIT_VM_MEMORY_FLOOR:-}" 37)
+memory_floor=$(whole "${CI_KIT_VM_MEMORY_FLOOR:-}" 60)
 warn_pause=$(whole "${CI_KIT_VM_WARN_PAUSE:-}" 120)
 critical_pause=$(whole "${CI_KIT_VM_CRITICAL_PAUSE:-}" 600)
 disk_reserve=$(whole "${CI_KIT_VM_DISK_RESERVE:-}" 40)
@@ -184,7 +188,7 @@ failures_file=$ci_kit_logs/vm-failures
 lane_lock=$ci_kit_logs/vm-lane.lock
 run_log=$ci_kit_logs/vm-run.log
 drain_marker=$ci_kit_logs/runner-drained
-markers='listening session-conflict assigned job refused stop-request stop-refused stop-raced stopped done'
+markers='listening session-conflict assigned job refused stop-request stop-refused stop-raced stopped done unfit'
 identity_files='.runner .credentials .credentials_rsaparams'
 job_clone_pattern="^maws-vm-job-$slot-[0-9]{8}T[0-9]{6}Z\$"
 
@@ -794,6 +798,8 @@ step_kicking() {
     enter session
     return
   fi
+  # The wrapper started no runner, so nothing can hold a job: the clone is the image's failure, and says why.
+  if has unfit; then fail image "the guest started no runner: $(first_line unfit)"; return; fi
   # Nothing assigned: a wrapper that may run may yet take a job, so give_up asks it through the handshake.
   if [[ -n $failed_kick ]]; then give_up image "$failed_kick"; return; fi
   if run_gone; then fail image 'tart run exited during the kickoff'; return; fi

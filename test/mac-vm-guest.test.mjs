@@ -5,7 +5,7 @@ import { appendFileSync, chmodSync, readdirSync, rmdirSync, unlinkSync, constant
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { asnShape, pairShape, terminal, windowLine, ordinaryWindows } from './fake-mac-desktop.mjs';
+import { asnShape, pairShape, terminal, windowLine, ordinaryWindows, displayplacer } from './fake-mac-desktop.mjs';
 
 // The VM lane's guest (mac/vm/guest): kickoff.sh, which a launcher's `tart exec` runs in a fresh clone; wrapper.sh,
 // which owns the clone's one runner and writes the out/ markers from its listener's diag log and processes; and the
@@ -65,8 +65,9 @@ const stamp = (at) => `[${at} `;
 //   listen | conflict | take (the job's lines and its worker) | worker (a worker and no line) | raw <diag line> |
 //   exit <code> (the listener ends, as after its one job)
 // and on SIGINT logs Ctrl-C, takes a job first when ctl/race exists (an acceptance racing the stop), and exits 0.
-// path: the runner's .path, as the image's runner install writes it (null: none).
-function guest({ identity = true, display = '2560x1440@2x', displayStatus = 0, worker = false, path = '/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin' } = {}) {
+// path: the runner's .path, as the image's runner install writes it (null: none). mode: the guest's display mode as
+// displayplacer reads it ("<res> <scaling>", null: the read fails), which the image's bake sets.
+function guest({ identity = true, display = '2560x1440@2x', displayStatus = 0, worker = false, path = '/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin', mode = '2560x1440 on' } = {}) {
   const home = mkdtempSync(join(root, 'guest-'));
   const bin = join(home, 'bin');
   const shares = join(home, 'shares');
@@ -142,6 +143,8 @@ done`);
 cat '${join(home, 'display')}'
 exit ${displayStatus}`);
   executable(join(bin, 'unified-log'), 'exit 0');
+  if (mode === null) writeFileSync(join(home, 'display-fail'), ''); else writeFileSync(join(home, 'display-mode'), `${mode}\n`);
+  executable(join(bin, 'displayplacer'), displayplacer(home));
   // gh, everywhere a guest could find it: on the PATH and as the hooks' override. Every call is recorded.
   executable(join(bin, 'gh'), `printf '%s\\n' "$*" >> '${join(home, 'gh.calls')}'\nexit 0`);
   executable(join(bin, 'node'), `printf '%s\\n' "$*" >> '${join(home, 'node.calls')}'\nexit 0`);
@@ -153,7 +156,7 @@ exit ${displayStatus}`);
   const env = {
     HOME: home, PATH: `${bin}:/usr/bin:/bin`, CI_KIT_VM_SHARES: shares, CI_KIT_VM_WATCH: '0.1', CI_KIT_VM_SHUTDOWN: join(bin, 'shutdown'),
     CI_KIT_MACHINE: 'mini-vm', CI_KIT_GH_BIN: join(bin, 'gh'), CI_KIT_CURSOR_PARK: join(bin, 'cursor-park'), CI_KIT_WINDOW_LIST: join(bin, 'window-list'),
-    CI_KIT_LOG_BIN: join(bin, 'unified-log'), PERL5LIB: perlLib, PERL5OPT: '-MFixtureClock',
+    CI_KIT_LOG_BIN: join(bin, 'unified-log'), CI_KIT_VM_DISPLAYPLACER: join(bin, 'displayplacer'), PERL5LIB: perlLib, PERL5OPT: '-MFixtureClock',
   };
   const text = (path) => existsSync(path) ? readFileSync(path, 'utf8') : null;
   const out = (name) => text(join(shares, 'out', name));
@@ -272,8 +275,37 @@ test("the runner starts on the PATH the image baked into its .path (runsvc.sh's 
   await until(() => bare.shutdown(), 'the power-off');
   assert.equal(existsSync(join(bare.ctl, 'run.args')), false, 'run.sh never started');
   assert.match(bare.out('wrapper.log'), /refused to start the runner: .*\.path is missing or empty .*; powering off/);
+  assert.match(bare.out('unfit'), /^\S+\/actions-runner-maws\/\.path is missing or empty/);
   for (const marker of ['listening', 'assigned', 'job', 'done']) assert.equal(bare.out(marker), null, marker);
 });
+
+// The guest's display mode is the image's (provision.sh display): Tart's --display does not reach it, and a clone at
+// another mode would run MAWS's windows on a smaller screen.
+test('the wrapper reads the display mode before the runner starts: at 2560x1440 with scaling on it starts the runner', async () => {
+  const vm = guest();
+  assert.equal(vm.kickoff().status, 0);
+  await until(() => existsSync(join(vm.ctl, 'run.args')), 'the runner');
+  assert.match(vm.out('wrapper.log'), /display 2560x1440 scaling:on \(C97580C4-/);
+  assert.equal(vm.out('unfit'), null);
+  vm.send('exit 0');
+  await until(() => vm.out('done') !== null, 'out/done');
+});
+
+for (const [what, mode, why] of [
+  ['the size Tart boots a guest at', '1024x768 on', /^the display is 1024x768 scaling:on, not 2560x1440 scaling:on /],
+  ['the right size without scaling', '2560x1440 off', /^the display is 2560x1440 scaling:off, not 2560x1440 scaling:on /],
+  ['a read that fails', null, /^the display mode cannot be read \(\S+displayplacer list\)/],
+]) {
+  test(`at ${what}, the wrapper starts no runner, says why in out/unfit, and powers off`, async () => {
+    const vm = guest({ mode });
+    assert.equal(vm.kickoff().status, 0);
+    await until(() => vm.shutdown(), 'the power-off');
+    assert.equal(existsSync(join(vm.ctl, 'run.args')), false, 'run.sh never started');
+    assert.match(vm.out('unfit'), why);
+    assert.match(vm.out('wrapper.log'), /refused to start the runner: the display.*; powering off/);
+    for (const marker of ['listening', 'assigned', 'job', 'done']) assert.equal(vm.out(marker), null, marker);
+  });
+}
 
 test('kickoff refuses, starting nothing, without the identity or with an out/ that is not empty', () => {
   const missing = guest({ identity: false });

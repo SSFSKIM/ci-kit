@@ -23,9 +23,11 @@
 # - --bake: `tart clone` of the base (CI_KIT_VM_BASE, ghcr.io/cirruslabs/macos-golden-gate-base:latest) to
 #   maws-vm-candidate-<YYYYMMDD> (UTC; --name for another id), refused when that candidate or its golden name exists
 #   (an earlier trial record of the name is moved aside, so only this candidate's own trial can authorize it);
-#   `tart set --cpu 4 --memory <MB> --display 2560x1440pt` (--memory, 4096 until V1 decides between 3 and 4 GB); a run
-#   with the installed kit (CI_KIT_VM_KIT, ~/ci-kit-vm/kit) and the MAWS checkout (--maws, CI_KIT_VM_MAWS,
-#   ~/Developer/GitHub/MAWS) shared read-only; provision.sh's steps through `tart exec`, the free space read after each
+#   `tart set --cpu 4 --memory <MB> --display 2560x1440pt --disk-size 60` before its first boot (--memory, 4096: V1's
+#   size; under 4096 is refused at once, the base image's minimum being 4 GiB); a run with the installed kit
+#   (CI_KIT_VM_KIT, ~/ci-kit-vm/kit) and the MAWS checkout (--maws, CI_KIT_VM_MAWS, ~/Developer/GitHub/MAWS) shared
+#   read-only; provision.sh's steps through `tart exec` (the APFS container grown into
+#   the larger disk and the display mode set first, each verified in the guest), the free space read after each
 #   (the lowest is printed, which the first refresh records; under CI_KIT_VM_DISK_FLOOR GB, 5, the bake stops); the
 #   verified stop. It then prints the human's first-run window step, which is never scripted.
 # - --register: boots the candidate or golden named, registers through config.sh each identity whose slot lacks one,
@@ -124,8 +126,19 @@ reserved_file=$ci_kit_logs/vm-reserved
 guest_shares='/Volumes/My Shared Files'
 provision="$guest_shares/kit/vm/provision.sh"
 identity_files='.runner .credentials .credentials_rsaparams'
-markers='listening session-conflict assigned job refused stop-request stop-refused stop-raced stopped done'
+markers='listening session-conflict assigned job refused stop-request stop-refused stop-raced stopped done unfit'
 vm_name_re='^[A-Za-z0-9][A-Za-z0-9._-]*$'
+# The guest's disk in GB, set while the candidate is stopped (tart set --disk-size) and taken into its APFS container by
+# provision.sh disk. A provisioned image has about 2.5 GiB free in a 41 GiB container, and V1's clone ran three builds
+# into ENOSPC (215 MiB free). With out/ no longer built in the guest a job writes less (a checkout, node_modules from
+# the warm store, a ~130 MB restored out/, test results), but V1's worst clone used ~2.3 GiB and the guest's swap file
+# reached ~0.9 GB. The base's disk is most likely 50 GB already (Cirrus's golden-gate template sets disk_size_gb 50,
+# and a 41 GiB container beside its ~5 GB recovery container and 0.5 GB iBoot container fills 50 GB), so 50 would add
+# nothing: 60 adds 10 GB, and the recovery container the resize removes about 5 more, for about 17 GiB free after
+# provisioning, some 7x V1's worst. The host pays only for the blocks a clone writes (APFS copy-on-write).
+guest_disk=60
+# The base image refuses less memory (tart set: LessThanMinimalResourcesError, 4294967296 bytes at minimum).
+memory_minimum=4096
 
 # 0 there, 1 not there, 2 the lookup failed.
 exists() { # <path>
@@ -257,7 +270,7 @@ disk_follow() {
 }
 
 do_bake() {
-  local memory=4096 name='' golden version sha pnpm machine
+  local memory=4096 name='' golden version sha pnpm machine output
   while (($# > 0)); do
     case $1 in
       --memory) (($# > 1)) || usage; memory=$2; shift ;;
@@ -268,6 +281,8 @@ do_bake() {
     shift
   done
   [[ $memory =~ ^[1-9][0-9]{3,4}$ ]] || die "--memory takes the guest's memory in MB (got '$memory')"
+  ((memory >= memory_minimum)) ||
+    die "--memory $memory is under the base image's minimum of $memory_minimum MB (Tart refuses it: LessThanMinimalResourcesError)"
   name=${name:-maws-vm-candidate-$(date -u +%Y%m%d)}
   [[ $name =~ ^maws-vm-candidate-[A-Za-z0-9._-]+$ ]] || die "--name takes maws-vm-candidate-<id> (got '$name')"
   golden=maws-vm-golden-${name#maws-vm-candidate-}
@@ -289,11 +304,16 @@ do_bake() {
   fi
   pnpm=$(perl -MJSON::PP -e 'my $p = JSON::PP->new->decode(do { local $/; <STDIN> }); my ($v) = ($p->{packageManager} // "") =~ /^pnpm\@(\d+\.\d+\.\d+)/; print $v // ""' <"$maws/package.json" 2>/dev/null)
   [[ -n $pnpm ]] || refuse "the MAWS checkout's packageManager names no pnpm version ($maws/package.json)"
-  say "baking $name from $base: --cpu 4 --memory $memory --display 2560x1440pt; runner $version, pnpm $pnpm, guest machine $machine-vm"
+  say "baking $name from $base: --cpu 4 --memory $memory --display 2560x1440pt --disk-size $guest_disk; runner $version, pnpm $pnpm, guest machine $machine-vm"
   tart_call 1800 clone "$base" "$name" >/dev/null 2>&1 || die "tart clone $base $name failed"
-  tart_call 60 set "$name" --cpu 4 --memory "$memory" --display 2560x1440pt >/dev/null 2>&1 || die "tart set $name failed; $name stays, stopped"
+  output=$(tart_call 300 set "$name" --cpu 4 --memory "$memory" --display 2560x1440pt --disk-size "$guest_disk" 2>&1) ||
+    die "tart set $name failed${output:+ ($(tail -1 <<<"$output"))}; $name stays, stopped"
   boot_vm "$name" "--dir=kit:$kit:ro" "--dir=maws:$maws:ro"
   in_guest 600 'the base (check)' /bin/bash "$provision" check
+  disk_follow
+  in_guest 1800 "the disk grown to $guest_disk GB (disk)" /bin/bash "$provision" disk "$guest_disk"
+  disk_follow
+  in_guest 900 'the display at 2560x1440, scaling on (display)' /bin/bash "$provision" display
   disk_follow
   in_guest "$provision_wait" "Node 22 and pnpm $pnpm (node)" /bin/bash "$provision" node "$pnpm"
   disk_follow
@@ -536,6 +556,11 @@ do_trial() {
   say "$trial: deleted"
   t_kept=$trials/$trial.out
   if mv "$t_out" "$t_kept" 2>/dev/null; then mkdir -p "$t_out"; else t_kept=$t_out; fi
+  if [[ -f $t_kept/unfit ]]; then
+    t_why="the guest started no runner: $(head -1 "$t_kept/unfit" 2>/dev/null)"
+    write_record "trial of $candidate: no job"
+    return 0
+  fi
   if [[ ! -f $t_kept/job ]]; then
     t_why="no job reached the trial clone's hook (no out/job): $t_end"
     write_record "trial of $candidate: no job"

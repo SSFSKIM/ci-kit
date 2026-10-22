@@ -426,7 +426,7 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     { name: '4, a maintenance VM running', before: (m) => m.vm('maws-vm-candidate-20261021', 'running'),
       refusal: /no boot: maws-vm-candidate-20261021 runs$/m, lift: (m) => m.vm('maws-vm-candidate-20261021', 'stopped') },
     { name: '5, memory pressure', options: { memory: { pressure: 2 } }, refusal: /no boot: memory pressure 2, not 1 \(pressure 2, available 60%, swap 500 MB\)$/m, lift: (m) => m.memory() },
-    { name: '5, available memory under the floor', options: { memory: { available: 36 } }, refusal: /no boot: memory available 36%, under the floor of 37%$/m, lift: (m) => m.memory({ available: 37 }) },
+    { name: '5, available memory under the floor (60 by default: V1\'s)', options: { memory: { available: 59 } }, refusal: /no boot: memory available 59%, under the floor of 60%$/m, lift: (m) => m.memory({ available: 60 }) },
     { name: '5, swap growing', before: (m) => writeFileSync(join(m.home, 'swap-grow'), '500\n'), refusal: /no boot: swap grew from \d+ MB to \d+ MB in \d+ s$/m,
       lift: (m) => rmSync(join(m.home, 'swap-grow')) },
     { name: '5, a memory read that fails', options: { memory: { pressure: 'fail' } }, refusal: /no boot: memory unknown \(the read failed\)$/m, lift: (m) => m.memory() },
@@ -1459,6 +1459,19 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     m.flag('fail-list', false);
     await m.booted();
     assert.deepEqual(m.closed().sort(), ['https://github.com/SSFSKIM/ci-kit-sandbox/issues/1', 'https://github.com/SSFSKIM/ci-kit-sandbox/issues/2']);
+    await finish(m, a);
+  });
+
+  test('a guest whose wrapper started no runner (out/unfit) is an image failure, and the failure says why', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const a = m.start();
+    const clone = await m.booted();
+    m.mark('unfit', 'the display is 1024x768 scaling:on, not 2560x1440 scaling:on (the image\'s bake sets it: provision.sh display)');
+    m.powerOff(clone);
+    await m.waitLog(new RegExp(`${clone}: the guest started no runner: the display is 1024x768 scaling:on, not 2560x1440 scaling:on \\(the image's bake sets it: provision\\.sh display\\); teardown`));
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    assert.equal(m.failures().total_image, '1');
+    assert.equal(m.failures().image_run, '1');
     await finish(m, a);
   });
 
