@@ -197,14 +197,16 @@ just after the ISO week turns:
 A schedule runs on the default branch and plans every `build_cache` gate. A push to the default branch plans the
 `build_cache` gates whose `paths` match what it changed since the branch's tip before it, and every one of them when
 there is no such tip to diff against (a new branch, a force push). Each seed is the gate's whole run, so a broken image
-shows on the default branch. Neither seed plans any other gate: gates without `build_cache` run as before, on the
-events they always had, and a merge is not tested again.
+shows on the default branch. Neither seed plans any other gate: gates without `build_cache` run as before, on the events
+they always had, and a merge is not tested again.
 
 So a merge that changes no cache gate's files costs a plan job and the verdict, about 15 s on two hosted runners. One
-that does runs those gates once, and the pull requests and `ci-gate` calls after it read the new layers rather than
-each building them cold until the next schedule. A push to any other branch outside `ci/**` still fails the plan. To seed by
-hand, dispatch on the default branch: `gh workflow run ci.yml --ref <default branch> -f gates=<a cache gate>`. GitHub
-disables a public repository's schedule after 60 days without activity in it.
+that does runs those gates once, and the pull requests and `ci-gate` calls after it read the new layers rather than each
+building them cold until the next schedule. Merges close together seed side by side, and the seed that finishes last
+names the scope's layers: if an older one finishes after a newer one, the layers the newer one changed are built again
+until a later seed. A push to any other branch outside `ci/**` still fails the plan. To seed by hand, dispatch on the
+default branch: `gh workflow run ci.yml --ref <default branch> -f gates=<a cache gate>`. GitHub disables a public
+repository's schedule after 60 days without activity in it.
 
 - **Why only the default branch writes.** GitHub scopes a cache entry to the ref that wrote it. A run reads its own
   ref's entries and the default branch's (a PR run its base branch's too), never a sibling's. Every `ci-gate` call
