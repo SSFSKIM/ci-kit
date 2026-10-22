@@ -192,13 +192,16 @@ docker build ${cache[@]+"${cache[@]}"} -t myimage .   # the ${...+...} form keep
   keeps its layers the image's own, and a hit downloads and unpacks them faster too.
 - **What a hit still costs.** The first build of a scope uploads every layer it built (about 40 s for 600 MB), and a
   build that hits downloads and unpacks each one: 25 s for the same 600 MB, the download 13 s of it, in a 27 s warm
-  build of an image that takes 92–101 s uncached. The cache pays where building a layer takes longer than moving it.
+  build of an image that takes 92–101 s uncached. Each layer comes down as one stream, so gates pulling the same
+  layers at once wait longer (three at once: 28–38 s). The cache pays where building a layer takes longer than
+  moving it.
 - **Which runs read a cache.** GitHub scopes a cache entry to the ref that wrote it. A run reads its own ref's entries
   and the default branch's (a PR run its base branch's too), never a sibling's. A PR's later pushes and re-runs read
   what its earlier runs wrote. Every `ci-gate` call pushes a ref of its own, so it reads only the default branch's
-  cache, and what it writes is read only by a re-run of that run. To make `ci-gate` calls warm, seed the default
-  branch's cache: a dispatch there, `gh workflow run ci.yml --ref <default branch> -f gates=<a cache gate>`, once per
-  scope (each week, with the key above).
+  cache, and what it writes is read only by a re-run of that run: until the default branch holds the scope, every
+  call builds cold and pays the upload too. To make `ci-gate` calls warm, seed the default branch's cache: a
+  dispatch there, `gh workflow run ci.yml --ref <default branch> -f gates=<a cache gate>`, once per scope (each
+  week, with the key above).
 - **What the token can do.** It is the job's runtime token: it reads and writes the run's cache scope, reads the
   default branch's, and uploads artifacts to the run. Gate commands are the repository's code, already trusted with
   the checkout; the opt-in keeps the token from the gates that do not build. A `pull_request` run writes only to its
