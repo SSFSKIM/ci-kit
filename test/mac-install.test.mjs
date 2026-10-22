@@ -586,7 +586,7 @@ function tree(dir, prefix = '') {
     entry.isDirectory() ? tree(dir, join(prefix, entry.name)) : [join(prefix, entry.name)]).sort();
 }
 
-test('--vm installs the launcher disabled, the kit laid out as mac/ is, the slots, and CI_KIT_VM_LANE=1 in every instance\'s .env', macOnly, () => {
+test('--vm installs the launcher disabled, the kit laid out as mac/ is, the slots, and the reservation path in every instance\'s .env', macOnly, () => {
   const f = laneFixture();
   const shared = f.shared(2);
   const result = f.run(undefined, ['--vm', '--shared', '1'], {}, 'registration-token-123\n');
@@ -617,9 +617,10 @@ test('--vm installs the launcher disabled, the kit laid out as mac/ is, the slot
     assert.deepEqual(readdirSync(join(f.home, 'ci-kit-vm', slot)).sort(), ['cache', 'identity', 'out']);
     assert.equal(statSync(join(f.home, 'ci-kit-vm', slot, 'identity')).mode & 0o777, 0o700);
   }
-  // Every host instance reads as one beside a possible guest.
-  assert.equal(readFileSync(join(f.runner, '.env'), 'utf8'), `${envFile(f, 'mini')}CI_KIT_VM_LANE=1\n`);
-  assert.match(readFileSync(join(shared, '.env'), 'utf8'), /CI_KIT_SHARED_DESKTOP=1\nCI_KIT_VM_LANE=1\n$/);
+  // Every host instance can read the lane's actual reservation, even while the launcher is disabled.
+  const reservation = `CI_KIT_VM_RESERVATION=${join(f.home, 'Library/Logs/ci-kit/vm-reserved')}\n`;
+  assert.equal(readFileSync(join(f.runner, '.env'), 'utf8'), `${envFile(f, 'mini')}${reservation}`);
+  assert.equal(readFileSync(join(shared, '.env'), 'utf8'), `${envFile({ hooks: join(shared, 'ci-kit/hooks') }, 'mini')}CI_KIT_SHARED_DESKTOP=1\n${reservation}`);
   assertNewHooks(f);
 });
 
@@ -636,9 +637,12 @@ test('--vm at registration gives the exclusive instance ci-kit-mac-solo beside t
   assert.deepEqual(labelsOf(argsOf(g.runner)), ['self-hosted', 'macOS', 'ARM64', 'ci-kit-mac']);
 });
 
-test('a re-run without --vm keeps the lane and the launcher\'s enabled state; --disabled disables it; --no-vm removes its agent and the flag, keeping ~/ci-kit-vm', macOnly, () => {
+test('a re-run migrates the static flag and keeps the launcher\'s enabled state; --disabled disables it; --no-vm removes its agent and reservation path, keeping ~/ci-kit-vm', macOnly, () => {
   const f = laneFixture();
-  assert.equal(f.run(undefined, ['--vm']).status, 0);
+  const shared = f.shared(2);
+  assert.equal(f.run(undefined, ['--vm', '--shared', '1'], {}, 'registration-token-123\n').status, 0);
+  // An installation made by the old kit must not keep forcing loaded budgets after refresh.
+  for (const runner of [f.runner, shared]) writeFileSync(join(runner, '.env'), 'CI_KIT_VM_LANE=1\n');
   const domain = `gui/${uidOf()}`;
   spawnSync(join(f.bin, 'launchctl'), ['enable', `${domain}/${vmAgent}`], { env: f.env });
   writeFileSync(join(f.home, 'ci-kit-vm/kit/stale'), 'from the last kit\n');
@@ -649,7 +653,9 @@ test('a re-run without --vm keeps the lane and the launcher\'s enabled state; --
   assert.match(refresh.stdout, new RegExp(`the VM lane's launcher ${vmAgent} runs from ${join(f.home, 'ci-kit-vm/kit')}`));
   assert.ok(!/keeps its labels/.test(refresh.stdout), 'said once, when the lane is new');
   assert.equal(existsSync(join(f.home, 'ci-kit-vm/kit/stale')), false, 'the kit is republished whole');
-  assert.match(readFileSync(join(f.runner, '.env'), 'utf8'), /CI_KIT_VM_LANE=1\n$/);
+  const reservation = `CI_KIT_VM_RESERVATION=${join(f.home, 'Library/Logs/ci-kit/vm-reserved')}\n`;
+  assert.equal(readFileSync(join(f.runner, '.env'), 'utf8'), `${envFile(f, 'mini')}${reservation}`);
+  assert.equal(readFileSync(join(shared, '.env'), 'utf8'), `${envFile({ hooks: join(shared, 'ci-kit/hooks') }, 'mini')}CI_KIT_SHARED_DESKTOP=1\n${reservation}`);
   rmSync(join(f.home, 'launchctl.calls'));
   assert.equal(f.run(undefined, ['--disabled']).status, 0);
   assert.ok(calls(f).includes(`disable ${domain}/${vmAgent}`) && !calls(f).some((call) => call.startsWith('bootstrap') && call.includes(vmAgent)));
@@ -660,6 +666,7 @@ test('a re-run without --vm keeps the lane and the launcher\'s enabled state; --
   assert.equal(existsSync(vmPlist(f)), false);
   assert.match(removed.stdout, new RegExp(`removed: the VM lane's launcher ${vmAgent} is unloaded and its LaunchAgent removed; .*ci-kit-vm stays`));
   assert.equal(readFileSync(join(f.runner, '.env'), 'utf8'), envFile(f, 'mini'));
+  assert.equal(readFileSync(join(shared, '.env'), 'utf8'), `${envFile({ hooks: join(shared, 'ci-kit/hooks') }, 'mini')}CI_KIT_SHARED_DESKTOP=1\n`);
   assert.ok(existsSync(join(f.home, 'ci-kit-vm/kit/vm/lane.sh')));
   rmSync(join(f.home, 'launchctl.calls'));
   assert.equal(f.run(undefined, []).status, 0);

@@ -314,11 +314,16 @@ fail rules.
   checkout was).
 - The lane's state, in `~/Library/Logs/ci-kit/` beside the shared hold's, written under the same `desktop.lock`, each
   file replaced whole by a rename, and a write that fails leaving the lane in the stricter state (a reservation that
-  cannot be written is no boot; a release that cannot be written stays reserved):
+  cannot be written is no boot; a reservation that cannot be removed stays reserved). The release stamp is the
+  exception below:
   - `vm-reserved`: the slot's one reservation, written by the launcher's job boot alone, in the locked step that
     spawns the clone: the VM's name, the time, the launcher's pid and start time (information only) and the job once
     the guest reports it. It states "a job clone of this slot may be running", and it is cleared only by a teardown
     verified against Tart (Lifecycle), never by its writer's death.
+  - `vm-released`: one line, the last release's epoch second (`date +%s`), atomically published by tmp + rename
+    before every removal of `vm-reserved`, including failed boots and recovery. A failed stamp is logged and the
+    release still proceeds: a host test may then assert a tight bound beside a guest that just ended, a visible flaky
+    red rather than a hidden pass. The stamp stays between jobs for the verdict-time budget read (Routing, below).
   - `vm-hold.<owner>`: one hold per owner (a coordinator session's timed or maintenance hold); the lane is held while
     any exists, and each owner removes only its own.
   - `vm-claim.<worker pid>-<start time>`: one claim per host job that keeps the guest out: settle's measured claim, or
@@ -347,7 +352,7 @@ released only after the VM's end is verified; the guard samples through every ro
 | listening | the runner polls GitHub for its one job | `out/assigned` appears (the wrapper's watcher saw the listener take a job: a job line in the newest diag log, or a `Runner.Worker`); or no assignment within 3 min (`CI_KIT_VM_IDLE`): the idle handshake (below) |
 | preparing | GitHub prepares the job in the guest (`Set up job`, action downloads: minutes in a bad case) before the job-started hook runs | `out/job` appears (the guest's job-started hook writes it) |
 | running | the job runs; `vm-reserved` names it | `tart run` exits: the guest powered itself off after the runner exited; bound from `out/assigned` = the job's longest timeout + 10 min (`CI_KIT_VM_JOB_BOUND`, 50), then `tart stop` |
-| teardown | the VM's end verified: `tart list` shows the clone stopped and no `tart run` of its name is in the process table; if it still runs, `tart stop` (its own timeout, then force), and the check again; `out/` folded into the lane's logs; then `tart delete <clone>`; then `vm-reserved` removed under the lock | → idle. A stop that fails, or a state that cannot be read, keeps the reservation, is retried each poll, and opens one alert after 10 min (`ci-kit alert: vm lane on <machine> cannot stop <clone> since <minute>`) |
+| teardown | the VM's end verified: `tart list` shows the clone stopped and no `tart run` of its name is in the process table; if it still runs, `tart stop` (its own timeout, then force), and the check again; `out/` folded into the lane's logs; then `tart delete <clone>`; then `vm-released` stamped and `vm-reserved` removed under the lock | → idle. A stop that fails, or a state that cannot be read, keeps the reservation, is retried each poll, and opens one alert after 10 min (`ci-kit alert: vm lane on <machine> cannot stop <clone> since <minute>`) |
 | failed | a bound passed or a command failed: teardown, the reason logged, a failure counted by kind (`image`, `session`, `memory`, `disk`, `raced`); three `image` failures in a row pause the lane (`vm-pause`, no expiry) and open one alert | an operator clears the pause |
 
 - **Why the runner runs once and exits, with no registration per job.** The guest's runner is a registered,
@@ -526,8 +531,8 @@ launcher reads the free space of the volume holding `~/.tart` (`df`) and admits 
 read goes with every memory sample: under half the reserve no next guest boots (`vm-pause`, reason `disk`, cleared
 when the space is back); under a floor of 5 GB (`CI_KIT_VM_DISK_FLOOR`) the guest is stopped as at critical memory,
 since a full volume damages the host, and the alert says `disk`. `bake.sh` reads the reserve before it starts and
-refuses below it. A state write that fails for lack of space fails closed, as every write of the lane does (The
-parts).
+refuses below it. Admission state writes that fail for lack of space fail closed; a release stamp that fails is
+logged without retaining the reservation (The parts).
 
 **Display.** The spike's one deterministic failure came from the guest's 1024x768 pt screen (document-narrow's drag
 floated below the 1440 pt window the test set), so the guest needs at least 1600 pt of width, at the host's @2x. From
@@ -648,7 +653,13 @@ guest. In MAWS's plan (V3):
 - Budgets: the guest's runner environment sets `CI_KIT_VM_GUEST=1`, which no host instance sets; MAWS's load-aware
   latency budgets treat a guest as a loaded host, as they treat `CI_KIT_SHARED_DESKTOP=1`, since the guest runs at
   1.3–1.7x the host's time. The runner-name contract stands: `ci-kit-mac-<machine>-vm` ends in no `-<n>`, and the
-  shared-desktop flag is unset in the guest.
+  shared-desktop flag is unset in the guest. Every host instance instead gets
+  `CI_KIT_VM_RESERVATION=<absolute path to vm-reserved>` from `install.sh --vm`; `--no-vm` removes it and refresh
+  removes the old static `CI_KIT_VM_LANE=1`. At verdict time, a test started at wall-clock `t0` reads the reservation
+  first, then its sibling `vm-released`: the host is loaded if the reservation exists or the stamp is at least
+  `floor(t0 in seconds)`. An unreadable path other than not-found, or a malformed stamp, reads as loaded. This covers
+  a guest booted after the initial load read, including one released before the verdict, without loosening every bound
+  while the lane is idle (Decision Log 2026-10-22).
 - The first candidates are the four foreground groups (`default`, `widgets`, `to-human`, `document-app`): exclusive on
   the host for their focus, they are exactly what a second desktop frees, and `document-app` already ran 18 of 19 in
   the spike with the one failure root-caused to the display.
@@ -683,7 +694,7 @@ owner's call, put to them only with a named group that needs it and its trial ev
 | a hold forgotten by its owner | the lane stays held, logged once per change, an alert after 6 h; another owner's release does not touch it |
 | a maintenance step that dies | nothing automated runs (the launcher is booted out); CI-opt reruns the subcommand, each safe to repeat; a candidate or trial clone left running is stopped by hand with the verified stop |
 | a candidate whose trial fails, or whose trial took no job | the record says so (no `success`, or no job id); `--promote` refuses; the pointer and the golden are untouched; the candidate stays for reading, deleted by hand |
-| low disk | under the reserve no boot and no bake; under half of it mid-run no next boot; under the floor the guest is stopped; a state write that fails leaves the stricter state |
+| low disk | under the reserve no boot and no bake; under half of it mid-run no next boot; under the floor the guest is stopped; an admission state write that fails leaves the stricter state; a failed release stamp is logged but release proceeds |
 
 **What it costs per job, by the spike's numbers and the design.** Boot to listening about 45 s, then the job: its
 checkout over NAT, its setup from the warm store (seconds, not the spike's 120), the group at 1.3–1.7x the host's
@@ -1495,6 +1506,21 @@ hold-aware plan send them to the guest, which this spec leaves open.
   in a second job, `e2e-vm`, which needs `e2e-build`, so host groups never wait for the pool. A group whose build is
   not `scripts/e2e-build.sh <variant>` (today `default`) stays on the exclusive instance. A guest-eligible job
   restores under REQUIRE on whichever desktop takes it.
+
+- 2026-10-22 (CI-opt and the MAWS architect): **host budgets read guest overlap at verdict time, not a static lane
+  flag.** This revises the 10-21 late V3 review-fix entry. Its premise, "a guest can boot after that read, so no
+  dynamic read covers the test's span", applies to a start-time read, not a verdict-time read over `[t0, now]`.
+  `install.sh --vm` now gives every host instance `CI_KIT_VM_RESERVATION=<absolute path to vm-reserved>` instead of
+  `CI_KIT_VM_LANE=1`; `--no-vm` removes it. Every reservation removal first atomically publishes `vm-released`, one
+  epoch-second line from `date +%s`, in the same directory. The verdict reads the reservation first, then the stamp:
+  loaded iff the reservation exists or the stamp is at least `floor(t0 in seconds)`; unreadable other than not-found
+  means loaded. A failed stamp is logged but release proceeds, choosing a possible visible flaky red from a tight
+  bound over a hidden pass. The stamp's whole seconds may conservatively include a release earlier in the starting
+  second. **Rejected alternative: keep the static flag and set it only once the launcher is enabled.** An enabled
+  lane is mostly idle, so that would still loosen every host bound through those hours, as the installed flag did
+  through the days before enabling. The reservation spans before clone through delete on the release paths; the
+  audit also fixed boot undo treating a failed second Tart list as an absent clone, which could release before
+  deletion. An unreadable list now defers to the reserved teardown.
 
 ## Surprises & Discoveries
 

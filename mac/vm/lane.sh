@@ -106,8 +106,10 @@
 #
 # STATE, in ~/Library/Logs/ci-kit beside the host's, each file replaced whole by a rename and written under the
 # desktop lock; a write that fails leaves the stricter state (a reservation not written is no boot, a release not done
-# stays reserved, a pause not written holds in this launcher). vm-reserved (this launcher's alone), vm-hold.<owner>
-# (read, never written), vm-claim.* (read through vm-claim.sh), vm-pause; vm-failures (the failure counts) and
+# stays reserved, a pause not written holds in this launcher). The exception is vm-released: the release's epoch
+# second, published before removing vm-reserved; a failed stamp is logged but release proceeds (a tight host budget,
+# not a hidden pass). vm-reserved and vm-released (this launcher's alone), vm-hold.<owner> (read, never written),
+# vm-claim.* (read through vm-claim.sh), vm-pause; vm-failures (the failure counts) and
 # vm-lane.alert.<kind> (an open alert's issue) are this launcher's own. The log is vm-lane.log; at each teardown out/ is
 # folded in (its markers and the wrapper's log), the guest's hook lines go to the hooks log, and out/ itself is kept
 # as vm-out/<clone> (the last CI_KIT_VM_KEEP_OUT, 20). Alerts go through dialog.sh's alert_gh, one open issue per kind,
@@ -186,6 +188,7 @@ keep_out=$(whole "${CI_KIT_VM_KEEP_OUT:-}" 20)
 image_streak_pause=3 refused_streak_pause=2
 
 reserved_file=$ci_kit_logs/vm-reserved
+released_file=$ci_kit_logs/vm-released
 pause_file=$ci_kit_logs/vm-pause
 failures_file=$ci_kit_logs/vm-failures
 lane_lock=$ci_kit_logs/vm-lane.lock
@@ -304,7 +307,13 @@ write_reservation() { # <vm>: under the lock
   rm -f "$reserved_file.tmp" 2>/dev/null
   return 1
 }
-release() { # under the lock: true once vm-reserved is gone
+release() { # under the lock, after the clone is gone: true once vm-reserved is gone
+  # Publish before unlink so a verdict-time reader sees the reservation or the end of the guest's interval.
+  # Use the release's clock, not the loop's cached time (stop/delete may have taken seconds).
+  if ! { date +%s >"$released_file.tmp" && mv -f "$released_file.tmp" "$released_file"; } 2>/dev/null; then
+    say "$released_file could not be written; releasing the reservation anyway (host budgets may read tight)"
+    rm -f "$released_file.tmp" 2>/dev/null
+  fi
   rm -f "$reserved_file" 2>/dev/null
   exists "$reserved_file"
   (($? == 1))
@@ -674,10 +683,12 @@ boot() {
 # A boot that failed inside the locked step: the clone, if Tart made one and it is stopped, is deleted, then the
 # reservation released, all under the same lock. Whatever cannot be done that way goes to teardown, reserved.
 boot_undo() { # <why>, with the lock held
-  local status
+  local status vms
   tart_ended "$clone"
   status=$?
-  if ((status == 0)) && { [[ -z $(tart_state_in "$(tart_vms)" "$clone") ]] || tart_delete "$clone" >/dev/null 2>&1; } &&
+  # A failed list is not an absent clone: keep the reservation until teardown can verify and delete it.
+  if ((status == 0)) && vms=$(tart_vms) &&
+    { [[ -z $(tart_state_in "$vms" "$clone") ]] || tart_delete "$clone" >/dev/null 2>&1; } &&
     release; then
     unlock
     say "no boot: $1; nothing of $clone is left, and the reservation is released"
