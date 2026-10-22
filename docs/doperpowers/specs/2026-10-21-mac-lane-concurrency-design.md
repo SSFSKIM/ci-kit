@@ -998,6 +998,19 @@ Proof: class 1a green; one Mac set at the head green, scheduled through CI-opt; 
 
 ### V4 — Install on the mini, the trials, the first proven-VM groups, the mode
 
+Before any window, two PRs carry V1's verdict, and neither needs the mini:
+- **ci-kit** (`vm-lane-v4-prep`): `provision.sh` sets the guest's display with `displayplacer`
+  (`2560x1440 scaling:on`), and the guest's wrapper refuses a job when the mode it reads at boot is not that; the
+  bake grows the guest's disk; `CI_KIT_VM_MEMORY_FLOOR` defaults to 60; `bake.sh` refuses a `--memory` under 4096.
+- **MAWS**: a guest-eligible e2e job does not build out/ (Decision Log, "out/ is built on the pool"). The plan adds a
+  pool job, `e2e-build`, which builds the out/ variants the run's guest-eligible groups need at the tested sha and
+  uploads them as artifacts keyed by that sha and the variant. A guest-eligible job, on either desktop, downloads
+  them into a writable `MAWS_E2E_BUILD_CACHE` and restores through `scripts/e2e-build.sh` under
+  `MAWS_E2E_BUILD_REQUIRE=1`, which turns a missing or mismatched entry into a failure naming the key and never
+  builds. The plan adds `e2e-build` only when it puts a job on the guest's labels, so with `MAC_VM_E2E` empty
+  nothing changes. The proof is a tree diff of a Linux out/ against a macOS out/ at one sha, for both variants,
+  allowing only the build stamp, the version, the dev nonce and source-map paths to differ.
+
 In windows CI-opt books, outside holds and measured windows:
 1. `install.sh --vm`, the launcher installed disabled; the exclusive instance's labels gain `ci-kit-mac-solo`.
 2. **The procedure's rehearsal, the first refresh** (VA8, VA12): under the maintenance hold, with the launcher's
@@ -1008,6 +1021,14 @@ In windows CI-opt books, outside holds and measured windows:
    sampled through the bake to set `CI_KIT_VM_DISK_RESERVE`.
 3. The launcher enabled in `always` mode. One scratch MAWS commit with `MAC_VM_E2E: document-app` and `Lane: vm`:
    the first production-shaped guest job, green, its posture line read, the clone gone after (VA1's shape).
+   **The same window settles V1's open cost.** In V1, each test against a restored out/ ran about 3–4 s slower per
+   Electron launch than the same test after a build in the guest. The MAWS architect's hypothesis is V8's code cache,
+   which is keyed by script path and mtime: a restored tree carries new mtimes, or a path the cache never saw. In
+   one clone, run `document-app` twice against an out/ built in place, then twice against the same out/ restored to
+   the same path (the cache's copy), and compare the per-test times. If the cost follows the restore, the restore
+   keeps the stored mtimes (`cp -p`), or the guest warms the cache once per clone. If it does not, look at the
+   clone's first minutes (Spotlight on the new checkout) and at the guest's memory. The verdict in step 12 uses the
+   times after this is settled.
 4. **Each candidate group three times in the guest** (`Lane: vm`), the four foreground groups first, then the
    functional groups by queue time: green 3/3, every timing annotation inside MAWS's guest budget, no stall, no
    screenshot difference MAWS's comparisons reject; the guest's p95 at most 10 min. The same fail rules as M4's,
@@ -1417,6 +1438,27 @@ hold-aware plan send them to the guest, which this spec leaves open.
     it.
   - **The bake sets the guest's display with `displayplacer`** (`res:2560x1440 scaling:on`); `tart set --display`
     does not reach the guest's mode. **The guest's disk grows**: the image has about 2.5 GiB free.
+- 2026-10-22 (CI-opt, with the MAWS architect; V4's preparation): **out/ is built on the pool.** V1 showed that a
+  4 GB guest cannot run `electron-vite build`: widgets exhausts V8's default heap, about 1 GB at 4 GB, and
+  document-app's build takes 3x the host's. With out/ built elsewhere, both groups were green with no flags.
+  - **Where.** A pool job in MAWS's `gate.yml`, `e2e-build`, builds the variants the guest-eligible groups need, at
+    the tested sha, and uploads each as an artifact keyed by the sha and the variant. A guest-eligible job, on
+    whichever desktop takes it, downloads the artifacts into a writable `MAWS_E2E_BUILD_CACHE/<sha>/<variant>/`. It
+    restores through `scripts/e2e-build.sh`, whose digest check stands, under `MAWS_E2E_BUILD_REQUIRE=1`: a missing
+    entry or a digest mismatch fails loudly and names the key, and nothing builds. The plan adds `e2e-build` only
+    when it places a job on the guest's labels (`MAC_VM_E2E`, or a `Lane:`); with `MAC_VM_E2E` empty, the plan and
+    the pool's minutes are as before.
+  - **Why the pool.** It is elastic, it keeps the mini's CPU free, and it couples nothing to the host.
+  - **Why the Linux out/ serves a Mac.** The MAWS architect read `electron.vite.config.ts`. It has no platform branch,
+    main externalizes the native modules, and out/ holds no `.node`, `.dylib` or spawn-helper. The binding proof is a
+    tree diff of the pool's out/ against one built on a Mac at the same sha, for both variants (plain and harness). It
+    ignores only the build stamp (`__MAWS_BUILD__`: commit and builtAt), `__MAWS_VERSION__`, the dev nonce and
+    source-map paths. A real difference stops this design.
+  - **The strongest alternative: build on the host** (option A). The guest job would restore an out/ the exclusive
+    instance builds into a cache the share exposes, which is V1's measured shape. It lost because it spends the
+    mini's CPU on every run, about 40 s per variant, beside the guest's job and the host's measured groups. It also
+    couples the guest's job to the host's runner, its cache directory and its timing, and makes the host a
+    dependency of a lane meant to free it. It is the fallback if the tree diff shows a real difference.
 
 ## Surprises & Discoveries
 
