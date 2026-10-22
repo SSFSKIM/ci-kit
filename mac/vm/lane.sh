@@ -17,8 +17,10 @@
 #               out/session-conflict, at most CI_KIT_VM_KICKOFF s (60) from the kickoff. An exec that fails is read
 #               against out/ first: the wrapper's markers go on as they would, a wrapper that may run with nothing
 #               assigned is given up through the handshake, and only a clone where none can run fails at once
-#   session     the listener found the slot's last session open: until out/listening, at most CI_KIT_VM_SESSION s
-#               (300); past it a `session` failure, counted apart from `image`
+#   session     the listener found the slot's last session open: until out/listening (or out/assigned, a job taken
+#               all the same), at most CI_KIT_VM_SESSION s (300); past it a `session` failure, counted apart from
+#               `image`. A bound passed before a job (the kickoff's, the session's) gives the guest up through the
+#               idle handshake where a wrapper may run, and stops it outright only where none can
 #   listening   until out/assigned; past CI_KIT_VM_IDLE s (180) without it, the idle handshake (below)
 #   stopping    the handshake's out/stop-request is written: until the wrapper's answer, at most CI_KIT_VM_STOP_ANSWER s
 #               (180) on this launcher's clock; past it the wrapper could not answer, which may hide a cancelled job:
@@ -46,7 +48,9 @@
 # a job clone with no reservation is reserved first, so settle sees it, then torn down the same way. A reservation that
 # names anything but a job clone of the slot stays, and is neither stopped nor deleted: recovery waits. Nothing else is
 # released, ever: a reservation goes only by a verified teardown, whatever became of the launcher that wrote it. A
-# recovery that cannot read what it needs waits, boots nothing, and alerts after CI_KIT_VM_STOP_ALERT s.
+# recovery that cannot read what it needs waits, boots nothing, and alerts after CI_KIT_VM_STOP_ALERT s; while it waits
+# with a reservation naming a job clone, the guard samples for that VM, and its stop (critical, the disk floor) takes
+# it by name. A teardown whose end cannot be told stops its clone by name once, and releases only a verified end.
 #
 # THE IDLE HANDSHAKE. The launcher never signals the listener and never stops a clone that may hold a job. Past the
 # idle bound with no out/assigned, it reads the queue again; with nothing the guest can take, it writes
@@ -422,14 +426,14 @@ The lane boots nothing until an operator removes ~/Library/Logs/ci-kit/vm-pause;
 # THE GUEST'S STATE in this launcher: the clone, since when the state holds, its own tart run's pid (empty for a guest
 # adopted at start), and what its teardown owes.
 state=recover since=0 clone='' run_pid='' kicked='' assigned_at='' stop_at='' failed='' next_ask=0 done_code=''
-pause_after='' recovering=1 td_next=0 td_since='' td_stopped='' td_done=''
+pause_after='' recovering=1 td_next=0 td_since='' td_stopped='' td_done='' td_forced=''
 enter() { # <state>
   state=$1 since=$now_epoch
 }
 clear_guest() {
   kickoff_forget
   clone='' run_pid='' kicked='' assigned_at='' stop_at='' failed='' next_ask=0 pause_after='' td_next=0 td_since=''
-  td_stopped='' td_done='' res_job='' warned=0
+  td_stopped='' td_done='' td_forced='' res_job='' warned=0
 }
 run_gone() { # whether the clone's tart run has exited; a process table that cannot be read says it has not
   local pids
@@ -450,6 +454,15 @@ fail() { # <kind> <why>
 to_teardown() { # <why>
   say "$clone: $1; teardown"
   enter teardown
+}
+# A bound passed before the guest took a job: the failure is counted (once), and the guest is given up through the
+# handshake where a wrapper may run, since its answer keeps a job taken meanwhile; only one with none is stopped.
+give_up() { # <kind> <why>
+  if [[ -z $failed ]]; then
+    failed=$1
+    count_failure "$1" "$2"
+  fi
+  if wrapper_may_run; then ask_stop "$2"; else to_teardown "$2"; fi
 }
 
 # IDLE: one poll. Housekeeping first (the disk pause, the alerts that follow holds, maintenance VMs and missing parts),
@@ -781,26 +794,17 @@ step_kicking() {
     enter session
     return
   fi
-  if [[ -n $failed_kick ]]; then
-    # Nothing assigned, but a wrapper that may run may yet take a job: only the handshake gives it up.
-    if wrapper_may_run; then
-      if [[ -z $failed ]]; then
-        failed=image
-        count_failure image "$failed_kick, with its wrapper perhaps started"
-      fi
-      ask_stop "$failed_kick, and its wrapper may run"
-    else
-      fail image "$failed_kick"
-    fi
-    return
-  fi
+  # Nothing assigned: a wrapper that may run may yet take a job, so give_up asks it through the handshake.
+  if [[ -n $failed_kick ]]; then give_up image "$failed_kick"; return; fi
   if run_gone; then fail image 'tart run exited during the kickoff'; return; fi
-  ((now_epoch - since < kickoff_bound)) || fail image "neither out/listening nor out/session-conflict within $kickoff_bound s"
+  ((now_epoch - since < kickoff_bound)) || give_up image "neither out/listening nor out/session-conflict within $kickoff_bound s"
 }
 step_session() {
+  # A job taken while out/listening was not (yet) written is a job: the session's bound no longer applies.
+  if has assigned || has job; then take_assigned; return; fi
   if has listening; then say "$clone: listening after $((now_epoch - since)) s of session recovery"; enter listening; return; fi
   if run_gone; then fail session 'tart run exited during session recovery'; return; fi
-  ((now_epoch - since < session_bound)) || fail session "the slot's session was not let go within $session_bound s"
+  ((now_epoch - since < session_bound)) || give_up session "the slot's session was not let go within $session_bound s"
 }
 # A job seen taken: preparing, the running bound counted from out/assigned.
 take_assigned() {
@@ -951,6 +955,15 @@ step_teardown() {
   if [[ -z $td_stopped ]]; then
     tart_stop_verified "$clone" "$stop_timeout"
     status=$?
+    # Its end cannot be told (Tart cannot list, the process table cannot be read): it is stopped by name all the same,
+    # once, and released only once the end is verified.
+    if ((status == 2)) && [[ -z $td_forced ]]; then
+      td_forced=1
+      say "$clone: its end cannot be told ($tart_why); tart stop by name"
+      tart_call $((stop_timeout + 30)) stop "$clone" --timeout "$stop_timeout" >/dev/null 2>&1
+      tart_stop_verified "$clone" "$stop_timeout"
+      status=$?
+    fi
     if ((status != 0)); then
       teardown_stuck "$tart_why"
       return
@@ -1005,10 +1018,25 @@ follow_disk() {
 }
 # THE GUARD: a sample from tart run to the verified end, every sample_every s.
 warned=0
+# While recovery waits with a reservation standing, its VM may run: the guard samples for it, and a stop takes it by
+# its name, which is a job clone of the slot (recover_poll reads the reservation; guard_reserved checks the name).
+guard_reserved() {
+  [[ -z $clone && $state == recover && ${r_state:-} == reserved && ${r_vm:-} =~ $job_clone_pattern ]]
+}
 guard_sample() {
   memory_read || true
   disk_read || true
-  say "sample $state $clone: $(memory_line); $(disk_line)"
+  say "sample $state ${clone:-$r_vm}: $(memory_line); $(disk_line)"
+  # A stop in recovery is the reserved VM's teardown; once it is released, recovery runs again.
+  if [[ -z $clone ]]; then
+    if [[ -n $d_free_kb ]] && ((d_free_kb < disk_floor * 1048576)) ||
+      { [[ -n $m_pressure ]] && ((m_pressure >= 4)); }; then
+      clear_guest
+      clone=$r_vm res_since=${r_since:-$now} res_golden=$r_golden
+    else
+      return 0
+    fi
+  fi
   follow_disk
   # A teardown is already the stop: the samples go on, and nothing more is done.
   [[ $state != teardown ]] || return 0
@@ -1217,7 +1245,7 @@ while :; do
   # A step may have blocked (a queue read, up to its deadline): the sample is judged on the time after it, so it is
   # taken before the next step can block again.
   clock
-  if [[ -n $clone ]] && ((now_epoch >= next_sample)); then
+  if { [[ -n $clone ]] || guard_reserved; } && ((now_epoch >= next_sample)); then
     next_sample=$((now_epoch + sample_every))
     guard_sample
   fi

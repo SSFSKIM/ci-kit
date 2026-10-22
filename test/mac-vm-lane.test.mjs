@@ -653,6 +653,31 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     await finish(m, b);
   });
 
+  test('recovery that cannot list Tart, with a reserved guest running: the guard samples it, and critical pressure stops it by name; released only once its end is verified', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const a = m.start();
+    const clone = await m.booted();
+    await m.listening(clone);
+    await a.kill();
+    m.flag('fail-list');
+    const b = m.start();
+    await m.waitLog(/recovery waits: Tart cannot list its VMs/);
+    await m.waitLog(new RegExp(`sample recover ${clone}: pressure 1`));
+    m.memory({ pressure: 4, available: 8 });
+    await m.waitLog(new RegExp(`${clone}: stopped for memory: memory pressure critical`));
+    await m.until(() => m.calls().includes(`stop ${clone} --timeout 30`), 'the stop by name');
+    await m.until(() => m.state(clone) === 'stopped', 'the guest stopped');
+    assert.match(m.alerts()[0], /^ci-kit alert: vm lane on mini stopped a job for memory at /);
+    await sleep(1500);
+    assert.ok(m.reserved(), 'the reservation stands while the end cannot be verified');
+    assert.equal(m.calls().filter((call) => call.startsWith('delete ')).length, 0);
+    m.memory();
+    m.flag('fail-list', false);
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    assert.equal(m.failures().total_memory, '1');
+    await finish(m, b);
+  });
+
   test('a delete Tart refuses keeps the reservation, is tried each poll and alerts after its bound; once Tart lets go it is released and the alert closed', async () => {
     const m = lane({ env: { CI_KIT_VM_STOP_ALERT: '2' } });
     const clone = `maws-vm-job-${m.slot}-20261021T120000Z`;
@@ -1095,9 +1120,7 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
   // EVERY BOUND ends in a verified teardown and a counted failure.
   for (const { name, env, before, reach, line, kind } of [
     { name: 'the boot', env: { CI_KIT_VM_BOOT: '2' }, before: (m) => m.flag('no-agent'), reach: states.booting.reach, line: 'its guest agent did not answer within 2 s', kind: 'image' },
-    { name: 'the kickoff', env: { CI_KIT_VM_KICKOFF: '2' }, reach: states.kicking.reach, line: 'neither out/listening nor out/session-conflict within 2 s', kind: 'image' },
     { name: 'a kickoff that fails', before: (m) => m.flag('fail-kickoff'), reach: (m) => m.booted(), line: 'kickoff.sh failed: kickoff: out/ already holds listening: every clone starts from an empty out/', kind: 'image' },
-    { name: 'session recovery', env: { CI_KIT_VM_SESSION: '2' }, reach: states.session.reach, line: 'the slot\'s session was not let go within 2 s', kind: 'session' },
     { name: 'the running bound', env: { CI_KIT_VM_JOB_BOUND: '0.05' }, reach: states.running.reach, line: 'the job outlived the running bound (0.05 min from out/assigned); stopping it', kind: 'image' },
   ]) test(`the bound of ${name} ends in a verified teardown and a counted ${kind} failure`, async () => {
     const m = lane({ queue: [['ci-kit-mac-vm']], env });
@@ -1110,6 +1133,44 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     assert.ok(m.calls().indexOf(`stop ${clone} --timeout 30`) < m.calls().indexOf(`delete ${clone}`));
     assert.match(m.log(), new RegExp(`${clone}: its end is verified`));
     assert.equal(m.failures()[`total_${kind}`], '1');
+    await finish(m, a);
+  });
+
+  // A bound passed by a guest whose wrapper runs: counted, and given up through the handshake, never a plain stop.
+  for (const { name, env, reach, line, kind } of [
+    { name: 'the kickoff', env: { CI_KIT_VM_KICKOFF: '2' }, reach: states.kicking.reach, line: 'neither out/listening nor out/session-conflict within 2 s', kind: 'image' },
+    { name: 'session recovery', env: { CI_KIT_VM_SESSION: '2' }, reach: states.session.reach, line: 'the slot\'s session was not let go within 2 s', kind: 'session' },
+  ]) test(`the bound of ${name}, with the wrapper started: a counted ${kind} failure, and the guest asked to stop through the handshake`, async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env });
+    const a = m.start();
+    const clone = await reach(m);
+    await m.waitLog(new RegExp(`${clone}: ${escape(line)}; asked the wrapper to stop`));
+    assert.equal(m.failures()[`total_${kind}`], '1');
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
+    m.mark('stopped', 'at=2026-10-21T12:04:00Z');
+    m.mark('done', '0');
+    m.powerOff(clone);
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
+    assert.equal(m.failures()[`total_${kind}`], '1');
+    assert.equal(m.failures().total_raced, '0');
+    await finish(m, a);
+  });
+
+  test('a job taken during session recovery, out/listening never written: the job goes on past the session bound', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_SESSION: '2' } });
+    const a = m.start();
+    const clone = await states.session.reach(m);
+    m.mark('assigned', 'job=9e8d7c6b at=2026-10-21T12:01:00Z by=diag');
+    m.mark('job', 'run=7 attempt=1 job=e2e repository=SSFSKIM/MAWS at=2026-10-21T12:01:30Z');
+    await m.waitLog(new RegExp(`${clone}: the listener took a job`));
+    await sleep(4000);
+    assert.doesNotMatch(m.log(), /session was not let go/);
+    assert.equal(existsSync(join(m.out, 'stop-request')), false);
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
+    await m.finished(clone);
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0);
+    assert.equal(m.failures().total_session ?? '0', '0');
     await finish(m, a);
   });
 
