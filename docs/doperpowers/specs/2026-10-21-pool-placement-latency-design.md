@@ -120,6 +120,10 @@ toward the boot alone, and below it for the jobs a warm runner covers.
     serving 100% by deploy.sh's own check. The bake (image -224528-8ogy-7292a8b1 ready) smoked 7 placements and
     skipped C4D us-central1 for capacity (16 tries); a sandbox walk burst ran green across us-west4, us-central1 and
     us-east1, and missed M6's 90 s bound (Surprises: a refusal costs 6–21 s).
+  - [x] (2026-10-22 00:08Z) Walk admission and follow-up ticks: #87 merged (41debfb) after one review round (1 P1, 2 P2,
+    1 P3 fixed; 1 P2 deferred); `deploy.sh base` (cloudquotas.viewer) and launcher 00017-ldn (rollback 00016-8ct). The
+    rerun burst: 20 of 20 jobs started 32–67 s after queued (median 42 s), none past 90 s, all in one tick; refusals 12
+    (capacity), against 33 (21 quota, 12 capacity) before.
   Follow-up outside M6's proof (CI-opt): the tick's preparation before its first allocation, 5.1 s at 18:45 and 6.2 s
   to the first insert, brought to M3's ≤ 5 s.
 
@@ -750,6 +754,14 @@ VM's walk.
   check VM in each new placement: C4D us-east1 39 s, us-east4 10.8 s, us-east5 19.6 s; C3D us-east1 145 s, us-east4
   43.5 s. A second sample in us-east1: 7.4 s (C4D), 6.1 s (C3D). The bake's per-placement smoke absorbs it.
 
+- 2026-10-22 (M6 walk, launcher 00017-ldn): **admission by live limits removed every quota refusal from the burst.** The
+  same 20 × cpus-4 burst (sandbox run 39697568771) launched all 20 VMs in one tick (46.7 s): us-west4 8 (its addresses),
+  us-east1-d 6, us-east5-a 6. C4D us-central1 and us-east4 were skipped as full from the start, rightly: MAWS's VMs
+  from 00:00:40Z held their 24 vCPUs each. Refusals: 12, all capacity (us-east1-b and -c, 6 each, the walks in flight
+  together), against 33 the first time; quota refusals 21 → 0. Queued → started 32–67 s, median 42 s (was 26–163 s,
+  median 53 s, 9 past 90 s). No follow-up tick fired (`cut` 0): the tick ended inside its budget, so the whole gain
+  here is admission's. The tick summary's `full` counted the skips: us-west4 addresses 36, us-central1 C4D 48, us-east1
+  C4D 18, us-east4 C4D 18.
 - 2026-10-21 (M6 rollout): **a config merge goes live before the code it needs.** The launcher reads `gce.json` from
   main on every tick but runs its deployed revision's code. #85 changed both, so from its merge (7292a8b) until
   launcher 00016-8ct (22:45Z) 00015-s2p walked the eight placements without the CPUS_PER_VM_FAMILY scope, the
@@ -807,12 +819,13 @@ accepted → started on c3d-4 (C4D separately), and day one's unclaimed pre-laun
   calls both VMs `done`, since runner-gone took them before the preemption read. MAWS's rerun-once rule, which
   reads the job's "The operation was canceled." annotation, counted both and reran each (attempt 3 green).
 - The config-before-code skew (Surprises): pick one of its two fixes.
-- The walk's refusal cost (Surprises, the live walk): M6's 90 s bound misses on a burst past us-west4. Proposed:
-  per-placement admission from each placement's known cap (min(family vCPUs, addresses × machine size), as M6 sized
-  them), so the walk skips a full placement without paying a quota refusal (17 of the burst's 33); then one probe
-  insert per untried (zone, machine) a tick before the rest follow (12 stock-out refusals become 2, at one insert's
-  wait for the followers when the zone has room). The order is CI-opt's lever: C3D us-central1 earlier, against
-  the preemption reason for putting it later.
+- Probe before fan-out (fix 2, not built: the rerun burst met the 90 s bound with admission alone). What it would take
+  out: the 12 capacity refusals walks in flight together paid in us-east1-b and -c (15–21 s each), one probe insert
+  per untried (zone, machine) a tick before the rest follow, at one insert's wait for the followers when the zone has
+  room. Worth building if a day of rows shows capacity refusals in the tail.
+- A race's row carries no zone until its walk returns (review P2 on #87, deferred): a launcher restarted while the
+  race's insert is in flight counts its vCPUs but not its regional room. Bounded by `--max-instances=1` and serialized
+  ticks to a crash mid-insert, costing at most one refusal.
 
 **What did not go as designed.**
 - Cloud NAT (M6) was built, reviewed, deployed and rolled back within the hour: GitHub's runner endpoints stall
