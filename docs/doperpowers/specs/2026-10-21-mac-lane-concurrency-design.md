@@ -1459,6 +1459,42 @@ hold-aware plan send them to the guest, which this spec leaves open.
     mini's CPU on every run, about 40 s per variant, beside the guest's job and the host's measured groups. It also
     couples the guest's job to the host's runner, its cache directory and its timing, and makes the host a
     dependency of a lane meant to free it. It is the fallback if the tree diff shows a real difference.
+- 2026-10-22 (V4's preparation, the ci-kit builders and their reviews): **V1's changes as built.**
+  - **The display.** `provision.sh`'s `display` step installs displayplacer, sets `res:2560x1440 scaling:on` and
+    reads it back. At boot the guest's wrapper reads the mode before starting a runner. A wrong or unreadable mode
+    starts no runner: the wrapper writes a new terminal marker, `out/unfit`, with the reason, and powers the guest off.
+    The missing-`.path` refusal now writes `out/unfit` too.
+  - **How the launcher treats `out/unfit`.** It counts as an `image` failure, not `refused`, so three in a row pause
+    the lane. The image is at fault.
+    - Review found that only the kickoff read the marker. Recovery, the state dispatcher and teardown read it now as
+      well, and stop and delete the clone at once.
+    - Image failures are deduplicated per clone (`image_clone` in `vm-failures`), so a failed kickoff and its later
+      marker count once, across restarts too.
+    - A trial's follower reads the marker itself, with the 60 s power-off bound, instead of waiting out the idle
+      handshake.
+  - **The disk is 60 GB, not 50.** The base image's disk is already 50 GB. Cirrus's
+    `vanilla-golden-gate.pkr.hcl` sets `disk_size_gb = 50` with `recovery_partition = "keep"`, and a 41 GiB container
+    beside a ~5 GB recovery container and a 0.5 GB iBoot fills 50 GB exactly.
+    - `tart set --disk-size 60` runs on the stopped candidate.
+    - The `disk` step then waits for tart-guest-agent's own boot-time resize. That resize cannot grow the container
+      past the recovery container that follows it: its README presumes images with recovery removed.
+    - The step then removes the recovery container from the running system (SIP is off in this base), runs repairDisk
+      and `resizeContainer 0`, and fails unless the container fills the disk.
+    - It accepts only the base layout: iBoot, one APFS container, optionally the recovery container immediately after
+      it, then free space. The check runs before any mutation, after a review found that an unexpected order would
+      have been erased first and rejected after.
+    - The guest then has about 17 GiB free, about 7x V1's worst clone.
+    - The cost: no recovery boot and no in-place `softwareupdate`. The lane rebakes from a new base instead.
+    - The removal from the running system, rather than from recoveryOS as Tart's FAQ does it, is unverified until V4's
+      first bake. The fallback is to remove it by hand from `tart run --recovery` in the human window step.
+  - **Memory.** The floor defaults to 60; `--memory` under 4096 is refused when the arguments are parsed.
+- 2026-10-22 (V4's preparation, the MAWS side; MAWS #122): **the Linux out/ serves a Mac, proven.** At one sha
+  (5b18dfc0), the pool's out/ and a MacBook's out/ are byte-identical for both variants (855 and 1078 files). The one
+  exception is out/main/index.js, which differs in 5–6 bytes, all in the build stamp's `builtAt`. The plan's `e2e`
+  output stays the union of all groups, since `guestRun` and e2e-default-specs read it. The guest-eligible groups run
+  in a second job, `e2e-vm`, which needs `e2e-build`, so host groups never wait for the pool. A group whose build is
+  not `scripts/e2e-build.sh <variant>` (today `default`) stays on the exclusive instance. A guest-eligible job
+  restores under REQUIRE on whichever desktop takes it.
 
 ## Surprises & Discoveries
 
