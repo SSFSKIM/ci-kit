@@ -73,10 +73,12 @@ account of the run; the spec's living sections hold the decisions and discoverie
 
 ## 2026-10-22 — Day-one readings (CI-opt)
 
-**The start-latency medians meet Acceptance 4 and 5 in the requested window. M3 does not close:** 11 launch ticks
-miss its 5 s preparation bound, and the one timed C3D-4 job misses its 26 s bound. Keep the 20 s race trigger and
-spot placement order for now; neither a race-threshold change nor a C3D on-demand switch is justified by these rows.
-No live configuration, quota, deployment or runner was changed for this reading.
+**Acceptance 4's median meets its bound in the requested window; Acceptance 5's run-level promise is missed:**
+13 of 45 observed pre-launched runs have gate-job medians above 25 s. The worst, run 39731694196, has six jobs with
+a median of 58.5 s, **33.5 s over**. The pooled-job median of 22 s is a diagnostic, not an A5 pass. **M3 does not
+close:** 11 launch ticks miss its 5 s preparation bound, and the one timed C3D-4 job misses its 26 s bound. Keep the
+20 s race trigger and spot placement order for now; neither a race-threshold change nor a C3D on-demand switch is
+justified by these rows. No live configuration, quota, deployment or runner was changed for this reading.
 
 ### Window, sources and limits
 
@@ -107,14 +109,29 @@ collector's nearest-rank rule. Insert send → done is the tick's operation dura
 | Reading | Day-to-date result | Verdict against the promise |
 |---|---|---|
 | A4: MAWS pool jobs queued → started, median ≤ 50 s | 24.0 s; p10–p90 1–42 s; n=304; max 80 s | **Met in this window**, 26 s below the bound. A full 24 h remains unobserved. |
-| A5: jobs of pre-launched runs, median ≤ 25 s | 22.0 s; p10–p90 1–42 s; n=235 across 45 runs | **Met in this window**, 3 s below the bound. The 69 jobs of other runs have median 34 s. This is not a randomized estimate of pre-launch's benefit. |
+| A5: a pre-launched run's gate-job median ≤ 25 s | 32/45 observed runs meet the bound; 13/45 miss. Worst: run 39731694196, six jobs, median 58.5 s | **Missed in this window**, worst by 33.5 s. A pooled median cannot satisfy a run-level promise. |
+| Diagnostic: pooled jobs of pre-launched runs | 22.0 s; p10–p90 1–42 s; n=235 across 45 runs; the 69 jobs of other runs have median 34 s | **Not an A5 verdict** or a randomized estimate of pre-launch's benefit. |
 | M5: inserts before the run's own gates queue | 158/182 claimed VMs serving their intended run were created before their job queued; creation → own-job queued median 4.5 s, p10–p90 −0.6–24.4 s | **Demonstrated, not universal.** 24 were late; pre-launch does not always hide the boot. |
 
-A5's statistic is the collector's pooled-job median, not a guarantee for every run: 13 of the 45 runs have their
-own gate-job median above 25 s; the median of the 45 run medians is 21.5 s. Full standby's 10 s clause is inapplicable:
-the owner chose pre-launch, not standby. As a concrete M5 proof, MAWS
+A5 promises a run's gate-job median, not the collector's pooled-job median. The median of the 45 run medians is
+21.5 s, but neither that nor the 22 s pooled diagnostic overrides the 13 observed run-level misses. Full standby's
+10 s clause is inapplicable: the owner chose pre-launch, not standby.
+
+**Why A5 misses:** in the worst [run 39731694196](https://github.com/SSFSKIM/MAWS/actions/runs/39731694196),
+all six serving VMs have `prelaunch` rows naming that run, but all were created **2.1–2.8 s after** their jobs queued
+(06:04:37Z; VM creation 06:04:39.145–06:04:39.761Z). Their six original inserts took **38.795–39.822 s send → done**,
+and their jobs started 58–60 s after queued (median 58.5 s). The launch tick began at 06:04:31.714Z and sent its
+first insert at 06:04:38.527Z: **6.813 s preparation**. Pre-launch supplied no prequeue lead, and slow Compute
+inserts then added to the exposed wait; the label alone does not establish that boot was hidden. Other misses also
+have little or no prequeue lead, leaving the ordinary ~26 s accepted → started path visible. For example,
+run 39765562278's six own pre-launched VMs were created 1.2–1.5 s after their jobs queued; creation → started had
+median 26.148 s, and the run's queued → started median was 27.5 s. These timings are joined from the frozen
+`rows.json` and `launcher.json` in `/private/tmp/ci-kit-dayread-evidence/`, not a new live observation.
+
+As a concrete M5 proof of creation before queueing, MAWS
 [run 39858604975](https://github.com/SSFSKIM/MAWS/actions/runs/39858604975)'s hosted plan ran 21:36:21–21:36:35;
-`ci-kit-gce-hsec0lgnq8` was created at 21:36:26.363, before `e2e:desk-web` queued at 21:36:35. It started at 21:37:13.
+`ci-kit-gce-hsec0lgnq8` was created at 21:36:26.363, before `e2e:desk-web` queued at 21:36:35. It started at 21:37:13;
+its 38 s wait still misses A5.
 
 ### M3: tick and boot
 
@@ -196,9 +213,10 @@ There were 786 admission-skip counters, all family-vCPU limits (390 west4, 276 c
 not 786 distinct delayed jobs. For more fast-family headroom, pursue the already-requested west4 C4D 192 grant
 and the address raises rather than changing the spot policy; no quota was filed or edited here.
 
-**Remaining actions:** the owner can authorize work on the 11 slow preparation ticks; M3 must stay open. A full
-24-hour closeout and final pre-launch/race costs need a later read after 2026-10-23T00:15Z, and C3D's boot and
-preemption conclusions need actual C3D traffic, not another idle day. No on-demand switch, race change or NAT
-re-enable is recommended. Cloud Quotas initially billed the MacBook service account's home project and returned
-403; the read succeeded with `x-goog-user-project: ssfskim-ci-kit`, without enabling an API or changing credentials
+**Remaining actions:** M3 and M5 must stay open. The owner can authorize work on the 11 slow preparation ticks
+and the missing prequeue lead behind A5's run-level misses. A full 24-hour closeout and final pre-launch/race costs
+need a later read after 2026-10-23T00:15Z, and C3D's boot and preemption conclusions need actual C3D traffic, not
+another idle day. No on-demand switch, race change or NAT re-enable is recommended. Cloud Quotas initially billed
+the MacBook service account's home project and returned 403; the read succeeded with `x-goog-user-project: ssfskim-ci-kit`,
+without enabling an API or changing credentials
 (ci-kit friction tracker #68).

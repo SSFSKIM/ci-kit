@@ -129,9 +129,11 @@ toward the boot alone, and below it for the jobs a warm runner covers.
 
 - [x] (2026-10-22 21:38Z cutoff) Day-one readings taken read-only from 00:15Z through 21:38:04Z (21 h 23 m,
   not a completed 24 h); recorded in `2026-10-21-pool-placement-latency-report.md`, dated day-one section. All 433
-  created VMs in this cohort are MAWS's; 304 recorded jobs. Acceptance 4's median is 24 s (≤ 50), Acceptance 5's
-  pre-launched-run jobs 22 s (≤ 25): both meet their numerical targets in this window. M3 remains open: 11/86
-  first-insert ticks exceed 5 s (worst 9.898 s), and the sole timed C3D-4 job is 46.637 s (20.637 s over 26).
+  created VMs in this cohort are MAWS's; 304 recorded jobs. Acceptance 4's median is 24 s (≤ 50), meeting its bound
+  in this window. Acceptance 5 is missed: 13/45 observed pre-launched runs have gate-job medians above 25 s; worst
+  run 39731694196 has six jobs, median 58.5 s (33.5 s over). The pooled 22 s across 235 jobs is diagnostic only,
+  not a run-level pass; M5 stays open. M3 remains open: 11/86 first-insert ticks exceed 5 s (worst 9.898 s), and
+  the sole timed C3D-4 job is 46.637 s (20.637 s over 26).
   Final unclaimed pre-launch: 93 VMs, $1.6783; another 15 not-yet-claimed VMs remain live. The 20 s race trigger
   remains justified as a tail cutoff (successful-insert p90 20.1 s), not proven optimal. No observed job over 90 s.
   Zero preemptions found, but only 6.49 VM-minutes of C3D us-central1 exposure: no on-demand switch recommended.
@@ -706,6 +708,13 @@ VM's walk.
   zero observed preemptions over only 6.49 VM-minutes of C3D us-central1 exposure. These are reading-session
   recommendations, not new owner approvals or live configuration changes. The report records pending final costs
   separately from finalized waste; the full-day and C3D-exposure proofs remain open.
+- 2026-10-22 (CI-opt day-reading correction): **The earlier pooled A5 verdict is superseded by the run-level
+  reading; the acceptance promise is unchanged.** A5 promises a run's gate-job median ≤ 25 s, not a pooled-job
+  median: 13/45 observed pre-launched runs miss, worst run 39731694196 at 58.5 s across six jobs (33.5 s over).
+  Keep 22 s pooled as a diagnostic, not a pass. The frozen rows and launcher logs show all six worst-run VMs
+  were pre-launch rows but created 2.1–2.8 s after their jobs queued; their original inserts took 38.795–39.822 s
+  send → done, after 6.813 s tick preparation. Other runs likewise have little or no prequeue lead, exposing
+  ordinary ~26 s boot/start time. Reject the earlier pooled reading as a basis for closing A5; M5 remains open.
 
 ## Surprises & Discoveries
 
@@ -826,11 +835,23 @@ qualifications remain explicit.)
   tick summary and the daily line, with the day's NAT.
 
 **Day-one reading (2026-10-22, 00:15–21:38:04Z; full evidence in the report's dated section).** A4 is 24 s
-(n=304, 26 s under its limit); A5 is 22 s (235 jobs of 45 pre-launched runs, 3 s under). Both numerical medians
-meet the target in this 21 h 23 m window, not yet a full day. M3's tick median is 3.1885 s but 11/86 launch ticks
-miss ≤ 5 s, worst 9.898 s (4.898 s over); the likely remaining cost is the preparation API path, whose individual
-calls are not timed. C3D-4 is 46.637 s (20.637 s over ≤ 26), n=1; 31.486 s is accepted → RUNNING and only
-15.151 s is RUNNING → started. C4D separately is 26.493 s, n=303. M3 stays open.
+(n=304, 26 s under its limit), meeting its bound in this 21 h 23 m window, not yet a full day. **A5 is missed:**
+13 of 45 observed pre-launched runs have gate-job medians above 25 s. Worst run 39731694196 has six jobs with
+median 58.5 s, 33.5 s over. The pooled 22 s across 235 jobs and the 21.5 s median of run medians are diagnostics,
+not passes against A5's run-level promise; M5 stays open.
+
+The worst run's six serving VMs all have pre-launch rows naming it, yet were created 2.1–2.8 s after their jobs
+queued. Their six original inserts took 38.795–39.822 s send → done; tick preparation was 6.813 s. There was no
+prequeue lead to hide boot, and slow Compute inserts compounded the wait. Other misses also have little or no
+lead: run 39765562278's six own pre-launched VMs were created 1.2–1.5 s after queueing, exposing a creation →
+started median of 26.148 s and a run-level queued → started median of 27.5 s. A pre-launch label is not evidence
+of hidden boot; the frozen `rows.json` and `launcher.json` in `/private/tmp/ci-kit-dayread-evidence/` supply these
+joined timings.
+
+M3's tick median is 3.1885 s but 11/86 launch ticks miss ≤ 5 s, worst 9.898 s (4.898 s over); the likely remaining
+cost is the preparation API path, whose individual calls are not timed. C3D-4 is 46.637 s (20.637 s over ≤ 26),
+n=1; 31.486 s is accepted → RUNNING and only 15.151 s is RUNNING → started. C4D separately is 26.493 s, n=303.
+M3 stays open.
 
 Pre-launch: 320 VMs, 212 claimed; 93 final unclaimed cost $1.6783, another 15 not-yet-claimed remain running.
 These are the cohort's finalized charges, not a full UTC daily line or a final cost for live VMs. Race: retain
