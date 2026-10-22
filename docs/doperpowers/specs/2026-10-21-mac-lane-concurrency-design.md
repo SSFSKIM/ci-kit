@@ -126,7 +126,11 @@ and by the coordinator's holds, and the design below says what is read and when.
   maintenance out of automated admission (Decision Log 9–11).
 - [ ] V1 — The second spike: go/no-go on numbers (3 GB and 4 GB guests, the wide display, a baked image, two groups,
   host memory and a timed row beside).
-- [ ] V2 — ci-kit: the launcher, the guest's runner and hooks, admission with the host lock, the memory guard, the bake.
+- [x] (2026-10-22 ~03:00Z) V2 — ci-kit: the launcher, the guest's runner and hooks, admission with the host lock, the
+  memory guard, the bake. Built as V2a–V2d on branch `vm-lane-v2` (0e99134..), each task reviewed clean
+  (task-reviewer, with fix rounds), then the whole branch by reviewer-medium and, on admission, lock and recovery,
+  reviewer-high: two fix waves, converged clean at 987edd7; ci-gate 39713040812 green; `npm test` 1022/1022 at 9200d6a.
+  Merge and the `v1` move follow through CI-opt; nothing on the mini changed.
 - [x] (2026-10-22 ~01:50Z) V3 — MAWS: `MAC_VM_E2E` and the `ci-kit-mac-solo` routing, the guest's budgets. MAWS #110
   landed 64483a63d (reviewer-medium, three rounds; class 1a green; Mac set 39684439702 green at 17a27e686; CI-opt
   rebased it onto 489f591c7 and added two gate-plan test commits, final head ecb877349). It also carries M3's
@@ -1387,6 +1391,10 @@ hold-aware plan send them to the guest, which this spec leaves open.
   cannot read, the guard samples and a critical or floor stop takes the reserved job clone by name; the guest's wrapper
   starts `run.sh` on the PATH of the runner's `.path` (runner 2.338.0 reads `.path` only in `runsvc.sh`), and starts
   nothing without one.
+  The second round's residues, also taken: a stop by name while `tart list` stays unreadable is retried at each
+  teardown poll until one goes through; an owner ending in `.tmp` is refused (the readers skip `vm-hold.*.tmp`), and
+  `hold.sh` stages as `.vm-hold.<owner>.<pid>`; `docs/mac-lane.md`'s `vm_hold` helper checks the owner locally and
+  quotes every argument into the ssh command, since the remote shell parses it before `hold.sh` can.
 
 ## Surprises & Discoveries
 
@@ -1468,4 +1476,17 @@ hold-aware plan send them to the guest, which this spec leaves open.
 
 ## Outcomes & Retrospective
 
-(At completion.)
+- 2026-10-22, V2 and V3 (interim; V1, V4 and V5 remain). The lane is built and inert: MAWS's `MAC_VM_E2E` is empty
+  on master (#110), and `install.sh` installs nothing of it without `--vm`. What the reviews taught, for V4 to carry:
+  - **Every review round found a real fail-open in a path that judged a clone's state from one read.** The pattern
+    that held: read `out/` before any decision to stop, treat an unreadable read as "may hold a job", and give a guest
+    up only through the wrapper's handshake unless no wrapper can be running. V4's recovery rehearsals should probe
+    the same seams on real Tart (the exec's detachment, the diag log's timing, `tart stop --timeout`).
+  - **Coordination files written by hand were the lane's weakest point** (the hold race, the shell-quoted owner):
+    every shared file now goes through a script that takes the lock. CI-opt's hold scripts on the MacBook move to
+    `hold.sh` in V4 step 6.
+  - **Tart's defaults are not the lane's:** the shared clipboard was found by reading `Run.swift`, not by a test. V1
+    reads the guest's pasteboard isolation, display and TCC on the real image before anything relies on them.
+  - The split into four tasks with a review at each frontier cost about 9 fix rounds and caught every interleaving
+    before the whole-branch review; the whole-branch reviews still found five cross-file defects no task review could
+    see (the hold publication, the pre-job deadlines across states, the guest's PATH between provision and wrapper).
