@@ -44,8 +44,8 @@ spec's Decision Log.
   - the disk at 60 GB, with the recovery container removed and the layout checked first;
   - the floor at 60, and `--memory` refused under 4096.
 
-  Evidence: ci-gate green (runs 39753049588 and 39757552408); reviewer-medium found three P2s, all fixed, and is
-  re-reviewing.
+  Evidence: ci-gate green (runs 39753049588 and 39757552408); reviewer-medium found three P2s, all fixed; the
+  re-review is clean.
 
 **Unverified until the install window:**
 - removing the recovery container from the running system;
