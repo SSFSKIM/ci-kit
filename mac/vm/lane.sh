@@ -16,7 +16,10 @@
 #   kicking     `tart exec <clone> …/kickoff.sh <slot> <clone>`, run beside the loop, then until out/listening or
 #               out/session-conflict, at most CI_KIT_VM_KICKOFF s (60) from the kickoff. An exec that fails is read
 #               against out/ first: the wrapper's markers go on as they would, a wrapper that may run with nothing
-#               assigned is given up through the handshake, and only a clone where none can run fails at once
+#               assigned is given up through the handshake, and only a clone where none can run fails at once. A
+#               wrapper that started no runner (out/unfit: no .path, the display off the image's mode) is an `image`
+#               failure naming its reason, counted once per clone even after a failed kickoff or a launcher restart.
+#               This terminal outcome is read in every active state and at teardown: no stop answer is owed
 #   session     the listener found the slot's last session open: until out/listening (or out/assigned, a job taken
 #               all the same), at most CI_KIT_VM_SESSION s (300); past it a `session` failure, counted apart from
 #               `image`. A bound passed before a job (the kickoff's, the session's) gives the guest up through the
@@ -41,8 +44,10 @@
 #
 # RECOVERY runs at one point only, this launcher's start, under the desktop lock, before the first queue read, and
 # touches job clones alone (maws-vm-job-<slot>-*, and vm-reserved); a golden, a candidate, a trial clone or the base is
-# the maintenance procedure's. A reservation's VM running with out/assigned and no out/done is adopted (running, the
-# bound from out/assigned); one asked to stop has its answer read first, before an out/done after it; one running with
+# the maintenance procedure's. out/unfit is counted as an image failure before any adoption or deletion, whether the
+# guest runs or has powered off, and goes straight to verified teardown. A reservation's VM running with out/assigned
+# and no out/done is adopted (running, the bound from out/assigned); one asked to stop has its answer read first, before
+# an out/done after it; one running with
 # no assignment goes through the idle handshake where a wrapper may run (a marker or out/wrapper.log in out/, or a
 # kickoff still in the process table) and is stopped where none can; one stopped or gone is deleted and released;
 # a job clone with no reservation is reserved first, so settle sees it, then torn down the same way. A reservation that
@@ -70,10 +75,12 @@
 #      the desktop lock: clear only when it exits 0 and prints nothing);
 #   4. no guest exists: vm-reserved absent, and Tart lists no maws-vm-* running (a maintenance VM keeps the lane shut,
 #      logged once per change and alerted after CI_KIT_VM_MAINTENANCE_ALERT s, 600);
-#   5. the memory guard and the disk reserve admit: pressure 1, available at least CI_KIT_VM_MEMORY_FLOOR % (37: a 4 GB
-#      guest's share of 16 GB plus 12 points), swap not grown since the last read at least CI_KIT_VM_SWAP_GAP s (60)
-#      older, and the volume of ~/.tart (CI_KIT_VM_TART_HOME) with at least CI_KIT_VM_DISK_RESERVE GB (40) free; a read
-#      that fails admits nothing;
+#   5. the memory guard and the disk reserve admit: pressure 1, available at least CI_KIT_VM_MEMORY_FLOOR % (60, V1's
+#      measure on the mini: a busy 4 GB guest moved the available figure at most 8 points, 24 with a host e2e job
+#      beside it, and pressure 2 began at 35-41 %, so a boot at 60 keeps the host above the warn boundary with a host
+#      job beside; a 3 GB surge beside the guest left 53 %, which 60 keeps from booting, as the floor is meant to),
+#      swap not grown since the last read at least CI_KIT_VM_SWAP_GAP s (60) older, and the volume of ~/.tart
+#      (CI_KIT_VM_TART_HOME) with at least CI_KIT_VM_DISK_RESERVE GB (40) free; a read that fails admits nothing;
 #   6. the host's main display is at @2x (cursor-park --describe through CI_KIT_CURSOR_PARK, the exclusive instance's
 #      installed helper by default), since the guest takes its density from it at boot;
 #   7. CI_KIT_VM_LANE_MODE is always (the default), or hold-only with every host instance held or stopped;
@@ -166,7 +173,7 @@ stop_timeout=$(whole "${CI_KIT_VM_STOP_TIMEOUT:-}" 30)
 spawn_check=$(whole "${CI_KIT_VM_SPAWN_CHECK:-}" 1)
 sample_every=$(whole "${CI_KIT_VM_SAMPLE:-}" 15)
 swap_gap=$(whole "${CI_KIT_VM_SWAP_GAP:-}" 60)
-memory_floor=$(whole "${CI_KIT_VM_MEMORY_FLOOR:-}" 37)
+memory_floor=$(whole "${CI_KIT_VM_MEMORY_FLOOR:-}" 60)
 warn_pause=$(whole "${CI_KIT_VM_WARN_PAUSE:-}" 120)
 critical_pause=$(whole "${CI_KIT_VM_CRITICAL_PAUSE:-}" 600)
 disk_reserve=$(whole "${CI_KIT_VM_DISK_RESERVE:-}" 40)
@@ -184,7 +191,7 @@ failures_file=$ci_kit_logs/vm-failures
 lane_lock=$ci_kit_logs/vm-lane.lock
 run_log=$ci_kit_logs/vm-run.log
 drain_marker=$ci_kit_logs/runner-drained
-markers='listening session-conflict assigned job refused stop-request stop-refused stop-raced stopped done'
+markers='listening session-conflict assigned job refused stop-request stop-refused stop-raced stopped done unfit'
 identity_files='.runner .credentials .credentials_rsaparams'
 job_clone_pattern="^maws-vm-job-$slot-[0-9]{8}T[0-9]{6}Z\$"
 
@@ -382,14 +389,14 @@ pause_clear() { # <reason> <why>
 }
 
 # THE FAILURES, counted by kind into vm-failures (this launcher's own, so a restart keeps the runs of them).
-# raced_clone names the clone whose raced stop is counted and alerted already, so a restart neither loses it (the
-# answer stays in out/ until the teardown) nor counts it twice.
-image_run=0 refused_run=0 total_image=0 total_session=0 total_memory=0 total_disk=0 total_raced=0 raced_clone=''
+# raced_clone and image_clone name the last clone counted for each: a restart neither loses a terminal marker (it
+# stays in out/ until teardown) nor counts it twice. An image failure at kickoff and its later unfit are one failure.
+image_run=0 refused_run=0 total_image=0 total_session=0 total_memory=0 total_disk=0 total_raced=0 raced_clone='' image_clone=''
 load_failures() {
   local key value
   [[ -f $failures_file ]] || return 0
   while IFS='=' read -r key value; do
-    [[ $key != raced_clone ]] || raced_clone=$value
+    case $key in raced_clone | image_clone) printf -v "$key" '%s' "$value" ;; esac
     [[ $value =~ ^[0-9]+$ ]] || continue
     case $key in
       image_run | refused_run | total_image | total_session | total_memory | total_disk | total_raced) printf -v "$key" '%s' "$value" ;;
@@ -397,8 +404,8 @@ load_failures() {
   done <"$failures_file" 2>/dev/null
 }
 save_failures() {
-  if ! printf 'image_run=%s\nrefused_run=%s\ntotal_image=%s\ntotal_session=%s\ntotal_memory=%s\ntotal_disk=%s\ntotal_raced=%s\nraced_clone=%s\n' \
-    "$image_run" "$refused_run" "$total_image" "$total_session" "$total_memory" "$total_disk" "$total_raced" "$raced_clone" \
+  if ! printf 'image_run=%s\nrefused_run=%s\ntotal_image=%s\ntotal_session=%s\ntotal_memory=%s\ntotal_disk=%s\ntotal_raced=%s\nraced_clone=%s\nimage_clone=%s\n' \
+    "$image_run" "$refused_run" "$total_image" "$total_session" "$total_memory" "$total_disk" "$total_raced" "$raced_clone" "$image_clone" \
     >"$failures_file.tmp" 2>/dev/null || ! mv -f "$failures_file.tmp" "$failures_file" 2>/dev/null; then
     rm -f "$failures_file.tmp" 2>/dev/null
     say "could not write $failures_file; the counts hold in this launcher"
@@ -406,6 +413,10 @@ save_failures() {
 }
 count_failure() { # <kind> <why>
   local total=total_$1
+  if [[ $1 == image && -n $clone ]]; then
+    [[ $image_clone != "$clone" ]] || return 0
+    image_clone=$clone
+  fi
   printf -v "$total" '%s' "$((${!total} + 1))"
   if [[ $1 == image ]]; then
     image_run=$((image_run + 1))
@@ -454,6 +465,12 @@ fail() { # <kind> <why>
 to_teardown() { # <why>
   say "$clone: $1; teardown"
   enter teardown
+}
+# A terminal outcome, not an idle wrapper: no runner started, so no handshake is owed, even after an exec failed.
+# count_failure persists the clone with the count, including when an earlier kickoff failure already counted it.
+unfit() {
+  has unfit || return 1
+  fail image "the guest started no runner: $(first_line unfit)"
 }
 # A bound passed before the guest took a job: the failure is counted (once), and the guest is given up through the
 # handshake where a wrapper may run, since its answer keeps a job taken meanwhile; only one with none is stopped.
@@ -888,6 +905,8 @@ step_ending() {
 # failures by a clone that ran its course.
 conclude() {
   local line
+  # A terminal marker may arrive after the launcher entered teardown.
+  if unfit; then return; fi
   # An answer the steps did not see (it came after the clone was given up) is still the clone's record.
   if [[ $failed != raced ]] && has stop-raced; then raced "$(field stop-raced job)"; fi
   if has job; then
@@ -1167,6 +1186,8 @@ recover_poll() {
   clone=$target
   [[ $target != "$r_vm" ]] || res_since=${r_since:-$now} res_golden=$r_golden
   vstate=$(tart_state_in "$vms" "$target")
+  # Read the outcome even if the guest powered off before this launcher started.
+  if unfit; then return; fi
   if [[ (-z $vstate || $vstate == stopped) && -z $pids ]]; then
     say "recovery: $clone is ${vstate:-gone}; teardown"
     enter teardown
@@ -1209,6 +1230,9 @@ recover_poll() {
 # THE LAUNCHER.
 step() { # the state's step; a kickoff under way is followed in every state
   kickoff_poll
+  # unfit can arrive after a failed kickoff, or after recovery adopted a still-starting wrapper. It takes priority
+  # over the idle handshake and its unanswered-stop alert. Teardown reads it once more at the verified end.
+  if [[ -n $clone && $state != recover && $state != teardown ]]; then unfit || true; fi
   case $state in
     recover) recover_poll ;;
     idle)

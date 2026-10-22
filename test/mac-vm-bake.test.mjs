@@ -6,6 +6,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DISPLAY_ID, displayplacer } from './fake-mac-desktop.mjs';
 
 // The VM lane's maintenance procedure (mac/vm/bake.sh, with mac/vm/tart.sh, and mac/vm/provision.sh in the guest):
 // the hold every step but --retire checks, the disk reserve, the bake, the registration of both identities, the trial
@@ -293,16 +294,18 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.match(f.run(['--bake']).stderr, /45 GB free .* under the reserve of 50 GB/);
   });
 
-  test('--bake: the candidate cloned from the base, set at 4 CPUs, 4096 MB and 2560x1440pt, provisioned through tart exec, its stop verified, then the human\'s steps', () => {
+  test('--bake: the candidate cloned from the base, set at 4 CPUs, 4096 MB, 2560x1440pt and a 60 GB disk before its first boot, provisioned through tart exec (the disk grown and the display set first), its stop verified, then the human\'s steps', () => {
     const f = fixture();
     const result = f.run(['--bake', '--name', CANDIDATE]);
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.equal(f.state(CANDIDATE), 'stopped');
     assert.equal(text(join(f.vms, CANDIDATE, 'source')).trim(), BASE);
-    assert.deepEqual(text(join(f.vms, CANDIDATE, 'set.args')).trim().split('\n'), ['--cpu', '4', '--memory', '4096', '--display', '2560x1440pt']);
+    assert.deepEqual(text(join(f.vms, CANDIDATE, 'set.args')).trim().split('\n'), ['--cpu', '4', '--memory', '4096', '--display', '2560x1440pt', '--disk-size', '60']);
+    // The disk is grown while the candidate is stopped, before it ever boots.
+    assert.ok(f.calls().findIndex((call) => call.startsWith(`set ${CANDIDATE} `)) < f.calls().findIndex((call) => call.startsWith('run ')), f.calls().join('\n'));
     assert.deepEqual(text(join(f.vms, CANDIDATE, 'run.args')).trim().split('\n'), ['--no-graphics', '--no-clipboard', `--dir=kit:${mac}:ro`, `--dir=maws:${f.maws}:ro`, CANDIDATE]);
     const script = '/bin/bash /Volumes/My Shared Files/kit/vm/provision.sh';
-    assert.deepEqual(f.exec(CANDIDATE), [`${script} check`, `${script} node 11.23.0`, `${script} store`, `${script} libreoffice`,
+    assert.deepEqual(f.exec(CANDIDATE), [`${script} check`, `${script} disk 60`, `${script} display`, `${script} node 11.23.0`, `${script} store`, `${script} libreoffice`,
       `${script} runner ${installPin('RUNNER_VERSION')} ${installPin('RUNNER_SHA256')} mini-vm`, `${script} helpers`]);
     // Its end verified before the step reports done: a stop, then Tart's list.
     const calls = f.calls();
@@ -324,12 +327,12 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
 
   test('--bake: --memory sets the guest\'s size, the date names the candidate, and a candidate or its golden name taken is refused', () => {
     const f = fixture();
-    const result = f.run(['--bake', '--memory', '3072']);
+    const result = f.run(['--bake', '--memory', '6144']);
     assert.equal(result.status, 0, result.stdout + result.stderr);
     const name = f.names().find((vm) => vm.startsWith('maws-vm-candidate-'));
     assert.match(name, /^maws-vm-candidate-\d{8}$/);
     assert.equal(name, `maws-vm-candidate-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`);
-    assert.deepEqual(text(join(f.vms, name, 'set.args')).trim().split('\n'), ['--cpu', '4', '--memory', '3072', '--display', '2560x1440pt']);
+    assert.deepEqual(text(join(f.vms, name, 'set.args')).trim().split('\n'), ['--cpu', '4', '--memory', '6144', '--display', '2560x1440pt', '--disk-size', '60']);
     const again = f.run(['--bake']);
     assert.equal(again.status, 1);
     assert.match(again.stderr, new RegExp(`refused: ${name} exists: retire it \\(bake.sh --retire ${name}\\)`));
@@ -338,6 +341,25 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.match(g.run(['--bake', '--name', CANDIDATE]).stderr, new RegExp(`refused: ${GOLDEN} exists, which ${CANDIDATE} would be promoted to`));
     assert.match(g.run(['--bake', '--memory', 'lots']).stderr, /--memory takes the guest's memory in MB/);
     assert.match(g.run(['--bake', '--name', 'maws-vm-golden-x']).stderr, /--name takes maws-vm-candidate-<id>/);
+  });
+
+  test('--bake: a --memory under the base image\'s 4 GiB is refused before anything, with the image\'s reason', () => {
+    const f = fixture();
+    const result = f.run(['--bake', '--memory', '3072']);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /--memory 3072 is under the base image's minimum of 4096 MB \(Tart refuses it: LessThanMinimalResourcesError\)/);
+    assert.deepEqual(f.calls(), []);
+    assert.equal(f.run(['--bake', '--memory', '4095']).status, 1);
+  });
+
+  test('--bake: a disk that does not grow in the guest fails the bake, and the candidate is stopped, verified', () => {
+    const f = fixture();
+    f.flag('fail-disk');
+    const result = f.run(['--bake', '--name', CANDIDATE]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /maws-vm-candidate-20261022: the disk grown to 60 GB \(disk\) failed \(1: provision: disk failed\)/);
+    assert.equal(f.state(CANDIDATE), 'stopped');
+    assert.equal(f.exec(CANDIDATE).length, 2, 'stopped at the disk step');
   });
 
   test('--bake: a provision step that fails stops the candidate, verified, and leaves it; a VM of the lane running refuses the bake', () => {
@@ -434,6 +456,27 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
 // The trials run one at a time: a trial clone is named after the second it starts, and Tart's VMs, like the process
 // table its runs are read from, are the machine's, so two trials in one second would read each other's run.
 describe('the trial (bake.sh --trial)', macOnly, () => {
+  test('--trial: unfit that stays powered on is stopped at the power-off bound, not the idle bound', async () => {
+    const f = fixture({ env: { CI_KIT_VM_END_WAIT: '2', CI_KIT_VM_TRIAL_IDLE: '1800' } });
+    f.vm(CANDIDATE);
+    f.identity('vm-trial');
+    const trial = f.start(['--trial', CANDIDATE]);
+    await f.until(() => trialClone(f) && existsSync(join(f.vms, trialClone(f), 'kicked')), 'the trial clone kicked off');
+    const clone = trialClone(f);
+    f.mark('unfit', 'the display mode cannot be read');
+    await f.until(() => f.record() !== null, 'unfit trial ended at the power-off bound', 15_000);
+    assert.equal(await trial.exited, 0, trial.output());
+    const record = f.record();
+    assert.equal(record.why, 'the guest started no runner: the display mode cannot be read');
+    assert.equal(record.job, '');
+    assert.equal(record.conclusion, '');
+    assert.equal(f.state(clone), null, 'the stopped trial clone is deleted');
+    assert.ok(f.calls().some((call) => call.startsWith(`stop ${clone} `)));
+    assert.equal(existsSync(join(record.out, 'stop-request')), false, 'no wrapper can answer an idle stop');
+    assert.equal(text(join(record.out, 'unfit')), 'the display mode cannot be read\n');
+    assert.deepEqual(f.ghCalls(), [], 'no job result to fetch');
+  });
+
   test('--trial: a clone of the candidate under the trial slot\'s identity, never the production one; the job read through gh; the record binds candidate, run, job and success', async () => {
     const f = fixture();
     f.vm(CANDIDATE);
@@ -675,17 +718,156 @@ describe('the promote and the retire (bake.sh)', { concurrency: 4, ...macOnly },
   });
 });
 
-// provision.sh's steps that run nothing of Homebrew's or GitHub's: the runner's environment, and the registration.
+// The guest's disk, through diskutil as the base image's layout has it: disk0 holds the iBoot system container
+// (disk0s1), the APFS container macOS runs from (disk0s2) and the recovery container after it (disk0s3). Its sizes are
+// files of <dir>: disk-size (what `tart set --disk-size` made), apfs-size, recovery-size (gone once removed). Flags:
+// erase-refused (eraseVolume fails, deleteContainer works), keep-recovery (both fail), no-grow (a resize that takes
+// nothing). Every call is a line of <dir>/diskutil.calls; repairDisk's answer on stdin is kept in repair-answer.
+const ISC = 524288000;
+const fakeDiskutil = (dir) => `d='${dir}'
+printf '%s\\n' "$*" >> "$d/diskutil.calls"
+isc=${ISC}
+size() { cat "$d/$1"; }
+part() { printf '<dict><key>Content</key><string>%s</string><key>DeviceIdentifier</key><string>%s</string><key>Size</key><integer>%s</integer></dict>' "$@"; }
+case "$*" in
+  'list -plist physical')
+    printf '<?xml version="1.0" encoding="UTF-8"?>\\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\\n'
+    printf '<plist version="1.0"><dict><key>AllDisks</key><array><string>disk0</string></array><key>AllDisksAndPartitions</key><array><dict>'
+    printf '<key>Content</key><string>GUID_partition_scheme</string><key>DeviceIdentifier</key><string>disk0</string><key>OSInternal</key><false/><key>Partitions</key><array>'
+    if [[ -f $d/partitions ]]; then
+      while read -r content device bytes; do part "$content" "$device" "$bytes"; done < "$d/partitions"
+    else
+      part Apple_APFS_ISC disk0s1 "$isc"
+      part Apple_APFS disk0s2 "$(size apfs-size)"
+      [[ ! -f $d/recovery-size ]] || part Apple_APFS_Recovery disk0s3 "$(size recovery-size)"
+    fi
+    printf '</array><key>Size</key><integer>%s</integer></dict></array></dict></plist>\\n' "$(size disk-size)" ;;
+  'eraseVolume free free disk0s3')
+    [[ -f $d/recovery-size && ! -e $d/erase-refused && ! -e $d/keep-recovery ]] || { echo 'Error: -69888: Could not unmount disk' >&2; exit 1; }
+    rm "$d/recovery-size" ;;
+  'apfs deleteContainer disk0s3')
+    [[ -f $d/recovery-size && ! -e $d/keep-recovery ]] || { echo 'Error: -69624: Unable to delete the container' >&2; exit 1; }
+    rm "$d/recovery-size" ;;
+  'repairDisk disk0')
+    IFS= read -r answer; printf '%s\\n' "$answer" > "$d/repair-answer" ;;
+  'apfs resizeContainer disk0s2 0')
+    [[ ! -e $d/no-grow ]] || exit 0
+    [[ ! -f $d/recovery-size ]] || { echo 'Error: -69519: The target disk is too small for this operation' >&2; exit 1; }
+    echo "$(($(size disk-size) - isc - 40960))" > "$d/apfs-size" ;;
+  *) exit 64 ;;
+esac`;
+
+// provision.sh's steps that run nothing of Homebrew's or GitHub's: the runner's environment, the registration, the
+// display and the disk.
 describe('the bake\'s provisioning in the guest (provision.sh)', macOnly, () => {
-  function guest() {
+  function guest({ mode = '1024x768 on', disk = 60e9, apfs = 44107026944, recovery = 5368664064 } = {}) {
     const home = mkdtempSync(join(root, 'guest-'));
     const shares = join(home, 'shares');
     const runner = join(home, 'actions-runner-maws');
-    for (const dir of [join(shares, 'kit'), join(shares, 'identity-vm'), runner]) mkdirSync(dir, { recursive: true });
-    const env = { HOME: home, PATH: '/usr/bin:/bin', CI_KIT_VM_SHARES: shares };
+    const bin = join(home, 'bin');
+    for (const dir of [join(shares, 'kit'), join(shares, 'identity-vm'), runner, bin]) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(home, 'display-mode'), `${mode}\n`);
+    executable(join(bin, 'displayplacer'), displayplacer(home));
+    for (const [file, bytes] of [['disk-size', disk], ['apfs-size', apfs], ['recovery-size', recovery]]) if (bytes) writeFileSync(join(home, file), `${bytes}\n`);
+    executable(join(bin, 'diskutil'), fakeDiskutil(home));
+    const env = { HOME: home, PATH: '/usr/bin:/bin', CI_KIT_VM_SHARES: shares, CI_KIT_VM_DISPLAYPLACER: join(bin, 'displayplacer'),
+      CI_KIT_VM_DISKUTIL: join(bin, 'diskutil'), CI_KIT_VM_DAEMON_LOG: join(home, 'tart-guest-daemon.log') };
     const run = (args, input = '') => spawnSync('/bin/bash', [provision, ...args], { encoding: 'utf8', input, env });
-    return { home, shares, runner, run };
+    const lines = (name) => (text(join(home, name)) ?? '').split('\n').filter(Boolean);
+    const flag = (name) => writeFileSync(join(home, name), '');
+    return { home, shares, runner, env, run, flag, displayCalls: () => lines('displayplacer.calls'), diskCalls: () => lines('diskutil.calls') };
   }
+
+  test('display: the guest\'s mode set to 2560x1440 with scaling on through displayplacer, and read back; set already, nothing is set', () => {
+    const g = guest();
+    const result = g.run(['display']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(g.displayCalls(), ['list', `id:${DISPLAY_ID} res:2560x1440 scaling:on`, 'list']);
+    assert.match(result.stdout, /the display is 1024x768 scaling:on; setting 2560x1440 scaling:on/);
+    assert.match(result.stdout, new RegExp(`display ${DISPLAY_ID}: 2560x1440 scaling:on`));
+    const again = g.run(['display']);
+    assert.equal(again.status, 0, again.stderr);
+    assert.deepEqual(g.displayCalls().slice(3), ['list'], 'read, and nothing set');
+  });
+
+  test('display: a set that does not take, or a mode that cannot be read, fails the step', () => {
+    const stuck = guest();
+    stuck.flag('display-stuck');
+    const result = stuck.run(['display']);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /provision: the display is 1024x768 scaling:on after displayplacer set 2560x1440 scaling:on/);
+    const unreadable = guest();
+    unreadable.flag('display-fail');
+    assert.match(unreadable.run(['display']).stderr, /provision: the display mode cannot be read \(\S+displayplacer list\)/);
+  });
+
+  test('disk: the recovery container after the APFS one removed, the disk repaired, the container grown to the disk tart set made, and verified; a second run changes nothing', () => {
+    const g = guest();
+    const result = g.run(['disk', '60']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(g.diskCalls(), ['list -plist physical', 'eraseVolume free free disk0s3', 'repairDisk disk0', 'apfs resizeContainer disk0s2 0', 'list -plist physical']);
+    assert.equal(text(join(g.home, 'repair-answer')), 'yes\n');
+    assert.match(result.stdout, /the container disk0s2 is 44\.1 GB of the 60\.0 GB disk disk0; growing it/);
+    assert.match(result.stdout, /removing the recovery container disk0s3/);
+    assert.match(result.stdout, /the container disk0s2 is 59\.5 GB of the 60\.0 GB disk disk0; \/ has \d+ GiB free/);
+    const again = g.run(['disk', '60']);
+    assert.equal(again.status, 0, again.stderr);
+    assert.deepEqual(g.diskCalls().slice(5), ['list -plist physical'], 'read, and nothing changed');
+  });
+
+  for (const order of [
+    ['Apple_APFS_ISC', 'Apple_APFS', 'Apple_HFS', 'Apple_APFS_Recovery'],
+    ['Apple_APFS_ISC', 'Apple_APFS', 'Apple_APFS_Recovery', 'Apple_HFS'],
+    ['Apple_APFS_ISC', 'Apple_APFS_Recovery', 'Apple_APFS'],
+    ['Apple_APFS_ISC', 'Apple_APFS', 'Apple_APFS_Recovery', 'Apple_APFS_Recovery'],
+  ]) {
+    test(`disk: unsupported partition order ${order.join(', ')} is refused before any disk change`, () => {
+      const g = guest();
+      writeFileSync(join(g.home, 'partitions'), order.map((content, i) => `${content} disk0s${i + 1} ${content === 'Apple_APFS' ? 44107026944 : 524288000}`).join('\n') + '\n');
+      const result = g.run(['disk', '60']);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(result.stderr, /unsupported.*layout/i);
+      for (const content of order) assert.ok(result.stderr.includes(content), result.stderr);
+      assert.deepEqual(g.diskCalls(), ['list -plist physical'], 'no erase, delete, repair or resize on an unsupported layout');
+      assert.ok(existsSync(join(g.home, 'recovery-size')), 'the recovery container remains');
+    });
+  }
+
+  test('disk: a recovery container eraseVolume refuses is deleted as a container', () => {
+    const g = guest();
+    g.flag('erase-refused');
+    const result = g.run(['disk', '60']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(g.diskCalls().slice(1, 3), ['eraseVolume free free disk0s3', 'apfs deleteContainer disk0s3']);
+  });
+
+  test('disk: refused when tart set did not grow the disk, when the recovery container stays, and when the container does not grow', () => {
+    const small = guest({ disk: 50e9 });
+    const result = small.run(['disk', '60']);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /provision: the disk disk0 is 50\.0 GB, under the 60 GB bake\.sh set \(tart set --disk-size did not take\)/);
+    assert.deepEqual(small.diskCalls(), ['list -plist physical']);
+    const kept = guest();
+    kept.flag('keep-recovery');
+    assert.match(kept.run(['disk', '60']).stderr, /provision: the recovery container disk0s3 could not be removed/);
+    const stuck = guest();
+    stuck.flag('no-grow');
+    assert.match(stuck.run(['disk', '60']).stderr, /provision: the container disk0s2 is 44\.1 GB of the 60\.0 GB disk disk0 after the resize: it did not grow into the disk/);
+    assert.match(guest().run(['disk', 'big']).stderr, /disk takes the disk's size in GB/);
+  });
+
+  test('disk: the guest agent\'s own resize, under way at boot, is let finish before the step touches the disk', () => {
+    const g = guest();
+    const log = join(g.home, 'tart-guest-daemon.log');
+    writeFileSync(log, 'INFO\trunning on Tart 2.40.1, proceeding...\nINFO\tattempting to resize disk...\n');
+    const started = Date.now();
+    const result = spawnSync('/bin/bash', ['-c', `(sleep 1.5; printf 'WARN\\tfailed to resize disk: no space\\n' >> "$1") & exec /bin/bash "$2" disk 60`, 'x', log, provision],
+      { encoding: 'utf8', env: g.env });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(Date.now() - started >= 1500, 'waited for the agent');
+    assert.match(result.stdout, /waiting for the guest agent's own disk resize/);
+    assert.equal(g.diskCalls()[0], 'list -plist physical');
+  });
 
   test('env: the runner\'s .env carries the hooks through ~/ci-kit, the guest\'s machine and flag, and English; .path gives Node 22 first', () => {
     const g = guest();

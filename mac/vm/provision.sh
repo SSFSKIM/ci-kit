@@ -5,6 +5,10 @@
 #
 #   check                                the base: macOS's version, Homebrew, python3 (installed when the system's
 #                                        cannot run runner-state.py) and the Swift compiler
+#   disk <GB>                            the APFS container grown into the disk bake.sh set to <GB> (below), verified
+#   display                              the display at 2560x1440 with scaling on, through displayplacer (installed
+#                                        from its tap), read back: `tart set --display` does not reach the guest's
+#                                        mode, and the mode set here persists into every clone
 #   node <pnpm version>                  Node 22 (Homebrew's node@22) and pnpm through corepack, on the runner's PATH
 #   store                                the pnpm store and Electron's download cache warmed: a scratch clone of the
 #                                        read-only maws share, `pnpm install --frozen-lockfile`, then the clone removed
@@ -36,6 +40,66 @@ fail() {
 say() {
   echo "provision: $*"
 }
+gb() { # <bytes>
+  awk -v bytes="$1" 'BEGIN { printf "%.1f GB", bytes / 1e9 }'
+}
+
+# THE DISK. bake.sh grows the stopped candidate's disk (tart set --disk-size); the container macOS runs from takes the
+# new space only by a resize in the guest, which is how Tart's FAQ (disk resizing) and the guest agent's own resizer
+# (tart-guest-agent --resize-disk, internal/diskresizer) do it: `diskutil repairDisk`, then `diskutil apfs
+# resizeContainer <container> 0`. A container grows only into space right after it, and the golden-gate base keeps its
+# recovery container there (its template: recovery_partition "keep"; the agent's resizer is documented for images
+# without one), so the recovery container is removed first, as the FAQ does: the lane's guests never update macOS in
+# place (a new base is a new bake) and never boot to recovery. The FAQ removes it from recoveryOS; here it is removed
+# from the running system (SIP is off in the base), which V4's first bake proves or refutes: the step fails unless the
+# container ends up holding the whole disk but at most disk_slack bytes (the iBoot system container and the GPT).
+disk_slack=1000000000
+# diskutil as root (the base image's passwordless sudo); CI_KIT_VM_DISKUTIL stands in for it in tests.
+root_diskutil() {
+  if [[ -n ${CI_KIT_VM_DISKUTIL:-} ]]; then "$CI_KIT_VM_DISKUTIL" "$@"; else sudo -n /usr/sbin/diskutil "$@"; fi
+}
+# The physical disk holding the one APFS container, found as the guest agent's resizer finds it: l_disk, l_size, l_apfs
+# and l_apfs_size (the container's physical store), l_recovery (the immediately following recovery container, or -).
+# Before touching the disk, accept only the base layout: iBoot, APFS, optional recovery, then free space. Recovery
+# may already be gone on a repeated step; any other partition order is unsupported and left untouched.
+layout() {
+  local line
+  line=$(root_diskutil list -plist physical | python3 -I -c '
+import plistlib, sys
+disks = plistlib.loads(sys.stdin.buffer.read()).get("AllDisksAndPartitions", [])
+seen = "; ".join("%s: %s" % (d.get("DeviceIdentifier", "?"), ", ".join(
+    "%s(%s)" % (p.get("DeviceIdentifier", "-"), p.get("Content", "?"))
+    for p in d.get("Partitions", []))) for d in disks)
+found = [(disk, i) for disk in disks for i, p in enumerate(disk.get("Partitions", []))
+         if p.get("Content") == "Apple_APFS"]
+if len(found) != 1:
+    sys.exit("unsupported disk layout (%d APFS containers, not one): %s" % (len(found), seen))
+disk, i = found[0]
+parts = disk["Partitions"]
+part = parts[i]
+after = parts[i + 1:]
+recovery = "-"
+if after and after[0].get("Content") == "Apple_APFS_Recovery":
+    recovery = after[0]["DeviceIdentifier"]
+    after = after[1:]
+if ([p.get("Content") for p in parts[:i]] != ["Apple_APFS_ISC"]
+        or any(p.get("Content") != "Free Space" for p in after)):
+    sys.exit("unsupported disk layout (expected iBoot, APFS, optional recovery, then free space): " + seen)
+print(disk["DeviceIdentifier"], disk["Size"], part["DeviceIdentifier"], part["Size"], recovery)') || return 1
+  read -r l_disk l_size l_apfs l_apfs_size l_recovery <<<"$line"
+}
+# The guest agent's daemon (Cirrus's images run it at boot as a LaunchDaemon, tart-guest-agent --run-daemon) tries the
+# same repair and resize itself when the disk has room the partitions do not use; its attempt is let finish first, so
+# two diskutil sequences never work the disk at once. Its log has one outcome line after "attempting to resize disk".
+agent_resize_wait() {
+  local log=${CI_KIT_VM_DAEMON_LOG:-/tmp/tart-guest-daemon.log} waited=0 said=''
+  while [[ $(grep -E 'attempting to resize disk|skipping disk resizing|failed to resize disk|successfully resized the disk' "$log" 2>/dev/null | tail -1) == *'attempting to resize disk'* ]]; do
+    ((waited < 600)) || fail "the guest agent's own disk resize has not ended after 600 s ($log)"
+    [[ -n $said ]] || { say "waiting for the guest agent's own disk resize to end ($log)"; said=1; }
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
 
 write_env() { # <machine>
   [[ $1 =~ ^[a-z0-9-]+$ ]] || fail "env takes the guest's machine name (got '$1')"
@@ -64,6 +128,38 @@ case $step in
     fi
     say "$(python3 --version)"
     xcrun --find swiftc >/dev/null || fail 'no Swift compiler (the Xcode command line tools) in the base image'
+    ;;
+  disk)
+    [[ ${1:-} =~ ^[1-9][0-9]*$ ]] || fail "disk takes the disk's size in GB, as bake.sh set it (got '${1:-}')"
+    agent_resize_wait
+    layout || fail 'the physical disk cannot be read (diskutil list -plist physical)'
+    ((l_size >= $1 * 1000000000)) || fail "the disk $l_disk is $(gb "$l_size"), under the $1 GB bake.sh set (tart set --disk-size did not take)"
+    if ((l_size - l_apfs_size > disk_slack)); then
+      say "the container $l_apfs is $(gb "$l_apfs_size") of the $(gb "$l_size") disk $l_disk; growing it"
+      if [[ $l_recovery != - ]]; then
+        say "removing the recovery container $l_recovery, which sits between $l_apfs and the disk's free space"
+        root_diskutil eraseVolume free free "$l_recovery" || root_diskutil apfs deleteContainer "$l_recovery" ||
+          fail "the recovery container $l_recovery could not be removed"
+      fi
+      root_diskutil repairDisk "$l_disk" <<<yes || fail "diskutil repairDisk $l_disk failed"
+      root_diskutil apfs resizeContainer "$l_apfs" 0 || fail "diskutil apfs resizeContainer $l_apfs 0 failed"
+      layout || fail 'the physical disk cannot be read after the resize'
+      ((l_size - l_apfs_size <= disk_slack)) ||
+        fail "the container $l_apfs is $(gb "$l_apfs_size") of the $(gb "$l_size") disk $l_disk after the resize: it did not grow into the disk"
+    fi
+    say "the container $l_apfs is $(gb "$l_apfs_size") of the $(gb "$l_size") disk $l_disk; / has $(df -g / | awk 'NR == 2 { print $4 }') GiB free"
+    ;;
+  display)
+    [[ -x $vm_displayplacer ]] || brew install jakehilborn/jakehilborn/displayplacer
+    [[ -x $vm_displayplacer ]] || fail "displayplacer did not install ($vm_displayplacer)"
+    vm_display || fail "the display mode cannot be read ($vm_displayplacer list)"
+    if ! vm_display_right; then
+      say "the display is $dp_res scaling:$dp_scaling; setting $vm_display_res scaling:on"
+      "$vm_displayplacer" "id:$dp_id res:$vm_display_res scaling:on" || fail "displayplacer could not set $vm_display_res scaling:on"
+      vm_display || fail "the display mode cannot be read after displayplacer set it ($vm_displayplacer list)"
+    fi
+    vm_display_right || fail "the display is $dp_res scaling:$dp_scaling after displayplacer set $vm_display_res scaling:on"
+    say "display $dp_id: $dp_res scaling:on (every clone of the image keeps it)"
     ;;
   node)
     [[ ${1:-} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "node takes pnpm's version (got '${1:-}')"
@@ -144,6 +240,6 @@ case $step in
     say "$name registered with $labels; its identity is in the identity-$slot share, and none is left in $vm_runner"
     ;;
   *)
-    fail "unknown step '${step}' (check, node, store, libreoffice, runner, env, helpers, register)"
+    fail "unknown step '${step}' (check, disk, display, node, store, libreoffice, runner, env, helpers, register)"
     ;;
 esac

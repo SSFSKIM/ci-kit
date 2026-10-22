@@ -12,12 +12,47 @@ Outcomes carry every decision; this report is the run's record and what comes ne
 | V1, the second spike | Run 07:05–08:29Z 10-22, inside CI-opt's window (hard end 10:05:32Z). **Verdict: a partial go at 4096 MB, with the build moved out of the guest and `CI_KIT_VM_MEMORY_FLOOR` raised from 37 to 60.** Details are under "V1: the second spike". |
 | V2, ci-kit: the lane | Merged: #89 (722d8e4). |
 | V3, MAWS | Landed: MAWS #110, merge 64483a63d. |
-| V4, install, trials, verdict | Not started. Needs the V1 verdict checked by CI-opt, mini windows and one owner step (below). V1 adds three changes for V4 to build first (under "V1: what V4 must change"). |
+| V4, install, trials, verdict | Preparation done, with no mini window: ci-kit PR (branch `vm-lane-v4-prep`) and MAWS #122, both reviewed and not merged. Details are under "V4's preparation". The install window comes next. |
 | V5 | Not started. |
 
 In V1's window the mini was used only from one-shot gui-session LaunchAgents (`v1-spike.sh launch <phase>`). No
 osascript ran, no dialog was touched and no password prompt appeared. The mini was left as described in "V1: the end
 state".
+
+## V4's preparation (2026-10-22, no mini window)
+
+The design change: out/ is built on the pool. It was decided by CI-opt with the MAWS architect and is recorded in the
+spec's Decision Log.
+
+- **MAWS #122** (https://github.com/SSFSKIM/MAWS/pull/122, branch `gate-vm-e2e-build`, for the architect to land):
+  - `e2e-build.sh` gains `MAWS_E2E_BUILD_REQUIRE=1`;
+  - the plan gains the outputs `e2e_host`, `e2e_vm`, `e2e_build` and `e2e_build_runner`;
+  - `gate.yml` gains an `e2e-build` pool job and an `e2e-vm` job that shares `e2e`'s steps through YAML anchors;
+  - the refusal relaunch never names `e2e-build (…)`.
+
+  Evidence:
+  - With MAC_VM_E2E empty the plan is unchanged apart from the added outputs.
+  - Class 1a was green on the pool: runs 39751617140 and 39756283200, the second at the head.
+  - reviewer-medium: one P2, fixed, then clean.
+- **The proof (the architect's condition 1).** At scratch sha 5b18dfc0, the pool's out/ (run 39752104205; its two e2e
+  jobs queued on [ci-kit-mac-vm] and were cancelled unrun at 09:03:49Z) was compared with a MacBook build:
+  - plain: 855/855 files; harness: 1078/1078;
+  - the only difference is `builtAt` in out/main/index.js (6 and 5 bytes);
+  - the artifacts and the diff are in `/tmp/maws-e2e-proof/` on the MacBook.
+- **ci-kit** (branch `vm-lane-v4-prep`, this branch):
+  - displayplacer in the bake, with the boot check and the new `out/unfit` marker;
+  - the disk at 60 GB, with the recovery container removed and the layout checked first;
+  - the floor at 60, and `--memory` refused under 4096.
+
+  Evidence: ci-gate green (runs 39753049588 and 39757552408); reviewer-medium found three P2s, all fixed; the
+  re-review is clean.
+
+**Unverified until the install window:**
+- removing the recovery container from the running system;
+- the real `e2e-vm` job's download and restore;
+- the display check right after login: it reads the mode once, with no retry.
+
+The V8 code-cache experiment is in V4 step 3.
 
 ## V1: the second spike
 

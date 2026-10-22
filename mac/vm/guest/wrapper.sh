@@ -1,10 +1,12 @@
 #!/bin/bash
 # The VM lane's runner wrapper (docs/mac-lane.md, the VM lane), started by kickoff.sh in a job clone as
 # `wrapper.sh <slot> <clone>`. It owns the clone's one runner: it runs `run.sh --once` on the PATH of the runner's
-# .path (none: it starts nothing and powers off), so the listener takes one job and exits; it tells the launcher, through out/, what the listener is doing, read from the listener's own diag log
-# (diag.sh) and from the processes (a Runner.Worker, by the kernel's path: hooks/runner-state.py); it answers the
-# launcher's idle stop; and when the runner has exited it copies the clone's record to out/ and powers the guest off,
-# which ends the launcher's `tart run`. The runner and its hooks get CI_KIT_VM_SLOT and CI_KIT_VM_CLONE.
+# .path, so the listener takes one job and exits (a clone without that .path, or whose display is not at the image's
+# mode, starts nothing, says why in out/unfit, and powers off); it tells the launcher, through out/, what the listener
+# is doing, read from the listener's own diag log (diag.sh) and from the processes (a Runner.Worker, by the kernel's
+# path: hooks/runner-state.py); it answers the launcher's idle stop; and when the runner has exited it copies the
+# clone's record to out/ and powers the guest off, which ends the launcher's `tart run`. The runner and its hooks get
+# CI_KIT_VM_SLOT and CI_KIT_VM_CLONE.
 #
 # THE out/ PROTOCOL. out/ is the slot's out share (/Volumes/My Shared Files/out in the guest, ~/ci-kit-vm/<slot>/out on
 # the host). The launcher hands each clone an empty one: kickoff.sh refuses a clone whose out/ holds any marker below.
@@ -39,6 +41,10 @@
 #   done             <exit code>                  run.sh has exited, with that code, and _diag and the hooks log are in
 #                                                 out/; the guest powers itself off next (`sudo -n shutdown -h now`).
 #                                                 A guest that does not power off after done is the launcher's to stop.
+#   unfit            <why, one line of text>      the clone is not what the image meant, so the wrapper started no
+#                                                 runner and the guest powers itself off next: the runner's .path is
+#                                                 missing, or the display is not at 2560x1440 with scaling on (read at
+#                                                 boot, before any job: guest.sh). No other marker follows.
 #
 #   written by the launcher
 #   stop-request     (empty)                      past the idle bound with nothing assigned and nothing queued for it,
@@ -66,7 +72,7 @@
 # ended unrecorded. A done that cannot be written does not keep the guest up: tart run's exit is the launcher's signal.
 #
 # Bounds and overrides: CI_KIT_VM_WATCH, the watch's poll (1 s); CI_KIT_VM_STOP_WAIT; CI_KIT_VM_WRITE_WAIT; CI_KIT_VM_SHUTDOWN, a command run
-# in place of the power-off (tests).
+# in place of the power-off, and CI_KIT_VM_DISPLAYPLACER (guest.sh) (tests).
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd) || exit 1
 # shellcheck source=guest.sh
@@ -203,17 +209,34 @@ publish_answer() { # true once nothing is pending
   answer='' answer_text=''
 }
 
+power_off() {
+  if [[ -n ${CI_KIT_VM_SHUTDOWN:-} ]]; then
+    "$CI_KIT_VM_SHUTDOWN"
+  else
+    sudo -n /sbin/shutdown -h now
+  fi || say "the power-off failed ($?)"
+}
+# A clone that cannot run a job as the image meant starts nothing: out/unfit says why, and the guest powers off (the
+# launcher counts it an image failure, naming the reason).
+unfit() { # <why>
+  say "refused to start the runner: $1; powering off"
+  mark unfit "$1" || say 'could not write out/unfit'
+  power_off
+  exit 1
+}
+
 # The runner's PATH is the one the image baked into its .path (Homebrew's keg-only node@22 first). runner 2.338.0
 # reads .path only in runsvc.sh, the service's start, never in run.sh or the listener, so run.sh would inherit the
-# guest agent's PATH, which lacks it. With no .path the clone cannot run a job as the image meant: nothing starts, no
-# marker is written, and the guest powers off (the launcher counts the clone's end during the kickoff an image failure).
+# guest agent's PATH, which lacks it.
 runner_path=$(head -1 "$vm_runner/.path" 2>/dev/null)
-if [[ -z $runner_path ]]; then
-  say "refused to start the runner: $vm_runner/.path is missing or empty (the image's runner install writes it); powering off"
-  if [[ -n ${CI_KIT_VM_SHUTDOWN:-} ]]; then "$CI_KIT_VM_SHUTDOWN"; else sudo -n /sbin/shutdown -h now; fi ||
-    say "the power-off failed ($?)"
-  exit 1
+[[ -n $runner_path ]] || unfit "$vm_runner/.path is missing or empty (the image's runner install writes it)"
+# The display mode the image baked: a clone at another one would run MAWS's windows on a smaller screen.
+if ! vm_display; then
+  unfit "the display mode cannot be read ($vm_displayplacer list)"
+elif ! vm_display_right; then
+  unfit "the display is $dp_res scaling:$dp_scaling, not $vm_display_res scaling:on (the image's bake sets it: provision.sh display)"
 fi
+say "display $dp_res scaling:$dp_scaling ($dp_id)"
 say "starting $vm_runner/run.sh --once (PATH from its .path: $runner_path)"
 export CI_KIT_VM_SLOT=$slot CI_KIT_VM_CLONE=$clone
 # The runner gets its own process group, which the stop signals as a terminal's Ctrl-C would, and SIGINT back: a
@@ -248,8 +271,4 @@ rm -rf "$vm_out/_diag" 2>/dev/null
 [[ ! -f $vm_hooks_log ]] || cp "$vm_hooks_log" "$vm_out/mac-runner-hooks.log" || say 'could not copy the hooks log to out/'
 mark 'done' "$code" || say 'powering off without out/done'
 say 'powering off'
-if [[ -n ${CI_KIT_VM_SHUTDOWN:-} ]]; then
-  "$CI_KIT_VM_SHUTDOWN"
-else
-  sudo -n /sbin/shutdown -h now
-fi || say "the power-off failed ($?)"
+power_off

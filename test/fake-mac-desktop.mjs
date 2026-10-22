@@ -38,6 +38,42 @@ export const ordinaryWindows = [
 // The same desktop with a dialog's window over it, topmost.
 export const withWindow = (window) => `${windowLine(window)}\n${ordinaryWindows}`;
 
+// A VM guest's one display, through displayplacer (jakehilborn/displayplacer v1.4.0: `list` as DisplayPlacer.c prints
+// it, a set as `displayplacer "id:<persistent id> res:<WxH> scaling:<on|off>"`). Its mode is the file
+// <dir>/display-mode, "<res> <scaling>" (a fresh macOS 27 guest boots at "1024x768 on", whatever `tart set --display`
+// said); a set writes it unless <dir>/display-stuck exists (a set that does not take); <dir>/display-fail fails `list`.
+// Every call is a line of <dir>/displayplacer.calls.
+export const DISPLAY_ID = 'C97580C4-5D2A-4B8E-9F31-6A0C2E7B1D44';
+export const displayplacer = (dir) => `d='${dir}'
+printf '%s\\n' "$*" >> "$d/displayplacer.calls"
+if [[ $1 == list ]]; then
+  [[ ! -e $d/display-fail ]] || { echo 'displayplacer: no screens' >&2; exit 1; }
+  read -r res scaling < "$d/display-mode"
+  cat <<EOF
+Persistent screen id: ${DISPLAY_ID}
+Contextual screen id: 1
+Serial screen id: s0
+Type: 27 inch external screen
+Resolution: $res
+Hertz: N/A
+Color Depth: 8
+Scaling: $scaling
+Origin: (0,0) - main display
+Rotation: 0
+Enabled: true
+Resolutions for rotation 0:
+  mode 0: res:1024x768 color_depth:8 scaling:on
+  mode 25: res:2560x1440 color_depth:8 scaling:on
+
+Execute the command below to set your screens to the current arrangement.
+
+displayplacer "id:${DISPLAY_ID} res:$res color_depth:8 enabled:true scaling:$scaling origin:(0,0) degree:0"
+EOF
+  exit 0
+fi
+[[ $1 =~ ^id:${DISPLAY_ID}\\ res:([0-9]+x[0-9]+)\\ scaling:(on|off)$ ]] || { echo "Unable to find screen $1" >&2; exit 1; }
+[[ -e $d/display-stuck ]] || echo "\${BASH_REMATCH[1]} \${BASH_REMATCH[2]}" > "$d/display-mode"`;
+
 const executable = (path, body) => { writeFileSync(path, `#!/bin/bash\n${body}\n`); chmodSync(path, 0o755); };
 // A fake that hangs ignoring SIGALRM, recording its pid so a run can tell whether the deadline killed it.
 const hangs = (dir) => `trap '' ALRM\necho "$$" >> '${join(dir, 'hung-pids.txt')}'\nexec /bin/sleep 60`;

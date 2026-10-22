@@ -634,8 +634,10 @@ The booking a session makes through CI-opt says which kind it needs:
   guest's jobs keep CI going through it.
 
 **The memory guard and the disk reserve.** A boot needs memory pressure at level 1
-(`kern.memorystatus_vm_pressure_level`), at least `CI_KIT_VM_MEMORY_FLOOR` % available (`kern.memorystatus_level`, 37:
-a 4 GB guest's share of 16 GB plus 12 points), swap not grown over 60 s (`vm.swapusage`), and `CI_KIT_VM_DISK_RESERVE`
+(`kern.memorystatus_vm_pressure_level`), at least `CI_KIT_VM_MEMORY_FLOOR` % available (`kern.memorystatus_level`, 60,
+from V1's samples on the mini: a busy 4 GB guest moved the figure at most 8 points, 24 with a host e2e job beside it,
+and pressure 2 began at 35–41 %, so a boot at 60 keeps the host above that with a host job beside, while a 3 GB surge,
+which left 53 %, blocks a boot), swap not grown over 60 s (`vm.swapusage`), and `CI_KIT_VM_DISK_RESERVE`
 GB free on the volume of `~/.tart` (40); a read that fails admits nothing. From `tart run` to the clone's verified end
 the launcher samples every 15 s into `vm-lane.log`: warning on two samples gives up a guest that holds no job (through
 the idle stop) and pauses the next boot 2 min behind one that does; critical on one sample, or free space under 5 GB,
@@ -660,7 +662,8 @@ A reservation stands until the launcher's teardown removes it. Remove one by han
 stopped or gone, with the launcher booted out.
 
 **Failures** are counted by kind (`image`, `session`, `memory`, `disk`, `raced`) in `vm-failures`. Three `image`
-failures in a row (a clone that never answers or never listens, a job past its bound) pause the lane with no expiry and
+failures in a row (a clone that never answers or never listens, one whose wrapper starts no runner and says why in
+`out/unfit`, such as a display not at 2560x1440 with scaling on, a job past its bound) pause the lane with no expiry and
 an alert, since the image is the likely cause; an operator lifts the pause by removing `vm-pause` once the image is
 fixed. A listener that finds the slot's previous session still open (a clone that died mid-job) retries for up to
 5 min and counts as `session`, apart from the image. An idle stop that raced a job's acceptance is reported with an
@@ -732,13 +735,17 @@ commands, `owner` is the session's name, as for a timed hold, and `cand` the can
    default is set.
 
 3. **The bake** clones the base to `maws-vm-candidate-<YYYYMMDD>` (UTC; `--name maws-vm-candidate-<id>` for another),
-   sets `--cpu 4 --memory <MB> --display 2560x1440pt`, boots it with the installed kit and the MAWS checkout shared
-   read-only (`--maws`, default `~/Developer/GitHub/MAWS`, which the owner's `gh` login keeps at master), provisions it
-   through `tart exec` (`mac/vm/provision.sh`'s steps: the base's tools and `python3`; Node 22 and the checkout's pnpm
+   sets `--cpu 4 --memory <MB> --display 2560x1440pt --disk-size 60`, boots it with the installed kit and the MAWS
+   checkout shared read-only (`--maws`, default `~/Developer/GitHub/MAWS`, which the owner's `gh` login keeps at
+   master), provisions it through `tart exec` (`mac/vm/provision.sh`'s steps: the base's tools and `python3`; the APFS
+   container grown into the 60 GB disk, the recovery container after it removed first, and the result verified; the
+   display set to 2560x1440 with scaling on through `displayplacer` and read back, since `tart set --display` does not
+   reach the guest's mode; Node 22 and the checkout's pnpm
    through corepack; the warm store from a scratch clone; LibreOffice; the runner at `install.sh`'s pin in
    `~/actions-runner-maws`, its `.env` naming the hooks through `~/ci-kit` → the kit share, `CI_KIT_MACHINE=mini-vm`,
    `CI_KIT_VM_GUEST=1` and `LANG=en_US.UTF-8`, and its `.path`; the compiled helpers in `~/ci-kit-helpers/`), and
-   verifies its stop. `--memory` is the guest's size in MB, 4096 until V1 settles between 3 GB and 4 GB.
+   verifies its stop. `--memory` is the guest's size in MB, 4096 by default (V1's size); under 4096 is refused at once,
+   the base image's minimum being 4 GiB.
 
    ```bash
    ssh mini '~/ci-kit-vm/kit/vm/bake.sh --bake --memory 4096'
