@@ -11,11 +11,24 @@
 here=$(dirname "$0")
 # shellcheck source=instances.sh
 source "$here/instances.sh"
+# On a Mac with the VM lane, the exclusive instance's job is classified first (vm-claim.sh): one whose workflow does not
+# promise that its measured jobs run settle raises a claim, so no guest boots beside it, and waits, after its shared
+# admission, until no guest runs; one bound covers both waits. A shared instance's job needs no classification: only a
+# workflow that makes the promise can ask for its label.
+SECONDS=0
+vm=
+if vm_lane_installed && ! shared_number "$(instance_root "$here")" >/dev/null; then
+  if "$here/vm-claim.sh" exclusive-start "$PPID"; then vm=safe; else
+    (($? == 3)) || exit 1
+    vm=claimed
+  fi
+fi
 lane=
 if [[ -n $(shared_instances) ]]; then
   if shared_number "$(instance_root "$here")" >/dev/null; then lane=shared; else lane=exclusive; fi
   "$here/shared-hold.sh" "$lane-start" "$PPID" || exit 1
 fi
+if [[ $vm == claimed ]]; then "$here/vm-claim.sh" exclusive-wait "$SECONDS" || exit 1; fi
 # A job refused from here on keeps its admission until its job-completed hook releases it: the steps that run after a
 # failure still run (shared-hold.sh).
 "$here/desktop-check.sh" || exit 1

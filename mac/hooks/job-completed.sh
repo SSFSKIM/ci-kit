@@ -31,14 +31,18 @@ here=$(dirname "$0")
 # On a Mac with shared instances, the job's admission (shared-hold.sh) goes once its sweep has gone through: the
 # exclusive instance's hold, or a shared instance's running marker. After a failed sweep the exclusive hold stays up, so
 # no shared job starts beside what the job left, and the dialog watcher reconciles it; a shared marker goes stale with
-# its worker, and the next exclusive job's sweep tries again.
+# its worker, and the next exclusive job's sweep tries again. On a Mac with the VM lane, the job's claim on the guest
+# (vm-claim.sh: settle's, or the start's for a job of unknown kind) goes the same way, and stales with its worker.
 # shellcheck source=instances.sh
 source "$here/instances.sh"
-if [[ -n $(shared_instances) ]]; then
-  lane=exclusive
-  if shared_number "$(instance_root "$here")" >/dev/null; then lane=shared; fi
+if [[ -n $(shared_instances) ]] || vm_lane_installed; then
   node "$here/sweep.mjs" job-completed || exit
-  "$here/shared-hold.sh" "$lane-end" "$PPID" || true
+  if [[ -n $(shared_instances) ]]; then
+    lane=exclusive
+    if shared_number "$(instance_root "$here")" >/dev/null; then lane=shared; fi
+    "$here/shared-hold.sh" "$lane-end" "$PPID" || true
+  fi
+  if vm_lane_installed; then "$here/vm-claim.sh" end "$PPID" || true; fi
   exit 0
 fi
 exec node "$here/sweep.mjs" job-completed

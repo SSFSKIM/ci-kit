@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,8 +13,33 @@ import { parse } from '../vendor/yaml/dist/index.js';
 // runs in seconds. The desktop changes by read: read n sees world[n] (the last entry for every read after it).
 const action = fileURLToPath(new URL('../mac/settle/', import.meta.url));
 const step = parse(readFileSync(join(action, 'action.yml'), 'utf8'));
-let root;
-before(() => { root = mkdtempSync(join(tmpdir(), 'ci-kit-settle-')); });
+let root, worker;
+// A job's Runner.Worker, as settle looks for it among its ancestors on a Mac with the VM lane: a copy of node under that
+// name, which records its pid and runs the step as its child.
+before(() => {
+  root = mkdtempSync(join(tmpdir(), 'ci-kit-settle-'));
+  worker = join(root, 'runner/bin/Runner.Worker');
+  mkdirSync(join(root, 'runner/bin'), { recursive: true });
+  copyFileSync(process.execPath, worker, constants.COPYFILE_FICLONE);
+});
+const asWorker = `require('node:fs').writeFileSync(process.argv[1], String(process.pid));
+const run = require('node:child_process').spawnSync(process.argv[2], process.argv.slice(3), { stdio: 'inherit' });
+process.exit(run.status ?? 1);`;
+// A step with no Runner.Worker above it at all: run by a grandchild that waits until its parent has exited, so it is
+// reparented away from this test's own ancestors, which hold the real Runner.Worker when the suite runs as a CI job. Its
+// output stays on the inherited pipes, which spawnSync reads until they close; its status goes to a file.
+const orphaned = `my ($status, @command) = @ARGV;
+my $child = fork; defined $child or exit 125;
+if (!$child) {
+  my $parent = $$;
+  my $grandchild = fork; defined $grandchild or exit 125;
+  exit 0 if $grandchild;
+  select(undef, undef, undef, 0.02) while getppid() == $parent;
+  system { $command[0] } @command;
+  open(my $fh, '>', $status) or exit 125; print $fh ($? >> 8), "\\n"; close $fh;
+  exit 0;
+}
+waitpid $child, 0;`;
 after(() => rmSync(root, { recursive: true, force: true }));
 
 const T0 = Date.parse('2026-10-19T05:12:34Z') / 1000;
@@ -24,7 +49,10 @@ const connected = '[I 2026-10-19 05:00:04] user#123 connected.\n';
 
 // hooks: where the runner's hook set is installed, the only place the compiled display helper lives (false: nowhere);
 // variable: whether the runner's .env names it in ACTIONS_RUNNER_HOOK_JOB_STARTED, as mac/install.sh writes it.
-function guard(world, { inputs = {}, hooks = 'actions-runner-maws/ci-kit/hooks', variable = true, env = {}, readSeconds = 0, logFailure = false } = {}) {
+// lane: whether the VM lane is installed (its launcher's LaunchAgent file); underWorker: whether the step runs under a
+// Runner.Worker, as on a runner; orphan: whether it runs with no Runner.Worker among its ancestors; logsFile: the hooks' log directory is a file, so nothing can be written there. A world
+// entry's reserved puts the lane's reservation (vm-reserved) up for that read.
+function guard(world, { inputs = {}, hooks = 'actions-runner-maws/ci-kit/hooks', variable = true, env = {}, readSeconds = 0, logFailure = false, lane = false, underWorker = lane, orphan = false, logsFile = false } = {}) {
   const dir = mkdtempSync(join(root, 'job-'));
   const bin = join(dir, 'bin');
   mkdirSync(bin);
@@ -33,19 +61,22 @@ function guard(world, { inputs = {}, hooks = 'actions-runner-maws/ci-kit/hooks',
   const now = (name) => `'${file(`now/${name}`)}'`;
   // Each read's desktop, written whole into world/<n>/ and copied into now/ for read 0 and by each sleep after it.
   world.forEach((entry, n) => {
-    const { load, loadavg = `{ ${load} 6.00 5.00 }\n`, loadStatus = 0, display, displayStatus = 0, processes, psStatus = 0, parsec } = { ...quiet, ...entry };
+    const { load, loadavg = `{ ${load} 6.00 5.00 }\n`, loadStatus = 0, display, displayStatus = 0, processes, psStatus = 0, parsec, reserved } = { ...quiet, ...entry };
     const at = file(`world/${n}`);
     mkdirSync(at, { recursive: true });
     for (const [name, value] of Object.entries({ loadavg, 'load-status': loadStatus, display, 'display-status': displayStatus, processes, 'ps-status': psStatus })) {
       writeFileSync(join(at, name), String(value));
     }
     if (parsec !== undefined) writeFileSync(join(at, 'parsec'), parsec);
+    if (reserved) writeFileSync(join(at, 'reserved'), 'vm=maws-vm-job-vm-20261019T051000Z since 2026-10-19T05:10:00Z\n');
   });
+  const logs = file('Library/Logs/ci-kit');
   const apply = `apply() {
   local n=$1 last=${world.length - 1}
   ((n <= last)) || n=$last
   rm -rf '${file('now')}' && cp -R '${file('world')}/'"$n" '${file('now')}'
   if [[ -e ${now('parsec')} ]]; then mkdir -p '${file('.parsec')}' && cp ${now('parsec')} '${file('.parsec/log.txt')}'; else rm -f '${file('.parsec/log.txt')}'; fi
+  if [[ -e ${now('reserved')} ]]; then mkdir -p '${logs}' && cp ${now('reserved')} '${logs}/vm-reserved'; else rm -f '${logs}/vm-reserved'; fi
 }`;
   writeFileSync(file('clock'), '0');
   writeFileSync(file('reads'), '0');
@@ -81,12 +112,20 @@ cat ${now('loadavg')}; exit $(cat ${now('load-status')})`);
   writeFileSync(join(perlLib, 'FixtureClock.pm'), 'package FixtureClock;\n*CORE::GLOBAL::alarm = sub (_) { CORE::alarm($_[0] > 0 ? $_[0] * 5 : $_[0]) };\n1;\n');
   const log = file('Library/Logs/ci-kit/mac-runner-hooks.log');
   if (logFailure) mkdirSync(log, { recursive: true });
+  if (logsFile) { mkdirSync(file('Library/Logs'), { recursive: true }); writeFileSync(logs, ''); }
+  if (lane) {
+    mkdirSync(file('Library/LaunchAgents'), { recursive: true });
+    writeFileSync(file('Library/LaunchAgents/com.ssfskim.ci-kit.vm-lane.plist'), '<plist/>\n');
+  }
   // action.yml's one step: its env with the inputs (or their defaults) substituted, and its run line, as the runner runs it.
   const [only] = step.runs.steps;
   const stepEnv = Object.fromEntries(Object.entries(only.env).map(([name, value]) =>
     [name, value.replace(/\$\{\{ inputs\.([a-z]+) \}\}/, (_, input) => String(inputs[input] ?? step.inputs[input].default))]));
   const started = Date.now();
-  const result = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', only.run], {
+  const command = ['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', only.run];
+  const [program, ...args] = underWorker ? [worker, '-e', asWorker, file('worker.pid'), ...command]
+    : orphan ? ['perl', '-e', orphaned, file('orphan.status'), ...command] : command;
+  const spawned = spawnSync(program, args, {
     encoding: 'utf8', timeout: 120_000,
     env: {
       HOME: dir, PATH: `${bin}:/usr/bin:/bin`, GITHUB_ACTION_PATH: action, GITHUB_RUN_ID: '123456', GITHUB_JOB: 'e2e',
@@ -95,12 +134,17 @@ cat ${now('loadavg')}; exit $(cat ${now('load-status')})`);
     },
   });
   const text = (name) => existsSync(file(name)) ? readFileSync(file(name), 'utf8') : '';
+  const result = orphan ? { ...spawned, status: text('orphan.status') === '' ? null : Number(text('orphan.status')) } : spawned;
   return {
     ...result,
     elapsed: Date.now() - started,
     sleeps: text('sleeps').split('\n').filter(Boolean).map(Number),
     readAt: text('read-at').split('\n').filter(Boolean).map(Number),
     log: logFailure ? '' : text('Library/Logs/ci-kit/mac-runner-hooks.log'),
+    worker: underWorker ? Number(text('worker.pid')) : null,
+    claims: existsSync(logs) && !logsFile ? readdirSync(logs).filter((name) => name.startsWith('vm-claim.')) : [],
+    claim: (name) => text(`Library/Logs/ci-kit/${name}`),
+    locked: existsSync(join(logs, 'desktop.lock')),
   };
 }
 
@@ -257,6 +301,7 @@ test('a malformed input fails the step before any read, never in the refusal sha
     [{ computeruse: 'cua' }, "computeruse takes none or any, not 'cua'"],
     [{ bound: '0' }, "bound takes a whole number of minutes, at least 1, not '0'"],
     [{ bound: '1.5' }, "bound takes a whole number of minutes, at least 1, not '1.5'"],
+    [{ vm: 'guest' }, "vm takes none or any, not 'guest'"],
   ]) {
     const run = guard([{}], { inputs });
     assert.equal(run.status, 2, JSON.stringify(inputs));
@@ -273,4 +318,57 @@ test('a hooks log that cannot be written changes neither the line nor the outcom
   const refused = guard([{ load: '7.20' }], { inputs: { bound: '1' }, logFailure: true });
   assert.equal(refused.status, 1);
   assert.match(refused.stderr.trim(), refusalShape);
+});
+
+// The VM lane (mac/hooks/vm-claim.sh): on a Mac with the lane installed, settle keeps the guest out of a measured job.
+test('on a Mac with the VM lane, settle raises the measured claim at its first read, names it, and releases only once the reservation is gone', () => {
+  const run = guard([{ reserved: true }, { reserved: true }, {}], { lane: true });
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(run.claims.length, 1);
+  const [claim] = run.claims;
+  assert.match(claim, new RegExp(`^vm-claim\\.${run.worker}-\\S+$`));
+  // Raised at the first read, under the clock's first second, naming the job and its Runner.Worker.
+  assert.match(run.claim(claim), new RegExp(`^measured claim since 2026-10-19T05:12:34Z: run 123456 job e2e \\(worker ${run.worker}\\)\\n(.|\\n)*worker=${run.worker}\\nstarted=\\S`));
+  assert.equal(run.stdout, `ci-kit settle: settled in 90 s; claim: ${claim}; start: ${posture()} vm=reserved; release: ${posture()} vm=none\n`);
+  assert.deepEqual(run.sleeps, [30, 30, 30]);
+  assert.equal(run.stderr, '');
+});
+
+test('a reservation that stands to the bound refuses the measured job, naming the vm condition; its claim stays for the end hook', () => {
+  const run = guard([{ reserved: true }], { lane: true, inputs: { bound: '1' } });
+  assert.equal(run.status, 1, run.stderr);
+  const [claim] = run.claims;
+  assert.ok(claim, 'the claim stays');
+  assert.equal(run.stderr, `ci-kit: the mini did not settle for a measured job within 1 min (vm reserved); waited 60 s; claim: ${claim}; start: ${posture()} vm=reserved; refusal: ${posture()} vm=reserved — fix that there and rerun\n`);
+  assert.match(run.stderr.trim(), refusalShape);
+});
+
+test('vm: any leaves the guest unchecked: no claim, and a reservation does not hold the job', () => {
+  const run = guard([{ reserved: true }], { lane: true, inputs: { vm: 'any' } });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stdout, `ci-kit settle: settled in 30 s; start: ${posture()} vm=reserved; release: ${posture()} vm=reserved\n`);
+  assert.deepEqual(run.claims, []);
+});
+
+test('a measured job whose claim cannot be raised is refused at once, before any read', () => {
+  for (const [options, why] of [
+    [{ underWorker: false, orphan: true }, /no Runner\.Worker among the ancestors of process \d+/],
+    [{ logsFile: true }, /the desktop lock could not be taken within 180 s/],
+  ]) {
+    const run = guard([{}], { lane: true, ...options });
+    assert.equal(run.status, 1, run.stderr);
+    assert.equal(run.stdout, '');
+    assert.match(run.stderr, new RegExp(`^ci-kit: the mini could not keep the guest out for a measured job \\(${why.source}\\) — rerun\\n$`));
+    assert.match(run.stderr.trim(), refusalShape);
+    assert.deepEqual(run.readAt, []);
+    assert.deepEqual(run.claims, []);
+  }
+});
+
+test('without the VM lane, a reservation changes nothing and settle writes nothing new', () => {
+  const run = guard([{ reserved: true }], { underWorker: true });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stdout, `ci-kit settle: settled in 30 s; start: ${posture()}; release: ${posture()}\n`);
+  assert.deepEqual(run.claims, []);
+  assert.equal(run.locked, false);
 });

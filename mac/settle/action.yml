@@ -21,6 +21,10 @@ inputs:
     description: none, no computer-use process.
     required: false
     default: none
+  vm:
+    description: none, no guest of the VM lane may be running (a Mac without the lane has none); the job also claims the machine, so none boots until it ends.
+    required: false
+    default: none
   bound:
     description: Minutes to wait before refusing the job.
     required: false
@@ -34,5 +38,6 @@ runs:
         SETTLE_DISPLAY: ${{ inputs.display }}
         SETTLE_REMOTE: ${{ inputs.remote }}
         SETTLE_COMPUTERUSE: ${{ inputs.computeruse }}
+        SETTLE_VM: ${{ inputs.vm }}
         SETTLE_BOUND: ${{ inputs.bound }}
       run: bash "$GITHUB_ACTION_PATH/settle.sh"

@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The VM lane's launcher (docs/mac-lane.md, the VM lane): lane.sh from the installed kit, in the logged-in user's GUI
+  session (Aqua), where Virtualization.framework finds an unlocked login keychain and the host's main screen gives the
+  guest its density. RunAtLoad starts it with the session after a reboot and KeepAlive after a death; either way it
+  recovers its job clones before anything else. mac/install.sh, given the lane, fills in __KIT_DIR__ (~/ci-kit-vm/kit),
+  __LOG_DIR__, __PATH__ (with Tart's directory) and __MACHINE__, adds the lane's inputs it sets to
+  EnvironmentVariables, and installs it as ~/Library/LaunchAgents/com.ssfskim.ci-kit.vm-lane.plist.
+
+  The guest's tart run is detached in a session of its own, so it outlives the launcher, which is the point:
+  AbandonProcessGroup keeps launchd from killing what the launcher leaves when it exits. Interactive, as the runners
+  are, since the guest's QoS follows the process that starts it.
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.ssfskim.ci-kit.vm-lane</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/bash</string>
+      <string>__KIT_DIR__/vm/lane.sh</string>
+    </array>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>PATH</key>
+      <string>__PATH__</string>
+      <key>LANG</key>
+      <string>en_US.UTF-8</string>
+      <key>CI_KIT_MACHINE</key>
+      <string>__MACHINE__</string>
+    </dict>
+    <!-- What it does goes to vm-lane.log; stdout and stderr are for what cannot (a full volume) and for crashes. -->
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/vm-lane.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/vm-lane.err.log</string>
+  </dict>
+</plist>
