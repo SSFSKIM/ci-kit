@@ -464,7 +464,7 @@ hold waits for it, and the guard stops it only at critical pressure or the disk 
     (`hold-now.sh`, `hold-by.sh`, `hold-for-cua.sh` on the MacBook, the `launchctl bootout` lines) and leaves the lane
     running. This is where the lane pays: the host desktop is the session's, the guest's goes on taking `solo` jobs.
     At release, CI-opt brings the instances back; the lane needs nothing.
-  - **Timed** (MAWS's benches, anything that reads the machine's timing): CI-opt first writes `vm-hold.<session>`
+  - **Timed** (MAWS's benches, anything that reads the machine's timing): CI-opt first writes `vm-hold.<session>` through `hold.sh hold <session> timed` (under `desktop.lock`, Decision Log 2026-10-22)
     (`timed since <time>`), waits until `vm-reserved` is absent (at most the running bound; in practice the group's
     p95 plus the boot), then boots out the instances. At release it removes its own hold, then brings the instances
     back. A hold script that forgets the marker gets a guest beside its bench, so the hold scripts carry it, and the
@@ -583,7 +583,7 @@ schedule, so the procedure is CI-opt's, run with `bake.sh`'s subcommands; every 
 before it does anything and refuses otherwise. The launcher boots job clones from the VM named in
 `~/ci-kit-vm/golden`, a pointer file replaced whole by a rename and written by step 6 alone. The steps and their
 checks:
-1. **The hold.** CI-opt writes `vm-hold.<session>` (`maintenance since <time>`), waits until `vm-reserved` is absent
+1. **The hold.** CI-opt writes `vm-hold.<session>` (`maintenance since <time>`) through `hold.sh hold <session> maintenance`, waits until `vm-reserved` is absent
    and `tart list` shows no `maws-vm-*` running, boots out and disables the host's instances as for a timed hold,
    and boots out the launcher's agent (`launchctl bootout gui/$(id -u)/com.ssfskim.ci-kit.vm-lane`). `bake.sh`
    reads all three before every step: the hold file, no reservation, the agent not loaded (`launchctl print`).
