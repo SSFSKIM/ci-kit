@@ -21,7 +21,7 @@ test('a minimal config gets every default', () => {
   assert.deepEqual(c.gates, [
     {
       name: 'unit', run: 'npm test', lane: 'hosted', cpus: null, timeout: 30, paths: [],
-      on: ['pr', 'ci-ref', 'dispatch'], artifacts: [], setup: true, env: {},
+      on: ['pr', 'ci-ref', 'dispatch'], artifacts: [], setup: true, env: {}, build_cache: null,
     },
   ]);
 });
@@ -45,11 +45,12 @@ gates:
     artifacts: ["test-results/**"]
     setup: false
     env: {FOO: bar}
+    build_cache: gha
 `, priv);
   assert.deepEqual(c.setup, { node: '24', pnpm: true, install: 'pnpm install --frozen-lockfile', fetch_depth: 0 });
   assert.deepEqual(c.gates[0], {
     name: 'unit', run: 'npm test', lane: 'pool', cpus: 8, timeout: 15, paths: ['src/**'],
-    on: ['pr', 'ci-ref'], artifacts: ['test-results/**'], setup: false, env: { FOO: 'bar' },
+    on: ['pr', 'ci-ref'], artifacts: ['test-results/**'], setup: false, env: { FOO: 'bar' }, build_cache: 'gha',
   });
 });
 
@@ -112,6 +113,9 @@ const rejected = [
   ['a non-boolean gate setup', 'version: 1\ngates:\n  - {name: a, run: x, setup: no-thanks}\n', /^gate "a": setup: must be true or false/],
   ['a non-string env value', 'version: 1\ngates:\n  - {name: a, run: x, env: {N: 1}}\n', /^gate "a": env\.N: must be a string/],
   ['a bad env name', 'version: 1\ngates:\n  - {name: a, run: x, env: {"1X": "y"}}\n', /^gate "a": env: "1X" is not a valid variable name/],
+  ['an unknown build cache', 'version: 1\ngates:\n  - {name: a, run: x, build_cache: s3}\n', /^gate "a": build_cache: must be one of gha$/],
+  ['a boolean build cache', 'version: 1\ngates:\n  - {name: a, run: x, build_cache: true}\n', /^gate "a": build_cache: must be one of gha$/],
+  ['a build cache in the shared setup', 'version: 1\nsetup: {build_cache: gha}\ngates:\n  - {name: a, run: x}\n', /^setup: unknown key "build_cache"/],
   ['an env name the kit sets', 'version: 1\ngates:\n  - {name: a, run: x, env: {CI_KIT_BASE: "y"}}\n', /^gate "a": env: "CI_KIT_BASE" is reserved: the kit sets CI_KIT_\* variables/],
 ];
 

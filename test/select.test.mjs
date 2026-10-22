@@ -78,11 +78,11 @@ test('planOutput shapes I3: runs_on per lane, setup resolved, pool flag', () => 
     gates: [
       {
         name: 'unit', run: 'npm test', runs_on: ['ubuntu-latest'], timeout: 30,
-        setup: { node: '24', pnpm: false, install: 'npm ci', fetch_depth: 1 }, artifacts: [], env: {},
+        setup: { node: '24', pnpm: false, install: 'npm ci', fetch_depth: 1 }, artifacts: [], env: {}, build_cache: null,
       },
       {
         name: 'big', run: 'npm run big', runs_on: ['self-hosted', 'ci-kit-pool', 'cpus-8'], timeout: 30,
-        setup: { node: '24', pnpm: false, install: 'npm ci', fetch_depth: 1 }, artifacts: [], env: {},
+        setup: { node: '24', pnpm: false, install: 'npm ci', fetch_depth: 1 }, artifacts: [], env: {}, build_cache: null,
       },
     ],
     pool: true,
@@ -104,6 +104,18 @@ gates:
   // setup: false skips the whole shared setup, fetch_depth with it (I1): the gate checks out at the default depth.
   assert.deepEqual(out.gates[1].setup, { node: '', pnpm: false, install: '', fetch_depth: 1 });
   assert.equal(out.pool, false);
+});
+
+test('planOutput carries a gate\'s build_cache, with or without the shared setup', () => {
+  const c = parseConfig(`
+version: 1
+setup: {node: "22"}
+gates:
+  - {name: img, run: x, build_cache: gha}
+  - {name: bare, run: y, setup: false, build_cache: gha}
+  - {name: plain, run: z}
+`, { isPrivate: false });
+  assert.deepEqual(planOutput(c, c.gates).gates.map((g) => g.build_cache), ['gha', 'gha', null]);
 });
 
 test('planOutput of an empty selection says so', () => {

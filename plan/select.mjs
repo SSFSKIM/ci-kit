@@ -53,6 +53,7 @@ export function planOutput(config, selected) {
       setup: g.setup ? { ...config.setup } : { ...NO_SETUP },
       artifacts: g.artifacts,
       env: g.env,
+      build_cache: g.build_cache,
     })),
     pool: selected.some((g) => g.lane === 'pool'),
     note: selected.length === 0 ? 'no gates selected' : '',
