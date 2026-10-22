@@ -109,8 +109,9 @@ about a minute for it (`ci-gate` prints `WAIT` after 2 minutes). Inside the job,
    - Bracket expressions (`[...]`), backslash escapes, braces (`{a,b}`), a leading `!` or `/`, and an empty pattern
      are config errors, naming the gate and `paths[<i>]`, rather than patterns that might silently select nothing.
      List alternatives as separate patterns instead.
-3. **A schedule seeds the build cache.** A caller that adds a `schedule` (see [Build cache](#build-cache)) plans every
-   gate with `build_cache` on it, whatever its `paths` and `on`, and no other gate.
+3. **The build cache's seeds.** For a caller that adds them (see [Build cache](#build-cache)), a `schedule` plans every
+   gate with `build_cache`, whatever its `paths` and `on`, and a push to the default branch the ones whose `paths` it
+   changed (all of them when the branch has no earlier tip to diff against). Neither plans any other gate.
 4. **An empty selection is a success.** `ci / verdict` is green with "no gates selected".
 
 ### Gate jobs
@@ -130,7 +131,7 @@ with `setup: false`, which checks out at depth 1.
 | Variable | Holds |
 |---|---|
 | `CI_KIT_HEAD` | the commit the gate checked out (`HEAD`): a PR's merge commit, or `ci-gate`'s nonce commit, whose tree is the tested commit's |
-| `CI_KIT_BASE` | where that commit left the base: for a PR, the base it merges into; for a `ci/**` push, its merge-base with the default branch. **Empty on a dispatch**, which has no change basis |
+| `CI_KIT_BASE` | where that commit left the base: for a PR, the base it merges into; for a `ci/**` push, its merge-base with the default branch; for a push to the default branch, the branch's tip before it. **Empty on a dispatch or a schedule**, which have no change basis, and on a default-branch push with no earlier tip to diff against |
 
 So `git diff $CI_KIT_BASE $CI_KIT_HEAD` (two dots) is the change the gate is testing. The base commit is fetched into
 the checkout whatever `fetch_depth` is, so this works at the default depth. Lint only what changed, for example (on
@@ -158,8 +159,8 @@ A newer push to a PR cancels the older PR run. A `ci-gate` run is never cancelle
 #### Build cache
 
 `build_cache: gha` lets a gate's `docker build` keep its layers in the GitHub Actions cache (BuildKit's `type=gha`
-backend). Every run reads the cache; only a run on the default branch writes it, and a weekly schedule there writes
-each week's scope before anything needs it.
+backend). Every run reads the cache; only a run on the default branch writes it: a weekly schedule there writes each
+week's scope before anything needs it, and a merge that changes a cache gate's files writes it again.
 
 The runner gives the cache service's token and URLs to JS actions only, never to `run:` steps, so before `install`
 the gate's job exports them: `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_RESULTS_URL`, `ACTIONS_CACHE_URL` and
@@ -183,17 +184,27 @@ fi
 docker build ${cache[@]+"${cache[@]}"} -t myimage .   # the ${...+...} form keeps bash 3.2's set -u quiet
 ```
 
-The caller's `on:` gains the seed, for example just after the ISO week turns:
+The caller's `on:` gains the seeds: its default branch (here `main`) in `push: branches`, and a schedule, for example
+just after the ISO week turns:
 
 ```yaml
+  push:
+    branches: ['ci/**', main]
   schedule:
     - cron: '10 0 * * 1'
 ```
 
-A schedule runs on the default branch and plans every `build_cache` gate (gates without one run as before, on the
-events they always had). To seed by hand, after a change to what a layer installs, say, dispatch on the default branch:
-`gh workflow run ci.yml --ref <default branch> -f gates=<a cache gate>`. GitHub disables a public repository's
-schedule after 60 days without activity in it.
+A schedule runs on the default branch and plans every `build_cache` gate. A push to the default branch plans the
+`build_cache` gates whose `paths` match what it changed since the branch's tip before it, and every one of them when
+there is no such tip to diff against (a new branch, a force push). Each seed is the gate's whole run, so a broken image
+shows on the default branch. Neither seed plans any other gate: gates without `build_cache` run as before, on the
+events they always had, and a merge is not tested again.
+
+So a merge that changes no cache gate's files costs a plan job and the verdict, about 15 s on two hosted runners. One
+that does runs those gates once, and the pull requests and `ci-gate` calls after it read the new layers rather than
+each building them cold until the next schedule. A push to any other branch outside `ci/**` still fails the plan. To seed by
+hand, dispatch on the default branch: `gh workflow run ci.yml --ref <default branch> -f gates=<a cache gate>`. GitHub
+disables a public repository's schedule after 60 days without activity in it.
 
 - **Why only the default branch writes.** GitHub scopes a cache entry to the ref that wrote it. A run reads its own
   ref's entries and the default branch's (a PR run its base branch's too), never a sibling's. Every `ci-gate` call
@@ -225,7 +236,9 @@ schedule after 60 days without activity in it.
 - **Size.** A repository's caches share 10 GB by default, least recently used entries evicted first, and an entry not
   read for 7 days is dropped. A scope costs about its image's compressed layers, a week at a time; gates that share a
   scope each upload their own copy of a layer that does not build byte for byte the same, and the copies the index
-  does not name age out.
+  does not name age out. Each seed that rebuilds a layer uploads it again, so a scope that several merges a week
+  rebuild holds as many copies until the old ones age out. Gates that share a scope can leave the writing to one of
+  them: the others read it, and their seeds upload nothing.
 
 ## `ci-gate`
 

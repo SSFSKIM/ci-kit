@@ -61,6 +61,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           CI_KIT_CONFIG: .github/ci-kit.yml
           CI_KIT_PRIVATE: ${{ github.event.repository.private }}
@@ -73,9 +74,21 @@ jobs:
           case $EVENT_NAME in
             pull_request) export CI_KIT_EVENT=pr CI_KIT_BASE=$PR_BASE CI_KIT_HEAD=$PR_HEAD ;;
             push)
-              [[ $GITHUB_REF == refs/heads/ci/* ]] || fail "ci-kit: a push is planned only on ci/** refs, not $GITHUB_REF"
-              base=$(git rev-parse --verify "origin/$DEFAULT_BRANCH") || fail "ci-kit: no default branch origin/$DEFAULT_BRANCH to diff against"
-              export CI_KIT_EVENT=ci-ref CI_KIT_BASE=$base CI_KIT_HEAD=$GITHUB_SHA ;;
+              if [[ $GITHUB_REF == refs/heads/ci/* ]]; then
+                base=$(git rev-parse --verify "origin/$DEFAULT_BRANCH") || fail "ci-kit: no default branch origin/$DEFAULT_BRANCH to diff against"
+                export CI_KIT_EVENT=ci-ref CI_KIT_BASE=$base CI_KIT_HEAD=$GITHUB_SHA
+              elif [[ $GITHUB_REF == "refs/heads/$DEFAULT_BRANCH" ]]; then
+                # A merge seeds the build cache (docs/adopting.md, "Build cache"): the build_cache gates whose paths the
+                # push changed, against the branch's tip before it. When that tip is all zeros (a new branch), absent
+                # from the checkout or not an ancestor (a force push), the base stays empty and every one of them seeds.
+                base=
+                if [[ ! $PUSH_BEFORE =~ ^0+$ ]] && git merge-base --is-ancestor "$PUSH_BEFORE" "$GITHUB_SHA" 2>/dev/null; then
+                  base=$PUSH_BEFORE
+                fi
+                export CI_KIT_EVENT=push CI_KIT_BASE=$base CI_KIT_HEAD=$GITHUB_SHA
+              else
+                fail "ci-kit: a push is planned only on ci/** refs and the default branch, not $GITHUB_REF"
+              fi ;;
             workflow_dispatch) export CI_KIT_EVENT=dispatch CI_KIT_BASE= CI_KIT_HEAD= ;;
             # The build cache's seeding run (docs/adopting.md, "Build cache"). A schedule has no event payload, so the
             # repository's visibility and default branch come from the API.
@@ -84,13 +97,13 @@ jobs:
                 || fail "ci-kit: a schedule could not read $GITHUB_REPOSITORY's visibility and default branch"
               CI_KIT_PRIVATE=$(jq -r .private <<<"$repo") DEFAULT_BRANCH=$(jq -r .default_branch <<<"$repo")
               export CI_KIT_PRIVATE CI_KIT_EVENT=schedule CI_KIT_BASE= CI_KIT_HEAD= ;;
-            *) fail "ci-kit: event $EVENT_NAME is not planned (pull_request, push to ci/**, workflow_dispatch, schedule)" ;;
+            *) fail "ci-kit: event $EVENT_NAME is not planned (pull_request, push to ci/** or the default branch, workflow_dispatch, schedule)" ;;
           esac
           unset CI_KIT_TOKEN
           # The planner writes the build cache only on the default branch.
           export CI_KIT_REF=$GITHUB_REF CI_KIT_DEFAULT_BRANCH=$DEFAULT_BRANCH
           # The gates' CI_KIT_BASE: where the commit they check out ($GITHUB_SHA) left the base, so that a two-dot
-          # `git diff $CI_KIT_BASE $CI_KIT_HEAD` is the change. Empty on a dispatch, which has no change basis.
+          # `git diff $CI_KIT_BASE $CI_KIT_HEAD` is the change. Empty when the event has no change basis.
           gate_base=
           if [[ -n $CI_KIT_BASE ]]; then
             gate_base=$(git merge-base "$CI_KIT_BASE" "$GITHUB_SHA") || fail "ci-kit: no merge-base of $CI_KIT_BASE and $GITHUB_SHA"

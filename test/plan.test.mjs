@@ -133,7 +133,7 @@ test('a missing config file is reported', () => {
 test('an unknown event is refused', () => {
   const r = plan({ CI_KIT_EVENT: 'release' });
   assert.equal(r.code, 2);
-  assert.match(r.err, /^ci-kit: CI_KIT_EVENT must be pr, ci-ref, dispatch or schedule, not "release"/);
+  assert.match(r.err, /^ci-kit: CI_KIT_EVENT must be pr, ci-ref, dispatch, schedule or push, not "release"/);
 });
 
 test('a schedule seeds: every build_cache gate, no change basis needed, the cache written on the default branch', () => {
@@ -165,6 +165,31 @@ test('only a run on the default branch writes the build cache', () => {
   assert.equal(on('refs/heads/mainline', 'main'), false);
 });
 
+// head renames src/a.js to lib/a.js: a push touches lib/** and src/**, not docs/**.
+test('a push to the default branch seeds the build_cache gates whose paths it changed, and writes the cache', () => {
+  const dir = join(repo, 'push-config');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'ci-kit.yml'), `version: 1
+gates:
+  - {name: img-lib, run: x, build_cache: gha, paths: ["lib/**"], on: [dispatch]}
+  - {name: img-docs, run: x, build_cache: gha, paths: ["docs/**"]}
+  - {name: img-src, run: x, build_cache: gha, paths: ["src/**"]}
+  - {name: unit, run: y, paths: ["lib/**"]}
+`);
+  const env = { CI_KIT_EVENT: 'push', CI_KIT_CONFIG: 'push-config/ci-kit.yml', CI_KIT_REF: 'refs/heads/main', CI_KIT_DEFAULT_BRANCH: 'main' };
+  const r = plan(env);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json.gates.map((g) => g.name), ['img-lib', 'img-src']);
+  assert.equal(r.json.cache_write, true);
+  // No base (a new branch or a force push): every build_cache gate, as on a schedule.
+  const all = plan({ ...env, CI_KIT_BASE: '' });
+  assert.equal(all.code, 0, all.err);
+  assert.deepEqual(all.json.gates.map((g) => g.name), ['img-lib', 'img-docs', 'img-src']);
+  // A push that changes nothing a cache gate watches plans nothing: the run is the plan and the verdict.
+  const none = plan({ ...env, CI_KIT_BASE: head });
+  assert.deepEqual(none.json, { gates: [], pool: false, note: 'no gates selected', cache_write: true });
+});
+
 // A consumer with no build_cache, on the events it always sent: the plan is what it was before the build cache, with
 // the two inert fields it added (a gate's build_cache: null, cache_write: false).
 test('a config without build_cache plans as before on pr, ci-ref and dispatch', () => {
@@ -192,6 +217,12 @@ gates:
   assert.deepEqual(ref.json, { gates: [unit, e2e], pool: true, note: '', cache_write: false });
   const all = plan({ ...env, CI_KIT_EVENT: 'dispatch', CI_KIT_BASE: '', CI_KIT_REF: 'refs/heads/main' });
   assert.deepEqual(all.json, { gates: [unit, e2e, lint], pool: true, note: '', cache_write: true });
+  // Such a caller never pushes to its default branch; if it did, nothing would run, and no pool box be woken.
+  for (const before of [base, '']) {
+    const push = plan({ ...env, CI_KIT_EVENT: 'push', CI_KIT_BASE: before, CI_KIT_REF: 'refs/heads/main' });
+    assert.equal(push.code, 0, push.err);
+    assert.deepEqual(push.json, { gates: [], pool: false, note: 'no gates selected', cache_write: true });
+  }
 });
 
 test('a PR without a base is refused rather than guessed', () => {

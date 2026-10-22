@@ -131,6 +131,20 @@ gates:
   assert.deepEqual(selectGates(config, { event: 'schedule' }), []);
 });
 
+test('a push selects the build_cache gates whose paths it changed, whatever their on, and no other', () => {
+  const c = parseConfig(`
+version: 1
+gates:
+  - {name: img, run: x, build_cache: gha, paths: ["img/**"], on: [dispatch]}
+  - {name: other, run: x, build_cache: gha, paths: ["other/**"]}
+  - {name: any, run: x, build_cache: gha}
+  - {name: unit, run: y, paths: ["img/**"]}
+`, { isPrivate: false });
+  assert.deepEqual(names(selectGates(c, { event: 'push', changedFiles: ['img/Dockerfile'] })), ['img', 'any']);
+  assert.deepEqual(names(selectGates(c, { event: 'push', changedFiles: ['README.md'] })), ['any']);
+  assert.deepEqual(selectGates(config, { event: 'push', changedFiles: ['src/a.js', 'docs/b.md'] }), []);
+});
+
 test('planOutput says whether the build cache is written', () => {
   assert.equal(planOutput(config, [], { cacheWrite: true }).cache_write, true);
   assert.equal(planOutput(config, []).cache_write, false);
