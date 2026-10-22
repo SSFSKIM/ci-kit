@@ -70,3 +70,135 @@ account of the run; the spec's living sections hold the decisions and discoverie
 - The NAT question: what in GitHub's edge stalls concurrent NAT flows (a packet-level probe from a no-IP VM).
 - From #72: stale c3d/e2 us-central1 rates (10-16 catalog).
 - The runs listing's lag for brand-new runs; idle VMs not subtracted from the pre-launch shape.
+
+## 2026-10-22 — Day-one readings (CI-opt)
+
+**The start-latency medians meet Acceptance 4 and 5 in the requested window. M3 does not close:** 11 launch ticks
+miss its 5 s preparation bound, and the one timed C3D-4 job misses its 26 s bound. Keep the 20 s race trigger and
+spot placement order for now; neither a race-threshold change nor a C3D on-demand switch is justified by these rows.
+No live configuration, quota, deployment or runner was changed for this reading.
+
+### Window, sources and limits
+
+The frozen window is **2026-10-22T00:15:00Z–2026-10-22T21:38:04Z** (21 h 23 m 04 s, not a completed 24 h).
+The fresh checkout was main `e7cef209d92f`; every launcher log in the window names `ci-kit-launcher-00017-ldn`, and
+its ticks name config `e6c8fefa`. The read used gh's token and the MacBook's default gcloud account,
+`cli-owner@ytdownload-505811.iam.gserviceaccount.com`.
+
+```sh
+node gce/latency-report.mjs --since 2026-10-22T00:15:00Z --until 2026-10-22T21:38:04Z
+```
+
+The collector selected 433 VMs by **creation time**, 1,411 completed ticks, and 304 jobs with recorded queued and
+started times, across 59 runs. All these VMs/jobs belong to MAWS; there are no sandbox/manim jobs in this cohort.
+The ledger snapshot has 410 final rows and 23 running rows. The collector reads mutable ledger rows, not historical
+snapshots: rerunning this command later can add jobs and final costs to the same creation cohort. These readings
+are the captured day-to-date result, not certification of the remaining 2 h 36 m 56 s or of unclaimed live VMs.
+
+Sources: the open/rotated [sandbox pool ledger](https://github.com/SSFSKIM/ci-kit-sandbox/issues/48) (read through
+`readRows`), launcher Cloud Logging (`resource.type="cloud_run_revision"`, service `ci-kit-launcher`, the window
+above), Compute audit events (`protoPayload.methodName="compute.instances.preempted"`, same window), and serial
+logs searched for the runner's `shutdown signal`. Raw captures are retained on the reading MacBook in
+`/private/tmp/ci-kit-dayread-evidence/`; that scratch directory is not a durable archive. Percentiles below use the
+collector's nearest-rank rule. Insert send → done is the tick's operation duration, not creation → RUNNING.
+
+### Acceptance 4 and 5
+
+| Reading | Day-to-date result | Verdict against the promise |
+|---|---|---|
+| A4: MAWS pool jobs queued → started, median ≤ 50 s | 24.0 s; p10–p90 1–42 s; n=304; max 80 s | **Met in this window**, 26 s below the bound. A full 24 h remains unobserved. |
+| A5: jobs of pre-launched runs, median ≤ 25 s | 22.0 s; p10–p90 1–42 s; n=235 across 45 runs | **Met in this window**, 3 s below the bound. The 69 jobs of other runs have median 34 s. This is not a randomized estimate of pre-launch's benefit. |
+| M5: inserts before the run's own gates queue | 158/182 claimed VMs serving their intended run were created before their job queued; creation → own-job queued median 4.5 s, p10–p90 −0.6–24.4 s | **Demonstrated, not universal.** 24 were late; pre-launch does not always hide the boot. |
+
+A5's statistic is the collector's pooled-job median, not a guarantee for every run: 13 of the 45 runs have their
+own gate-job median above 25 s; the median of the 45 run medians is 21.5 s. Full standby's 10 s clause is inapplicable:
+the owner chose pre-launch, not standby. As a concrete M5 proof, MAWS
+[run 39858604975](https://github.com/SSFSKIM/MAWS/actions/runs/39858604975)'s hosted plan ran 21:36:21–21:36:35;
+`ci-kit-gce-hsec0lgnq8` was created at 21:36:26.363, before `e2e:desk-web` queued at 21:36:35. It started at 21:37:13.
+
+### M3: tick and boot
+
+| Stage | Median | p10–p90 | n |
+|---|---:|---:|---:|
+| queued → next tick | 7.7 s | 2.5–27.0 s | 304 |
+| tick start → first insert **sent** | 3.2 s | 2.7–6.4 s | 86 |
+| tick start → first insert accepted | 3.9 s | 3.3–6.9 s | 86 |
+| accepted → RUNNING | 8.5 s | 6.9–18.4 s | 413 |
+| RUNNING → job started | 17.6 s | 16.3–39.3 s | 304 |
+| accepted → job started | 26.5 s | 24.4–56.6 s | 304 |
+
+- **Tick ≤ 5 s: missed.** 75/86 launch ticks meet it, 11/86 (12.8%) do not. p90 misses by 1.352 s;
+  the worst is 9.898 s, **4.898 s over**, at 01:31:53.427Z. Its first insert was sent at 01:32:03.325 and then
+  completed in 8.7 s with no refusal. The excess precedes Compute provisioning: observation, ledger and JIT API
+  work is the likely cause, not stock-out or boot. There are no per-call preparation timings to isolate which read
+  or write was slow. A good median cannot close a ≤ 5 s bound that the spec did not qualify as a median.
+- **C3D-4 accepted → started ≤ 26 s: observed miss by 20.637 s; insufficient day-long exposure.** The only timed
+  sample is `hsec0lgnq8`, **46.637 s**: accepted → RUNNING 31.486 s, then → started 15.151 s. Compute's send →
+  done was 32.292 s. This miss is provisioning, not a return of the old ~30 s guest-boot delay. First-use is a
+  possible explanation, not established by this row. Only two C3D-4 VMs were created, the other an unclaimed race
+  child without RUNNING/job timestamps in the snapshot. One job cannot establish a representative C3D day median.
+- **C4D separately:** accepted → started median **26.493 s** (303 jobs). By size: C4D-2 26.8 s (28), C4D-4
+  25.3 s (24), C4D-8 26.0 s (197), C4D-16 29.7 s (54). These are not substitutes for M3's C3D-4 target.
+  The large upper tail includes VMs that waited for a later run to claim them; it is not all boot latency.
+
+### Unclaimed pre-launch: count and cost
+
+The collector reports **320 pre-launched VMs, 212 claimed, 108 not yet claimed**. Of those 108, **93 are final**
+(`cancelled-idle`) and cost **$1.6783**, including their priced VM, disk and external-address lifetime; all 93 are
+priced. They accumulated 59,546 VM-seconds (16.54 VM-hours). **15 are still running**, so 108 is not a final waste
+count and $1.6783 is not the final cost of all 108. They may still take jobs, including another run's jobs.
+
+Applying the ledger's `dailyLine` to this creation cohort's finalized rows gives 302 finalized pre-launch VMs,
+93 unclaimed, $1.6783. The whole cohort's 410 finalized VMs cost $4.2664. These are a read-only subtotal, **not the
+published full-UTC-day daily line** (the launcher publishes yesterday after midnight); rows created before 00:15
+and final costs of the 23 running VMs are outside this subtotal. The current day's published line and the final
+status of the 15 unclaimed pre-launch VMs remain to be read. There is no spend ceiling in the spec to miss.
+
+### Race trigger and M6's tail
+
+**Retain 20 s.** It falls almost exactly at the measured p90, rather than inside ordinary insertion time. The
+434 logged attempts comprise 424 created in the tick, nine initially unknown, and one capacity refusal. All nine
+unknown outcomes later have a created/settled record in the captured ledger. Combining their exact ledger
+send/done times with the tick durations gives **433 successful inserts**, median **9.5 s**, p90 **20.1 s**, p95
+**30.2 s**, p99 **53.8 s**, max **68.439 s**; **44/433 (10.2%) exceed 20 s**. The one refusal took 11.5 s.
+
+There were **27 race allocations**; their rows were allocated 20.9–21.7 s after the original send (the 20 s timer
+plus recording overhead). At the snapshot, 22 pairs are final: child first claim 7, original first claim 10,
+neither claimed 5; three of the 17 claimed pairs had both claimed. Five pairs remain unresolved. Unclaimed VMs
+in final race pairs cost **$0.5659**; this overlaps pre-launch waste where the original was pre-launched and must
+not be added to it as a disjoint cost. First claim is not measured latency saved: a runner can serve a later run.
+For example, `hsdem542qf` first claimed a static job around eight minutes after the race was allocated.
+
+The day supports the trigger as a reasonable tail cutoff, **not an optimal threshold or a quantified speedup**.
+Raising it would wait longer on the 48–68 s tail; lowering it would race more ordinary inserts. There is no
+observed >90 s start to justify either change: **all 304 timed jobs started within 80 s**, so M6's refusal/slow-insert
+90 s condition holds for the observed starts. Zero quota refusals, one capacity refusal (C4D us-central1-a, falling
+through to -b), zero on-demand launches, zero deadline cuts. Probe-before-fan-out still has no demonstrated need.
+
+### C3D us-central1 preemptions and owner decisions
+
+**Zero audit-confirmed preemptions; no affected job identified.** The window-wide audit query returned no
+`compute.instances.preempted` events; no runner `shutdown signal` was found in the serial log search, and no
+captured ledger row ends `preempted`. Audit and serial absence alone cannot exclude the prior day's teardown race.
+The more important limit is exposure: C4D served 426/433 new VMs, and **only five new C3D VMs ran in us-central1**,
+all created at 21:36–21:37. They have just one recorded job (`e2e:desk-web`, job 120103272840 above, in progress
+when checked). Including the 14.781 s tail of the C3D VM created before the window, the observed us-central1 C3D
+exposure is only **389.419 VM-seconds (6.49 VM-minutes)**. Two other new C3D VMs are race children in us-east1.
+
+The count fell from the previous day's 10 to zero, but the placement received almost no traffic; this does **not**
+show a lower underlying preemption rate. **An on-demand-only switch is not warranted by this window.** Keep C4D
+first and collect materially more C3D exposure before revisiting that decision, unless the owner chooses to pay
+for interruption avoidance independently of these measurements.
+
+No emergency quota action is indicated by the start results. Read-only quota checks still show C4D us-west4 **50
+vCPUs**, other C4D regions **24 each**, and address grants **8 us-west4 / 32 us-central1 / 8 per east region**.
+There were 786 admission-skip counters, all family-vCPU limits (390 west4, 276 central1, 90 east1, 24 east4, 6 east5),
+not 786 distinct delayed jobs. For more fast-family headroom, pursue the already-requested west4 C4D 192 grant
+and the address raises rather than changing the spot policy; no quota was filed or edited here.
+
+**Remaining actions:** the owner can authorize work on the 11 slow preparation ticks; M3 must stay open. A full
+24-hour closeout and final pre-launch/race costs need a later read after 2026-10-23T00:15Z, and C3D's boot and
+preemption conclusions need actual C3D traffic, not another idle day. No on-demand switch, race change or NAT
+re-enable is recommended. Cloud Quotas initially billed the MacBook service account's home project and returned
+403; the read succeeded with `x-goog-user-project: ssfskim-ci-kit`, without enabling an API or changing credentials
+(ci-kit friction tracker #68).
