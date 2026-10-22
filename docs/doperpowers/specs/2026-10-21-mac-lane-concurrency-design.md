@@ -127,7 +127,10 @@ and by the coordinator's holds, and the design below says what is read and when.
 - [ ] V1 — The second spike: go/no-go on numbers (3 GB and 4 GB guests, the wide display, a baked image, two groups,
   host memory and a timed row beside).
 - [ ] V2 — ci-kit: the launcher, the guest's runner and hooks, admission with the host lock, the memory guard, the bake.
-- [ ] V3 — MAWS: `MAC_VM_E2E` and the `ci-kit-mac-solo` routing, the guest's budgets.
+- [x] (2026-10-22 ~01:50Z) V3 — MAWS: `MAC_VM_E2E` and the `ci-kit-mac-solo` routing, the guest's budgets. MAWS #110
+  landed 64483a63d (reviewer-medium, three rounds; class 1a green; Mac set 39684439702 green at 17a27e686; CI-opt
+  rebased it onto 489f591c7 and added two gate-plan test commits, final head ecb877349). It also carries M3's
+  alert-reader `-<n>` fold.
 - [ ] V4 — Install on the mini, trials, the first proven-VM groups, the mode verdict, the coordinator's holds.
 - [ ] V5 — Widen the proven-VM set; the second guest, if memory ever allows it.
 
@@ -1372,6 +1375,18 @@ hold-aware plan send them to the guest, which this spec leaves open.
   guest by default, `--no-graphics` included (`Run.swift`: `clipboard: !noClipboard`), so MAWS's clipboard groups
   would cross desktops and break "no result changes because of a neighbour". Every `tart run` of the lane carries
   `--no-clipboard` (Tart 2.40.1 on the mini has it).
+- 2026-10-22 (V2's whole-branch reviews, reviewer-medium and reviewer-high, all taken): **holds go through
+  `hold.sh`, under the lock.** A hold file written with no lock could land between the boot's hold read and its
+  reservation write, so the coordinator's wait read "no guest" while one booted. `mac/vm/hold.sh` (in the installed
+  kit) is now the only way a coordinator holds the lane: `hold <owner> timed|maintenance` writes `vm-hold.<owner>` under
+  `desktop.lock` and then waits, under the same lock for each read, until no reservation and no `maws-vm-*` VM runs
+  (at most `CI_KIT_VM_HOLD_WAIT`, 3600 s; past it, exit 1 with the hold kept); `release <owner>` removes it; `wait`
+  waits alone. Owners are `[A-Za-z0-9][A-Za-z0-9._-]*`, so a name reaches a remote shell as one word. The same round:
+  every pre-job deadline (kickoff, session recovery) reads `out/` first and gives a guest whose wrapper may run up
+  through the handshake, and session recovery takes `assigned`/`job` as a job; while recovery waits on a reservation it
+  cannot read, the guard samples and a critical or floor stop takes the reserved job clone by name; the guest's wrapper
+  starts `run.sh` on the PATH of the runner's `.path` (runner 2.338.0 reads `.path` only in `runsvc.sh`), and starts
+  nothing without one.
 
 ## Surprises & Discoveries
 
