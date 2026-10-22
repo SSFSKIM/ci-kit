@@ -24,14 +24,18 @@ function changedFiles(base, head) {
   return out.split('\0').filter(Boolean);
 }
 
-// The events a gate's `on` names, and the build cache's seeding schedule, which selects by build_cache alone.
-const PLANNED = [...EVENTS, 'schedule'];
+// The events a gate's `on` names, and the build cache's seeding runs, which select by build_cache: a schedule, and a
+// push to the default branch.
+const PLANNED = [...EVENTS, 'schedule', 'push'];
 
 function plan(env) {
-  const event = env.CI_KIT_EVENT;
+  let event = env.CI_KIT_EVENT;
   if (!PLANNED.includes(event)) {
-    throw new ConfigError([`CI_KIT_EVENT must be pr, ci-ref, dispatch or schedule, not "${event ?? ''}"`]);
+    throw new ConfigError([`CI_KIT_EVENT must be pr, ci-ref, dispatch, schedule or push, not "${event ?? ''}"`]);
   }
+  // A push with no base (gates.yml leaves it empty for a new branch or a force push) has no change to select by: it
+  // seeds every build_cache gate, as a schedule does.
+  if (event === 'push' && !env.CI_KIT_BASE) event = 'schedule';
   const configPath = env.CI_KIT_CONFIG || '.github/ci-kit.yml';
 
   let text;

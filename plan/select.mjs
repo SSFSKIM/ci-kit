@@ -25,12 +25,17 @@ export function trailerGates(message) {
   return null;
 }
 
-// event: pr | ci-ref | dispatch. explicit: a gate list from the dispatch input or the trailer, or null.
-// changedFiles: repo-relative paths (ignored for an explicit list and for a dispatch).
+// A gate with no paths is touched by every change.
+const touched = (gate, changedFiles) => gate.paths.length === 0 || changedFiles.some((f) => matchesAny(f, gate.paths));
+
+// event: pr | ci-ref | dispatch, or a build cache seed: schedule | push. explicit: a gate list from the dispatch input
+// or the trailer, or null. changedFiles: repo-relative paths (ignored for an explicit list, a dispatch and a schedule).
 export function selectGates(config, { event, explicit = null, explicitSource = 'the gate list', changedFiles = [] }) {
-  // A schedule is the build cache's seeding run (docs/adopting.md, "Build cache"): every gate with a cache, whatever
-  // its paths and on, so that the default branch holds each scope.
+  // The build cache's seeding runs (docs/adopting.md, "Build cache"), which select by build_cache whatever a gate's on.
+  // A schedule seeds every gate with a cache, so that the default branch holds each scope; a push to the default
+  // branch, those whose paths it changed.
   if (event === 'schedule') return config.gates.filter((g) => g.build_cache);
+  if (event === 'push') return config.gates.filter((g) => g.build_cache && touched(g, changedFiles));
   if (explicit && explicit.length > 0) {
     const known = config.gates.map((g) => g.name);
     const unknown = explicit.filter((n) => !known.includes(n));
@@ -39,11 +44,7 @@ export function selectGates(config, { event, explicit = null, explicitSource = '
     }
     return config.gates.filter((g) => explicit.includes(g.name));
   }
-  return config.gates.filter((g) => {
-    if (!g.on.includes(event)) return false;
-    if (event === 'dispatch' || g.paths.length === 0) return true;
-    return changedFiles.some((f) => matchesAny(f, g.paths));
-  });
+  return config.gates.filter((g) => g.on.includes(event) && (event === 'dispatch' || touched(g, changedFiles)));
 }
 
 // cacheWrite: whether the build_cache gates write the cache as well as read it (plan.mjs decides).
