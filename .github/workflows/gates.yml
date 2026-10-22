@@ -158,30 +158,18 @@ jobs:
         run: corepack enable
 
       # build_cache: gha (docs/adopting.md, "Build cache"). The runner hands the cache service's token and URLs to JS
-      # actions only, never to run: steps, so the second step exports them for the rest of the job: the variables
-      # buildx reads to fill a type=gha cache's token, url, url_v2 and version (docker/buildx build/opt.go,
-      # addGithubToken). The builder is a docker-container one, since the default docker driver cannot export a
-      # cache unless the daemon uses the containerd image store. It is not made the default, so a plain
-      # `docker build` in the gate still builds straight into the daemon's images; a build that uses the cache
-      # passes --builder "$CI_KIT_BUILDX_BUILDER" (and --load for an image the gate then runs).
-      - name: Set up the build cache's builder
-        id: buildx
-        if: matrix.gate.build_cache == 'gha'
-        uses: docker/setup-buildx-action@v4
-        with:
-          use: false
-
+      # actions only, never to run: steps, so this step exports them for the rest of the job: what buildx fills a
+      # type=gha cache's token, url, url_v2 and version from (docker/buildx build/opt.go, addGithubToken). The hosted
+      # runners' Docker uses the containerd image store, whose default builder exports a type=gha cache itself.
       - name: Expose the build cache
         if: matrix.gate.build_cache == 'gha'
         uses: actions/github-script@v9
-        env:
-          CI_KIT_BUILDER: ${{ steps.buildx.outputs.name }}
         with:
           script: |
             for (const name of ['ACTIONS_RUNTIME_TOKEN', 'ACTIONS_RESULTS_URL', 'ACTIONS_CACHE_URL', 'ACTIONS_CACHE_SERVICE_V2']) {
               if (process.env[name]) core.exportVariable(name, process.env[name]);
             }
-            core.exportVariable('CI_KIT_BUILDX_BUILDER', process.env.CI_KIT_BUILDER);
+            core.exportVariable('CI_KIT_BUILD_CACHE', 'gha');
 
       - name: Install
         if: matrix.gate.setup.install != ''

@@ -73,6 +73,7 @@ gates:                      # required; non-empty
     artifacts: ["test-results/**"]   # optional; uploaded when the gate fails
     setup: true             # optional; false skips the shared setup
     env: {FOO: bar}         # optional; string values (quote numbers); CI_KIT_* names are the kit's
+    build_cache: gha        # optional; hosted only; the GitHub Actions cache for this gate's docker builds
 ```
 
 ### Lanes
@@ -151,6 +152,54 @@ A gate's `env` cannot set a `CI_KIT_*` name; the plan refuses it.
 choose to require; the kit never makes anything required.
 
 A newer push to a PR cancels the older PR run. A `ci-gate` run is never cancelled by another: each call has its own ref.
+
+#### Build cache
+
+`build_cache: gha` lets a gate's `docker build` keep its layers in the GitHub Actions cache (BuildKit's `type=gha`
+backend). The runner gives the cache service's token and URLs to JS actions only, never to `run:` steps, so before
+`install` the gate's job exports them: `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_RESULTS_URL`, `ACTIONS_CACHE_URL` and
+`ACTIONS_CACHE_SERVICE_V2`, from which buildx fills a `type=gha` cache's token and URL, and `CI_KIT_BUILD_CACHE=gha`
+for the command to test. It is a gate's key, not part of the shared `setup`, so only the gates that build images hold
+the token; a gate without it gets none of these variables. It applies with `setup: false` too. It is for the `hosted`
+lane only: GitHub's macOS runners have no Docker, and a `pool` job's container has no Docker daemon.
+
+The gate's command asks for the cache:
+
+```bash
+cache=()
+if [ "${CI_KIT_BUILD_CACHE:-}" = gha ]; then
+  scope="myimage-$(date -u +%G-W%V)"
+  cache=(--cache-from "type=gha,scope=$scope" --cache-to "type=gha,mode=min,scope=$scope,ignore-error=true")
+fi
+docker build ${cache[@]+"${cache[@]}"} -t myimage .   # the ${...+...} form keeps bash 3.2's set -u quiet
+```
+
+- The hosted runners' Docker (29 on `ubuntu-latest`) uses the containerd image store, whose default builder exports
+  a `type=gha` cache itself: the image lands in the daemon as it always does, with no other builder and no `--load`.
+  A daemon without that store refuses the export ("Cache export is not supported for the docker driver"); there the
+  command needs a builder of its own (`docker buildx create --driver docker-container`, then `--builder` and `--load`).
+- **The key is the command's business.** A `scope` holds one cache, which each export replaces, so give each image a
+  scope of its own; gates that build the same image can share one. When a step installs "latest" (an
+  `apt-get install`, a release download), a scope that changes only with the files keeps testing the first build's
+  packages: give it an age bound, such as the ISO week above.
+- `mode=min` exports the layers of the image built, which for a single-stage build is every step; a multi-stage build
+  whose earlier stages are slow needs `mode=max`. `ignore-error=true` keeps a cache service failure from failing
+  the gate.
+- **The first build of a scope costs more.** It uploads every layer it built (about 45 s for 650 MB of layers), and a
+  build that hits still downloads and unpacks each layer (about 22 MB/s through BuildKit's backend), so the cache
+  pays where building a layer takes longer than moving it.
+- **Which runs read a cache.** GitHub scopes a cache entry to the ref that wrote it. A run reads its own ref's entries
+  and the default branch's (a PR run its base branch's too), never a sibling's. A PR's later pushes and re-runs read
+  what its earlier runs wrote. Every `ci-gate` call pushes a ref of its own, so it reads only the default branch's
+  cache, and what it writes is read only by a re-run of that run. To make `ci-gate` calls warm, seed the default
+  branch's cache: a dispatch there, `gh workflow run ci.yml --ref <default branch> -f gates=<a cache gate>`, once per
+  scope (each week, with the key above).
+- **What the token can do.** It is the job's runtime token: it reads and writes the run's cache scope, reads the
+  default branch's, and uploads artifacts to the run. Gate commands are the repository's code, already trusted with
+  the checkout; the opt-in keeps the token from the gates that do not build. A `pull_request` run writes only to its
+  merge ref (`refs/pull/<n>/merge`), so a pull request, a fork's included, cannot change what other runs read.
+- **Size.** A repository's caches share 10 GB by default, least recently used entries evicted first, and an entry not
+  read for 7 days is dropped. An image's cache costs about its compressed layers, once per ref that writes them.
 
 ## `ci-gate`
 

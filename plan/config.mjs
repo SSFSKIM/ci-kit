@@ -140,10 +140,12 @@ function readGate(raw, index, seen, isPrivate, errors) {
   }
 
   // Per gate, not in the shared setup: it hands the job the cache service's token, which no other gate should hold.
+  // Hosted only: a pool job's container has no Docker daemon, and GitHub's macOS runners have no Docker.
   let buildCache = null;
   if (raw.build_cache !== undefined) {
-    if (BUILD_CACHES.includes(raw.build_cache)) buildCache = raw.build_cache;
-    else err(`build_cache: must be one of ${BUILD_CACHES.join(', ')}`);
+    if (!BUILD_CACHES.includes(raw.build_cache)) err(`build_cache: must be one of ${BUILD_CACHES.join(', ')}`);
+    else if (lane !== 'hosted') err('build_cache: only for lane hosted');
+    else buildCache = raw.build_cache;
   }
 
   const env = {};

@@ -45,13 +45,17 @@ gates:
     artifacts: ["test-results/**"]
     setup: false
     env: {FOO: bar}
-    build_cache: gha
 `, priv);
   assert.deepEqual(c.setup, { node: '24', pnpm: true, install: 'pnpm install --frozen-lockfile', fetch_depth: 0 });
   assert.deepEqual(c.gates[0], {
     name: 'unit', run: 'npm test', lane: 'pool', cpus: 8, timeout: 15, paths: ['src/**'],
-    on: ['pr', 'ci-ref'], artifacts: ['test-results/**'], setup: false, env: { FOO: 'bar' }, build_cache: 'gha',
+    on: ['pr', 'ci-ref'], artifacts: ['test-results/**'], setup: false, env: { FOO: 'bar' }, build_cache: null,
   });
+});
+
+test('a hosted gate may opt into the build cache', () => {
+  const c = parseConfig('version: 1\ngates:\n  - {name: img, run: x, build_cache: gha}\n', pub);
+  assert.equal(c.gates[0].build_cache, 'gha');
 });
 
 test('a pool gate defaults to 4 cpus', () => {
@@ -115,6 +119,7 @@ const rejected = [
   ['a bad env name', 'version: 1\ngates:\n  - {name: a, run: x, env: {"1X": "y"}}\n', /^gate "a": env: "1X" is not a valid variable name/],
   ['an unknown build cache', 'version: 1\ngates:\n  - {name: a, run: x, build_cache: s3}\n', /^gate "a": build_cache: must be one of gha$/],
   ['a boolean build cache', 'version: 1\ngates:\n  - {name: a, run: x, build_cache: true}\n', /^gate "a": build_cache: must be one of gha$/],
+  ['a build cache off the hosted lane', 'version: 1\ngates:\n  - {name: a, run: x, lane: pool, build_cache: gha}\n', /^gate "a": build_cache: only for lane hosted$/],
   ['a build cache in the shared setup', 'version: 1\nsetup: {build_cache: gha}\ngates:\n  - {name: a, run: x}\n', /^setup: unknown key "build_cache"/],
   ['an env name the kit sets', 'version: 1\ngates:\n  - {name: a, run: x, env: {CI_KIT_BASE: "y"}}\n', /^gate "a": env: "CI_KIT_BASE" is reserved: the kit sets CI_KIT_\* variables/],
 ];
