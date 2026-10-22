@@ -1339,6 +1339,19 @@ hold-aware plan send them to the guest, which this spec leaves open.
     an adopting launcher keeps its `since` and golden. `out/` is kept as `vm-out/<clone>` (the last 20).
   - The pure reads are `mac/vm/lane-reads.sh`; the plist is `mac/vm/com.ssfskim.ci-kit.vm-lane.plist`
     (AbandonProcessGroup, ProcessType Interactive, since the guest's QoS follows its starter).
+  - **Its review's fixes** (two rounds): every tick reads `out/` before the guard samples, and a jobless guest whose
+    wrapper may run (any marker or `wrapper.log`, a kickoff alive or done) is given up through the handshake, never a
+    plain stop; a failed kickoff is read against `out/` first, so an assigned clone goes on; pending handshake answers
+    are read before `done`, and a raced cancellation is counted once per clone (`raced_clone` in `vm-failures`); a
+    reservation naming anything but this slot's `maws-vm-job-*` is never stopped or deleted (it holds the lane and
+    alerts `recover`); kickoff runs in the background, and the queue read has an overall deadline,
+    `CI_KIT_VM_QUEUE_WAIT` (15 s).
+  - **The guard's cadence is cooperative:** two samples are at most one sample interval plus one read bound apart
+    (about 30 s at the defaults, 28 s observed under the review's slow-queue probe), not a strict 15 s; a sample due
+    during a blocking read is taken before the next step. Cutting reads at the next sample's due time was rejected: a
+    read cut every time would never let an idle guest be asked to stop. V4 judges the guard against this contract.
+  - **Accepted residues:** a raced alert is lost if the launcher dies between saving the count and creating the alert
+    (chosen over a duplicate); a kickoff killed during cleanup leaves its `tart exec` until the clone stops.
 
 ## Surprises & Discoveries
 
