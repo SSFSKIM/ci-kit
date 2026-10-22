@@ -65,7 +65,8 @@ const stamp = (at) => `[${at} `;
 //   listen | conflict | take (the job's lines and its worker) | worker (a worker and no line) | raw <diag line> |
 //   exit <code> (the listener ends, as after its one job)
 // and on SIGINT logs Ctrl-C, takes a job first when ctl/race exists (an acceptance racing the stop), and exits 0.
-function guest({ identity = true, display = '2560x1440@2x', displayStatus = 0, worker = false } = {}) {
+// path: the runner's .path, as the image's runner install writes it (null: none).
+function guest({ identity = true, display = '2560x1440@2x', displayStatus = 0, worker = false, path = '/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin' } = {}) {
   const home = mkdtempSync(join(root, 'guest-'));
   const bin = join(home, 'bin');
   const shares = join(home, 'shares');
@@ -74,12 +75,14 @@ function guest({ identity = true, display = '2560x1440@2x', displayStatus = 0, w
   for (const dir of [bin, ctl, join(shares, 'out'), join(shares, 'identity'), join(shares, 'cache'), join(runner, 'bin')]) mkdirSync(dir, { recursive: true });
   if (identity) for (const file of ['.runner', '.credentials', '.credentials_rsaparams']) writeFileSync(join(shares, 'identity', file), `${file} of ci-kit-mac-mini-vm\n`);
   writeFileSync(join(ctl, 'commands'), '');
+  if (path !== null) writeFileSync(join(runner, '.path'), `${path}\n`);
   executable(join(runner, 'run.sh'), `printf '%s\\n' "$*" >> '${ctl}/run.args'
 "$(dirname "$0")/bin/Runner.Listener" run "$@"
 exit $?`);
   executable(join(runner, 'bin/Runner.Listener'), `ctl='${ctl}'
 runner=$(cd "$(dirname "$0")/.." && pwd)
 env | grep '^CI_KIT_VM_\\(SLOT\\|CLONE\\)=' | sort > "$ctl/listener.env"
+printf '%s\\n' "$PATH" > "$ctl/listener.path"
 echo $$ > "$ctl/listener.pid"
 mkdir -p "$runner/_diag"
 log=$runner/_diag/Runner_$(date -u +%Y%m%d-%H%M%S)-utc.log
@@ -254,6 +257,22 @@ test('kickoff: the identity copied, the cache linked, the runner started once un
   vm.send('exit 0');
   await until(() => vm.out('done') !== null, 'out/done');
   assert.deepEqual(vm.ghCalls(), []);
+});
+
+test("the runner starts on the PATH the image baked into its .path (runsvc.sh's read, which run.sh does not make), and with none the wrapper starts nothing and powers off", async () => {
+  const vm = guest();
+  assert.equal(vm.kickoff().status, 0);
+  await until(() => existsSync(join(vm.ctl, 'listener.path')), "the listener's PATH");
+  assert.equal(readFileSync(join(vm.ctl, 'listener.path'), 'utf8'), '/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin\n');
+  vm.send('exit 0');
+  await until(() => vm.out('done') !== null, 'out/done');
+
+  const bare = guest({ path: null });
+  assert.equal(bare.kickoff().status, 0);
+  await until(() => bare.shutdown(), 'the power-off');
+  assert.equal(existsSync(join(bare.ctl, 'run.args')), false, 'run.sh never started');
+  assert.match(bare.out('wrapper.log'), /refused to start the runner: .*\.path is missing or empty .*; powering off/);
+  for (const marker of ['listening', 'assigned', 'job', 'done']) assert.equal(bare.out(marker), null, marker);
 });
 
 test('kickoff refuses, starting nothing, without the identity or with an out/ that is not empty', () => {

@@ -1,7 +1,7 @@
 #!/bin/bash
 # The VM lane's runner wrapper (docs/mac-lane.md, the VM lane), started by kickoff.sh in a job clone as
-# `wrapper.sh <slot> <clone>`. It owns the clone's one runner: it runs `run.sh --once`, so the listener takes one job
-# and exits; it tells the launcher, through out/, what the listener is doing, read from the listener's own diag log
+# `wrapper.sh <slot> <clone>`. It owns the clone's one runner: it runs `run.sh --once` on the PATH of the runner's
+# .path (none: it starts nothing and powers off), so the listener takes one job and exits; it tells the launcher, through out/, what the listener is doing, read from the listener's own diag log
 # (diag.sh) and from the processes (a Runner.Worker, by the kernel's path: hooks/runner-state.py); it answers the
 # launcher's idle stop; and when the runner has exited it copies the clone's record to out/ and powers the guest off,
 # which ends the launcher's `tart run`. The runner and its hooks get CI_KIT_VM_SLOT and CI_KIT_VM_CLONE.
@@ -203,13 +203,24 @@ publish_answer() { # true once nothing is pending
   answer='' answer_text=''
 }
 
-say "starting $vm_runner/run.sh --once"
+# The runner's PATH is the one the image baked into its .path (Homebrew's keg-only node@22 first). runner 2.338.0
+# reads .path only in runsvc.sh, the service's start, never in run.sh or the listener, so run.sh would inherit the
+# guest agent's PATH, which lacks it. With no .path the clone cannot run a job as the image meant: nothing starts, no
+# marker is written, and the guest powers off (the launcher counts the clone's end during the kickoff an image failure).
+runner_path=$(head -1 "$vm_runner/.path" 2>/dev/null)
+if [[ -z $runner_path ]]; then
+  say "refused to start the runner: $vm_runner/.path is missing or empty (the image's runner install writes it); powering off"
+  if [[ -n ${CI_KIT_VM_SHUTDOWN:-} ]]; then "$CI_KIT_VM_SHUTDOWN"; else sudo -n /sbin/shutdown -h now; fi ||
+    say "the power-off failed ($?)"
+  exit 1
+fi
+say "starting $vm_runner/run.sh --once (PATH from its .path: $runner_path)"
 export CI_KIT_VM_SLOT=$slot CI_KIT_VM_CLONE=$clone
 # The runner gets its own process group, which the stop signals as a terminal's Ctrl-C would, and SIGINT back: a
 # command started in the background of a non-interactive shell has it ignored, and a listener that ignores it cannot
 # stop gracefully.
 perl -e '$SIG{INT} = $SIG{QUIT} = "DEFAULT"; setpgrp(0, 0) or exit 126; exec { $ARGV[0] } @ARGV; exit 127' \
-  "$vm_runner/run.sh" --once </dev/null &
+  /usr/bin/env PATH="$runner_path" "$vm_runner/run.sh" --once </dev/null &
 pid=$!
 while kill -0 "$pid" 2>/dev/null; do
   watch_once
