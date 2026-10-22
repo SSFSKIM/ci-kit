@@ -574,3 +574,202 @@ test('an install with no shared instance asks launchd nothing new and lays down 
   assert.ok(!readdirSync(f.home).some((name) => name.startsWith('actions-runner-maws-')));
   assert.equal(result.stdout.match(/^ci-kit mac: (running|installed|loaded)/gm).length, 1);
 });
+
+// The VM lane (--vm, mac/vm/lane.sh): the launcher's agent, the installed kit, the slots, and the host's .env flag.
+const vmAgent = 'com.ssfskim.ci-kit.vm-lane';
+const vmPlist = (f) => join(f.home, `Library/LaunchAgents/${vmAgent}.plist`);
+const withTart = (f) => { f.executable(join(f.bin, 'tart'), 'echo 2.40.1'); return f; };
+const laneFixture = (options) => withTart(fixture(options));
+// Every file under a directory, relative, sorted.
+function tree(dir, prefix = '') {
+  return readdirSync(join(dir, prefix), { withFileTypes: true }).flatMap((entry) =>
+    entry.isDirectory() ? tree(dir, join(prefix, entry.name)) : [join(prefix, entry.name)]).sort();
+}
+
+test('--vm installs the launcher disabled, the kit laid out as mac/ is, the slots, and CI_KIT_VM_LANE=1 in every instance\'s .env', macOnly, () => {
+  const f = laneFixture();
+  const shared = f.shared(2);
+  const result = f.run(undefined, ['--vm', '--shared', '1'], {}, 'registration-token-123\n');
+  assert.equal(result.status, 0, result.stderr);
+  const domain = `gui/${uidOf()}`;
+  const plist = readPlist(vmPlist(f));
+  assert.equal(plist.Label, vmAgent);
+  assert.deepEqual(plist.ProgramArguments, ['/bin/bash', join(f.home, 'ci-kit-vm/kit/vm/lane.sh')]);
+  assert.equal(plist.EnvironmentVariables.PATH, f.env.PATH, "the runner's PATH, which holds Tart's directory");
+  assert.equal(plist.EnvironmentVariables.CI_KIT_MACHINE, 'mini');
+  assert.equal(plist.StandardOutPath, join(f.home, 'Library/Logs/ci-kit/vm-lane.out.log'));
+  assert.equal(plist.LimitLoadToSessionType, 'Aqua');
+  assert.ok(!JSON.stringify(plist).includes('__'), 'every placeholder is filled');
+  // Disabled on a machine new to the lane, as a new shared instance is.
+  assert.ok(calls(f).includes(`disable ${domain}/${vmAgent}`));
+  assert.ok(!calls(f).some((call) => call.startsWith('bootstrap') && call.includes(vmAgent)), calls(f).join('\n'));
+  assert.match(result.stdout, new RegExp(`installed, disabled: the VM lane's launcher ${vmAgent} is not loaded`));
+  assert.match(result.stdout, /ci-kit-mac-mini keeps its labels: add ci-kit-mac-solo to its registration by hand/);
+  // The kit: a copy of mac/, with its scripts executable, and no staging left beside it.
+  const kit = join(f.home, 'ci-kit-vm/kit');
+  assert.deepEqual(tree(kit), tree(join(f.kit, 'mac')));
+  for (const file of tree(join(f.kit, 'mac'))) assert.equal(readFileSync(join(kit, file), 'utf8'), readFileSync(join(f.kit, 'mac', file), 'utf8'), file);
+  for (const file of ['vm/lane.sh', 'vm/bake.sh', 'vm/guest/kickoff.sh', 'vm/guest/hooks/job-started.sh', 'vm/guest/hooks/desktop-check.sh', 'hooks/desktop-posture.sh']) {
+    assert.ok(statSync(join(kit, file)).mode & 0o111, file);
+  }
+  assert.deepEqual(readdirSync(join(f.home, 'ci-kit-vm')).sort(), ['kit', 'trials', 'vm', 'vm-trial']);
+  for (const slot of ['vm', 'vm-trial']) {
+    assert.deepEqual(readdirSync(join(f.home, 'ci-kit-vm', slot)).sort(), ['cache', 'identity', 'out']);
+    assert.equal(statSync(join(f.home, 'ci-kit-vm', slot, 'identity')).mode & 0o777, 0o700);
+  }
+  // Every host instance reads as one beside a possible guest.
+  assert.equal(readFileSync(join(f.runner, '.env'), 'utf8'), `${envFile(f, 'mini')}CI_KIT_VM_LANE=1\n`);
+  assert.match(readFileSync(join(shared, '.env'), 'utf8'), /CI_KIT_SHARED_DESKTOP=1\nCI_KIT_VM_LANE=1\n$/);
+  assertNewHooks(f);
+});
+
+test('--vm at registration gives the exclusive instance ci-kit-mac-solo beside today\'s labels; without --vm it registers as today', macOnly, () => {
+  const f = laneFixture({ registered: null });
+  const result = f.run(undefined, ['--vm', '--name', 'ci-kit-mac-mini'], {}, 'registration-token-123\n');
+  assert.equal(result.status, 0, result.stderr);
+  const labels = labelsOf(argsOf(f.runner));
+  assert.deepEqual(labels, ['self-hosted', 'macOS', 'ARM64', 'ci-kit-mac', 'ci-kit-mac-solo']);
+  assert.ok(reaches(['ci-kit-mac-solo'], labels) && reaches(['self-hosted', 'macOS', 'ARM64'], labels));
+  assert.ok(!/keeps its labels/.test(result.stdout), 'a new registration has the label already');
+  const g = fixture({ registered: null });
+  assert.equal(g.run(undefined, ['--name', 'ci-kit-mac-mini'], {}, 'registration-token-123\n').status, 0);
+  assert.deepEqual(labelsOf(argsOf(g.runner)), ['self-hosted', 'macOS', 'ARM64', 'ci-kit-mac']);
+});
+
+test('a re-run without --vm keeps the lane and the launcher\'s enabled state; --disabled disables it; --no-vm removes its agent and the flag, keeping ~/ci-kit-vm', macOnly, () => {
+  const f = laneFixture();
+  assert.equal(f.run(undefined, ['--vm']).status, 0);
+  const domain = `gui/${uidOf()}`;
+  spawnSync(join(f.bin, 'launchctl'), ['enable', `${domain}/${vmAgent}`], { env: f.env });
+  writeFileSync(join(f.home, 'ci-kit-vm/kit/stale'), 'from the last kit\n');
+  rmSync(join(f.home, 'launchctl.calls'));
+  const refresh = f.run(undefined, []);
+  assert.equal(refresh.status, 0, refresh.stderr);
+  assert.ok(calls(f).includes(`bootout ${domain}/${vmAgent}`) && calls(f).includes(`bootstrap ${domain} ${vmPlist(f)}`), calls(f).join('\n'));
+  assert.match(refresh.stdout, new RegExp(`the VM lane's launcher ${vmAgent} runs from ${join(f.home, 'ci-kit-vm/kit')}`));
+  assert.ok(!/keeps its labels/.test(refresh.stdout), 'said once, when the lane is new');
+  assert.equal(existsSync(join(f.home, 'ci-kit-vm/kit/stale')), false, 'the kit is republished whole');
+  assert.match(readFileSync(join(f.runner, '.env'), 'utf8'), /CI_KIT_VM_LANE=1\n$/);
+  rmSync(join(f.home, 'launchctl.calls'));
+  assert.equal(f.run(undefined, ['--disabled']).status, 0);
+  assert.ok(calls(f).includes(`disable ${domain}/${vmAgent}`) && !calls(f).some((call) => call.startsWith('bootstrap') && call.includes(vmAgent)));
+  rmSync(join(f.home, 'launchctl.calls'));
+  const removed = f.run(undefined, ['--no-vm']);
+  assert.equal(removed.status, 0, removed.stderr);
+  assert.ok(calls(f).includes(`bootout ${domain}/${vmAgent}`));
+  assert.equal(existsSync(vmPlist(f)), false);
+  assert.match(removed.stdout, new RegExp(`removed: the VM lane's launcher ${vmAgent} is unloaded and its LaunchAgent removed; .*ci-kit-vm stays`));
+  assert.equal(readFileSync(join(f.runner, '.env'), 'utf8'), envFile(f, 'mini'));
+  assert.ok(existsSync(join(f.home, 'ci-kit-vm/kit/vm/lane.sh')));
+  rmSync(join(f.home, 'launchctl.calls'));
+  assert.equal(f.run(undefined, []).status, 0);
+  assert.ok(!calls(f).some((call) => call.includes(vmAgent)), 'gone, it stays gone');
+});
+
+test('without --vm nothing of the lane is installed or asked of launchd, and the .env is today\'s (VA7)', macOnly, () => {
+  for (const args of [[], ['--disabled']]) {
+    const f = laneFixture();
+    const result = f.run(undefined, args);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(join(f.home, 'ci-kit-vm')), false, `${args}`);
+    assert.equal(existsSync(vmPlist(f)), false, `${args}`);
+    assert.ok(!calls(f).some((call) => call.includes(vmAgent)), calls(f).join('\n'));
+    assert.equal(readFileSync(join(f.runner, '.env'), 'utf8'), envFile(f, 'mini'));
+    assert.ok(!/VM lane|ci-kit-mac-solo|Tart/.test(result.stdout + result.stderr), result.stdout);
+  }
+  // A stale reservation or a maintenance hold on a Mac without the lane is not the install's to read.
+  const f = fixture();
+  mkdirSync(join(f.home, 'Library/Logs/ci-kit'), { recursive: true });
+  writeFileSync(join(f.home, 'Library/Logs/ci-kit/vm-reserved'), 'reserved since 2026-10-22T09:00:00Z: vm=x\n');
+  writeFileSync(join(f.home, 'Library/Logs/ci-kit/vm-hold.ci-opt'), 'maintenance since 2026-10-22T09:00:00Z\n');
+  assert.equal(f.run(undefined, []).status, 0);
+  assert.equal(f.run(undefined, ['--uninstall']).status, 0);
+});
+
+test('with the lane, its reservation or a maintenance hold refuses a refresh, --vm, --no-vm and --uninstall before anything changes; a timed hold does not', macOnly, () => {
+  const f = laneFixture();
+  assert.equal(f.run(undefined, ['--vm']).status, 0);
+  const logs = join(f.home, 'Library/Logs/ci-kit');
+  const kit = tree(join(f.home, 'ci-kit-vm/kit'));
+  for (const [file, content, refusal] of [
+    ['vm-reserved', 'reserved since 2026-10-22T09:00:00Z: vm=maws-vm-job-vm-20261022T090000Z slot=vm\n', /the VM lane's reservation stands \(reserved since .*maws-vm-job-vm-20261022T090000Z.*\): a guest may run; re-run when it is gone/],
+    ['vm-hold.ci-opt', 'maintenance since 2026-10-22T09:00:00Z\n', /the VM lane's maintenance procedure holds it \(vm-hold\.ci-opt: maintenance since 2026-10-22T09:00:00Z\); re-run after its release/],
+  ]) {
+    writeFileSync(join(logs, file), content);
+    for (const args of [[], ['--vm'], ['--disabled'], ['--no-vm'], ['--uninstall']]) {
+      const before = f.snapshot();
+      rmSync(join(f.home, 'launchctl.calls'), { force: true });
+      const result = f.run(undefined, args);
+      assert.equal(result.status, 1, `${file} ${args}: ${result.stderr}`);
+      assert.match(result.stderr, refusal, `${file} ${args}`);
+      assert.deepEqual(calls(f), [], `${file} ${args}: nothing reloaded`);
+      assert.deepEqual(f.snapshot(), before);
+      assert.ok(existsSync(vmPlist(f)));
+      assert.deepEqual(tree(join(f.home, 'ci-kit-vm/kit')), kit);
+    }
+    rmSync(join(logs, file));
+  }
+  writeFileSync(join(logs, 'vm-hold.ci-opt'), 'timed since 2026-10-22T09:00:00Z\n');
+  assert.equal(f.run(undefined, []).status, 0, 'a timed hold keeps the lane down, not the install');
+});
+
+test('a guest booted between the reservation\'s read and the launcher\'s bootout refuses the refresh, and the launcher comes back to adopt it', macOnly, () => {
+  const f = laneFixture();
+  assert.equal(f.run(undefined, ['--vm']).status, 0);
+  const domain = `gui/${uidOf()}`;
+  // The launcher is loaded (until booted out, and again once bootstrapped), and boots a guest just before launchd
+  // takes it down.
+  const fake = readFileSync(join(f.bin, 'launchctl'), 'utf8');
+  rmSync(join(f.bin, 'launchctl'));
+  writeFileSync(join(f.home, 'vm-loaded'), '');
+  f.executable(join(f.bin, 'launchctl'), `${fake.replace(/^#!\/bin\/bash\n/, '')}`.replace('[[ $1 != print ]]',
+    `if [[ $1 == bootout && $2 == */${vmAgent} ]]; then
+  [[ ! -e $HOME/vm-loaded ]] || echo 'reserved since 2026-10-22T09:00:00Z: vm=maws-vm-job-vm-20261022T090001Z' > "$HOME/Library/Logs/ci-kit/vm-reserved"
+  rm -f "$HOME/vm-loaded"
+fi
+[[ $1 == bootstrap && $3 == *${vmAgent}.plist ]] && touch "$HOME/vm-loaded"
+[[ $1 != print ]] || [[ $2 == */${vmAgent} && -e $HOME/vm-loaded ]]`));
+  const kitBefore = readFileSync(join(f.home, 'ci-kit-vm/kit/vm/lane.sh'), 'utf8');
+  writeFileSync(join(f.kit, 'mac/vm/lane.sh'), `${kitBefore}# a newer kit\n`);
+  rmSync(join(f.home, 'launchctl.calls'));
+  const hooks = f.snapshot();
+  const result = f.run(undefined, []);
+  assert.equal(result.status, 1, result.stderr);
+  assert.deepEqual(f.snapshot(), hooks, 'nothing went live');
+  assert.ok(!calls(f).some((call) => call.includes(runnerAgent)), 'no runner reloaded');
+  assert.match(result.stderr, /the VM lane booted a guest meanwhile \(reserved since .*maws-vm-job-vm-20261022T090001Z\); its launcher is back as it was; re-run when the guest is gone/);
+  const log = calls(f);
+  assert.ok(log.indexOf(`bootstrap ${domain} ${vmPlist(f)}`) > log.indexOf(`bootout ${domain}/${vmAgent}`), log.join('\n'));
+  assert.equal(readFileSync(join(f.home, 'ci-kit-vm/kit/vm/lane.sh'), 'utf8'), kitBefore, 'the running guest keeps its kit');
+  assert.ok(existsSync(join(f.home, 'vm-loaded')), 'the launcher is loaded again');
+});
+
+test('--uninstall removes the launcher\'s agent with the rest and keeps ~/ci-kit-vm; a staged kit that fails its check changes nothing', macOnly, () => {
+  const f = laneFixture();
+  assert.equal(f.run(undefined, ['--vm']).status, 0);
+  rmSync(join(f.home, 'launchctl.calls'));
+  const result = f.run(undefined, ['--uninstall']);
+  assert.equal(result.status, 0, result.stderr);
+  const domain = `gui/${uidOf()}`;
+  assert.ok(calls(f).includes(`bootout ${domain}/${vmAgent}`));
+  assert.equal(existsSync(vmPlist(f)), false);
+  assert.match(result.stdout, new RegExp(`uninstalled: ${watchAgent} and ${runnerAgent} are unloaded and removed, and the VM lane's ${vmAgent} \\(.*ci-kit-vm stays\\)`));
+  assert.ok(existsSync(join(f.home, 'ci-kit-vm/kit/vm/lane.sh')));
+  assert.equal(f.run(undefined, ['--uninstall', '--vm']).status, 2, '--uninstall takes nothing else');
+  const g = laneFixture();
+  writeFileSync(join(g.kit, 'mac/vm/guest/wrapper.sh'), '#!/bin/bash\nif then\n');
+  const broken = g.run(undefined, ['--vm']);
+  assert.notEqual(broken.status, 0);
+  assert.equal(existsSync(join(g.home, 'ci-kit-vm/kit')), false);
+  assert.equal(existsSync(vmPlist(g)), false);
+  assert.deepEqual(readdirSync(join(g.home, 'ci-kit-vm')), [], 'no staging left');
+  assert.deepEqual(calls(g), []);
+});
+
+test('--vm without Tart on the PATH is a missing prerequisite, and nothing is installed', macOnly, () => {
+  const f = fixture();
+  const result = f.run(undefined, ['--vm']);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /missing: Tart \(the VM lane\)/);
+  assert.equal(existsSync(join(f.home, 'ci-kit-vm')), false);
+});
