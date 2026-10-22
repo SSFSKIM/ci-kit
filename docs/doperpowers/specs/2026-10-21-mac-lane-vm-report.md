@@ -10,7 +10,7 @@ Outcomes carry every decision; this report is the run's record and what comes ne
 | Milestone | State |
 |---|---|
 | V1, the second spike | Not run. Window booked by CI-opt: hold-by after 09:00Z 10-22 (deadline 09:30Z), hard end start + 3 h, before 13:10Z. Script ready on the MacBook: `~/Developer/ci-analysis/v1-spike.sh`. |
-| V2, ci-kit: the lane | Built, reviewed clean, ci-gate green. PR on branch `vm-lane-v2`, for CI-opt to merge and move `v1`. |
+| V2, ci-kit: the lane | Built, reviewed clean, ci-gate green. PR https://github.com/SSFSKIM/ci-kit/pull/89 (branch `vm-lane-v2`), for CI-opt to merge and move `v1`. |
 | V3, MAWS | Landed: MAWS #110, merge 64483a63d. |
 | V4, install, trials, verdict | Not started. Needs V1's verdict, V2 merged, mini windows and one owner step (below). |
 | V5 | Not started. |
