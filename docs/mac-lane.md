@@ -5,7 +5,8 @@ above all) run there instead of on the MacBook. The design is §4 of the
 [spec](doperpowers/specs/2026-10-15-ci-kit-design.md); the contract is I10. A Mac's runners are its
 [instances](#instances-and-the-shared-hold): the exclusive one, which runs each job alone on the desktop, and the shared
 ones a machine opts into, which run beside each other
-([design](doperpowers/specs/2026-10-21-mac-lane-concurrency-design.md)).
+([design](doperpowers/specs/2026-10-21-mac-lane-concurrency-design.md)). A machine may also opt into
+[the VM lane](#the-vm-lane): a guest macOS desktop beside the host's, booted for one job at a time.
 
 | | The mini | The second Mac |
 |---|---|---|
@@ -23,7 +24,7 @@ On every machine:
 |---|---|
 | Session | `new`'s logged-in GUI session |
 | Registration | `SSFSKIM/MAWS`, at repository level, non-ephemeral |
-| Labels | the exclusive instance: `self-hosted`, `macOS`, `ARM64` (what MAWS's `gate.yml` targets), `ci-kit-mac`; a shared instance: `ci-kit-mac-shared` alone |
+| Labels | the exclusive instance: `self-hosted`, `macOS`, `ARM64` (what MAWS's `gate.yml` targets), `ci-kit-mac`, and `ci-kit-mac-solo` with [the VM lane](#the-vm-lane); a shared instance: `ci-kit-mac-shared` alone |
 | Directory | the exclusive instance: `~/actions-runner-maws` (work directory `~/actions-runner-maws/_work`); shared instance n: `~/actions-runner-maws-<n>` |
 | LaunchAgent | `com.ssfskim.ci-kit.mac-runner` (shared instance n: `com.ssfskim.ci-kit.mac-runner-<n>`) — RunAtLoad, KeepAlive, `ProcessType` Interactive, Aqua session only; its program is the instance's own `runner-hold.sh`, which execs the runner's `runsvc.sh` unless the dialog watcher holds the runners |
 | Hooks | `<instance>/ci-kit/hooks/job-started.sh` (admission on a Mac with shared instances, the desktop check, then the sweep), `job-completed.sh` (the [drain](#the-drain)'s job end, then the sweep, then the admission's release), a full copy from `mac/hooks/` in each instance |
@@ -110,6 +111,9 @@ gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token
   between renames: a job starting during publication finds either complete set. Copy or validation failures leave the
   old set untouched; a Swift compile failure still warns and installs without that helper (its log is
   `~/Library/Logs/ci-kit/<helper>-build.log`).
+- **The VM lane.** `--vm` installs it beside the instances, and a re-run keeps it; `--no-vm` removes it
+  ([the VM lane](#the-vm-lane), "Install, enable, remove"). Without it, `install.sh` installs and reads nothing of the
+  lane.
 - **Prerequisites** checked on the PATH jobs get: Node ≥ 22.12 (MAWS's `engines`), corepack, the Xcode command line
   tools' `clang` (native modules such as `node-pty`), `python3` (node-gyp), git, and LibreOffice's `soffice` (the
   document groups), found but not launched. MAWS's setup action installs its own Node 22 and pnpm per job into the
@@ -485,6 +489,305 @@ Check by hand:
 ssh mini 'cat ~/Library/Logs/ci-kit/shared-hold ~/Library/Logs/ci-kit/shared-running-* 2>/dev/null; grep shared-hold ~/Library/Logs/ci-kit/mac-runner-hooks.log | tail -5'
 #   expect, between jobs: no output from the markers
 ```
+
+## The VM lane
+
+A second macOS desktop on the mini: a guest, run by Tart (`/opt/homebrew/bin/tart`) over Apple's
+Virtualization.framework, booted fresh for one job from a golden image and deleted after it. A job that needs a
+desktop to itself runs there beside the host's jobs, and keeps running while the host's desktop is held for an untimed
+GUI session. Memory, not CPU, is what binds on the mini's 16 GB, so the lane is admitted job by job: by the host's
+admission lock, by a memory guard, and by the coordinator's holds. The design and its reasons are the
+[concurrency spec](doperpowers/specs/2026-10-21-mac-lane-concurrency-design.md) ("The VM lane"); the lane is opted
+into per machine (`install.sh --vm`), and a Mac without it has none of what follows.
+
+**The parts.**
+
+| | |
+|---|---|
+| Launcher | `mac/vm/lane.sh`, the program of the LaunchAgent `com.ssfskim.ci-kit.vm-lane` (RunAtLoad, KeepAlive, Aqua session only, `ProcessType` Interactive), run from the installed kit. It is the only automated way a guest starts: it reads the queue every 15 s, decides admission, boots a job clone, follows it through its one job and deletes it. Its header has the lifecycle, the boot rule, the guard and every input. |
+| Installed kit | `~/ci-kit-vm/kit`, a copy of `mac/` that `install.sh` publishes with the hooks' staged swap, so the checkout can move on. Every clone is shown it read-only, so a hook change needs no image refresh. |
+| Golden image | the local Tart VM `~/ci-kit-vm/golden` names (`maws-vm-golden-<id>`): the macOS 27 base (`ghcr.io/cirruslabs/macos-golden-gate-base`) with Node 22, pnpm, the warm store, LibreOffice, the runner and the compiled helpers baked in. It is never run for a job; only the [maintenance procedure](#the-vm-lanes-maintenance) makes or replaces it. |
+| Job clone | `maws-vm-job-vm-<time>`, an APFS copy of the golden image (seconds; it holds only what the job writes), run with `tart run --no-graphics` and four directory shares: the kit and the slot's identity read-only, its `out/` and `cache/` read-write. |
+| Slot | `~/ci-kit-vm/vm/`: `identity/` (the runner's `.runner`, `.credentials`, `.credentials_rsaparams`, copied into each clone and never baked), `out/` (what the guest writes back: its markers, `_diag`, its hooks log), `cache/` (MAWS's e2e build cache). The trial slot, `~/ci-kit-vm/vm-trial/`, is the same for a candidate's trial and serves nothing else. |
+| In the guest | `mac/vm/guest/`: `kickoff.sh` (run by `tart exec`, which is gRPC to the Tart guest agent, never the guest's address) makes the clone the slot's runner and starts `wrapper.sh`, which runs `run.sh --once`, writes the `out/` markers (its header is the protocol), answers the idle stop and powers the guest off; `hooks/` is the guest's start and end, cut down: the display and dialog check, Terminal in front, the posture line with `vm=` and `clone=`, no sweep, no alert, no `gh`. |
+| State | in `~/Library/Logs/ci-kit`, each file replaced whole, written under `desktop.lock`: `vm-reserved` (the slot's reservation), `vm-hold.<owner>` (the holds), `vm-claim.<worker>` (host jobs keeping the guest out), `vm-pause` (the guard's), and the launcher's own `vm-failures` and `vm-lane.alert.<kind>`. |
+| Logs | `vm-lane.log` (every decision, every boot's reads, the guard's samples, each clone's `out/` folded in at its end), `vm-run.log` (the clones' `tart run` output), `vm-out/<clone>/` (the last 20 clones' `out/`), `vm-bake.log` (the maintenance procedure's transcript); the guest's hook lines land in `mac-runner-hooks.log`. |
+
+**The reservation.** `vm-reserved` means "a job clone of this slot may be running", whatever became of the launcher
+that wrote it. It is written in the same locked step that spawns the clone, before the clone exists, and removed only
+after Tart shows the clone stopped and it is deleted. A launcher that dies leaves its guest running (`tart run` is
+detached), so the reservation is never read as stale by its writer's pid: settle, the exclusive hook, `install.sh` and
+`bake.sh` all read its presence alone.
+
+**Labels and what MAWS does.**
+
+| Runner | Labels | Who reaches it |
+|---|---|---|
+| `ci-kit-mac-<machine>` (the exclusive instance) | today's, plus `ci-kit-mac-solo` | today's jobs, and a solo job when it is free |
+| `ci-kit-mac-<machine>-vm` (the guest) | `ci-kit-mac-solo`, `ci-kit-mac-vm` (`--no-default-labels`) | a solo job when it is free, or a job forced to the guest |
+| `ci-kit-mac-<machine>-vm-trial` (a candidate's trial clone) | `ci-kit-mac-vm-trial` alone | a trial commit's job, and nothing else |
+
+A job that asks for `[ci-kit-mac-solo]` runs on whichever of the exclusive instance and the guest is free: GitHub's
+assignment does the balancing, and the launcher boots a clone only when the host will not take the job first. MAWS
+(its `gate.yml` and plan) sends its `MAC_VM_E2E` groups to `[ci-kit-mac-solo]`, keeps every `MEASURED_E2E` group on
+today's labels, honours `Lane: vm` (`scripts/ci-gate.sh --lane vm`: those groups to `[ci-kit-mac-vm]` alone) and
+`Lane: vm-trial` (to `[ci-kit-mac-vm-trial]`, a candidate's trial and nothing else), and gives a solo job the exclusive
+wait in its timeout. **What a guest job may rely on:** its runner environment sets `CI_KIT_VM_GUEST=1` (MAWS's budgets
+treat a guest as a loaded host), its `CI_KIT_MACHINE` is `<machine>-vm`, and `RUNNER_NAME` ends in no `-<n>`.
+**Every host instance** of a Mac with the lane sets `CI_KIT_VM_LANE=1`, because a guest can boot after a test read the
+host's load: MAWS's budgets read such a host as loaded. MAWS's alert reader treats `-vm` and `-vm-trial` as machines
+of their own, and the guest never opens an alert.
+
+The exclusive instance gains `ci-kit-mac-solo` when it is registered with `--vm`. An instance registered before keeps
+its labels; add the label from the MacBook (the runner keeps its registration and needs no restart):
+
+```bash
+id=$(gh api repos/SSFSKIM/MAWS/actions/runners --jq '.runners[]|select(.name=="ci-kit-mac-mini").id')
+gh api -X POST repos/SSFSKIM/MAWS/actions/runners/$id/labels -f 'labels[]=ci-kit-mac-solo' --jq '[.labels[].name]|join(",")'
+#   expect: self-hosted,macOS,ARM64,ci-kit-mac,ci-kit-mac-solo
+```
+
+**Admission: the job boot, under the host's lock.** At each poll the launcher boots a clone only when all of these
+hold, and it logs what fails, once per change, and what it read at each boot:
+1. a queued job of `SSFSKIM/MAWS` asks only for labels among `ci-kit-mac-solo` and `ci-kit-mac-vm` (read with the
+   machine user's own `gh` login, `Actions: read`);
+2. the host will not take it first: a `ci-kit-mac-vm` job always counts; a `ci-kit-mac-solo` job counts while the
+   exclusive instance is busy, held by the dialog watcher or offline, or when more than one is queued;
+3. nothing holds the lane: no `vm-hold.<owner>`, no live `vm-claim.*`, no `vm-pause` in force;
+4. no guest exists: no `vm-reserved`, and Tart lists no `maws-vm-*` VM running;
+5. the memory guard and the disk reserve admit (below);
+6. the host's main display is at @2x, since the guest takes its density from it at boot;
+7. the mode allows it: `CI_KIT_VM_LANE_MODE` `always` (the default), or `hold-only` with every host instance held or
+   stopped;
+8. every host job now running is VM-safe, which is 3: a job that is not holds a claim.
+
+Conditions 3 and 4 are read again under `desktop.lock`, in the one step that writes the reservation, clones and spawns
+`tart run`; nothing can release the reservation between its write and the run. The lane never stops a running guest to
+admit anything else: a measured job, a timed hold and the maintenance procedure each wait for it.
+
+**Host jobs and the guest.**
+- **A measured job** keeps the guest out through settle ([the measured-job guard](#the-measured-job-guard)): `vm:
+  none` raises the measured claim at the first read, so nothing boots from then on, and releases the job only once no
+  reservation stands.
+- **Every other exclusive job is classified** before today's start: its job-started hook reads the workflow file it
+  runs under, at `GITHUB_WORKFLOW_SHA`, through the machine's own `gh` login (bounded 10 s), for the contract line
+  `# ci-kit-vm-contract: 1` (MAWS's `gate.yml` carries it, and MAWS's tests pin what it promises: every timed group is
+  on `MEASURED_E2E`, and every measured job runs settle). The job log says which: `vm-safe: yes (contract 1)` runs
+  beside a guest; `vm-safe: unknown (<why>)` (no line, another number, a read that fails, an empty SHA, as an old
+  sha's rerun has) is treated as measured: the hook raises `vm-claim.<worker>`, waits for the reservation to go within
+  the exclusive bound, and keeps the claim to its end hook. Past the bound it is refused:
+
+  ```
+  ci-kit: the guest on the mini did not make way for a job of unknown kind (after 10 min: …); waited 600 s — rerun
+  ```
+
+- **Shared instances** need no classification: only a contract workflow can ask for their label.
+- A guest job refused by the guest's own start (a dialog in the guest, a display off geometry) carries the lane's
+  shape, naming the guest: `ci-kit: a system dialog (…) holds focus in the guest mini-vm (vm=vm clone=…) — if every
+  clone shows it, answer it in the image; rerun`. Two such refusals in a row pause the lane with an alert: a fresh
+  clone that refuses twice shows an image fault.
+
+**Holds have owners, and keep each other.** A hold is a file of its own, `~/Library/Logs/ci-kit/vm-hold.<owner>`,
+written and removed by its owner alone (CI-opt names it after the session that booked the mini); the lane is held while
+any exists, so one owner's release never drops another's. The first line says its kind. Each hold is logged once per
+change, and alerted after 6 h (`ci-kit alert: vm lane on <machine> held by <owner> since <minute>`). The booking a
+session makes through CI-opt says which kind it needs:
+- **Untimed** (cua's functional sessions): CI-opt takes the host's instances down as for any hold (below) and leaves
+  the lane running, so the guest goes on taking `solo` jobs while the session has the host's desktop. No marker.
+- **Timed** (MAWS's benches, anything that reads the machine's timing): the marker first, then the wait for the
+  reservation to go, then the host's instances; at release the marker is removed first, then the instances come back.
+
+  ```bash
+  owner=<session>   # the booking session's name: one file per owner
+  ssh mini "printf 'timed since %s\n' \$(date -u +%Y-%m-%dT%H:%M:%SZ) > ~/Library/Logs/ci-kit/vm-hold.$owner"
+  ssh mini 'until [ ! -e ~/Library/Logs/ci-kit/vm-reserved ]; do sleep 15; done; echo no guest'
+  #   expect: no guest   (at most the running bound; in practice the guest job's own length and its boot)
+  # … take the host's instances down, as for any hold; the session runs …
+  ssh mini "rm -f ~/Library/Logs/ci-kit/vm-hold.$owner"   # at release, before the instances come back
+  ```
+
+  A hold script that forgets the marker gets a guest beside its bench.
+- **Maintenance** is the [procedure below](#the-vm-lanes-maintenance), with the launcher's agent booted out as well.
+- **The dialog watcher's drain** does not hold the lane: a dialog on the host is the host instances' problem, and the
+  guest's jobs keep CI going through it.
+
+**The memory guard and the disk reserve.** A boot needs memory pressure at level 1
+(`kern.memorystatus_vm_pressure_level`), at least `CI_KIT_VM_MEMORY_FLOOR` % available (`kern.memorystatus_level`, 37:
+a 4 GB guest's share of 16 GB plus 12 points), swap not grown over 60 s (`vm.swapusage`), and `CI_KIT_VM_DISK_RESERVE`
+GB free on the volume of `~/.tart` (40); a read that fails admits nothing. From `tart run` to the clone's verified end
+the launcher samples every 15 s into `vm-lane.log`: warning on two samples gives up a guest that holds no job (through
+the idle stop) and pauses the next boot 2 min behind one that does; critical on one sample, or free space under 5 GB,
+stops the guest in any state, with an alert (`ci-kit alert: vm lane on <machine> stopped a job for memory|disk at
+<minute>`) and a pause. Such a job ends without a `ci-kit: … rerun` line: GitHub reports the runner lost.
+
+**Recovery.** It runs at one point, the launcher's start (KeepAlive after a death, RunAtLoad after a reboot), under the
+lock, before the first queue read, and it touches job clones and `vm-reserved` alone: a running job is adopted and
+followed to its end, a guest without one is asked to stop or stopped, a stopped one is deleted and released. A golden,
+a candidate, a trial clone or the base is never touched; while one of them runs the launcher boots nothing and alerts
+after 10 min. A stop that fails, or a state that cannot be read, keeps the reservation, is retried each poll and alerts
+after 10 min (`ci-kit alert: vm lane on <machine> cannot stop <clone> since <minute>`); nothing boots meanwhile. A VM
+left running by hand is ended with the verified stop, the same check the launcher and `bake.sh` make before any delete:
+
+```bash
+vm=<name>
+ssh mini "tart stop $vm --timeout 60; tart list --format json | python3 -c 'import json,sys; print([v[\"State\"] for v in json.load(sys.stdin) if v[\"Name\"] == \"$vm\"])'; pgrep -fl 'tart run' | grep -- '$vm\$' || echo 'no tart run'"
+#   expect: ['stopped'] (or [] once deleted), then: no tart run
+```
+
+A reservation stands until the launcher's teardown removes it. Remove one by hand only after that check shows its VM
+stopped or gone, with the launcher booted out.
+
+**Failures** are counted by kind (`image`, `session`, `memory`, `disk`, `raced`) in `vm-failures`. Three `image`
+failures in a row (a clone that never answers or never listens, a job past its bound) pause the lane with no expiry and
+an alert, since the image is the likely cause; an operator lifts the pause by removing `vm-pause` once the image is
+fixed. A listener that finds the slot's previous session still open (a clone that died mid-job) retries for up to
+5 min and counts as `session`, apart from the image. An idle stop that raced a job's acceptance is reported with an
+alert naming the job, which GitHub shows cancelled: rerun it.
+
+**Install, enable, remove.** `install.sh --vm` installs the lane beside the instances ([Install, update,
+remove](#install-update-remove)): the launcher's agent, disabled on a machine new to the lane; the kit and the slots;
+`CI_KIT_VM_LANE=1` in every instance's `.env`; and Tart's directory on the launcher's PATH (Tart is a prerequisite with
+`--vm`). A re-run without `--vm` keeps an installed lane and refreshes it, the launcher keeping the enabled state
+launchd has for it; `--disabled` disables it with the runners; `--no-vm` unloads and removes its agent and the `.env`
+flag, keeping `~/ci-kit-vm`; `--uninstall` removes it with the rest. While the lane's reservation stands, or the
+maintenance hold is up, every one of these refuses before anything changes: a reload would restart the launcher beside
+its guest or bring it back into the procedure, and a publish would pull the kit from under a running clone. A guest
+the launcher boots between that read and its bootout refuses the install too, and the launcher comes back to adopt
+it. The lane boots nothing until a golden image exists (the [procedure](#the-vm-lanes-maintenance)) and its agent is
+enabled:
+
+```bash
+ssh mini 'launchctl enable gui/$(id -u)/com.ssfskim.ci-kit.vm-lane; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ssfskim.ci-kit.vm-lane.plist'
+ssh mini 'tail -3 ~/Library/Logs/ci-kit/vm-lane.log'
+#   expect: … vm-lane starting (pid …, slot vm, mode always); recovery first … then the boot rule's first read
+```
+
+Check by hand:
+
+```bash
+ssh mini 'cat ~/Library/Logs/ci-kit/vm-reserved ~/Library/Logs/ci-kit/vm-hold.* ~/Library/Logs/ci-kit/vm-pause 2>/dev/null; cat ~/ci-kit-vm/golden; tail -5 ~/Library/Logs/ci-kit/vm-lane.log'
+#   expect, between guest jobs: no reservation, the holds in force (if any), the golden's name, the launcher's last reads
+gh api repos/SSFSKIM/MAWS/actions/runners --jq '.runners[]|select(.name|test("-vm"))|[.name,.status,.busy,([.labels[].name]|join(","))]|@tsv'
+#   expect: ci-kit-mac-mini-vm  online|offline  …  ci-kit-mac-solo,ci-kit-mac-vm   (online only while a clone listens)
+```
+
+## The VM lane's maintenance
+
+The golden image is made, tried and replaced by one procedure, the coordinator's (CI-opt), run with
+`mac/vm/bake.sh` under a full hold of the mini with the launcher's agent booted out, so nothing automated boots,
+recovers or releases while it runs. It is run on invalidation, never on a schedule: a runner the image's is behind
+(`vm-lane.log` says `refresh trigger: the runner updated itself` per job), MAWS's Node or pnpm pins, a stale store
+(a job's `pnpm install` past 60 s in `vm-out/<clone>/`), the mini's macOS moving, a new Electron bundle id or
+LibreOffice version wanting its first-run window again. A refresh takes the mini for its length, as a timed hold does.
+
+`bake.sh` checks the hold before every step but `--retire`, and refuses without it: a `vm-hold.<owner>` whose first
+line starts `maintenance`, no `vm-reserved`, the launcher's agent not loaded (`launchctl print`), and no launcher
+holding `vm-lane.lock`. It holds that lock itself for each step, so a launcher bootstrapped out of order waits for the
+step. The steps that boot a VM also refuse while any `maws-vm-*` VM runs, and under the disk reserve. Each step prints
+what it did and logs it to `vm-bake.log`; each is safe to run again: nothing is deleted without a verified stop
+first, and `--promote` finishes from either name.
+
+Run it from the installed kit, `~/ci-kit-vm/kit/vm/bake.sh`, after refreshing the kit (`install.sh`, outside the hold:
+the install refuses during maintenance), so the candidate is provisioned with the kit the lane will run. In the
+commands, `owner` is the session's name, as for a timed hold, and `cand` the candidate's name `--bake` prints.
+
+1. **The hold.** Write the marker, wait for the guest to go, take the host's instances down as for any hold, and boot
+   the launcher out:
+
+   ```bash
+   owner=<session>
+   ssh mini "printf 'maintenance since %s\n' \$(date -u +%Y-%m-%dT%H:%M:%SZ) > ~/Library/Logs/ci-kit/vm-hold.$owner"
+   ssh mini 'until [ ! -e ~/Library/Logs/ci-kit/vm-reserved ]; do sleep 15; done; echo no guest'
+   ssh mini "tart list --format json | python3 -c 'import json,sys; print([v[\"Name\"] for v in json.load(sys.stdin) if v[\"Name\"].startswith(\"maws-vm-\") and v[\"Running\"]])'"
+   #   expect: no guest, then []
+   # take the host's instances down (Disable and enable, above: every com.ssfskim.ci-kit.mac-runner*), noting which were enabled
+   ssh mini 'launchctl bootout gui/$(id -u)/com.ssfskim.ci-kit.vm-lane; launchctl print gui/$(id -u)/com.ssfskim.ci-kit.vm-lane >/dev/null 2>&1 || echo booted out'
+   #   expect: booted out
+   ```
+
+2. **The reserve.** `--bake`, `--register` and `--trial` read the free space of the volume of `~/.tart` and refuse
+   under `CI_KIT_VM_DISK_RESERVE` GB (40), printing the figure. `--bake` also prints the lowest free space it saw
+   between its steps, and stops under the floor (5 GB): the first refresh records that peak, from which the reserve's
+   default is set.
+
+3. **The bake** clones the base to `maws-vm-candidate-<YYYYMMDD>` (UTC; `--name maws-vm-candidate-<id>` for another),
+   sets `--cpu 4 --memory <MB> --display 2560x1440pt`, boots it with the installed kit and the MAWS checkout shared
+   read-only (`--maws`, default `~/Developer/GitHub/MAWS`, which the owner's `gh` login keeps at master), provisions it
+   through `tart exec` (`mac/vm/provision.sh`'s steps: the base's tools and `python3`; Node 22 and the checkout's pnpm
+   through corepack; the warm store from a scratch clone; LibreOffice; the runner at `install.sh`'s pin in
+   `~/actions-runner-maws`, its `.env` naming the hooks through `~/ci-kit` → the kit share, `CI_KIT_MACHINE=mini-vm`,
+   `CI_KIT_VM_GUEST=1` and `LANG=en_US.UTF-8`, and its `.path`; the compiled helpers in `~/ci-kit-helpers/`), and
+   verifies its stop. `--memory` is the guest's size in MB, 4096 until V1 settles between 3 GB and 4 GB.
+
+   ```bash
+   ssh mini '~/ci-kit-vm/kit/vm/bake.sh --bake --memory 4096'
+   #   expect: … baked: maws-vm-candidate-<id>, stopped; the lowest free space during the bake was <n> GB
+   ```
+
+   **Then the human's first-run window step, once, on the candidate,** which `--bake` prints with the candidate's name
+   and is never scripted: a prompt answered in the image stays answered in every clone, while one left unanswered comes
+   up on every job's fresh desktop (the 10-16 incident, `UserNotificationCenter` in front, per job). In the mini's own
+   GUI session, reached over Screen Sharing (never VNC into the guest, which would connect to its address), the owner
+   runs `tart run <cand> --dir=maws:<checkout>:ro` in the mini's Terminal; in the guest's window opens Terminal and
+   LibreOffice and answers their first-run prompts; runs one MAWS group from a scratch clone of the share
+   (`pnpm e2e:deliverables`), answering Electron's notification prompt as the mini's own setting has it; then removes
+   the clone and shuts the guest down. `--register` and `--trial` refuse a candidate still running.
+
+4. **Registration**, once per identity, not per refresh (the first refresh, or after a slot's identity is removed):
+   `--register` boots the candidate (or the golden), runs the runner's `config.sh --unattended --no-default-labels`
+   for each slot whose `identity/` is incomplete, production first (`ci-kit-mac-mini-vm`, `ci-kit-mac-solo,
+   ci-kit-mac-vm`), then the trial's (`ci-kit-mac-mini-vm-trial`, `ci-kit-mac-vm-trial`), moves each identity's three
+   files to its slot (mode 600) and out of the image, and verifies the stop. It reads one token a line on stdin, one
+   per identity it registers, every one before it boots, and hands each to the guest on the exec's stdin, never in an
+   argument:
+
+   ```bash
+   for i in 1 2; do gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token; done \
+     | ssh mini "~/ci-kit-vm/kit/vm/bake.sh --register $cand"
+   gh api repos/SSFSKIM/MAWS/actions/runners --jq '.runners[]|select(.name|test("-vm"))|[.name,.status,([.labels[].name]|join(","))]|@tsv'
+   #   expect: ci-kit-mac-mini-vm  offline  ci-kit-mac-solo,ci-kit-mac-vm
+   #           ci-kit-mac-mini-vm-trial  offline  ci-kit-mac-vm-trial
+   ```
+
+5. **The trial.** Push a scratch MAWS commit whose trailer is `Lane: vm-trial` (`scripts/ci-gate.sh --lane vm-trial`,
+   with `MAC_VM_E2E` naming one group, `document-app` the first time); its job asks for `[ci-kit-mac-vm-trial]` alone
+   and waits queued. Then `--trial` clones the candidate to `maws-vm-trial-<time>` and boots and kicks it off as the
+   launcher boots a job clone, but with the trial slot's identity, `out/` and cache, so its runner carries
+   `ci-kit-mac-vm-trial` alone and no production job can reach it. It prints each `out/` marker, waits for the guest
+   to power itself off (no job within 30 min: the idle stop; a job past 50 min: a stop), verifies the stop, deletes
+   the clone, keeps its `out/` as `~/ci-kit-vm/trials/<clone>.out`, reads the job's numeric id and conclusion
+   through `gh` (the jobs of `out/job`'s run attempt that ran on the trial runner after the trial began), and writes
+   the record `~/ci-kit-vm/trials/<cand>`, which binds the candidate, the clone, the run, the job and the conclusion.
+   A trial whose clone took no job, or whose job cannot be told, is recorded with no job id and why.
+
+   ```bash
+   ssh mini "~/ci-kit-vm/kit/vm/bake.sh --trial $cand; cat ~/ci-kit-vm/trials/$cand"
+   #   expect: trial of <cand>: run <run> job <job> success, then candidate=… run=… job=… conclusion=success
+   ```
+
+6. **Promote** refuses unless the record names the candidate, a job id and `success`; then renames the candidate to
+   `maws-vm-golden-<id>` and replaces the pointer `~/ci-kit-vm/golden` by a rename. Interrupted between the two, the
+   pointer still names the old golden, which is valid; run again, it finds the VM under either name and finishes.
+
+   ```bash
+   ssh mini "~/ci-kit-vm/kit/vm/bake.sh --promote $cand"
+   #   expect: promoted: the pointer names maws-vm-golden-<id> (it named <old>); then the --retire line for <old>
+   ```
+
+7. **Release**, in this order: bring the launcher back (`launchctl bootstrap gui/$(id -u)
+   ~/Library/LaunchAgents/com.ssfskim.ci-kit.vm-lane.plist`, if its agent is enabled), remove your hold
+   (`rm ~/Library/Logs/ci-kit/vm-hold.$owner`), and bring back the host's instances that were enabled. The launcher's
+   start reconciles job clones only and boots from the pointer's VM from then on, naming the golden at every boot.
+
+8. **Retire** the old golden after the first green production job from the new one (`vm-lane.log` names the golden at
+   each boot): `bake.sh --retire <old>`. It needs no hold, and refuses the pointer's VM, a running VM, and anything
+   but a golden, a candidate or a trial clone.
+
+**When a step fails.** Nothing automated meets it, since the launcher is booted out: rerun the same step. A candidate
+whose trial failed, or took no job, stays for reading (`~/ci-kit-vm/trials/<clone>.out/`, `vm-bake.log`); `--promote`
+refuses it, the pointer and the golden are untouched, and `--retire <cand>` deletes it. A candidate or trial clone
+left running by a step that died is ended with the verified stop ([above](#the-vm-lane)) and then retired. A bake that
+fails leaves its candidate stopped; retire it before baking again under the same name.
 
 ## The dialog watcher
 
