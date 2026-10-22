@@ -1352,6 +1352,26 @@ hold-aware plan send them to the guest, which this spec leaves open.
     read cut every time would never let an idle guest be asked to stop. V4 judges the guard against this contract.
   - **Accepted residues:** a raced alert is lost if the launcher dies between saving the count and creating the alert
     (chosen over a duplicate); a kickoff killed during cleanup leaves its `tart exec` until the clone stops.
+- 2026-10-22 (V2d's builder): **the procedure's and the install's shapes.**
+  - The guest's provisioning is `mac/vm/provision.sh` (run in the bake's guest through `tart exec`); the installed kit is
+    a full copy of `mac/`, so `bake.sh` reads the runner's pin from the kit's `install.sh`. The bake's memory defaults
+    to 4096 MB until V1 decides.
+  - The disk reserve gates every step that boots a VM, and the bake tracks its lowest free space and stops under the
+    floor. A booting step refuses while any `maws-vm-*` runs and holds `vm-lane.lock` for its run.
+  - A candidate `maws-vm-candidate-<id>` is promoted to `maws-vm-golden-<id>`, so a repeated `--promote` finds it
+    under either name; `--bake` moves aside an earlier trial record of the same name, so an old success cannot
+    promote a re-baked image. Registration reads one token line per missing identity and hands each to the guest on
+    `tart exec -i`'s stdin, never as an argument. The trial's job is the one job of `out/job`'s run attempt that ran on
+    the trial runner after the trial began; a trial that gets no job ends through the idle handshake. `--retire`
+    works only on golden, candidate and trial VMs.
+  - `install.sh`: a re-run without `--vm` keeps an installed lane (as `--shared` keeps its count); `--no-vm` removes
+    it alone, keeping `~/ci-kit-vm`. It refuses under a maintenance hold as well as while a reservation stands, boots
+    the launcher out before anything goes live and reads the reservation again, so a guest booted in that gap refuses
+    the install with nothing changed.
+- 2026-10-22 (V2d's builder, taken): **the guest's clipboard is its own.** Tart shares the pasteboard between host and
+  guest by default, `--no-graphics` included (`Run.swift`: `clipboard: !noClipboard`), so MAWS's clipboard groups
+  would cross desktops and break "no result changes because of a neighbour". Every `tart run` of the lane carries
+  `--no-clipboard` (Tart 2.40.1 on the mini has it).
 
 ## Surprises & Discoveries
 
