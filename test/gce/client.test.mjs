@@ -289,3 +289,14 @@ test('a time series page that reports execution errors or unreachable projects f
   const { gce } = gceWith([[`GET ${MON}`, json(200, { timeSeries: [], executionErrors: [], unreachable: [] })]]);
   assert.deepEqual(await gce.timeSeries('metric.type="x"', opts), []);
 });
+
+test('a region and a Cloud Quotas quotaInfo are read as the API returns them (the placements\' limits, spec M6)', async () => {
+  const CQ = 'https://cloudquotas.googleapis.com/v1/projects/ssfskim-ci-kit/locations/global/services/compute.googleapis.com/quotaInfos/CPUS-PER-VM-FAMILY-per-project-region';
+  const { f, gce } = gceWith([
+    ['GET /regions/us-west4', json(200, { name: 'us-west4', quotas: [{ metric: 'IN_USE_ADDRESSES', limit: 8, usage: 0 }] })],
+    [`GET ${CQ}`, json(200, { quotaId: 'CPUS-PER-VM-FAMILY-per-project-region', dimensionsInfos: [] })],
+  ]);
+  assert.equal((await gce.region('us-west4')).quotas[0].limit, 8);
+  assert.equal((await gce.quotaInfo('CPUS-PER-VM-FAMILY-per-project-region')).quotaId, 'CPUS-PER-VM-FAMILY-per-project-region');
+  assert.deepEqual(f.calls.map((c) => c.auth), ['Bearer tok', 'Bearer tok']);
+});

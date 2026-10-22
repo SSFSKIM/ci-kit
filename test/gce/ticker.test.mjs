@@ -2,7 +2,7 @@
 // process, at most one pending, starts at least 10 s apart, requested ticks dropped while the App's budget is low.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createTicker, TICK_SPACING_MS } from '../../gce/launcher/ticker.mjs';
+import { createTicker, TICK_SPACING_MS, FOLLOW_UPS, FOLLOW_WINDOW_MS } from '../../gce/launcher/ticker.mjs';
 
 const flush = () => new Promise((r) => setImmediate(r));
 
@@ -154,4 +154,73 @@ test('a failed tick fails the callers it served, and the pending one still runs'
   assert.equal(w.ticks.length, 2);
   await w.end(1, 'ok');
   assert.equal(await second, 'ok');
+});
+
+// The walk's refusal cost (spec 2026-10-21 M6): a tick whose deadline cut a launch off (`cut`) is followed by another
+// at once, 10 s after its start, inside the request that asked for it, since a tick run with no request open has no
+// CPU (--cpu-throttling). At most FOLLOW_UPS in a row: a pool that keeps running out of time waits for the next request.
+test('a tick that cut launches off runs a follow-up within the same request; at most FOLLOW_UPS in a row', async () => {
+  const w = world();
+  const done = w.ticker('scheduled');
+  let answered = false;
+  done.then(() => { answered = true; });
+  await w.end(0, { cut: 2 });
+  assert.equal(answered, false, 'the request stays open while its follow-up runs');
+  await w.advance(TICK_SPACING_MS);
+  assert.equal(w.ticks.length, 2);
+  assert.deepEqual([w.ticks[1].trigger, w.ticks[1].requests], ['follow-up', 0]);
+  for (let k = 1; k <= FOLLOW_UPS; k += 1) {
+    await w.end(k, { cut: 1 });
+    await w.advance(TICK_SPACING_MS);
+  }
+  assert.equal(w.ticks.length, 1 + FOLLOW_UPS, 'no fourth follow-up');
+  await flush();
+  assert.equal(answered, true);
+  assert.deepEqual(await done, { cut: 2 }, 'answered with its own tick\'s outcome');
+});
+
+test('a follow-up joins the requests already pending; a tick that cut nothing has none', async () => {
+  const w = world();
+  w.ticker('requested');
+  const waiting = w.ticker('requested');
+  await w.end(0, { cut: 1 });
+  await w.advance(TICK_SPACING_MS);
+  assert.equal(w.ticks.length, 2);
+  assert.deepEqual([w.ticks[1].trigger, w.ticks[1].requests], ['requested', 1]);
+  await w.end(1, { cut: 0 });
+  await w.advance(TICK_SPACING_MS);
+  assert.equal(w.ticks.length, 2);
+  assert.deepEqual(await waiting, { cut: 0 });
+});
+
+test('no follow-up starts past FOLLOW_WINDOW_MS from the run\'s first tick, so no request outlives the 300 s timeouts', async () => {
+  const w = world();
+  const done = w.ticker('requested');
+  await w.advance(100_000);
+  await w.end(0, { cut: 1 });
+  await w.advance(TICK_SPACING_MS);
+  assert.equal(w.ticks.length, 2, '100 s in: a follow-up');
+  await w.advance(FOLLOW_WINDOW_MS - 100_000);
+  await w.end(1, { cut: 1 });
+  await w.advance(TICK_SPACING_MS);
+  assert.equal(w.ticks.length, 2, 'past the window: none');
+  assert.deepEqual(await done, { cut: 1 });
+});
+
+test('review: the window counts from the first request\'s arrival, so a request queued behind a long tick is not held past it', async () => {
+  const w = world();
+  w.ticker('scheduled'); // tick 0, 0-85 s
+  await w.advance(1_000);
+  const queued = w.ticker('requested'); // arrives at 1 s
+  await w.advance(84_000);
+  await w.end(0);
+  assert.equal(w.ticks.length, 2); // its tick, 85-170 s
+  await w.advance(85_000);
+  await w.end(1, { cut: 1 });
+  assert.equal(w.ticks.length, 3, 'a follow-up at 170 s: 169 s after the request arrived');
+  await w.advance(85_000);
+  await w.end(2, { cut: 1 });
+  await w.advance(TICK_SPACING_MS);
+  assert.equal(w.ticks.length, 3, 'none at 255 s: 254 s after the request arrived');
+  assert.deepEqual(await queued, { cut: 1 });
 });

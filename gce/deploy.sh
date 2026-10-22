@@ -42,7 +42,7 @@ die() { echo "deploy: $*" >&2; exit 1; }
 base() {
   g services enable compute.googleapis.com secretmanager.googleapis.com run.googleapis.com \
     cloudscheduler.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com \
-    logging.googleapis.com monitoring.googleapis.com pubsub.googleapis.com
+    logging.googleapis.com monitoring.googleapis.com pubsub.googleapis.com cloudquotas.googleapis.com
   g iam service-accounts describe "$SA" > /dev/null 2>&1 ||
     g iam service-accounts create "$SA_NAME" --display-name='ci-kit launcher and bake'
   # The public receiver's own identity, apart from the launcher's: it may read the webhook secret (granted by the
@@ -57,6 +57,11 @@ base() {
   # Read the Cloud NAT's day (bytes processed, addresses held) for the ledger's daily line (spec M6).
   g projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$SA" \
     --role=roles/monitoring.viewer --condition=None > /dev/null
+  # Read each machine family's vCPU grant per region from Cloud Quotas, so the walk skips a full placement instead of
+  # paying its refusal (gce/launcher/room.mjs; spec M6). A region's addresses and instances come from regions.get,
+  # which compute.instanceAdmin.v1 already allows.
+  g projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$SA" \
+    --role=roles/cloudquotas.viewer --condition=None > /dev/null
   # Cloud Run source deploys build as the project's default compute account (new projects since 2024), which needs
   # the builder role to read the uploaded source and push the image. No kit VM runs as that account: VMs have none.
   local number

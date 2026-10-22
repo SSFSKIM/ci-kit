@@ -326,8 +326,21 @@ refusal is remembered for the rest of the tick, scoped to what its message names
 the refused machine's family, or the older `C3D_CPUS` form) by region and family, so C4D refused in us-central1 leaves
 C3D there to try, any other regional quota (`CPUS`, `INSTANCES`, `IN_USE_ADDRESSES`, disk capacity) by region,
 `CPUS_ALL_REGIONS` everywhere, a `PREEMPTIBLE_` one for spot only; every later attempt in that scope of the same or
-more vCPUs is skipped, in this walk and the tick's later ones, since a smaller VM may still fit. A launch whose every
-attempt is so ruled out makes no runner or row and its job waits in GitHub's queue; no other launch stops. An insert
+more vCPUs is skipped, in this walk and the tick's later ones, since a smaller VM may still fit.
+
+A refusal costs 6-21 s (it is the insert operation's error), and walks in flight together each pay the same one, so
+the walk also knows each placement's limits and skips a full placement without an insert (`gce/launcher/room.mjs`):
+the region's `IN_USE_ADDRESSES` (while egress is external) and `INSTANCES` from regions.get, and the family's vCPUs
+from Cloud Quotas' `CPUS_PER_VM_FAMILY` (region, vm_family) grant, read live and cached for 10 min, so a grant that
+lands is picked up without a config change. What holds them is the tick's own listing (job and bake VMs; a stopped VM
+holds no vCPUs or address, a NAT VM no address) plus what its walks have sent; a refused insert gives its share back,
+and a refusal that still happens closes that limit for the rest of the tick, for every size. Without a read (the
+cache's first read failed), nothing is skipped as full. The tick summary's `full` counts the attempts skipped, by limit.
+A launch whose every attempt is so ruled out makes no runner or row and its job waits in GitHub's queue; no other
+launch stops. A tick's budget is a 45 s constant (`TICK_BUDGET_MS`), well below the 300 s of Cloud Run's request
+timeout, Cloud Scheduler's attempt deadline and Pub/Sub's ack deadline, since a request stays open for its tick's whole
+run; a launch it cuts off (the summary's `cut`) gets a follow-up tick 10 s after the cut one started, inside the same
+request (at most 3 in a row, none starting 3 min past the first), rather than waiting for the minute tick. An insert
 whose outcome is unknown is settled through its zone operation before any other zone is tried, and if it stays
 unknown the walk stops and the cleanup rules settle it. The VM: no service account, its placement's subnetwork with
 the egress `gce.json` names (an ephemeral external address by default; The network, below), the JIT config in metadata `ci-kit-jit`, `maxRunDuration` = `max_run_minutes` with a `DELETE` action, a boot disk of the
