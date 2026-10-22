@@ -21,9 +21,13 @@ const bake = join(mac, 'vm/bake.sh');
 const provision = join(mac, 'vm/provision.sh');
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'ci-kit-vm-bake-')));
 const children = new Set();
+const homes = [];
 after(() => {
+  // A guest's pasteboard is never the host's: no tart run of any test went without --no-clipboard.
+  const shared = homes.filter((home) => existsSync(join(home, 'tart/clipboard-shared')));
   for (const child of children) child.kill('SIGKILL');
   rmSync(root, { recursive: true, force: true });
+  assert.deepEqual(shared, [], 'every tart run carries --no-clipboard');
 });
 const executable = (path, body) => { writeFileSync(path, `#!/bin/bash\n${body}\n`); chmodSync(path, 0o755); };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -70,6 +74,8 @@ case $command in
     name=\${!#} dir=$vms/\${!#}
     [[ -d $dir && $(state "$name") != running ]] || { echo "Error: cannot run $name" >&2; exit 1; }
     printf '%s\\n' "$@" > "$dir/run.args"
+    # A guest's pasteboard is never the host's: every run of the lane's carries --no-clipboard.
+    [[ " $* " == *' --no-clipboard '* ]] || { echo "Error: $name run with the host's clipboard shared" >&2; echo "$name" >> "$t/clipboard-shared"; exit 64; }
     echo $$ > "$dir/run.pid"; echo running > "$dir/state"
     until [[ -e $dir/poweroff || -e $dir/stopping ]]; do sleep 0.05; done
     echo stopped > "$dir/state"; rm -f "$dir/run.pid" "$dir/poweroff" "$dir/stopping" ;;
@@ -130,6 +136,7 @@ esac`;
 let macs = 0;
 function fixture({ hold = 'maintenance since 2026-10-22T09:00:00Z', disk = 120, env = {} } = {}) {
   const home = mkdtempSync(join(root, `mac${++macs}-`));
+  homes.push(home);
   const bin = join(home, 'bin');
   const logs = join(home, 'Library/Logs/ci-kit');
   const vmHome = join(home, 'ci-kit-vm');
@@ -277,7 +284,7 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.equal(f.state(CANDIDATE), 'stopped');
     assert.equal(text(join(f.vms, CANDIDATE, 'source')).trim(), BASE);
     assert.deepEqual(text(join(f.vms, CANDIDATE, 'set.args')).trim().split('\n'), ['--cpu', '4', '--memory', '4096', '--display', '2560x1440pt']);
-    assert.deepEqual(text(join(f.vms, CANDIDATE, 'run.args')).trim().split('\n'), ['--no-graphics', `--dir=kit:${mac}:ro`, `--dir=maws:${f.maws}:ro`, CANDIDATE]);
+    assert.deepEqual(text(join(f.vms, CANDIDATE, 'run.args')).trim().split('\n'), ['--no-graphics', '--no-clipboard', `--dir=kit:${mac}:ro`, `--dir=maws:${f.maws}:ro`, CANDIDATE]);
     const script = '/bin/bash /Volumes/My Shared Files/kit/vm/provision.sh';
     assert.deepEqual(f.exec(CANDIDATE), [`${script} check`, `${script} node 11.23.0`, `${script} store`, `${script} libreoffice`,
       `${script} runner ${installPin('RUNNER_VERSION')} ${installPin('RUNNER_SHA256')} mini-vm`, `${script} helpers`]);
@@ -291,6 +298,7 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.match(result.stdout, /pnpm e2e:deliverables/);
     assert.match(result.stdout, /Electron may send notifications/);
     assert.match(result.stdout, /never VNC into the guest/);
+    assert.match(result.stdout, /This one boot keeps the clipboard shared/);
     assert.match(f.log(), /bake held for maintenance by ci-opt \(maintenance since/);
   });
 
@@ -374,7 +382,7 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
       '/bin/bash /Volumes/My Shared Files/kit/vm/provision.sh register vm ci-kit-mac-mini-vm ci-kit-mac-solo,ci-kit-mac-vm https://github.com/SSFSKIM/MAWS',
       '/bin/bash /Volumes/My Shared Files/kit/vm/provision.sh register vm-trial ci-kit-mac-mini-vm-trial ci-kit-mac-vm-trial https://github.com/SSFSKIM/MAWS',
     ]);
-    assert.deepEqual(text(join(f.vms, CANDIDATE, 'run.args')).trim().split('\n'), ['--no-graphics', `--dir=kit:${mac}:ro`,
+    assert.deepEqual(text(join(f.vms, CANDIDATE, 'run.args')).trim().split('\n'), ['--no-graphics', '--no-clipboard', `--dir=kit:${mac}:ro`,
       `--dir=identity-vm:${f.vmHome}/vm/identity`, `--dir=identity-vm-trial:${f.vmHome}/vm-trial/identity`, CANDIDATE]);
     assert.equal(f.state(CANDIDATE), 'stopped');
     // Both registered: nothing left to do.
@@ -417,7 +425,7 @@ describe('the trial (bake.sh --trial)', macOnly, () => {
     assert.match(clone, /^maws-vm-trial-\d{8}T\d{6}Z$/);
     assert.equal(text(join(f.vms, clone, 'source')).trim(), CANDIDATE);
     const args = text(join(f.vms, clone, 'run.args')).trim().split('\n');
-    assert.deepEqual(args, ['--no-graphics', `--dir=kit:${mac}:ro`, `--dir=identity:${f.vmHome}/vm-trial/identity:ro`,
+    assert.deepEqual(args, ['--no-graphics', '--no-clipboard', `--dir=kit:${mac}:ro`, `--dir=identity:${f.vmHome}/vm-trial/identity:ro`,
       `--dir=out:${f.vmHome}/vm-trial/out`, `--dir=cache:${f.vmHome}/vm-trial/cache`, clone]);
     assert.ok(!args.some((arg) => arg.includes(`${f.vmHome}/vm/`)), 'nothing of the production slot is shown');
     assert.deepEqual(text(join(f.vms, clone, 'kicked')).trim().split('\n'), ['/Users/admin/ci-kit/vm/guest/kickoff.sh', 'vm-trial', clone]);

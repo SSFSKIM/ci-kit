@@ -116,14 +116,16 @@ tart_kickoff() { # <name> <slot> <seconds>
 tart_shares() { # <kit dir> <slot dir>
   printf '%s\n' "--dir=kit:$1:ro" "--dir=identity:$2/identity:ro" "--dir=out:$2/out" "--dir=cache:$2/cache"
 }
-# `tart run --no-graphics` of a VM, detached in a session of its own: it outlives its caller, which is how a guest
-# keeps running through a launcher's death, and nothing of the caller's (its output, its locks, its process group)
-# reaches it. Sets tart_run_pid.
+# `tart run --no-graphics --no-clipboard` of a VM, detached in a session of its own: it outlives its caller, which is
+# how a guest keeps running through a launcher's death, and nothing of the caller's (its output, its locks, its process
+# group) reaches it. Tart shares the host's pasteboard with a guest by default, graphics or not (Run.swift passes
+# clipboard: !noClipboard), and a guest's pasteboard must never be the host's: MAWS's clipboard groups would cross
+# desktops. Sets tart_run_pid.
 tart_spawn() { # <name> <log file> <tart run options...>
   local name=$1 out=$2
   shift 2
   (cd / && exec perl -MPOSIX=setsid -e 'setsid() or exit 126; exec { $ARGV[0] } @ARGV; exit 127' \
-    env LC_ALL=C "$tart_bin" run --no-graphics "$@" "$name") </dev/null >>"$out" 2>&1 7>&- 8>&- 9>&- &
+    env LC_ALL=C "$tart_bin" run --no-graphics --no-clipboard "$@" "$name") </dev/null >>"$out" 2>&1 7>&- 8>&- 9>&- &
   # shellcheck disable=SC2034 # the caller reads it
   tart_run_pid=$!
 }

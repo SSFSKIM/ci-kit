@@ -9,7 +9,7 @@
 # ONE CLONE, ONE JOB, THEN GONE. Every bound is read from the environment, its default in parentheses.
 #   idle        the queue read every CI_KIT_VM_POLL s (15); a boot when the boot rule holds (below)
 #   booting     one step under the desktop lock, from the first write to the spawn: vm-reserved written, `tart clone
-#               <golden> maws-vm-job-<slot>-<time>`, `tart run --no-graphics` with the four shares spawned detached. A
+#               <golden> maws-vm-job-<slot>-<time>`, `tart run --no-graphics --no-clipboard` with the four shares spawned detached. A
 #               clone that fails releases under the same lock; a run that exits within CI_KIT_VM_SPAWN_CHECK s (1)
 #               has its stopped clone deleted, then releases. Then until `tart exec <clone> true` answers, at most
 #               CI_KIT_VM_BOOT s (120)

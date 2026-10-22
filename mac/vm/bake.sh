@@ -298,7 +298,9 @@ The human's first-run window step, once, on $name (Design, The image). In the mi
 Screen Sharing from the MacBook (never VNC into the guest), with the maintenance hold still in place:
   1. Open Terminal on the mini and run:
        tart run --dir=maws:$maws:ro $name
-     A window opens and the guest logs in as admin by itself.
+     A window opens and the guest logs in as admin by itself. This one boot keeps the clipboard shared, so the
+     commands below can be pasted in: nothing else runs on the mini under the hold, and a pasteboard does not outlive
+     the guest's shutdown. Every other boot of the lane (job clones, trials, the bake's) runs with --no-clipboard.
   2. In the guest, open Terminal (Applications > Utilities > Terminal) and answer anything it asks on its first launch.
   3. In the guest, open LibreOffice from Applications, answer its first-run dialogs, and quit it.
   4. In the guest's Terminal run:

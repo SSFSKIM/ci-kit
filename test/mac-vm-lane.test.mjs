@@ -68,6 +68,8 @@ case $command in
     name=\${!#} dir=$vms/\${!#}
     [[ -d $dir && $(state "$name") != running ]] || { echo "Error: cannot run $name" >&2; exit 1; }
     printf '%s\\n' "$@" > "$dir/run.args"
+    # A guest's pasteboard is never the host's: every run of the lane's carries --no-clipboard.
+    [[ " $* " == *' --no-clipboard '* ]] || { echo "Error: $name run with the host's clipboard shared" >&2; echo "$name" >> "$t/clipboard-shared"; exit 64; }
     [[ ! -e $t/fail-run ]] || { echo 'Error: Failed to generate keypair' >&2; exit 1; }
     echo $$ > "$dir/run.pid"; echo running > "$dir/state"
     until [[ -e $dir/poweroff || -e $dir/stopping ]]; do sleep 0.05; done
@@ -335,6 +337,7 @@ async function finish(m, ...running) {
   for (const launcherProcess of running) await launcherProcess.kill();
   await m.stop();
   assert.deepEqual(m.violations, [], 'a job clone existed without the reservation');
+  assert.equal(readFileSync(join(m.home, 'tart/clipboard-shared'), { encoding: 'utf8', flag: 'a+' }), '', 'every tart run carries --no-clipboard');
 }
 
 describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
@@ -348,7 +351,7 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     assert.match(m.log(), new RegExp(`booting ${clone} from the golden image ${GOLDEN}: 1 ci-kit-mac-vm job\\(s\\) queued; holds none; pressure 1, available 60%, swap 500 MB, swap steady over \\d+ s; free 120 GB; display 2560x1440@2x; mode always`));
     // tart run with the four shares, the kit and the identity read-only.
     assert.deepEqual(readFileSync(join(m.vms, clone, 'run.args'), 'utf8').trim().split('\n'), [
-      '--no-graphics', `--dir=kit:${mac}:ro`, `--dir=identity:${m.slotDir}/identity:ro`, `--dir=out:${m.out}`, `--dir=cache:${m.slotDir}/cache`, clone]);
+      '--no-graphics', '--no-clipboard', `--dir=kit:${mac}:ro`, `--dir=identity:${m.slotDir}/identity:ro`, `--dir=out:${m.out}`, `--dir=cache:${m.slotDir}/cache`, clone]);
     assert.deepEqual(readFileSync(join(m.vms, clone, 'kicked'), 'utf8').trim().split('\n'), ['/Users/admin/ci-kit/vm/guest/kickoff.sh', m.slot, clone]);
     assert.deepEqual(readdirSync(m.out).filter((name) => name !== 'wrapper.log'), [], 'the clone is handed an empty out/ (the wrapper.log its kickoff opens aside)');
     await m.listening(clone);
@@ -484,7 +487,7 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     assert.equal(seen, '', 'the hook waits for the boot');
     m.flag('clone-go');
     await m.until(() => seen.includes('locked\n'), 'the hook\'s lock');
-    assert.match(seen, new RegExp(`tart run --no-graphics .* maws-vm-job-${m.slot}-\\d{8}T\\d{6}Z$`, 'm'), 'tart run was started before the lock was let go');
+    assert.match(seen, new RegExp(`tart run --no-graphics --no-clipboard .* maws-vm-job-${m.slot}-\\d{8}T\\d{6}Z$`, 'm'), 'tart run was started before the lock was let go');
     hook.kill('SIGKILL');
     await m.booted();
     await finish(m, a);
