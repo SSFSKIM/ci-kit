@@ -18,11 +18,12 @@ import { queuedPoolJobs } from '../../pool/agent/logic.mjs';
 import { staleBakeInstances } from '../bake/plan.mjs';
 import { servedRepos, placementZones } from './config.mjs';
 import {
-  allocationId, instanceName, repoLabel, viewInstance, isGce, planLaunches, runnersNeverOnline, placements, quotaBlocks, insertOutcome, walkPlacements,
+  allocationId, instanceName, repoLabel, viewInstance, isGce, planLaunches, runnersNeverOnline, placements, quotaBlocks, insertOutcome, walkPlacements, stockoutMemory,
   jobInstance, jitRequest, newestReadyImage, reviewInstances, reviewRows, orphanRunners, orphanDisks, reportable, claimedInstances,
-  largestMachineCpus, raceAttempts, walkRecord, unsettledInsert, quotaMetric, RACE_AFTER_MS,
+  largestMachineCpus, raceAttempts, walkRecord, unsettledInsert, pendingAllocation, quotaMetric, RACE_AFTER_MS,
 } from './logic.mjs';
 import { planPrelaunches } from './prelaunch.mjs';
+import { createRoom } from './room.mjs';
 import { launchRow, runningRow, withJob, jobRecord, finalRow, dailyLine, launchCounts, natDay } from './ledger.mjs';
 
 export const TICK_BUDGET_MS = 45_000;
@@ -37,6 +38,9 @@ const SETTLE_PARALLEL = 4; // zones whose operations are read at once
 // and still be that insert's, when its link is unknown. A walk's earlier attempt in the same zone was sent at least one
 // operation earlier.
 const SEND_SKEW_MS = 2_000;
+// How long a launch waits for the placements' limits (room.mjs) when the cache must read them: the read runs beside the
+// tick's other reads and is done long before, so this only bounds a slow one, after which the walk runs without them.
+const LIMITS_WAIT_MS = 3_000;
 const NAT_GATEWAY = 'ci-kit-nat'; // each placement region's Cloud NAT (gce/deploy.sh network)
 const zoneOf = (r) => r.zone.split('/').pop();
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -61,8 +65,9 @@ function operationOf(ops, instance, insert) {
   return mine.filter((o) => Date.parse(o.insertTime) >= after).sort((a, b) => Date.parse(b.insertTime) - Date.parse(a.insertTime))[0] ?? null;
 }
 
-// deps: {gce, gh, ledger, cfg, config, poolRepos, now, log, error, random, alert, after}; error(message, fields) logs at
-// ERROR what a log-based alert watches (gce/deploy.sh alert), log otherwise.
+// deps: {gce, gh, ledger, cfg, config, poolRepos, now, log, error, random, alert, after, stockouts, limits}; error(message,
+// fields) logs at ERROR what a log-based alert watches (gce/deploy.sh alert), log otherwise. limits: the placements'
+// limits across ticks (room.mjs limitsCache: get(placements) → limits or null); none, and the walk skips nothing full.
 // cfg: the gce.json it runs, config: that file's commit; poolRepos: the repo names in pool.json (one file per repo).
 // after(ms) → {promise, cancel}: a timer, the race's (tests run it on their clock).
 export class Launcher {
@@ -74,6 +79,7 @@ export class Launcher {
     this.alert ??= createAlerts(this.gh, this.cfg.ledger.repo, { log: this.log });
     this.budgetMs ??= TICK_BUDGET_MS;
     this.insertDeadlineMs ??= INSERT_DEADLINE_MS;
+    this.stockouts ??= stockoutMemory(); // the server passes one kept across ticks (logic.mjs stockoutMemory)
     this.after ??= (ms) => {
       let timer;
       const promise = new Promise((resolve) => { timer = setTimeout(resolve, ms); });
@@ -86,10 +92,14 @@ export class Launcher {
   // out.prelaunched: the VMs of out.launched launched ahead of a run's pool jobs; out.raced: those that race another's
   // slow insert (`<race> for <original>`). The walks' counts (spec M6): out.inserts, every insert sent, {zone, machine,
   // provisioning, outcome, seconds from send to settle, null when it never settled}; and of the rows the launches wrote,
-  // out.refusals, out.slow and out.onDemand (ledger.mjs launchCounts).
+  // out.refusals, out.slow and out.onDemand (ledger.mjs launchCounts). out.full: the attempts skipped for want of room,
+  // by the limit each would pass (room.mjs); out.cut: the launches the tick's deadline cut off, which the server runs a
+  // follow-up tick for (ticker.mjs).
   async tick() {
     const deadline = this.now() + this.budgetMs;
-    const out = { launched: [], prelaunched: [], raced: [], deleted: [], unregistered: [], finalized: [], waiting: 0, firstInsert: null, inserts: [] };
+    const out = {
+      launched: [], prelaunched: [], raced: [], deleted: [], unregistered: [], finalized: [], waiting: 0, firstInsert: null, inserts: [], full: {}, cut: 0,
+    };
     const seen = await this.observe();
     // Launches start first, and the cleanup runs beside them: neither waits for the other. Launching before cleaning
     // up can only under-admit for a tick (a VM about to be deleted still counts against max_vcpus), never over-admit.
@@ -141,6 +151,7 @@ export class Launcher {
     // Read now so that a launch does not wait for it; a tick with nothing to launch never looks.
     const images = this.gce.images('labels.ci-kit=gce-image');
     images.catch(() => {});
+    const limits = this.limits ? this.limits.get(this.cfg.placements) : Promise.resolve(null); // never rejects
     const reads = new Map(listed.map((repo) => [repo, this.readRepo(repo)]));
 
     // Awaited first: it is the one read whose failure fails the tick, and a rejection nobody awaits yet would end the
@@ -180,7 +191,7 @@ export class Launcher {
     for (const [repo, mine] of listings) if (mine) runners.set(repo, mine);
     // quota: the tick's memory of quota refusals (logic.mjs quotaScope), shared by its launches; launches: the rows they
     // wrote last, which the tick's counts read.
-    const seen = { served, instances, complete, disks, builders, rows, rowOf, byLabel, runners, images, quota: [], launches: [] };
+    const seen = { served, instances, complete, disks, builders, rows, rowOf, byLabel, runners, images, limits, quota: [], launches: [] };
 
     // A VM whose job has ended says so in ci-kit/job before its guest powers off. Read beside the jobs, it serves both
     // the cover (an ended job's VM covers nothing) and the cleanup (the VM goes without waiting for its power-off).
@@ -550,9 +561,19 @@ export class Launcher {
     // A race (spec M6) starts only once every queued job's launch has made its first attempt (`firstTried`), so it never
     // takes the quota or the vCPUs a job not yet tried needs; it reserves its own in `inflight`, which pre-launch then
     // plans against, and the tick ends when its races have.
+    // The tick's room in each placement (room.mjs): the limits, less what every ci-kit VM listed holds, job and bake.
+    const wait = this.after(LIMITS_WAIT_MS);
+    const limits = await Promise.race([seen.limits, wait.promise.then(() => null)]);
+    wait.cancel();
+    const bake = seen.builders.filter((b) => b.labels?.['ci-kit'] === 'gce-builder').map(viewInstance);
+    // An earlier insert still unsettled and unlisted holds its share as its VM would (planLaunches counts its vCPUs).
+    const listed = new Set(seen.instances.map((i) => i.alloc));
+    const pending = seen.rows.filter((r) => !listed.has(r.alloc) && pendingAllocation(r) && unsettledInsert(r)?.zone)
+      .map((r) => ({ zone: unsettledInsert(r).zone, vcpus: r.reserved ?? largestMachineCpus(r.cpus, this.cfg), egress: r.egress }));
+    const room = createRoom({ limits, instances: [...seen.instances, ...bake], pending, placements: this.cfg.placements, egress: this.cfg.egress });
     let open;
     const ctx = {
-      seen, deadline, out, image, inflight: plan.inflight, races: [],
+      seen, deadline, out, image, room, inflight: plan.inflight, races: [],
       untried: new Set(plan.launches), firstTried: new Promise((resolve) => { open = resolve; }),
     };
     const opened = () => {
@@ -573,6 +594,7 @@ export class Launcher {
       await this.launchQueue(later, ctx);
     }
     while (ctx.races.length) await Promise.all(ctx.races.splice(0));
+    if (room) out.full = room.skipped();
   }
 
   // Launches `items` with up to PARALLEL_LAUNCHES at once, none started past the deadline. Returns how many made a VM.
@@ -594,6 +616,7 @@ export class Launcher {
       }
     };
     await Promise.all(Array.from({ length: Math.min(PARALLEL_LAUNCHES, queue.length) }, worker));
+    ctx.out.cut += queue.length; // never started: the deadline came first
     return made;
   }
 
@@ -610,8 +633,9 @@ export class Launcher {
     const purpose = job ? `job ${job.id}` : `run ${prelaunch.run}'s cpus-${cpus} pre-launch`;
     const what = race ? `the race of ${instanceName(race.of)} for ${purpose}` : purpose;
     const attempts = item.attempts ?? placements(cpus, this.cfg);
-    if (attempts.every((p) => quotaBlocks(seen.quota, p))) {
-      this.log(`${what} in ${repo} waits: quota refused every placement for its size this tick`);
+    if (attempts.every((p) => quotaBlocks(seen.quota, p) || this.stockouts.has(p, this.now()) || (ctx.room && !ctx.room.fits(p)))) {
+      for (const p of attempts) ctx.room?.skip(p);
+      this.log(`${what} in ${repo} waits: every placement for its size is full, out of quota this tick, or recently stocked out`);
       return {};
     }
     const at = this.now();
@@ -680,8 +704,9 @@ export class Launcher {
         if (settled.outcome !== 'unknown') unsettled?.settle();
         return settled;
       },
-      now: this.now, deadline, quota: seen.quota, raced: () => raced,
+      now: this.now, deadline, quota: seen.quota, stockouts: this.stockouts, raced: () => raced, room: ctx.room,
     });
+    if (result.stop === 'deadline') out.cut += 1;
     if (unsettled) {
       // Its race is decided by the tick's deadline at the latest; a race that cannot start yet (a queued job not yet
       // tried) is given up rather than holding this launch's place while that job waits for one.
@@ -739,7 +764,7 @@ export class Launcher {
     await ctx.firstTried;
     if (!stillPending()) return;
     const name = row.instance;
-    const next = raceAttempts(attempts, attempt).filter((p) => !quotaBlocks(ctx.seen.quota, p));
+    const next = raceAttempts(attempts, attempt).filter((p) => !quotaBlocks(ctx.seen.quota, p) && !this.stockouts.has(p, this.now()) && (!ctx.room || ctx.room.fits(p)));
     const need = largestMachineCpus(item.cpus, this.cfg);
     let why = null;
     if (!next.length) why = 'no other zone left to try';

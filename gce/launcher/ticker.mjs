@@ -6,14 +6,26 @@
 // dropped: the minute tick alone serves, and a job waits at most that minute.
 
 export const TICK_SPACING_MS = 10_000;
+// A tick whose deadline (launcher.mjs TICK_BUDGET_MS) cut launches off (its outcome's `cut`) is followed by one more,
+// TICK_SPACING_MS after its start, rather than leaving those jobs to the next minute tick: it joins the pending tick if
+// there is one, and the request that asked for the cut tick is answered only once its follow-up has ended, because a
+// tick run with no request open would have no CPU (the service runs with --cpu-throttling). FOLLOW_UPS bounds a run of
+// them, and none starts FOLLOW_WINDOW_MS after the earliest request the run serves arrived: a tick takes up to ~90 s (its 45 s budget, then the
+// inserts already sent, which wait up to 40 s), and a request held past Cloud Run's 300 s timeout, Cloud Scheduler's
+// 300 s attempt deadline or Pub/Sub's 300 s ack deadline would fail or be redelivered. A pool that keeps running out
+// of time waits for the next request.
+export const FOLLOW_UPS = 3;
+export const FOLLOW_WINDOW_MS = 180_000;
 
 // tick({trigger, requests}) → its outcome: runs one tick; trigger is 'scheduled' when a scheduled request is among
-// those it serves, else 'requested'; requests is how many requests it serves. budgetLow() → true while requested ticks
-// are to be dropped, read when the tick would start. Returns serve(trigger) → the outcome of the tick that serves
-// this request ({dropped, requests} when it was dropped), or the error it failed with.
+// those it serves, 'requested' when another request is, else 'follow-up'; requests is how many requests it serves.
+// budgetLow() → true while requested ticks (and follow-ups) are to be dropped, read when the tick would start. Returns
+// serve(trigger) → the outcome of the tick that serves this request ({dropped, requests} when it was dropped), or the
+// error it failed with.
 export function createTicker({ tick, budgetLow, now = Date.now, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), spacingMs = TICK_SPACING_MS }) {
   let running = null; // the tick in progress
-  let pending = null; // {scheduled, requests, done}: the tick that serves requests arriving now
+  let pending = null; // {scheduled, requests, chain, since, done}: the tick that serves requests arriving now; since:
+  // when the earliest request it serves arrived (a follow-up's, its run's)
   let lastStart = -Infinity;
 
   async function start(slot) {
@@ -25,20 +37,29 @@ export function createTicker({ tick, budgetLow, now = Date.now, sleep = (ms) => 
     pending = null;
     if (!slot.scheduled && budgetLow()) return { dropped: 'rate budget', requests: slot.requests };
     lastStart = now();
-    const mine = tick({ trigger: slot.scheduled ? 'scheduled' : 'requested', requests: slot.requests });
+    const mine = tick({ trigger: slot.scheduled ? 'scheduled' : slot.requests ? 'requested' : 'follow-up', requests: slot.requests });
     running = mine;
+    let out;
     try {
-      return await mine;
+      out = await mine;
     } finally {
       if (running === mine) running = null;
     }
+    if (out?.cut > 0 && slot.chain < FOLLOW_UPS && now() - slot.since < FOLLOW_WINDOW_MS) await join('follow-up', slot.chain + 1, slot.since).catch(() => {});
+    return out;
   }
 
-  return function serve(trigger) {
-    const slot = pending ?? (pending = { scheduled: false, requests: 0, done: null });
-    slot.requests += 1;
+  // A request, or a follow-up `chain` ticks into a run of them whose earliest request arrived at `since`, joins the
+  // pending tick, or makes it.
+  function join(trigger, chain = 0, since = now()) {
+    const slot = pending ?? (pending = { scheduled: false, requests: 0, chain: 0, since, done: null });
+    slot.since = Math.min(slot.since, since);
+    if (trigger === 'follow-up') slot.chain = Math.max(slot.chain, chain);
+    else slot.requests += 1;
     if (trigger === 'scheduled') slot.scheduled = true;
     slot.done ??= start(slot);
     return slot.done;
-  };
+  }
+
+  return (trigger) => join(trigger);
 }

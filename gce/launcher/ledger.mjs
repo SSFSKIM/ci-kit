@@ -18,10 +18,29 @@ export const moreFinal = (a, b) => rank(a) > rank(b);
 //   evidence/maws/gce-spot.md). On demand: the list prices of the same day.
 // - us-west4 c4d: the Cloud Billing catalog on 2026-10-21 (Compute Engine 6F81-5844-456A): spot core 4FCE-953F-3CE6,
 //   spot RAM 9841-EB59-D7A0; on-demand core CB83-B2B2-36C9, on-demand RAM BECC-C6A5-A981.
+// - M6's placements (spec 2026-10-21, Stock-out and quota resilience), the same catalog on 2026-10-21 (spot core, spot
+//   RAM; on-demand core, on-demand RAM):
+//   c4d us-central1 and us-east1 ("Americas"): 98F9-9C75-24C5, 06A4-288A-B3FF; 80C2-B3C5-BD5E, 159A-6F40-D544.
+//   c4d us-east4: 76BF-2975-1D5B, D0C3-EFE8-9200; 4B07-A843-F04F, 03FF-FFFF-77B2.
+//   c4d us-east5: 0169-7EBF-204A, 3A2D-FAED-C88C; 5177-3764-0DF0, 3FE7-BA20-521F.
+//   c3d us-east1 ("Americas"): DCB1-2557-F8CB, F33C-AA89-DE6D; CEE0-1AE0-3422, 79E9-0431-3CD3.
+//   c3d us-east4: 462F-BF9D-29F2, FEDE-CA21-A2B8; 299E-E8A6-3B63, 4AB8-DEB2-DD17.
 const RATES = {
   'us-central1': {
     c3d: { spot: { vcpu: 0.00715, gib: 0.00096 }, standard: { vcpu: 0.033982, gib: 0.004555 } },
+    c4d: { spot: { vcpu: 0.01383, gb: 0.00148 }, standard: { vcpu: 0.0327035, gb: 0.003495578 } },
     e2: { spot: { vcpu: 0.01309, gib: 0.001754 }, standard: { vcpu: 0.021811, gib: 0.002923 } },
+  },
+  'us-east1': {
+    c3d: { spot: { vcpu: 0.00679, gib: 0.000912 }, standard: { vcpu: 0.029563, gib: 0.003959 } },
+    c4d: { spot: { vcpu: 0.01383, gb: 0.00148 }, standard: { vcpu: 0.0327035, gb: 0.003495578 } },
+  },
+  'us-east4': {
+    c3d: { spot: { vcpu: 0.01331, gib: 0.001779 }, standard: { vcpu: 0.029563, gib: 0.003959 } },
+    c4d: { spot: { vcpu: 0.01735, gb: 0.001855 }, standard: { vcpu: 0.0327035, gb: 0.003495578 } },
+  },
+  'us-east5': {
+    c4d: { spot: { vcpu: 0.01362, gb: 0.001454 }, standard: { vcpu: 0.0327035, gb: 0.003495578 } },
   },
   'us-west4': {
     c4d: { spot: { vcpu: 0.0062, gb: 0.000661 }, standard: { vcpu: 0.036834, gb: 0.00393707 } },
@@ -45,10 +64,17 @@ const NAT_PER_GIB = 0.045;
 const NAT_ADDRESS_HOURLY = 0.005;
 // Boot disks by region and type, $ a month: per GiB, and for Hyperdisk Balanced per IOPS and per MiB/s provisioned
 // above the 3,000 IOPS and 140 MiB/s its capacity price includes. pd-balanced us-central1: the list price of
-// 2026-10-16. hyperdisk-balanced us-west4: the catalog on 2026-10-21, capacity F704-99E9-0130, IOPS D4CA-3484-910A,
-// throughput E96C-BF4C-C467.
+// 2026-10-16. The rest: the catalog on 2026-10-21. hyperdisk-balanced (capacity, IOPS, throughput): us-west4
+// F704-99E9-0130, D4CA-3484-910A, E96C-BF4C-C467; us-central1 83FF-9C17-D184, 3EEB-E1E6-C521, 9F5F-0236-9C17; us-east1
+// 5607-BF17-C33D, FD24-9FBC-B7F8, 5E1B-7BC4-5753; us-east4 0FB8-4FD9-6BB8, 3D96-85C5-6EB8, B36E-AD65-6DC5; us-east5
+// 87E7-B801-9F9B, 519B-955D-6042, 005C-88B8-438B. pd-balanced ("Balanced PD Capacity"): us-east1 6AE1-525F-8B80, us-east4
+// 7D52-6D58-14FF.
+const HYPERDISK = { gib: 0.08, iops: 0.005, mibps: 0.04 }; // us-central1, us-east4 and us-east5 alike
 const DISKS = {
-  'us-central1': { 'pd-balanced': { gib: 0.10 } },
+  'us-central1': { 'pd-balanced': { gib: 0.10 }, 'hyperdisk-balanced': HYPERDISK },
+  'us-east1': { 'pd-balanced': { gib: 0.10 }, 'hyperdisk-balanced': { gib: 0.09, iops: 0.006, mibps: 0.045 } },
+  'us-east4': { 'pd-balanced': { gib: 0.11 }, 'hyperdisk-balanced': HYPERDISK },
+  'us-east5': { 'hyperdisk-balanced': HYPERDISK },
   'us-west4': { 'hyperdisk-balanced': { gib: 0.09, iops: 0.006, mibps: 0.045 } },
 };
 const HOURS_PER_MONTH = 730;

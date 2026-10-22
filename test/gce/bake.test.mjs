@@ -7,10 +7,11 @@ import { readFileSync } from 'node:fs';
 import {
   reportOutcome, checkOutcome, ownsBakeInstance, staleBakeInstances, staleBakeRunners, imagesToPrune, placements, smokeMachines, refusal, bakeRunId, bakeNames,
   builderInstance, smokeInstance, checkInstance, checkJitRequest, imageBody, fillBuilderScript, machineCpus, BAKE_TIMEOUT_MS, CHECK_TIMEOUT_MS,
-  refusedOutright,
+  refusedOutright, STALE_MS, SMOKE_TIMEOUT_MS,
 } from '../../gce/bake/plan.mjs';
+import { parseGceConfig } from '../../gce/launcher/config.mjs';
 import { runBake } from '../../gce/bake/bake.mjs';
-import { WEST, CENTRAL, ONE_REGION_CFG } from './config-fixtures.mjs';
+import { WEST, CENTRAL, C4D_CENTRAL, ONE_REGION_CFG } from './config-fixtures.mjs';
 import { vmMode } from '../../gce/vm/run.mjs';
 import { GceError } from '../../lib/gce.mjs';
 import { fakeGce, fakeSandbox, instanceShape, imageShape, FOREIGN } from './fake-gce.mjs';
@@ -39,7 +40,7 @@ test('a builder that reports a failed step, powers off without a report, vanishe
   assert.deepEqual(at(running, 'ok', 30 * MIN + 1), { done: true, ok: false, reason: 'timeout' }); // never powered off
 });
 
-test('the bake owns only instances labelled as its own builders, and sweeps those older than 2 h', () => {
+test('the bake owns only instances labelled as its own builders, and sweeps those older than 4 h', () => {
   const mine = instanceShape({ name: `ci-kit-gce-builder-${RUN}`, labels: { 'ci-kit': 'gce-builder', 'ci-kit-run': RUN } });
   const other = instanceShape({ name: 'ci-kit-gce-builder-20261016-000000', labels: { 'ci-kit': 'gce-builder', 'ci-kit-run': '20261016-000000' }, created: '2026-10-16T00:00:00.000Z' });
   const vm = instanceShape({ name: 'ci-kit-gce-abc', labels: { 'ci-kit': 'gce', 'ci-kit-run': RUN }, created: '2026-10-16T00:00:00.000Z' });
@@ -47,11 +48,12 @@ test('the bake owns only instances labelled as its own builders, and sweeps thos
   assert.equal(ownsBakeInstance(other, RUN), false);
   assert.equal(ownsBakeInstance(vm, RUN), false);
   for (const f of FOREIGN.instances) assert.equal(ownsBakeInstance(f, '20260901-000000'), false);
-  const now = Date.parse('2026-10-16T02:30:00Z');
+  assert.deepEqual(staleBakeInstances([other], Date.parse('2026-10-16T03:30:00Z')), [], 'a bake 3.5 h in may still be running');
+  const now = Date.parse('2026-10-16T04:30:00Z');
   assert.deepEqual(staleBakeInstances([mine, other, vm, ...FOREIGN.instances], now).map((i) => i.name), ['ci-kit-gce-builder-20261016-000000']);
 });
 
-test('retention keeps the two newest ready images, and drops unready ones only once they are 2 h old', () => {
+test('retention keeps the two newest ready images, and drops unready ones only once they are 4 h old', () => {
   const img = (name, created, ready) => imageShape({ name, created, labels: { 'ci-kit': 'gce-image', 'ci-kit-commit': SHA, 'ci-kit-ready': ready } });
   const images = [
     ...FOREIGN.images,
@@ -187,8 +189,8 @@ test('the real job passes only once its run succeeded with every job on the bake
   assert.deepEqual(at({ done: true, ok: false, reason: 'exit:2' }, { status: 'in_progress' }), { done: true, ok: false, reason: 'exit:2' });
 });
 
-test('an earlier bake\'s check runner is swept once it is 2 h old and not busy; a younger one may be a bake in flight', () => {
-  const now = Date.parse('2026-10-16T12:00:00Z');
+test('an earlier bake\'s check runner is swept once it is 4 h old and not busy; a younger one may be a bake in flight', () => {
+  const now = Date.parse('2026-10-16T14:00:00Z');
   const runners = [
     { id: 1, name: 'ci-kit-bake-20261016-094500-k3x9', busy: false },
     { id: 2, name: 'ci-kit-bake-20261016-094500-b7c1', busy: true },
@@ -197,6 +199,17 @@ test('an earlier bake\'s check runner is swept once it is 2 h old and not busy; 
     { id: 5, name: 'ci-kit-bake-probe', busy: false },
   ];
   assert.deepEqual(staleBakeRunners(runners, now).map((r) => r.id), [1]);
+});
+
+// Review (M6 placements, P2): a bake smokes each placement in turn, so the bake job's task timeout (gce/deploy.sh)
+// grows with the placements, and STALE_MS must stay above it: a younger bake's builder, check runner or unready image
+// may belong to a bake still running, which an overlapping bake must not sweep.
+test('the bake job outlives its own bounds for the shipped placements, and STALE_MS outlives the bake job', () => {
+  const deploy = readFileSync(new URL('../../gce/deploy.sh', import.meta.url), 'utf8');
+  const taskMs = Number(/--task-timeout=(\d+)m/.exec(deploy)[1]) * 60_000;
+  const shipped = parseGceConfig(readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
+  assert.ok(taskMs >= BAKE_TIMEOUT_MS + shipped.placements.length * SMOKE_TIMEOUT_MS + CHECK_TIMEOUT_MS, `task timeout ${taskMs / 60_000} min`);
+  assert.ok(STALE_MS > taskMs, `STALE_MS ${STALE_MS / 3600_000} h against a ${taskMs / 60_000} min bake`);
 });
 
 test('the image goes into the family unready, labelled with the kit commit and the run', () => {
@@ -302,7 +315,10 @@ test('a builder machine refused for quota falls back to the next machine; capaci
 
 test('one region, two placements: a smoke VM each: the cpus-2 machine, then the next size\'s when E2 is refused; and the fallback placement\'s', async () => {
   const gce = fakeGce({ insertErrors: ['', 'QUOTA_EXCEEDED'], scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
-  await bake(gce);
+  // Only C3D booted the image: the smoke proves the family of the machine it ran on, never the rest of the map, so the
+  // image never booted on E2 and is not ready (review of 096e6f6, P2).
+  await assert.rejects(bake(gce), /no smoke VM passed on e2/);
+  assert.deepEqual(ready(gce), []);
   const smokes = gce.calls.filter((c) => c.startsWith(`insert ci-kit-gce-builder-${RUN}-smoke`));
   assert.deepEqual(smokes, [
     `insert ci-kit-gce-builder-${RUN}-smoke-1 e2-highcpu-2@us-central1-a`,
@@ -339,6 +355,58 @@ test('a smoke VM failing in any placement keeps the image unready and deletes it
   await assert.rejects(bakeNew(gce), /smoke VM in placement 2 \(us-central1\) did not pass: failed:cpus/);
   assert.deepEqual(ready(gce), []);
   assert.deepEqual(leftInstances(gce), []);
+});
+
+// Live 2026-10-21 22:00Z: C4D us-central1 had no capacity in any zone, on demand too, while C4D elsewhere booted the
+// image. A placement whose smoke VM no zone or machine would take is skipped with a warning; the image is ready when
+// every machine family of gce.json passed a smoke in at least one placement (it boots on that family's hardware).
+const FAMILIES_CFG = { ...CFG, placements: [WEST, C4D_CENTRAL, CENTRAL] };
+const C4D_CENTRAL_SMOKES = 4 * 4; // c4d-highcpu-2, -4, -8, -16 in its four zones
+const bakeFamilies = (gce, log = () => {}) => runBake(gce, { cfg: FAMILIES_CFG, sha: SHA, runId: RUN, token: 'ghs_x', gh: fakeSandbox({ run: OK_RUN }), script: '#!/bin/bash\n', ...clock(), log });
+
+test('a placement refused everywhere is skipped with a warning while another of its family passed: the image is ready', async () => {
+  const lines = [];
+  const gce = fakeGce({
+    insertErrors: ['', '', ...Array(C4D_CENTRAL_SMOKES).fill('ZONE_RESOURCE_POOL_EXHAUSTED')], scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK },
+  });
+  const { image, skipped } = await bakeFamilies(gce, (l) => lines.push(l));
+  assert.deepEqual(ready(gce), [image]);
+  assert.deepEqual(skipped, ['placement 2 (c4d@us-central1)']);
+  assert.ok(lines.some((l) => /^warning: placement 2 \(c4d@us-central1\) skipped: no zone took its smoke VM/.test(l)), lines.join('\n'));
+  const smokes = gce.calls.filter((c) => c.startsWith(`insert ci-kit-gce-builder-${RUN}-smoke`));
+  assert.equal(smokes.filter((c) => c.includes('-smoke-2 ')).length, C4D_CENTRAL_SMOKES, 'every zone and machine was asked');
+  assert.ok(smokes.some((c) => c.includes('-smoke-3 c3d-highcpu-4@us-central1-a')), 'the next placement is still smoked');
+  assert.deepEqual(leftInstances(gce), []);
+});
+
+test('a smoke proves the family of the machine it booted: E2 and C3D in one map, both booted, the image is ready', async () => {
+  const gce = fakeGce({ scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
+  const { image } = await bake(gce); // E2_CENTRAL smokes e2-highcpu-2, CENTRAL c3d-highcpu-4
+  assert.deepEqual(ready(gce), [image]);
+});
+
+test('quota refusing a placement\'s smoke VM skips it too', async () => {
+  const gce = fakeGce({ insertErrors: ['', '', 'QUOTA_EXCEEDED', 'QUOTA_EXCEEDED', 'QUOTA_EXCEEDED', 'QUOTA_EXCEEDED'], scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
+  const { image, skipped } = await bakeFamilies(gce);
+  assert.deepEqual(ready(gce), [image]);
+  assert.deepEqual(skipped, ['placement 2 (c4d@us-central1)']);
+});
+
+test('every placement of a family refused: no smoke proved that family, and the bake fails', async () => {
+  // C3D us-central1, the only C3D placement: c3d-highcpu-4, -8, -16 in its four zones.
+  const gce = fakeGce({ insertErrors: ['', '', '', ...Array(12).fill('ZONE_RESOURCE_POOL_EXHAUSTED')], scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
+  await assert.rejects(bakeFamilies(gce), /no smoke VM passed on c3d: placement 3 \(c3d@us-central1\) was skipped/);
+  assert.deepEqual(ready(gce), []);
+  assert.ok(!gce.state.images.some((i) => i.name.startsWith(`ci-kit-runner-${RUN}`)), 'its own image is deleted');
+  assert.deepEqual(leftInstances(gce), []);
+});
+
+test('a smoke VM that boots and fails still fails the bake, though another placement of its family passed', async () => {
+  const gce = fakeGce({ scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
+  const real = gce.guestAttribute;
+  gce.guestAttribute = async (zone, name, path) => (name.endsWith('-smoke-2') ? 'failed:cpus' : real(zone, name, path));
+  await assert.rejects(bakeFamilies(gce), /smoke VM in placement 2 \(us-central1\) did not pass: failed:cpus/);
+  assert.deepEqual(ready(gce), []);
 });
 
 test('a builder refused for quota in the first placement\'s region is built in the next placement', async () => {
@@ -511,10 +579,10 @@ test('a public sandbox gets no runner: the bake fails before registering one', a
   assert.deepEqual(leftInstances(gce), []);
 });
 
-test('a check runner an earlier bake left is unregistered at the start once it is 2 h old; a younger one is left to its bake', async () => {
+test('a check runner an earlier bake left is unregistered at the start once it is 4 h old; a younger one is left to its bake', async () => {
   const gce = fakeGce({ scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
-  const gh = fakeSandbox({ run: OK_RUN, runners: [{ id: 1, name: 'ci-kit-bake-20261016-060000-ol01' }, { id: 2, name: 'ci-kit-bake-20261016-090000-yg01' }] });
+  const gh = fakeSandbox({ run: OK_RUN, runners: [{ id: 1, name: 'ci-kit-bake-20261016-050000-ol01' }, { id: 2, name: 'ci-kit-bake-20261016-063000-yg01' }] });
   await bake(gce, clock(), gh);
-  assert.equal(gh.calls[0], 'unregister ci-kit-bake-20261016-060000-ol01');
-  assert.deepEqual(gh.state.runners.map((r) => r.name), ['ci-kit-bake-20261016-090000-yg01']);
+  assert.equal(gh.calls[0], 'unregister ci-kit-bake-20261016-050000-ol01');
+  assert.deepEqual(gh.state.runners.map((r) => r.name), ['ci-kit-bake-20261016-063000-yg01'], 'a bake 3 h in may still be running');
 });

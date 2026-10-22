@@ -14,7 +14,8 @@
 #   bake               the Cloud Run job ci-kit-bake, built from this checkout
 #   bake-schedule      the Scheduler job ci-kit-bake-weekly, which runs the bake every Sunday at 18:00 UTC
 #   launcher           the Cloud Run service ci-kit-launcher, built from this checkout: no public ingress, one
-#                      instance, 300 s per request; requests are many at a time, ticks one
+#                      instance, 300 s per request; requests are many at a time, ticks one. Like webhook, it ends with
+#                      all traffic on the revision it deployed, a rollback's pin undone, and fails if that does not serve
 #   launcher-schedule  the Scheduler job ci-kit-launcher-tick, which calls the launcher every minute with an OIDC token
 #   webhook            the public Cloud Run service ci-kit-webhook (the App's webhook receiver), the Pub/Sub topic
 #                      ci-kit-tick-requests it publishes to, and the push subscription that asks the launcher for a
@@ -41,7 +42,7 @@ die() { echo "deploy: $*" >&2; exit 1; }
 base() {
   g services enable compute.googleapis.com secretmanager.googleapis.com run.googleapis.com \
     cloudscheduler.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com \
-    logging.googleapis.com monitoring.googleapis.com pubsub.googleapis.com
+    logging.googleapis.com monitoring.googleapis.com pubsub.googleapis.com cloudquotas.googleapis.com
   g iam service-accounts describe "$SA" > /dev/null 2>&1 ||
     g iam service-accounts create "$SA_NAME" --display-name='ci-kit launcher and bake'
   # The public receiver's own identity, apart from the launcher's: it may read the webhook secret (granted by the
@@ -56,6 +57,11 @@ base() {
   # Read the Cloud NAT's day (bytes processed, addresses held) for the ledger's daily line (spec M6).
   g projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$SA" \
     --role=roles/monitoring.viewer --condition=None > /dev/null
+  # Read each machine family's vCPU grant per region from Cloud Quotas, so the walk skips a full placement instead of
+  # paying its refusal (gce/launcher/room.mjs; spec M6). A region's addresses and instances come from regions.get,
+  # which compute.instanceAdmin.v1 already allows.
+  g projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$SA" \
+    --role=roles/cloudquotas.viewer --condition=None > /dev/null
   # Cloud Run source deploys build as the project's default compute account (new projects since 2024), which needs
   # the builder role to read the uploaded source and push the image. No kit VM runs as that account: VMs have none.
   local number
@@ -134,11 +140,13 @@ network() {
 
 bake() {
   # The job runs the bake orchestrator only; the builder clones the kit at the commit it bakes (main's head).
-  # Its timeout stays above the bake's own bounds (builder 30 min, smoke 15, real job 10, the image and the cleanup),
-  # so the bake's cleanup always runs; a typical bake takes about 15 min.
+  # Its timeout stays above the bake's own bounds (builder 30 min, a smoke 15 in each placement in turn, eight since
+  # M6, real job 10, the image and the cleanup), so the bake's cleanup always runs; a typical bake takes about 15 min
+  # plus a few per placement. STALE_MS (gce/bake/plan.mjs, 4 h) stays above it, so no other bake sweeps a live one's
+  # check runner or image.
   g run jobs deploy ci-kit-bake --source="$KIT" --region="$REGION" --service-account="$SA" \
     --command=launcher --args=node,gce/bake/bake.mjs --labels=ci-kit=bake \
-    --tasks=1 --max-retries=0 --task-timeout=90m --cpu=1 --memory=512Mi
+    --tasks=1 --max-retries=0 --task-timeout=180m --cpu=1 --memory=512Mi
   g run jobs add-iam-policy-binding ci-kit-bake --region="$REGION" \
     --member="serviceAccount:$SA" --role=roles/run.invoker > /dev/null
   echo "deploy: bake job ok"
@@ -157,6 +165,25 @@ bake_schedule() {
 COMMIT=$(git -C "$KIT" rev-parse HEAD)
 LAUNCHER=ci-kit-launcher
 
+# A deploy leaves a service's traffic where it was: after a rollback pinned it to an older revision
+# (update-traffic --to-revisions=<old>=100), `gcloud run deploy` creates the new revision at 0% and says so only in
+# passing. So every traffic goes to the latest ready revision, which is then checked to serve all of it. Prints it.
+# It runs in a command substitution, where errexit is off: each failure returns explicitly.
+serve_latest() {
+  local service=$1 status
+  g run services update-traffic "$service" --region="$REGION" --to-latest > /dev/null || return
+  # shellcheck disable=SC2016 # a JavaScript template literal, not the shell's
+  status=$(g run services describe "$service" --region="$REGION" --format=json | node -e '
+    let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+      const { latestReadyRevisionName: latest, traffic = [] } = JSON.parse(s).status ?? {};
+      const live = traffic.filter((t) => t.percent > 0);
+      if (live.length === 1 && live[0].revisionName === latest && live[0].percent === 100) console.log(`serving ${latest}`);
+      else console.log(`its latest revision ${latest} does not serve all traffic: ${live.map((t) => `${t.revisionName} ${t.percent}%`).join(", ") || "none"}`);
+    });') || return
+  [[ $status == serving\ * ]] || die "$service: $status"
+  echo "${status#serving }"
+}
+
 launcher() {
   # Buildpack images keep node in their layers, off the bare PATH: the CNB `launcher` sets up the layers' environment
   # and then runs the command (the same holds for the bake job above).
@@ -172,7 +199,9 @@ launcher() {
   # Cloud Scheduler calls it as the service account, and so does Pub/Sub's push (webhook); nothing else may.
   g run services add-iam-policy-binding "$LAUNCHER" --region="$REGION" \
     --member="serviceAccount:$SA" --role=roles/run.invoker > /dev/null
-  echo "deploy: launcher ok (kit ${COMMIT:0:8})"
+  local revision
+  revision=$(serve_latest "$LAUNCHER")
+  echo "deploy: launcher ok ($revision serving; kit ${COMMIT:0:8})"
 }
 
 launcher_schedule() {
@@ -223,6 +252,8 @@ webhook() {
     --set-secrets="/secrets/webhook/secret=$WEBHOOK_SECRET:latest" \
     --ingress=all --no-invoker-iam-check --min-instances=0 --max-instances=3 --concurrency=80 \
     --timeout=30 --cpu=1 --memory=256Mi
+  local revision
+  revision=$(serve_latest "$WEBHOOK")
 
   # The launcher answers a push when the tick that serves it has ended, and a push that arrives while a tick runs is
   # served by the next one, so the ack deadline must outlive the worst case: the running tick (~100 s: launches stop
@@ -239,7 +270,7 @@ webhook() {
     g pubsub subscriptions create "$SUBSCRIPTION" --topic="$TOPIC" "${push[@]}" --labels=ci-kit=webhook > /dev/null
   fi
   hook=$(g run services describe "$WEBHOOK" --region="$REGION" --format='value(status.url)')
-  echo "deploy: webhook ok ($hook → $TOPIC → $url/request; kit ${COMMIT:0:8})"
+  echo "deploy: webhook ok ($revision serving; $hook → $TOPIC → $url/request; kit ${COMMIT:0:8})"
 }
 
 app_hook() {

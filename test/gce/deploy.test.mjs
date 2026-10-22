@@ -89,11 +89,61 @@ test('a subnetwork that has Private Google Access already is not updated', () =>
   assert.deepEqual(verb(run.calls, 'compute', 'networks', 'subnets', 'update'), []);
 });
 
+// Today's network (2026-10-21): us-central1 and us-west4 have their subnetworks, routers and NATs. The shipped
+// placements' other regions get theirs, each on its own /20 after those two; what exists is not touched.
+test('today\'s network and the shipped placements: the two subnetworks that exist kept, each new region on the next free /20', () => {
+  const today = [
+    { name: 'ci-kit-us-central1', region: 'us-central1', range: '10.64.0.0/20', pga: true },
+    { name: 'ci-kit-us-west4', region: 'us-west4', range: '10.64.16.0/20', pga: true },
+  ];
+  const run = network({ network: true, subnets: today, routers: ['us-central1', 'us-west4'], nats: ['us-central1', 'us-west4'] });
+  assert.equal(run.status, 0, run.stderr);
+  const created = verb(run.calls, 'compute', 'networks', 'subnets', 'create').map((c) => c[4]).sort();
+  assert.deepEqual(created, SHIPPED.filter((s) => !today.some((t) => t.name === s.name && t.region === s.region)).map((s) => s.name).sort());
+  assert.deepEqual(verb(run.calls, 'compute', 'networks', 'subnets', 'update'), [], 'the two that exist are left as they are');
+  assert.deepEqual(run.state.subnets.slice(0, 2), today);
+  const ranges = run.state.subnets.map((s) => s.range);
+  assert.equal(new Set(ranges).size, ranges.length, 'no two subnetworks share a range');
+  assert.deepEqual(ranges.slice(2).sort(), ['10.64.32.0/20', '10.64.48.0/20', '10.64.64.0/20']);
+  assert.deepEqual(run.state.nats.sort(), [...REGIONS].sort(), 'a router and NAT in each new region');
+});
+
 test('a rule allowing ingress into the network still stops the deploy', () => {
   const run = network({ firewall: ['ci-kit-ssh\tci-kit\tINGRESS\tFalse\ttcp:22', 'default-ssh\tdefault\tINGRESS\tFalse\ttcp:22'] });
   assert.equal(run.status, 1);
   assert.match(run.stderr, /network ci-kit has rules allowing ingress: ci-kit-ssh/);
 });
+
+// A manual rollback pins a service's traffic to an older revision (update-traffic --to-revisions=<old>=100); a later
+// `gcloud run deploy` then creates the new revision at 0%, and the deploy used to report ok. Each service's deploy
+// sends all traffic to its latest ready revision and checks that revision serves.
+const pinned = (name) => ({ revisions: 1, latestReady: `${name}-00001-old`, traffic: [{ revisionName: `${name}-00001-old`, percent: 100, latestRevision: false }] });
+for (const [part, service] of [['launcher', 'ci-kit-launcher'], ['webhook', 'ci-kit-webhook']]) {
+  test(`${part}: traffic pinned to an older revision moves to the one just deployed`, () => {
+    const run = deploy(part, { services: { 'ci-kit-launcher': pinned('ci-kit-launcher'), 'ci-kit-webhook': pinned('ci-kit-webhook') } });
+    assert.equal(run.status, 0, run.stderr);
+    const svc = run.state.services[service];
+    assert.deepEqual(svc.traffic, [{ revisionName: `${service}-00002-new`, percent: 100, latestRevision: true }]);
+    assert.ok(verb(run.calls, 'run', 'services', 'update-traffic', service).some((c) => c.includes('--to-latest')));
+  });
+
+  // Review of ca1fda2 (P2): the helper runs in a command substitution, where errexit is off; a failed update-traffic
+  // must still fail the deploy, though the read after it would show the new revision serving (traffic that follows
+  // the latest moved with the deploy).
+  test(`${part}: a failed update-traffic fails the deploy`, () => {
+    const following = (name) => ({ revisions: 1, latestReady: `${name}-00001-old`, traffic: [{ revisionName: `${name}-00001-old`, percent: 100, latestRevision: true }], trafficFails: true });
+    const run = deploy(part, { services: { 'ci-kit-launcher': following('ci-kit-launcher'), 'ci-kit-webhook': following('ci-kit-webhook') } });
+    assert.equal(run.status, 1, run.stderr);
+    assert.match(run.stderr, /update-traffic\) failed/);
+    assert.doesNotMatch(run.stdout ?? '', new RegExp(`${part} ok`));
+  });
+
+  test(`${part}: a deploy whose revision does not serve fails, naming what does`, () => {
+    const run = deploy(part, { services: { 'ci-kit-launcher': { ...pinned('ci-kit-launcher'), stuck: true }, 'ci-kit-webhook': { ...pinned('ci-kit-webhook'), stuck: true } } });
+    assert.equal(run.status, 1);
+    assert.match(run.stderr, new RegExp(`${service}: its latest revision ${service}-00002-new does not serve all traffic: ${service}-00001-old 100%`));
+  });
+}
 
 test('alert: each failure the owner is mailed for has its log-based metric and a policy on it, on one channel', () => {
   const run = deploy('alert', {});

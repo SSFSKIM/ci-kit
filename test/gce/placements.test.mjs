@@ -6,8 +6,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { GceError } from '../../lib/gce.mjs';
 import { parseGceConfig, placementZones } from '../../gce/launcher/config.mjs';
-import { WEST, CENTRAL, COMMON, NEW_CFG, ONE_REGION_CFG as OLD_CFG } from './config-fixtures.mjs';
-import { placements, walkPlacements, quotaScope, quotaBlocks, largestMachineCpus, jobInstance, viewInstance } from '../../gce/launcher/logic.mjs';
+import { WEST, CENTRAL, COMMON, NEW_CFG, ONE_REGION_CFG as OLD_CFG, M6_CFG, M6_PLACEMENTS } from './config-fixtures.mjs';
+import { placements, walkPlacements, quotaScope, quotaBlocks, largestMachineCpus, jobInstance, viewInstance, stockoutMemory, STOCKOUT_TTL_MS } from '../../gce/launcher/logic.mjs';
 
 const key = (p) => `${p.machine}/${p.provisioning}@${p.zone}`;
 
@@ -59,6 +59,30 @@ test('one region, two families: spot e2, spot c3d, on-demand e2, on-demand c3d; 
   assert.deepEqual(placements(4, OLD_CFG).map(key), [...a('c3d-highcpu-4', 'spot'), ...a('c3d-highcpu-4', 'standard')]);
 });
 
+test('M6\'s eight placements parse in order; a region two placements share is one set of zones to list', () => {
+  assert.deepEqual(M6_CFG.placements, M6_PLACEMENTS);
+  assert.deepEqual(M6_CFG.placements.map((p) => `${p.machines[8].split('-')[0]}@${p.region}`), [
+    'c4d@us-west4', 'c4d@us-central1', 'c4d@us-east1', 'c4d@us-east4', 'c4d@us-east5', 'c3d@us-central1', 'c3d@us-east1', 'c3d@us-east4',
+  ]);
+  assert.equal(placementZones(M6_CFG).length, 3 + 4 + 3 + 3 + 3);
+});
+
+test('the walk across M6\'s placements: spot C4D region by region, then spot C3D, then on demand in the same order', () => {
+  const spot = (cpus) => M6_PLACEMENTS.flatMap((p) => p.zones.map((z) => `${p.machines[cpus]}/spot@${z}`));
+  const standard = (cpus) => spot(cpus).map((k) => k.replace('/spot@', '/standard@'));
+  assert.deepEqual(placements(8, M6_CFG).map(key), [...spot(8), ...standard(8)]);
+  assert.deepEqual(placements(8, M6_CFG).slice(0, 7).map(key), [
+    'c4d-highcpu-8/spot@us-west4-a', 'c4d-highcpu-8/spot@us-west4-b', 'c4d-highcpu-8/spot@us-west4-c',
+    'c4d-highcpu-8/spot@us-central1-a', 'c4d-highcpu-8/spot@us-central1-b', 'c4d-highcpu-8/spot@us-central1-c', 'c4d-highcpu-8/spot@us-central1-f',
+  ]);
+  // Size 2 is c4d-highcpu-2 on C4D and c3d-highcpu-4 on C3D, so admission reserves 4 for it.
+  const two = placements(2, M6_CFG).filter((p) => p.provisioning === 'spot');
+  assert.deepEqual([...new Set(two.map((p) => p.machine))], ['c4d-highcpu-2', 'c3d-highcpu-4']);
+  assert.equal(two.findIndex((p) => p.machine === 'c3d-highcpu-4'), 16, 'C3D only after every C4D zone');
+  assert.equal(largestMachineCpus(2, M6_CFG), 4);
+  assert.equal(largestMachineCpus(16, M6_CFG), 16);
+});
+
 test('admission reserves the largest machine any placement could give the size', () => {
   assert.equal(largestMachineCpus(2, NEW_CFG), 4, 'c4d-highcpu-2 or c3d-highcpu-4');
   assert.equal(largestMachineCpus(8, NEW_CFG), 8);
@@ -99,9 +123,41 @@ test('a remembered refusal skips only requests of the same or more vCPUs in its 
   assert.equal(quotaBlocks(everywhere, at(4)['c3d-highcpu-4/spot@us-central1-a']), false);
 });
 
-async function walk(cpus, script, memory) {
+// The family quota as Compute Engine reported it live (an insert operation's error, us-west4, 2026-10-21 19:50Z): code
+// QUOTA_EXCEEDED, errorDetails quotaInfo {dimensions: {region, vm_family: 'C4D'}, limitName
+// 'CPUS-PER-VM-FAMILY-per-project-region'}. The operation error's message, as lib/gce.mjs settles it:
+const familyQuota = (region) => new GceError(403,
+  `gce operation operation-1: QUOTA_EXCEEDED Quota 'CPUS_PER_VM_FAMILY' exceeded.  Limit: 50.0 in region ${region}.`, ['QUOTA_EXCEEDED'], { accepted: true, finished: true });
+
+test('CPUS_PER_VM_FAMILY is the refused machine\'s family quota in its region: C4D refused never blocks C3D beside it', () => {
+  const m6 = (cpus) => Object.fromEntries(placements(cpus, M6_CFG).map((p) => [key(p), p]));
+  const c4d = m6(8)['c4d-highcpu-8/spot@us-central1-a'];
+  assert.deepEqual(quotaScope(familyQuota('us-central1'), c4d), { region: 'us-central1', family: 'c4d', vcpus: 8 });
+  assert.deepEqual(quotaScope(familyQuota('us-west4'), W8), { region: 'us-west4', family: 'c4d', vcpus: 8 }, 'the live refusal');
+  const memory = [quotaScope(familyQuota('us-central1'), c4d)];
+  assert.equal(quotaBlocks(memory, m6(8)['c3d-highcpu-8/spot@us-central1-a']), false, 'C3D in the same region');
+  assert.equal(quotaBlocks(memory, m6(16)['c3d-highcpu-16/standard@us-central1-f']), false);
+  assert.equal(quotaBlocks(memory, m6(8)['c4d-highcpu-8/spot@us-central1-b']), true, 'C4D there, same size');
+  assert.equal(quotaBlocks(memory, m6(8)['c4d-highcpu-8/spot@us-east1-b']), false, 'C4D in another region');
+  // The older per-family form keeps its meaning.
+  assert.deepEqual(quotaScope(quota('C3D_CPUS', 'in region us-central1'), m6(8)['c3d-highcpu-8/spot@us-central1-a']), { region: 'us-central1', family: 'c3d', vcpus: 8 });
+});
+
+test('C4D refused for its family quota in every region: the walk asks each C4D placement once, then lands on C3D us-central1', async () => {
+  const memory = [];
+  const { tried, result } = await walk(8, (p) => (p.machine.startsWith('c4d-') ? familyQuota(p.placement.region) : null), memory, M6_CFG);
+  assert.deepEqual(tried, [
+    'c4d-highcpu-8/spot@us-west4-a', 'c4d-highcpu-8/spot@us-central1-a', 'c4d-highcpu-8/spot@us-east1-b',
+    'c4d-highcpu-8/spot@us-east4-a', 'c4d-highcpu-8/spot@us-east5-a', 'c3d-highcpu-8/spot@us-central1-a',
+  ]);
+  assert.equal(result.placement.machine, 'c3d-highcpu-8');
+  assert.equal(memory.length, 5);
+  assert.ok(memory.every((q) => q.family === 'c4d'));
+});
+
+async function walk(cpus, script, memory, cfg = NEW_CFG, { stockouts, now } = {}) {
   const tried = [];
-  const result = await walkPlacements(placements(cpus, NEW_CFG), {
+  const result = await walkPlacements(placements(cpus, cfg), {
     attempt: async (p) => {
       tried.push(key(p));
       const err = script(p);
@@ -109,6 +165,8 @@ async function walk(cpus, script, memory) {
     },
     reconcile: async () => 'unknown',
     quota: memory,
+    stockouts,
+    ...(now ? { now } : {}),
   });
   return { tried, result };
 }
@@ -129,6 +187,33 @@ test('a capacity refusal moves zone by zone, across placements, before any on-de
   const cap = new GceError(200, 'op', ['ZONE_RESOURCE_POOL_EXHAUSTED'], { accepted: true, finished: true });
   const { tried, result } = await walk(4, (p) => (p.provisioning === 'spot' ? cap : null), []);
   assert.deepEqual(tried, [...placements(4, NEW_CFG).filter((p) => p.provisioning === 'spot').map(key), 'c4d-highcpu-4/standard@us-west4-a']);
+  assert.equal(result.placement.provisioning, 'standard');
+});
+
+// Review (M6 placements, P2): eight placements are 26 spot attempts before the first on-demand one, ~2 s each when
+// refused, more than a tick's 45 s; a walk restarted from the first zone every tick would never reach on demand. A
+// capacity refusal is remembered (zone, machine, provisioning) for STOCKOUT_TTL_MS across launches and ticks.
+const stockedOut = () => new GceError(200, 'op', ['ZONE_RESOURCE_POOL_EXHAUSTED'], { accepted: true, finished: true });
+
+test('a capacity refusal is remembered for its zone, machine and provisioning until its TTL ends', async () => {
+  let t = 0;
+  const now = () => t;
+  const stockouts = stockoutMemory();
+  const first = await walk(8, (p) => (p.zone === 'us-west4-a' && p.provisioning === 'spot' ? stockedOut() : null), [], NEW_CFG, { stockouts, now });
+  assert.deepEqual(first.tried, ['c4d-highcpu-8/spot@us-west4-a', 'c4d-highcpu-8/spot@us-west4-b']);
+  t += STOCKOUT_TTL_MS - 1;
+  assert.deepEqual((await walk(8, () => null, [], NEW_CFG, { stockouts, now })).tried, ['c4d-highcpu-8/spot@us-west4-b'], 'skipped while remembered');
+  assert.deepEqual((await walk(4, () => null, [], NEW_CFG, { stockouts, now })).tried, ['c4d-highcpu-4/spot@us-west4-a'], 'another machine is asked');
+  t += 1;
+  assert.deepEqual((await walk(8, () => null, [], NEW_CFG, { stockouts, now })).tried, ['c4d-highcpu-8/spot@us-west4-a'], 'asked again once its TTL ends');
+  assert.ok(STOCKOUT_TTL_MS >= 60_000 && STOCKOUT_TTL_MS <= 10 * 60_000, 'a few minutes: past a tick or two, short of a lasting skip');
+});
+
+test('every spot attempt remembered stocked out: the walk\'s first attempt is on demand', async () => {
+  const stockouts = stockoutMemory();
+  for (const p of placements(8, M6_CFG).filter((a) => a.provisioning === 'spot')) stockouts.add(p, 0);
+  const { tried, result } = await walk(8, () => null, [], M6_CFG, { stockouts, now: () => 1000 });
+  assert.deepEqual(tried, ['c4d-highcpu-8/standard@us-west4-a']);
   assert.equal(result.placement.provisioning, 'standard');
 });
 
@@ -155,16 +240,22 @@ test('the job VM is on its placement\'s subnetwork and boot disk type, and label
   assert.equal(viewInstance({ ...c, labels: {}, zone: 'x/us-central1-a', creationTimestamp: '2026-10-21T00:00:00Z' }).diskType, null);
 });
 
-test('the shipped gce.json is the spec\'s pool: C4D us-west4 and C3D us-central1 placements, no E2, size 2 on c3d-highcpu-4 in us-central1', () => {
-  const shipped = parseGceConfig(readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
-  assert.deepEqual(shipped.placements.map((p) => p.region).sort(), ['us-central1', 'us-west4']);
-  assert.deepEqual(shipped.placements.find((p) => p.region === 'us-west4'), WEST);
-  assert.deepEqual(shipped.placements.find((p) => p.region === 'us-central1'), CENTRAL);
+test('the shipped gce.json is the spec\'s pool: M6\'s eight placements, C4D before C3D, no E2', () => {
+  const text = readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8');
+  const shipped = parseGceConfig(text);
+  const id = (p) => `${p.machines[8]}@${p.region}`;
+  const byId = (list) => Object.fromEntries(list.map((p) => [id(p), p]));
+  assert.deepEqual(byId(shipped.placements), byId(M6_PLACEMENTS), 'the same eight placements (their order is a commit on main)');
+  assert.equal(shipped.placements.length, 8);
+  const first = (family) => shipped.placements.findIndex((p) => p.machines[8].startsWith(`${family}-`));
+  const last = (family) => shipped.placements.findLastIndex((p) => p.machines[8].startsWith(`${family}-`));
+  assert.ok(last('c4d') < first('c3d'), 'speed first: every C4D placement before any C3D one');
   assert.equal(shipped.placements.some((p) => Object.values(p.machines).some((m) => m.startsWith('e2-'))), false);
-  // The served repos change by commit, and max_vcpus follows the granted quotas (docs/pool.md, Quotas and budget).
+  // The served repos change by commit, and max_vcpus follows the granted quotas (docs/pool.md, Quotas and budget), never
+  // above the project's all-regions CPU quota (CPUS_ALL_REGIONS, 512 since 2026-10-21).
   const rest = ({ repos: _, placements: __, max_vcpus: ___, ...others }) => others;
-  assert.ok(Number.isInteger(shipped.max_vcpus) && shipped.max_vcpus > 0);
+  assert.ok(Number.isInteger(shipped.max_vcpus) && shipped.max_vcpus > 0 && shipped.max_vcpus <= 512, String(shipped.max_vcpus));
   assert.deepEqual(rest(shipped), rest(COMMON), 'every other key keeps its value');
   // Egress is named in the file, not left to the default: re-enabling the NAT is this one value, changed on main.
-  assert.equal(JSON.parse(readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8')).egress, 'external');
+  assert.equal(JSON.parse(text).egress, 'external');
 });

@@ -190,11 +190,14 @@ export function placements(cpus, cfg) {
 
 const familyOf = (machine) => machine.split('-')[0];
 
-// What a quota refusal ran out of, from the metric and region its message names (Compute Engine words it "Quota
-// 'C4D_CPUS' exceeded.  Limit: 50.0 in region us-west4."; the all-regions quota "... globally."): a family's CPUs
-// by (region, family), any other regional quota (CPUS, instances, addresses, disk capacity) by region, the
-// all-regions CPUs everywhere. A PREEMPTIBLE_ quota binds spot requests only. A refusal that names nothing is taken
-// as the machine's family's. vcpus: the refused machine's; a request smaller than it may still fit.
+// What a quota refusal ran out of, from the metric and region its message names: a family's CPUs by (region, family),
+// any other regional quota (CPUS, instances, addresses, disk capacity) by region, the all-regions CPUs everywhere. A
+// PREEMPTIBLE_ quota binds spot requests only. A refusal that names nothing is taken as the machine's family's. vcpus:
+// the refused machine's; a request smaller than it may still fit.
+// Compute Engine names a family's quota "Quota 'CPUS_PER_VM_FAMILY' exceeded.  Limit: 50.0 in region us-west4." (an
+// insert operation's error, live 2026-10-21 on C4D; its quotaInfo's vm_family dimension is the machine's family, so
+// the attempt's machine names it), or in the older per-family form "Quota 'C3D_CPUS' exceeded. ..."; the all-regions
+// quota "... globally.".
 export function quotaScope(err, attempt) {
   const message = err?.message ?? '';
   const vcpus = machineCpus(attempt.machine);
@@ -204,8 +207,8 @@ export function quotaScope(err, attempt) {
   const spot = metric.startsWith('PREEMPTIBLE_') ? { spot: true } : {};
   const base = metric.replace(/^PREEMPTIBLE_/, '');
   if (base === 'CPUS_ALL_REGIONS' || / globally/.test(message)) return { ...spot, vcpus };
-  const family = /^([A-Z0-9]+)_CPUS$/.exec(base)?.[1];
-  return family ? { region, family: family.toLowerCase(), ...spot, vcpus } : { region, ...spot, vcpus };
+  const family = base === 'CPUS_PER_VM_FAMILY' ? familyOf(attempt.machine) : /^([A-Z0-9]+)_CPUS$/.exec(base)?.[1]?.toLowerCase();
+  return family ? { region, family, ...spot, vcpus } : { region, ...spot, vcpus };
 }
 
 // The quota a refusal's message names ('C4D_CPUS', 'IN_USE_ADDRESSES', ...), or undefined.
@@ -215,6 +218,26 @@ export const quotaMetric = (err) => /Quota '([A-Z0-9_]+)' exceeded/.exec(err?.me
 export const quotaBlocks = (memory, attempt) => memory.some((q) =>
   (!q.region || q.region === attempt.placement.region) && (!q.family || q.family === familyOf(attempt.machine)) &&
   (!q.spot || attempt.provisioning === 'spot') && machineCpus(attempt.machine) >= q.vcpus);
+
+// Capacity refusals (ZONE_RESOURCE_POOL_EXHAUSTED*) remembered by zone, machine and provisioning for STOCKOUT_TTL_MS,
+// across a tick's launches and across ticks (the server keeps one for the process; a restart forgets it). With eight
+// placements a size has 26 spot attempts before its first on-demand one, at 15-21 s a capacity refusal (live
+// 2026-10-21; the insert operation's error), far more than a tick's 45 s budget: a walk that asked every stocked-out zone again each tick would never reach on demand. Five minutes skips a
+// zone for about five ticks, enough for the walk to reach the rest; a zone that recovers sooner costs at most that long
+// on another zone or on demand, never a wait.
+export const STOCKOUT_TTL_MS = 5 * 60_000;
+export function stockoutMemory({ ttlMs = STOCKOUT_TTL_MS } = {}) {
+  const until = new Map();
+  const key = (p) => `${p.machine}|${p.zone}|${p.provisioning}`;
+  return {
+    add: (p, at) => until.set(key(p), at + ttlMs),
+    has(p, at) {
+      const end = until.get(key(p));
+      if (end !== undefined && at >= end) until.delete(key(p));
+      return end !== undefined && at < end;
+    },
+  };
+}
 
 // What a failed insert means. 'capacity' (ZONE_RESOURCE_POOL_EXHAUSTED*: this zone, this provisioning) and 'quota'
 // (a region's or the project's, as its message names it: quotaScope) are definite refusals. 'failed': nothing was
@@ -270,7 +293,8 @@ export function pendingAllocation(row) {
 // is final. A walk stops at an unknown outcome, so a row has at most one.
 export const unsettledInsert = (row) => (row.state !== 'final' && row.slow?.find((s) => !s.done)) || null;
 
-// Walks the attempts until one creates the VM. Capacity moves to the next zone. A quota refusal is remembered in
+// Walks the attempts until one creates the VM. Capacity moves to the next zone, and is remembered in `stockouts`
+// (stockoutMemory, when given): an attempt it holds is skipped while its TTL lasts. A quota refusal is remembered in
 // `quota` (the tick's memory, quotaScope) and every attempt it covers is skipped, here and in the tick's later walks.
 // An unknown outcome is reconciled (through the zone's operation) before anything else is tried, and if it stays
 // unknown the walk stops: two zones must never both hold this allocation's VM.
@@ -279,16 +303,24 @@ export const unsettledInsert = (row) => (row.state !== 'final' && row.slow?.find
 // attempt starts at or past `deadline` (the tick's budget): the walk stops with 'deadline', having created nothing.
 // Once `raced()` (a second allocation races this one's pending insert, spec M6), the walk makes no further attempt and
 // stops with 'raced': the race carries the job, and this allocation is never moved to another zone.
+// `room` (room.mjs createRoom, the tick's, when the limits are known): an attempt whose placement is full is skipped
+// with no insert; an insert takes its share as it is sent and gives it back when refused or failed, and a quota refusal
+// closes the limit it names for the rest of the tick.
 // Returns {placement, tried, stop: 'exhausted'|'failed'|'unknown'|'deadline'|'raced' when no placement, quota: true if
 // any refused it}. Each of `tried` is the attempt with its outcome, when it was sent (`sent`, ms) and how long it took to
 // settle (`ms`), a quota refusal's `metric`, and an unsettled insert's `operation` (its link) when the API named it.
-export async function walkPlacements(list, { attempt, reconcile, now = Date.now, deadline = Infinity, quota: memory = [], raced = () => false }) {
+export async function walkPlacements(list, { attempt, reconcile, now = Date.now, deadline = Infinity, quota: memory = [], stockouts = null, raced = () => false, room = null }) {
   const tried = [];
   let quota = false;
   for (const p of list) {
-    if (quotaBlocks(memory, p)) continue;
+    if (quotaBlocks(memory, p) || stockouts?.has(p, now())) continue;
+    if (room && !room.fits(p)) {
+      room.skip(p);
+      continue;
+    }
     if (raced()) return { placement: null, tried, stop: 'raced', quota };
     if (now() >= deadline) return { placement: null, tried, stop: 'deadline', quota };
+    room?.take(p);
     const sent = now();
     let outcome;
     let error = null;
@@ -309,10 +341,15 @@ export async function walkPlacements(list, { attempt, reconcile, now = Date.now,
       ...(outcome === 'unknown' && error?.operation ? { operation: error.operation } : {}),
     });
     if (outcome === 'created') return { placement: p, tried, quota };
-    if (outcome === 'capacity') continue;
+    if (outcome !== 'unknown') room?.release(p);
+    if (outcome === 'capacity') {
+      stockouts?.add(p, now());
+      continue;
+    }
     if (outcome === 'quota') {
       quota = true;
       memory.push(quotaScope(error, p));
+      room?.refused(p, quotaMetric(error));
       continue;
     }
     return { placement: null, tried, stop: outcome, quota };
