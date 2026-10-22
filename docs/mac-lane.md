@@ -510,7 +510,7 @@ into per machine (`install.sh --vm`), and a Mac without it has none of what foll
 | Job clone | `maws-vm-job-vm-<time>`, an APFS copy of the golden image (seconds; it holds only what the job writes), run with `tart run --no-graphics --no-clipboard` (its pasteboard is never the host's) and four directory shares: the kit and the slot's identity read-only, its `out/` and `cache/` read-write. |
 | Slot | `~/ci-kit-vm/vm/`: `identity/` (the runner's `.runner`, `.credentials`, `.credentials_rsaparams`, copied into each clone and never baked), `out/` (what the guest writes back: its markers, `_diag`, its hooks log), `cache/` (MAWS's e2e build cache). The trial slot, `~/ci-kit-vm/vm-trial/`, is the same for a candidate's trial and serves nothing else. |
 | In the guest | `mac/vm/guest/`: `kickoff.sh` (run by `tart exec`, which is gRPC to the Tart guest agent, never the guest's address) makes the clone the slot's runner and starts `wrapper.sh`, which runs `run.sh --once`, writes the `out/` markers (its header is the protocol), answers the idle stop and powers the guest off; `hooks/` is the guest's start and end, cut down: the display and dialog check, Terminal in front, the posture line with `vm=` and `clone=`, no sweep, no alert, no `gh`. |
-| State | in `~/Library/Logs/ci-kit`, each file replaced whole, written under `desktop.lock`: `vm-reserved` (the slot's reservation), `vm-hold.<owner>` (the holds, written and removed by `mac/vm/hold.sh`), `vm-claim.<worker>` (host jobs keeping the guest out), `vm-pause` (the guard's), and the launcher's own `vm-failures` and `vm-lane.alert.<kind>`. |
+| State | in `~/Library/Logs/ci-kit`, each file replaced whole, written under `desktop.lock`: `vm-reserved` (the slot's reservation), `vm-released` (the last release's epoch second), `vm-hold.<owner>` (the holds, written and removed by `mac/vm/hold.sh`), `vm-claim.<worker>` (host jobs keeping the guest out), `vm-pause` (the guard's), and the launcher's own `vm-failures` and `vm-lane.alert.<kind>`. |
 | Logs | `vm-lane.log` (every decision, every boot's reads, the guard's samples, each clone's `out/` folded in at its end), `vm-run.log` (the clones' `tart run` output), `vm-out/<clone>/` (the last 20 clones' `out/`), `vm-bake.log` (the maintenance procedure's transcript); the guest's hook lines land in `mac-runner-hooks.log`. |
 
 **The reservation.** `vm-reserved` means "a job clone of this slot may be running", whatever became of the launcher
@@ -534,9 +534,21 @@ today's labels, honours `Lane: vm` (`scripts/ci-gate.sh --lane vm`: those groups
 `Lane: vm-trial` (to `[ci-kit-mac-vm-trial]`, a candidate's trial and nothing else), and gives a solo job the exclusive
 wait in its timeout. **What a guest job may rely on:** its runner environment sets `CI_KIT_VM_GUEST=1` (MAWS's budgets
 treat a guest as a loaded host), its `CI_KIT_MACHINE` is `<machine>-vm`, and `RUNNER_NAME` ends in no `-<n>`.
-**Every host instance** of a Mac with the lane sets `CI_KIT_VM_LANE=1`, because a guest can boot after a test read the
-host's load: MAWS's budgets read such a host as loaded. MAWS's alert reader treats `-vm` and `-vm-trial` as machines
-of their own, and the guest never opens an alert.
+**Every host instance** of a Mac with the lane sets `CI_KIT_VM_RESERVATION=<absolute path to vm-reserved>` in its
+`.env` (normally `$HOME/Library/Logs/ci-kit/vm-reserved`), not the old static `CI_KIT_VM_LANE=1`. MAWS's budgets read
+whether a guest overlapped the test, not whether a lane is installed or enabled: for a test started at wall-clock time
+`t0`, read at verdict time, first the reservation path and then its sibling `vm-released`. The host reads as loaded
+if the reservation exists **or** `vm-released >= floor(t0 in seconds)`. An unreadable path, other than not-found,
+reads as loaded; a malformed stamp does too. Read the reservation first so a release between the two reads is caught
+by the stamp. A guest that boots after the test's start is covered even if it ends before the verdict; an idle lane
+no longer loosens every host bound. Epoch-second rounding can conservatively include a guest released earlier in
+the test's starting second.
+
+Every reservation release, including failed boots and recovery, atomically replaces `vm-released` with one line
+from `date +%s` (temporary file, then rename), **before** removing `vm-reserved` and only once the clone is gone.
+A stamp write failure is reported in `vm-lane.log` and the release still proceeds: a test may then assert a tight
+bound beside a guest that just ended, a visible flaky red rather than a hidden pass. The last stamp stays between
+jobs. MAWS's alert reader treats `-vm` and `-vm-trial` as machines of their own, and the guest never opens an alert.
 
 The exclusive instance gains `ci-kit-mac-solo` when it is registered with `--vm`. An instance registered before keeps
 its labels; add the label from the MacBook (the runner keeps its registration and needs no restart):
@@ -671,11 +683,12 @@ alert naming the job, which GitHub shows cancelled: rerun it.
 
 **Install, enable, remove.** `install.sh --vm` installs the lane beside the instances ([Install, update,
 remove](#install-update-remove)): the launcher's agent, disabled on a machine new to the lane; the kit and the slots;
-`CI_KIT_VM_LANE=1` in every instance's `.env`; and Tart's directory on the launcher's PATH (Tart is a prerequisite with
-`--vm`). A re-run without `--vm` keeps an installed lane and refreshes it, the launcher keeping the enabled state
-launchd has for it; `--disabled` disables it with the runners; `--no-vm` unloads and removes its agent and the `.env`
-flag, keeping `~/ci-kit-vm`; `--uninstall` removes it with the rest. While the lane's reservation stands, or the
-maintenance hold is up, every one of these refuses before anything changes: a reload would restart the launcher beside
+`CI_KIT_VM_RESERVATION=<absolute path to vm-reserved>` in every host instance's `.env`; and Tart's directory on the
+launcher's PATH (Tart is a prerequisite with `--vm`). A re-run without `--vm` keeps an installed lane and refreshes it,
+the launcher keeping the enabled state launchd has for it; `--disabled` disables it with the runners; `--no-vm` unloads
+and removes its agent and the `.env` reservation path, keeping `~/ci-kit-vm`; refresh also removes the old static flag.
+`--uninstall` removes it with the rest. While the lane's reservation stands, or the maintenance hold is up, every one
+of these refuses before anything changes: a reload would restart the launcher beside
 its guest or bring it back into the procedure, and a publish would pull the kit from under a running clone. A guest
 the launcher boots between that read and its bootout refuses the install too, and the launcher comes back to adopt
 it. The lane boots nothing until a golden image exists (the [procedure](#the-vm-lanes-maintenance)) and its agent is

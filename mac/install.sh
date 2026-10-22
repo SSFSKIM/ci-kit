@@ -44,11 +44,11 @@
 # (mac/vm/com.ssfskim.ci-kit.vm-lane.plist), the slots' directories under ~/ci-kit-vm (vm and vm-trial, each with
 # identity/, out/ and cache/, and trials/), and the installed kit ~/ci-kit-vm/kit, a copy of this mac/ directory
 # published with the hooks' staged swap, which the launcher runs from and every clone is shown read-only. Every host
-# instance's .env gains CI_KIT_VM_LANE=1 (MAWS's budgets read a host that may have a guest beside it as loaded), and an
+# instance's .env gains CI_KIT_VM_RESERVATION (the absolute vm-reserved path, for MAWS's verdict-time load read), and an
 # exclusive instance registered now carries ci-kit-mac-solo too; an existing registration's labels are changed by hand
 # (the docs say how). The launcher's agent is installed disabled; a re-run keeps the state launchd has for it, as a
 # shared instance's, and --disabled leaves it disabled. Like --shared's count, the lane is kept by a re-run without
-# --vm (it is installed when its LaunchAgent is); --no-vm unloads and removes its agent and the .env flag, keeping
+# --vm (it is installed when its LaunchAgent is); --no-vm unloads and removes its agent and the .env path, keeping
 # ~/ci-kit-vm. With the lane installed or asked for, the install refuses while the lane's reservation stands (a guest
 # may run) or the maintenance procedure holds it (a vm-hold.<owner> of kind maintenance), and so does --uninstall,
 # which removes the launcher's agent with the rest. Without the lane, nothing of it is installed or read.
@@ -471,7 +471,7 @@ for ((n = 1; n <= last; n++)); do
     echo "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=$root/ci-kit/hooks/job-completed.sh"
     echo "CI_KIT_MACHINE=$machine"
     ((n == 1)) || echo CI_KIT_SHARED_DESKTOP=1
-    ((vm == 0)) || echo CI_KIT_VM_LANE=1
+    ((vm == 0)) || echo "CI_KIT_VM_RESERVATION=$VM_RESERVED"
   } >"$root/.env"
   echo "$RUNNER_PATH" >"$root/.path"
   cp "$root/bin/runsvc.sh" "$root/runsvc.sh"

@@ -49,6 +49,11 @@ case $command in
   list)
     [[ $* == '--format json' ]] || exit 64
     [[ ! -e $t/fail-list ]] || { echo 'Error: list failed' >&2; exit 1; }
+    # Undo reads once to verify the stop, then again to decide whether it must delete. Fail only the latter onward.
+    if [[ -e $t/fail-undo-list && -e $t/run-failed ]]; then
+      n=$(( $(cat "$t/undo-lists" 2>/dev/null || echo 0) + 1 )); echo $n > "$t/undo-lists"
+      ((n < 2)) || { echo 'Error: list failed after the verified stop' >&2; exit 1; }
+    fi
     # block-locked-list <n>: the n-th list made while desktop.lock is held (the launcher's recovery, then its boots)
     # waits for list-go.
     if [[ -e $t/block-locked-list ]] && ! perl -MFcntl=:flock -e 'open(my $f, ">>", shift) or exit 0; exit(flock($f, LOCK_EX | LOCK_NB) ? 0 : 1)' "$HOME/Library/Logs/ci-kit/desktop.lock"; then
@@ -76,7 +81,7 @@ case $command in
     printf '%s\\n' "$@" > "$dir/run.args"
     # A guest's pasteboard is never the host's: every run of the lane's carries --no-clipboard.
     [[ " $* " == *' --no-clipboard '* ]] || { echo "Error: $name run with the host's clipboard shared" >&2; echo "$name" >> "$t/clipboard-shared"; exit 64; }
-    [[ ! -e $t/fail-run ]] || { echo 'Error: Failed to generate keypair' >&2; exit 1; }
+    [[ ! -e $t/fail-run ]] || { touch "$t/run-failed"; echo 'Error: Failed to generate keypair' >&2; exit 1; }
     echo $$ > "$dir/run.pid"; echo running > "$dir/state"
     until [[ -e $dir/poweroff || -e $dir/stopping ]]; do sleep 0.05; done
     echo stopped > "$dir/state"; rm -f "$dir/run.pid" ;;
@@ -358,9 +363,95 @@ async function finish(m, ...running) {
   assert.equal(readFileSync(join(m.home, 'tart/clipboard-shared'), { encoding: 'utf8', flag: 'a+' }), '', 'every tart run carries --no-clipboard');
 }
 
+// Observe the real release at the filesystem boundary, not by polling after it. The shim records what a reader
+// could see immediately BEFORE unlink, then delegates to the real rm. Moving the stamp after rm fails this check.
+function observeRelease(m) {
+  const earliest = Math.floor(Date.now() / 1000);
+  executable(join(m.home, 'bin/rm'), `for arg in "$@"; do
+  [[ $arg == "$HOME/Library/Logs/ci-kit/vm-reserved" ]] || continue
+  present=no; [[ ! -e $arg ]] || present=yes
+  clones=none; for dir in "$HOME/tart/vms"/maws-vm-job-*; do [[ ! -d $dir ]] || clones=present; done
+  printf '%s\\t%s\\t%s\\t%s\\n' "$present" "$(cat "$HOME/Library/Logs/ci-kit/vm-released" 2>/dev/null)" "$clones" "$(date +%s)" >> "$HOME/releases"
+done
+exec /bin/rm "$@"`);
+  return {
+    reads: () => existsSync(join(m.home, 'releases')) ? readFileSync(join(m.home, 'releases'), 'utf8').trimEnd().split('\n').map((line) => line.split('\t')) : [],
+    assertStamped() {
+      const reads = this.reads();
+      assert.ok(reads.length, 'the release must have reached unlink');
+      for (const [present, stamp, clones, at] of reads) {
+        assert.equal(present, 'yes', 'the reservation still stands when the stamp is visible');
+        assert.match(stamp, /^\d+$/, 'a complete epoch stamp is published before unlink');
+        assert.ok(Number(stamp) >= earliest && Number(stamp) <= Number(at), 'the stamp is from this release, not a prior guest');
+        assert.equal(clones, 'none', 'the reservation outlives the clone');
+      }
+      assert.match(readFileSync(join(m.logs, 'vm-released'), 'utf8'), /^\d+\n$/, 'one epoch-second line');
+    },
+  };
+}
+
 describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
+  for (const state of ['stopped', 'absent', 'orphan', 'unnamed']) {
+    test(`recovery stamps before removing the reservation: ${state}`, async () => {
+      const m = lane();
+      const observed = observeRelease(m);
+      const clone = `maws-vm-job-${m.slot}-20261021T120000Z`;
+      if (state === 'orphan') m.orphan(clone);
+      else {
+        if (state === 'stopped') m.vm(clone);
+        writeFileSync(join(m.logs, 'vm-reserved'), state === 'unnamed' ? 'incomplete reservation\n' : `vm=${clone}\n`);
+      }
+      const a = m.start();
+      await m.waitLog(/recovery: no job clone and no reservation; idle/);
+      observed.assertStamped();
+      assert.equal(m.reserved(), null);
+      await finish(m, a);
+    });
+  }
+
+  test('the release stamp replaces the old one atomically while still reserved', async () => {
+    const m = lane();
+    const observed = observeRelease(m);
+    writeFileSync(join(m.logs, 'vm-reserved'), 'incomplete reservation\n');
+    writeFileSync(join(m.logs, 'vm-released'), '1\n');
+    executable(join(m.home, 'bin/mv'), `if [[ \${!#} == "$HOME/Library/Logs/ci-kit/vm-released" ]]; then
+  printf '%s\\n' "$1" > "$HOME/release-staged"
+  until [[ -e $HOME/release-go ]]; do sleep 0.05; done
+fi
+exec /bin/mv "$@"`);
+    const a = m.start();
+    await m.until(() => existsSync(join(m.home, 'release-staged')) || observed.reads().length, 'the stamp rename or premature unlink');
+    assert.equal(observed.reads().length, 0, 'no unlink before the atomic stamp publication');
+    assert.ok(m.reserved());
+    assert.equal(readFileSync(join(m.logs, 'vm-released'), 'utf8'), '1\n', 'readers still see the whole old stamp');
+    writeFileSync(join(m.home, 'release-go'), '');
+    await m.waitLog(/recovery: no job clone and no reservation; idle/);
+    observed.assertStamped();
+    await finish(m, a);
+  });
+
+  for (const failure of ['write', 'rename']) {
+    test(`a failed release stamp ${failure} is logged but does not retain the reservation`, async () => {
+      const m = lane();
+      const observed = observeRelease(m);
+      writeFileSync(join(m.logs, 'vm-reserved'), 'incomplete reservation\n');
+      writeFileSync(join(m.logs, 'vm-released'), '1\n');
+      if (failure === 'write') mkdirSync(join(m.logs, 'vm-released.tmp'));
+      else executable(join(m.home, 'bin/mv'), `[[ \${!#} != "$HOME/Library/Logs/ci-kit/vm-released" ]] || exit 1
+exec /bin/mv "$@"`);
+      const a = m.start();
+      await m.waitLog(/recovery: no job clone and no reservation; idle/);
+      assert.equal(m.reserved(), null);
+      assert.match(m.log(), /vm-released.*could not be written.*releasing/);
+      assert.equal(observed.reads()[0][1], '1', 'a failed publication keeps the old complete stamp');
+      if (failure === 'rename') assert.equal(existsSync(join(m.logs, 'vm-released.tmp')), false);
+      await finish(m, a);
+    });
+  }
+
   test('a queued ci-kit-mac-vm job boots a clone of the golden image, which goes through its one job to a verified teardown', async () => {
     const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const observed = observeRelease(m);
     const a = m.start();
     const clone = await m.booted();
     assert.match(clone, new RegExp(`^maws-vm-job-${m.slot}-\\d{8}T\\d{6}Z$`));
@@ -403,6 +494,7 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     assert.ok(reads.some((call) => call[1] === 'repos/SSFSKIM/MAWS/actions/runs?status=queued&per_page=100'));
     assert.ok(reads.some((call) => call[1] === 'repos/SSFSKIM/MAWS/actions/runs/101/jobs?filter=latest&per_page=100'));
     assert.deepEqual(m.alerts(), []);
+    observed.assertStamped();
     await finish(m, a);
   });
 
@@ -513,6 +605,7 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
 
   test('a clone that fails is released under the same lock, as an image failure, and nothing is left of it', async () => {
     const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const observed = observeRelease(m);
     m.flag('fail-clone');
     const a = m.start();
     await m.waitLog(/no boot: tart clone maws-vm-golden-20261020 (maws-vm-job-\S+) failed: Error: no space left on device; nothing of \1 is left, and the reservation is released/);
@@ -521,11 +614,13 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     assert.deepEqual(m.clones(), []);
     assert.equal(m.calls().filter((call) => call.startsWith('run ')).length, 0);
     assert.match(m.log(), /failure \(image\): tart clone .* failed: .*; 1 in a row/);
+    observed.assertStamped();
     await finish(m, a);
   });
 
   test('a tart run that exits at once has its stopped clone deleted, then the reservation released, under the same lock', async () => {
     const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const observed = observeRelease(m);
     m.flag('fail-run');
     const a = m.start();
     await m.waitLog(/no boot: tart run (maws-vm-job-\S+) exited at once \(1\); nothing of \1 is left, and the reservation is released/);
@@ -535,6 +630,25 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     assert.equal(m.reserved(), null);
     assert.deepEqual(m.clones(), []);
     assert.ok(m.lockFree());
+    observed.assertStamped();
+    await finish(m, a);
+  });
+
+  test('boot undo cannot release when the post-stop list fails: teardown deletes first, then stamps and releases', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const observed = observeRelease(m);
+    m.flag('fail-run');
+    m.flag('fail-undo-list');
+    const a = m.start();
+    await m.until(() => m.log().includes('its end cannot be verified here') || observed.reads().length, 'undo defers or releases');
+    assert.deepEqual(observed.reads(), [], 'an unreadable list is not proof the clone is absent');
+    assert.ok(m.reserved());
+    assert.equal(m.clones().length, 1);
+    const clone = m.clones()[0];
+    m.queue();
+    m.flag('fail-undo-list', false);
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    observed.assertStamped();
     await finish(m, a);
   });
 
@@ -689,6 +803,7 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
 
   test('a launcher killed during a boot: the reservation stands and settle stays parked; the next launcher, after waiting for the lock, finds the guest running with no wrapper and stops it; settle is released only after Tart shows it stopped', async () => {
     const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const observed = observeRelease(m);
     m.flag('no-agent');
     const a = m.start();
     await m.waitLog(/runs \(tart run, pid \d+\); waiting for its guest agent/);
@@ -711,11 +826,13 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     await m.waitLog(/no boot: a claim holds the lane/);
     await claim.kill();
     await m.waitLog(/booting maws-vm-job-/);
+    observed.assertStamped();
     await finish(m, b);
   });
 
   test('a launcher killed during a job: the reservation stands and settle stays parked; the next launcher adopts the job, never stops it, and releases only after the guest powered off and was deleted', async () => {
     const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const observed = observeRelease(m);
     const a = m.start();
     const clone = await m.booted();
     await m.listening(clone);
@@ -737,6 +854,7 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     await m.waitLog(/no boot: a claim holds the lane/);
     await claim.kill();
     await m.waitLog(/booting maws-vm-job-/);
+    observed.assertStamped();
     await finish(m, b);
   });
 
@@ -813,6 +931,7 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
 
   test('a delete Tart refuses keeps the reservation, is tried each poll and alerts after its bound; once Tart lets go it is released and the alert closed', async () => {
     const m = lane({ env: { CI_KIT_VM_STOP_ALERT: '2' } });
+    const observed = observeRelease(m);
     const clone = `maws-vm-job-${m.slot}-20261021T120000Z`;
     // Tart lists it stopped, but it is not (the list the test sets), so the delete is refused as on a running VM.
     m.vm(clone, 'running');
@@ -827,6 +946,7 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     m.vm(clone, 'stopped');
     await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
     await m.until(() => m.closed().length === 1, 'the close');
+    observed.assertStamped();
     await finish(m, a);
   });
 
@@ -1379,6 +1499,7 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
 
   test('free disk under the floor while a job runs: the guest is stopped, alerted for disk and counted', async () => {
     const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const observed = observeRelease(m);
     const a = m.start();
     const clone = await states.running.reach(m);
     m.disk(4);
@@ -1387,6 +1508,7 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     assert.ok(m.calls().includes(`stop ${clone} --timeout 30`));
     assert.match(m.alerts()[0], /^ci-kit alert: vm lane on mini stopped a job for disk at /);
     assert.equal(m.failures().total_disk, '1');
+    observed.assertStamped();
     await finish(m, a);
   });
 
