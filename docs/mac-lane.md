@@ -688,7 +688,8 @@ what it did and logs it to `vm-bake.log`; each is safe to run again: nothing is 
 first, and `--promote` finishes from either name.
 
 Run it from the installed kit, `~/ci-kit-vm/kit/vm/bake.sh`, after refreshing the kit (`install.sh`, outside the hold:
-the install refuses during maintenance), so the candidate is provisioned with the kit the lane will run. In the
+the install refuses during maintenance, and an install already under way holds `vm-lane.lock` while it publishes the
+kit, so a step started then refuses until it is done), so the candidate is provisioned with the kit the lane will run. In the
 commands, `owner` is the session's name, as for a timed hold, and `cand` the candidate's name `--bake` prints.
 
 1. **The hold.** Write the marker, wait for the guest to go, take the host's instances down as for any hold, and boot
@@ -731,8 +732,10 @@ commands, `owner` is the session's name, as for a timed hold, and `cand` the can
    runs `tart run --dir=maws:<checkout>:ro <cand>` in the mini's Terminal (this one boot keeps the clipboard shared, so
    the commands can be pasted in: nothing else runs under the hold, and a pasteboard does not outlive the guest's
    shutdown; every other boot of the lane runs with `--no-clipboard`); in the guest's window opens Terminal and
-   LibreOffice and answers their first-run prompts; runs one MAWS group from a scratch clone of the share
-   (`pnpm e2e:deliverables`), answering Electron's notification prompt as the mini's own setting has it; then removes
+   LibreOffice and answers their first-run prompts; gives the guest's Terminal the runner's PATH
+   (`export PATH="$(cat ~/actions-runner-maws/.path)"`: the baked Node 22 is Homebrew's keg-only `node@22`, so a new
+   Terminal finds the base image's Node 24 and no pnpm, while every job gets that PATH); runs one MAWS group from a
+   scratch clone of the share (`pnpm e2e:deliverables`), answering Electron's notification prompt as the mini's own setting has it; then removes
    the clone and shuts the guest down. `--register` and `--trial` refuse a candidate still running.
 
 4. **Registration**, once per identity, not per refresh (the first refresh, or after a slot's identity is removed):
@@ -783,7 +786,8 @@ commands, `owner` is the session's name, as for a timed hold, and `cand` the can
 
 8. **Retire** the old golden after the first green production job from the new one (`vm-lane.log` names the golden at
    each boot): `bake.sh --retire <old>`. It needs no hold, and refuses the pointer's VM, a running VM, and anything
-   but a golden, a candidate or a trial clone.
+   but a golden, a candidate or a trial clone. A retire and a promote take the pointer's own lock
+   (`~/ci-kit-vm/golden.lock`), so a retire never deletes the VM a promote is about to point at.
 
 **When a step fails.** Nothing automated meets it, since the launcher is booted out: rerun the same step. A candidate
 whose trial failed, or took no job, stays for reading (`~/ci-kit-vm/trials/<clone>.out/`, `vm-bake.log`); `--promote`

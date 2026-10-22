@@ -49,6 +49,9 @@
 #   candidate to maws-vm-golden-<id> (its own id), then the pointer ~/ci-kit-vm/golden (CI_KIT_VM_GOLDEN) replaced by a
 #   rename. Interrupted between the two, the pointer still names the old golden, which is valid; run again, it finds
 #   the VM under either name and finishes. It prints the old golden for --retire.
+# - --promote and --retire hold the pointer's own lock, ~/ci-kit-vm/golden.lock (flock, at most CI_KIT_VM_POINTER_WAIT
+#   s, 120), a promote from its rename through its pointer write and a retire from its pointer check through its
+#   delete, so a retire never deletes the VM a promote resuming from either name is about to point at.
 # - --retire: deletes a stopped maws-vm-golden-*, maws-vm-candidate-* or maws-vm-trial-* VM that the pointer does not
 #   name (a failed candidate, an old golden, a trial clone left by a step that died); never a job clone or the base. A
 #   VM already gone is done.
@@ -93,6 +96,7 @@ whole() { # <value> <default>
 vm_home=${CI_KIT_VM_HOME:-$HOME/ci-kit-vm}
 kit=${CI_KIT_VM_KIT:-$vm_home/kit}
 golden_pointer=${CI_KIT_VM_GOLDEN:-$vm_home/golden}
+pointer_lock_file=$vm_home/golden.lock
 trials=$vm_home/trials
 repo=${CI_KIT_VM_REPO:-SSFSKIM/MAWS}
 base=${CI_KIT_VM_BASE:-ghcr.io/cirruslabs/macos-golden-gate-base:latest}
@@ -111,6 +115,7 @@ end_wait=$(whole "${CI_KIT_VM_END_WAIT:-}" 60)
 stop_timeout=$(whole "${CI_KIT_VM_STOP_TIMEOUT:-}" 60)
 provision_wait=$(whole "${CI_KIT_VM_PROVISION_WAIT:-}" 3600)
 result_wait=$(whole "${CI_KIT_VM_TRIAL_RESULT:-}" 120)
+pointer_wait=$(whole "${CI_KIT_VM_POINTER_WAIT:-}" 120)
 job_bound_min=$(minutes "${CI_KIT_VM_JOB_BOUND:-}" 50)
 job_bound=$(seconds "$job_bound_min")
 lane_agent=com.ssfskim.ci-kit.vm-lane
@@ -163,8 +168,18 @@ hold_check() {
   mkdir -p "$ci_kit_logs" 2>/dev/null
   exec 7>>"$lane_lock" || refuse "$lane_lock cannot be opened"
   perl -MFcntl=:flock -e 'open(my $fh, ">>&=", 7) or exit 2; exit(flock($fh, LOCK_EX | LOCK_NB) ? 0 : 1)' ||
-    refuse "a launcher holds $lane_lock: it runs though its agent is not loaded; stop it first"
+    refuse "a launcher or an install holds $lane_lock: the launcher runs though its agent is not loaded, or mac/install.sh is publishing the lane; let it finish or stop it first"
   say "held for maintenance by $owners; no reservation, the launcher booted out"
+}
+# The golden pointer's lock, flock(2) on descriptor 6, held from a promote's rename through its pointer write and from
+# a retire's pointer check through its delete, so a retire can never delete the VM a promote is about to point at. It
+# is not vm-lane.lock: a retire needs no hold and runs beside the launcher. Released with the process.
+pointer_lock() {
+  mkdir -p "$vm_home" 2>/dev/null
+  exec 6>>"$pointer_lock_file" || refuse "$pointer_lock_file cannot be opened"
+  perl -MFcntl=:flock -e 'open(my $fh, ">>&=", 6) or exit 2; local $SIG{ALRM} = sub { exit 1 }; alarm shift;
+    exit(flock($fh, LOCK_EX) ? 0 : 1)' "$pointer_wait" ||
+    refuse "$pointer_lock_file stayed taken for $pointer_wait s: another promote or retire runs"
 }
 # The free space of Tart's volume, against the reserve.
 reserve_check() {
@@ -303,7 +318,9 @@ Screen Sharing from the MacBook (never VNC into the guest), with the maintenance
      the guest's shutdown. Every other boot of the lane (job clones, trials, the bake's) runs with --no-clipboard.
   2. In the guest, open Terminal (Applications > Utilities > Terminal) and answer anything it asks on its first launch.
   3. In the guest, open LibreOffice from Applications, answer its first-run dialogs, and quit it.
-  4. In the guest's Terminal run:
+  4. In the guest's Terminal run, first giving the shell the runner's PATH (its .path): node@22 is keg-only, so a
+     new Terminal finds the base image's Node 24 and no pnpm, while every job gets that PATH:
+       export PATH="\$(cat ~/actions-runner-maws/.path)"
        git -c safe.directory='*' clone "/Volumes/My Shared Files/maws" ~/maws-firstrun && cd ~/maws-firstrun &&
          pnpm install --frozen-lockfile && pnpm e2e:deliverables
      When macOS asks whether Electron may send notifications, answer it as the mini's own setting has it (System
@@ -552,13 +569,14 @@ do_promote() {
   [[ $r_candidate == "$candidate" ]] || refuse "the trial record $trials/$candidate names ${r_candidate:-no candidate}, not $candidate"
   [[ $r_job =~ ^[0-9]+$ ]] || refuse "the trial record names no job id ($(head -1 "$trials/$candidate")): no trial job ran"
   [[ $r_conclusion == success ]] || refuse "the trial job $r_job concluded ${r_conclusion:-nothing}, not success"
+  pointer_lock
   tart_list=$(tart_vms) || refuse 'Tart cannot list its VMs'
   c_state=$(tart_state_in "$tart_list" "$candidate") g_state=$(tart_state_in "$tart_list" "$golden")
   if [[ -n $c_state && -n $g_state ]]; then
     refuse "both $candidate and $golden exist; which one the trial was cannot be told"
   elif [[ -n $c_state ]]; then
     stopped_vm "$candidate"
-    tart_call 120 rename "$candidate" "$golden" >/dev/null 2>&1 || die "tart rename $candidate $golden failed"
+    tart_call 120 rename "$candidate" "$golden" >/dev/null 2>&1 6>&- || die "tart rename $candidate $golden failed"
     say "renamed $candidate to $golden (trial job $r_job, success)"
   elif [[ -n $g_state ]]; then
     say "$candidate is $golden already; the pointer is next"
@@ -587,6 +605,7 @@ do_retire() {
   [[ $# -eq 1 && $vm =~ $vm_name_re ]] || usage
   [[ $vm =~ ^maws-vm-(golden|candidate|trial)-[A-Za-z0-9._-]+$ ]] ||
     refuse "$vm is not a golden, a candidate or a trial clone of the lane: --retire deletes nothing else"
+  pointer_lock
   exists "$golden_pointer"
   case $? in
     0) IFS= read -r pointed <"$golden_pointer" 2>/dev/null || refuse "the pointer $golden_pointer cannot be read"
@@ -607,7 +626,7 @@ do_retire() {
     1) refuse "$vm runs ($tart_why): stop it with the verified stop first" ;;
     *) refuse "whether $vm runs cannot be told ($tart_why)" ;;
   esac
-  tart_delete "$vm" >/dev/null 2>&1 || die "tart delete $vm failed"
+  tart_delete "$vm" >/dev/null 2>&1 6>&- || die "tart delete $vm failed"
   say "retired: $vm deleted (the pointer names ${pointed:-nothing})"
 }
 

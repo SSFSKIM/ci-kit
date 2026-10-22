@@ -77,6 +77,8 @@ VM_PLIST=$LAUNCH_AGENTS/$VM_AGENT.plist
 VM_HOME=$HOME/ci-kit-vm
 VM_KIT=$VM_HOME/kit
 VM_RESERVED=$LOG_DIR/vm-reserved
+# The launcher's own lock, which every maintenance step (vm/bake.sh) also holds for its run.
+VM_LOCK=$LOG_DIR/vm-lane.lock
 # The PATH jobs and hooks start with: Homebrew's tools, then the system's. Jobs install their own Node and pnpm.
 RUNNER_PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 here=$(cd "$(dirname "$0")" && pwd)
@@ -172,6 +174,21 @@ vm_quiesce() {
   if [[ -n $loaded ]]; then launchctl bootstrap "$domain" "$VM_PLIST" 2>/dev/null || true; fi
   die "the VM lane booted a guest meanwhile ($(head -1 "$VM_RESERVED" 2>/dev/null || echo unreadable)); its launcher is back as it was; re-run when the guest is gone"
 }
+# The lane's lock, taken once its launcher is booted out and held until just before the launcher is loaded again: a
+# maintenance step started since the first read (which booting the launcher out let pass bake.sh's own check) holds
+# it, and none can start while the kit is published. The reservation and the holds are read again under it. A refusal
+# here leaves the launcher booted out: the procedure needs it so.
+vm_fence() {
+  mkdir -p "$LOG_DIR"
+  exec 7>>"$VM_LOCK" || die "$VM_LOCK cannot be opened"
+  perl -MFcntl=:flock -e 'open(my $fh, ">>&=", 7) or exit 2; local $SIG{ALRM} = sub { exit 1 }; alarm shift;
+    exit(flock($fh, LOCK_EX) ? 0 : 1)' "${CI_KIT_VM_LOCK_WAIT:-10}" ||
+    die "the VM lane's lock ($VM_LOCK) is held: a maintenance step runs (vm/bake.sh); the launcher stays booted out; re-run after the procedure's release"
+  vm_refusals
+}
+vm_unfence() {
+  exec 7>&-
+}
 # Publishes a staged directory at a fixed path in one exchange (Darwin's RENAME_SWAP), so a reader finds either the old
 # set or the new one, never a gap between two renames. After it the staged path holds the old set; after a first
 # install it no longer exists.
@@ -224,6 +241,7 @@ if [[ $mode == uninstall ]]; then
   if vm_installed; then
     vm_refusals
     vm_quiesce
+    vm_fence
     rm -f "$VM_PLIST"
     lane=", and the VM lane's $VM_AGENT ($VM_HOME stays)"
   fi
@@ -435,8 +453,10 @@ if ((vm == 1)); then
   done < <(find "$kit_staged/hooks" "$kit_staged/vm" -name '*.sh' -print0)
 fi
 # An installed launcher is booted out before anything goes live, so it boots no guest into the swap; a guest it booted
-# just before refuses the install with nothing changed (vm_quiesce).
+# just before refuses the install with nothing changed (vm_quiesce). Then the lane's lock, held through the kit's
+# publication, with the reservation and the holds read again under it (vm_fence).
 if [[ -n $vm_before ]]; then vm_quiesce; fi
+if ((vm == 1)) || [[ -n $vm_before ]]; then vm_fence; fi
 for ((n = 1; n <= last; n++)); do
   swap_in "${staged[n - 1]}" "$(root_of "$n")/ci-kit/hooks"
 done
@@ -512,6 +532,8 @@ if ((vm == 1)); then
     "$here/vm/$VM_AGENT.plist" >"$VM_PLIST"
   plutil -lint -s "$VM_PLIST"
   unload "$VM_AGENT"
+  # The kit is published: the launcher, loaded next, must not find this install holding its lock.
+  vm_unfence
   if [[ -n $vm_enabled ]]; then
     launchctl enable "$domain/$VM_AGENT"
     launchctl bootstrap "$domain" "$VM_PLIST"

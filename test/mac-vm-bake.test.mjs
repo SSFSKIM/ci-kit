@@ -115,6 +115,7 @@ case $command in
   delete)
     [[ -d $vms/$1 ]] || { echo "Error: the specified VM \\"$1\\" does not exist" >&2; exit 1; }
     [[ $(state "$1") != running ]] || { echo "Error: VM \\"$1\\" is running" >&2; exit 1; }
+    if [[ -e $t/block-delete ]]; then touch "$t/delete-waiting"; until [[ -e $t/delete-go ]]; do sleep 0.05; done; fi
     rm -rf "\${vms:?}/$1" ;;
   *) exit 64 ;;
 esac`;
@@ -255,7 +256,7 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
       for (const args of steps) {
         const result = f.run(args);
         assert.equal(result.status, 1, `${args}`);
-        assert.match(result.stderr, /refused: a launcher holds .*vm-lane\.lock/, `${args}`);
+        assert.match(result.stderr, /refused: a launcher or an install holds .*vm-lane\.lock/, `${args}`);
       }
       assert.deepEqual(f.calls(), []);
     } finally {
@@ -296,6 +297,10 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     // The human's window step, printed for CI-opt to relay: graphics, the maws share, the notification prompt.
     assert.match(result.stdout, new RegExp(`tart run --dir=maws:${f.maws}:ro ${CANDIDATE}`));
     assert.match(result.stdout, /pnpm e2e:deliverables/);
+    // The baked runtime, as jobs get it: the runner's .path before any pnpm.
+    const steps = result.stdout.slice(result.stdout.indexOf("The human's first-run window step"));
+    const exported = steps.indexOf('export PATH="$(cat ~/actions-runner-maws/.path)"');
+    assert.ok(exported > 0 && exported < steps.indexOf('pnpm install'), steps);
     assert.match(result.stdout, /Electron may send notifications/);
     assert.match(result.stdout, /never VNC into the guest/);
     assert.match(result.stdout, /This one boot keeps the clipboard shared/);
@@ -587,6 +592,39 @@ describe('the promote and the retire (bake.sh)', { concurrency: 4, ...macOnly },
     assert.equal(third.status, 0);
     assert.match(third.stdout, /promoted already: the pointer names maws-vm-golden-20261022/);
     assert.equal(f.calls().filter((call) => call.startsWith('rename')).length, 1);
+  });
+
+  test('a retire paused at its delete holds the pointer lock: a promote resuming from the renamed golden waits, then finds it gone, and the pointer never names a deleted VM', async () => {
+    const f = fixture();
+    // A promote interrupted after its rename: the golden exists under its new name, the pointer still names the old.
+    f.vm(OLD);
+    f.vm(GOLDEN);
+    f.writeRecord({});
+    f.flag('block-delete');
+    const retire = f.start(['--retire', GOLDEN]);
+    await f.until(() => existsSync(join(f.home, 'tart/delete-waiting')), 'the retire at its delete');
+    const promote = f.start(['--promote', CANDIDATE]);
+    await sleep(1500);
+    assert.equal(f.pointer(), OLD, 'the promote waits for the retire');
+    f.flag('delete-go');
+    assert.equal(await retire.exited, 0, retire.output());
+    assert.equal(await promote.exited, 1, promote.output());
+    assert.match(promote.output(), /refused: neither maws-vm-candidate-20261022 nor maws-vm-golden-20261022 is among Tart's VMs/);
+    assert.equal(f.pointer(), OLD);
+    assert.equal(existsSync(join(f.vms, GOLDEN)), false);
+    // A pointer lock that stays taken refuses at its bound.
+    const holder = spawn('perl', ['-MFcntl=:flock', '-e', '$| = 1; open(my $fh, ">>", shift) or die; flock($fh, LOCK_EX) or die; print "locked\\n"; sleep 600',
+      join(f.vmHome, 'golden.lock')], { stdio: ['ignore', 'pipe', 'inherit'] });
+    children.add(holder);
+    await once(holder.stdout, 'data');
+    try {
+      const waited = f.run(['--retire', OLD], { extra: { CI_KIT_VM_POINTER_WAIT: '1' } });
+      assert.equal(waited.status, 1);
+      assert.match(waited.stderr, /golden\.lock stayed taken for 1 s: another promote or retire runs/);
+      assert.ok(existsSync(join(f.vms, OLD)));
+    } finally {
+      holder.kill('SIGKILL');
+    }
   });
 
   test('--retire needs no hold; it refuses the pointer\'s VM, a running VM, and anything not a golden, a candidate or a trial clone; a VM gone is done', () => {

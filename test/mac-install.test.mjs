@@ -744,6 +744,48 @@ fi
   assert.ok(existsSync(join(f.home, 'vm-loaded')), 'the launcher is loaded again');
 });
 
+test('a maintenance step begun after the first check (its hold, or a bake holding vm-lane.lock) refuses the refresh under the lane\'s lock, with nothing live and the launcher left out', macOnly, () => {
+  for (const begun of ['hold', 'lock']) {
+    const f = laneFixture();
+    assert.equal(f.run(undefined, ['--vm']).status, 0);
+    const domain = `gui/${uidOf()}`;
+    const logs = join(f.home, 'Library/Logs/ci-kit');
+    // The procedure begins as the install boots the launcher out (which is what lets bake.sh's own check pass): its
+    // hold is written, or a bake takes vm-lane.lock and holds it.
+    const fake = readFileSync(join(f.bin, 'launchctl'), 'utf8');
+    rmSync(join(f.bin, 'launchctl'));
+    const start = begun === 'hold'
+      ? `echo 'maintenance since 2026-10-22T09:00:00Z' > "${logs}/vm-hold.ci-opt"`
+      : `perl -MFcntl=:flock -e 'open(my $fh, ">>", shift) or die; flock($fh, LOCK_EX) or die; open(my $ok, ">", shift); close $ok; sleep 60' "${logs}/vm-lane.lock" "$HOME/locked" </dev/null >/dev/null 2>&1 &
+  echo $! > "$HOME/holder.pid"
+  until [[ -e $HOME/locked ]]; do sleep 0.05; done`;
+    f.executable(join(f.bin, 'launchctl'), `${fake.replace(/^#!\/bin\/bash\n/, '')}`.replace('[[ $1 != print ]]',
+      `if [[ $1 == bootout && $2 == */${vmAgent} && ! -e $HOME/begun ]]; then
+  touch "$HOME/begun"
+  ${start}
+fi
+[[ $1 != print ]]`));
+    writeFileSync(join(f.kit, 'mac/vm/lane.sh'), `${readFileSync(join(f.kit, 'mac/vm/lane.sh'), 'utf8')}# a newer kit\n`);
+    const kit = readFileSync(join(f.home, 'ci-kit-vm/kit/vm/lane.sh'), 'utf8');
+    const hooks = f.snapshot();
+    rmSync(join(f.home, 'launchctl.calls'));
+    try {
+      const result = f.run(undefined, [], { CI_KIT_VM_LOCK_WAIT: '1' });
+      assert.equal(result.status, 1, `${begun}: ${result.stderr}`);
+      assert.match(result.stderr, begun === 'hold'
+        ? /the VM lane's maintenance procedure holds it \(vm-hold\.ci-opt: maintenance since/
+        : /the VM lane's lock \(.*vm-lane\.lock\) is held: a maintenance step runs .*the launcher stays booted out/, begun);
+      assert.ok(calls(f).includes(`bootout ${domain}/${vmAgent}`), begun);
+      assert.ok(!calls(f).some((call) => call.startsWith('bootstrap')), `${begun}: nothing loaded again, the launcher included`);
+      assert.ok(!calls(f).some((call) => call.includes(runnerAgent)), `${begun}: no runner reloaded`);
+      assert.deepEqual(f.snapshot(), hooks, `${begun}: nothing went live`);
+      assert.equal(readFileSync(join(f.home, 'ci-kit-vm/kit/vm/lane.sh'), 'utf8'), kit, `${begun}: the candidate keeps its kit`);
+    } finally {
+      if (existsSync(join(f.home, 'holder.pid'))) try { process.kill(Number(readFileSync(join(f.home, 'holder.pid'), 'utf8')), 'SIGKILL'); } catch {}
+    }
+  }
+});
+
 test('--uninstall removes the launcher\'s agent with the rest and keeps ~/ci-kit-vm; a staged kit that fails its check changes nothing', macOnly, () => {
   const f = laneFixture();
   assert.equal(f.run(undefined, ['--vm']).status, 0);
