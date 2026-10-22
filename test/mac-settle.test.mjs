@@ -25,6 +25,21 @@ before(() => {
 const asWorker = `require('node:fs').writeFileSync(process.argv[1], String(process.pid));
 const run = require('node:child_process').spawnSync(process.argv[2], process.argv.slice(3), { stdio: 'inherit' });
 process.exit(run.status ?? 1);`;
+// A step with no Runner.Worker above it at all: run by a grandchild that waits until its parent has exited, so it is
+// reparented away from this test's own ancestors, which hold the real Runner.Worker when the suite runs as a CI job. Its
+// output stays on the inherited pipes, which spawnSync reads until they close; its status goes to a file.
+const orphaned = `my ($status, @command) = @ARGV;
+my $child = fork; defined $child or exit 125;
+if (!$child) {
+  my $parent = $$;
+  my $grandchild = fork; defined $grandchild or exit 125;
+  exit 0 if $grandchild;
+  select(undef, undef, undef, 0.02) while getppid() == $parent;
+  system { $command[0] } @command;
+  open(my $fh, '>', $status) or exit 125; print $fh ($? >> 8), "\\n"; close $fh;
+  exit 0;
+}
+waitpid $child, 0;`;
 after(() => rmSync(root, { recursive: true, force: true }));
 
 const T0 = Date.parse('2026-10-19T05:12:34Z') / 1000;
@@ -35,9 +50,9 @@ const connected = '[I 2026-10-19 05:00:04] user#123 connected.\n';
 // hooks: where the runner's hook set is installed, the only place the compiled display helper lives (false: nowhere);
 // variable: whether the runner's .env names it in ACTIONS_RUNNER_HOOK_JOB_STARTED, as mac/install.sh writes it.
 // lane: whether the VM lane is installed (its launcher's LaunchAgent file); underWorker: whether the step runs under a
-// Runner.Worker, as on a runner; logsFile: the hooks' log directory is a file, so nothing can be written there. A world
+// Runner.Worker, as on a runner; orphan: whether it runs with no Runner.Worker among its ancestors; logsFile: the hooks' log directory is a file, so nothing can be written there. A world
 // entry's reserved puts the lane's reservation (vm-reserved) up for that read.
-function guard(world, { inputs = {}, hooks = 'actions-runner-maws/ci-kit/hooks', variable = true, env = {}, readSeconds = 0, logFailure = false, lane = false, underWorker = lane, logsFile = false } = {}) {
+function guard(world, { inputs = {}, hooks = 'actions-runner-maws/ci-kit/hooks', variable = true, env = {}, readSeconds = 0, logFailure = false, lane = false, underWorker = lane, orphan = false, logsFile = false } = {}) {
   const dir = mkdtempSync(join(root, 'job-'));
   const bin = join(dir, 'bin');
   mkdirSync(bin);
@@ -108,7 +123,9 @@ cat ${now('loadavg')}; exit $(cat ${now('load-status')})`);
     [name, value.replace(/\$\{\{ inputs\.([a-z]+) \}\}/, (_, input) => String(inputs[input] ?? step.inputs[input].default))]));
   const started = Date.now();
   const command = ['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', only.run];
-  const result = spawnSync(underWorker ? worker : command[0], underWorker ? ['-e', asWorker, file('worker.pid'), ...command] : command.slice(1), {
+  const [program, ...args] = underWorker ? [worker, '-e', asWorker, file('worker.pid'), ...command]
+    : orphan ? ['perl', '-e', orphaned, file('orphan.status'), ...command] : command;
+  const spawned = spawnSync(program, args, {
     encoding: 'utf8', timeout: 120_000,
     env: {
       HOME: dir, PATH: `${bin}:/usr/bin:/bin`, GITHUB_ACTION_PATH: action, GITHUB_RUN_ID: '123456', GITHUB_JOB: 'e2e',
@@ -117,6 +134,7 @@ cat ${now('loadavg')}; exit $(cat ${now('load-status')})`);
     },
   });
   const text = (name) => existsSync(file(name)) ? readFileSync(file(name), 'utf8') : '';
+  const result = orphan ? { ...spawned, status: text('orphan.status') === '' ? null : Number(text('orphan.status')) } : spawned;
   return {
     ...result,
     elapsed: Date.now() - started,
@@ -334,7 +352,7 @@ test('vm: any leaves the guest unchecked: no claim, and a reservation does not h
 
 test('a measured job whose claim cannot be raised is refused at once, before any read', () => {
   for (const [options, why] of [
-    [{ underWorker: false }, /no Runner\.Worker among the ancestors of process \d+/],
+    [{ underWorker: false, orphan: true }, /no Runner\.Worker among the ancestors of process \d+/],
     [{ logsFile: true }, /the desktop lock could not be taken within 180 s/],
   ]) {
     const run = guard([{}], { lane: true, ...options });
