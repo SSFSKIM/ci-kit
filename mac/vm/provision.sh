@@ -59,21 +59,33 @@ root_diskutil() {
   if [[ -n ${CI_KIT_VM_DISKUTIL:-} ]]; then "$CI_KIT_VM_DISKUTIL" "$@"; else sudo -n /usr/sbin/diskutil "$@"; fi
 }
 # The physical disk holding the one APFS container, found as the guest agent's resizer finds it: l_disk, l_size, l_apfs
-# and l_apfs_size (the container's physical store), l_recovery (a recovery container after it, or -).
+# and l_apfs_size (the container's physical store), l_recovery (the immediately following recovery container, or -).
+# Before touching the disk, accept only the base layout: iBoot, APFS, optional recovery, then free space. Recovery
+# may already be gone on a repeated step; any other partition order is unsupported and left untouched.
 layout() {
   local line
   line=$(root_diskutil list -plist physical | python3 -I -c '
 import plistlib, sys
-found = []
-for disk in plistlib.loads(sys.stdin.buffer.read()).get("AllDisksAndPartitions", []):
-    parts = disk.get("Partitions", [])
-    for i, part in enumerate(parts):
-        if part.get("Content") == "Apple_APFS":
-            after = [p["DeviceIdentifier"] for p in parts[i + 1:] if p.get("Content") == "Apple_APFS_Recovery"]
-            found.append((disk["DeviceIdentifier"], disk["Size"], part["DeviceIdentifier"], part["Size"], (after or ["-"])[0]))
+disks = plistlib.loads(sys.stdin.buffer.read()).get("AllDisksAndPartitions", [])
+seen = "; ".join("%s: %s" % (d.get("DeviceIdentifier", "?"), ", ".join(
+    "%s(%s)" % (p.get("DeviceIdentifier", "-"), p.get("Content", "?"))
+    for p in d.get("Partitions", []))) for d in disks)
+found = [(disk, i) for disk in disks for i, p in enumerate(disk.get("Partitions", []))
+         if p.get("Content") == "Apple_APFS"]
 if len(found) != 1:
-    sys.exit("%d APFS containers on the physical disks, not one" % len(found))
-print(*found[0])') || return 1
+    sys.exit("unsupported disk layout (%d APFS containers, not one): %s" % (len(found), seen))
+disk, i = found[0]
+parts = disk["Partitions"]
+part = parts[i]
+after = parts[i + 1:]
+recovery = "-"
+if after and after[0].get("Content") == "Apple_APFS_Recovery":
+    recovery = after[0]["DeviceIdentifier"]
+    after = after[1:]
+if ([p.get("Content") for p in parts[:i]] != ["Apple_APFS_ISC"]
+        or any(p.get("Content") != "Free Space" for p in after)):
+    sys.exit("unsupported disk layout (expected iBoot, APFS, optional recovery, then free space): " + seen)
+print(disk["DeviceIdentifier"], disk["Size"], part["DeviceIdentifier"], part["Size"], recovery)') || return 1
   read -r l_disk l_size l_apfs l_apfs_size l_recovery <<<"$line"
 }
 # The guest agent's daemon (Cirrus's images run it at boot as a LaunchDaemon, tart-guest-agent --run-daemon) tries the

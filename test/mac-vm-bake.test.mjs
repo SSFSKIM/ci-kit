@@ -456,6 +456,27 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
 // The trials run one at a time: a trial clone is named after the second it starts, and Tart's VMs, like the process
 // table its runs are read from, are the machine's, so two trials in one second would read each other's run.
 describe('the trial (bake.sh --trial)', macOnly, () => {
+  test('--trial: unfit that stays powered on is stopped at the power-off bound, not the idle bound', async () => {
+    const f = fixture({ env: { CI_KIT_VM_END_WAIT: '2', CI_KIT_VM_TRIAL_IDLE: '1800' } });
+    f.vm(CANDIDATE);
+    f.identity('vm-trial');
+    const trial = f.start(['--trial', CANDIDATE]);
+    await f.until(() => trialClone(f) && existsSync(join(f.vms, trialClone(f), 'kicked')), 'the trial clone kicked off');
+    const clone = trialClone(f);
+    f.mark('unfit', 'the display mode cannot be read');
+    await f.until(() => f.record() !== null, 'unfit trial ended at the power-off bound', 15_000);
+    assert.equal(await trial.exited, 0, trial.output());
+    const record = f.record();
+    assert.equal(record.why, 'the guest started no runner: the display mode cannot be read');
+    assert.equal(record.job, '');
+    assert.equal(record.conclusion, '');
+    assert.equal(f.state(clone), null, 'the stopped trial clone is deleted');
+    assert.ok(f.calls().some((call) => call.startsWith(`stop ${clone} `)));
+    assert.equal(existsSync(join(record.out, 'stop-request')), false, 'no wrapper can answer an idle stop');
+    assert.equal(text(join(record.out, 'unfit')), 'the display mode cannot be read\n');
+    assert.deepEqual(f.ghCalls(), [], 'no job result to fetch');
+  });
+
   test('--trial: a clone of the candidate under the trial slot\'s identity, never the production one; the job read through gh; the record binds candidate, run, job and success', async () => {
     const f = fixture();
     f.vm(CANDIDATE);
@@ -713,9 +734,13 @@ case "$*" in
     printf '<?xml version="1.0" encoding="UTF-8"?>\\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\\n'
     printf '<plist version="1.0"><dict><key>AllDisks</key><array><string>disk0</string></array><key>AllDisksAndPartitions</key><array><dict>'
     printf '<key>Content</key><string>GUID_partition_scheme</string><key>DeviceIdentifier</key><string>disk0</string><key>OSInternal</key><false/><key>Partitions</key><array>'
-    part Apple_APFS_ISC disk0s1 "$isc"
-    part Apple_APFS disk0s2 "$(size apfs-size)"
-    [[ ! -f $d/recovery-size ]] || part Apple_APFS_Recovery disk0s3 "$(size recovery-size)"
+    if [[ -f $d/partitions ]]; then
+      while read -r content device bytes; do part "$content" "$device" "$bytes"; done < "$d/partitions"
+    else
+      part Apple_APFS_ISC disk0s1 "$isc"
+      part Apple_APFS disk0s2 "$(size apfs-size)"
+      [[ ! -f $d/recovery-size ]] || part Apple_APFS_Recovery disk0s3 "$(size recovery-size)"
+    fi
     printf '</array><key>Size</key><integer>%s</integer></dict></array></dict></plist>\\n' "$(size disk-size)" ;;
   'eraseVolume free free disk0s3')
     [[ -f $d/recovery-size && ! -e $d/erase-refused && ! -e $d/keep-recovery ]] || { echo 'Error: -69888: Could not unmount disk' >&2; exit 1; }
@@ -789,6 +814,24 @@ describe('the bake\'s provisioning in the guest (provision.sh)', macOnly, () => 
     assert.equal(again.status, 0, again.stderr);
     assert.deepEqual(g.diskCalls().slice(5), ['list -plist physical'], 'read, and nothing changed');
   });
+
+  for (const order of [
+    ['Apple_APFS_ISC', 'Apple_APFS', 'Apple_HFS', 'Apple_APFS_Recovery'],
+    ['Apple_APFS_ISC', 'Apple_APFS', 'Apple_APFS_Recovery', 'Apple_HFS'],
+    ['Apple_APFS_ISC', 'Apple_APFS_Recovery', 'Apple_APFS'],
+    ['Apple_APFS_ISC', 'Apple_APFS', 'Apple_APFS_Recovery', 'Apple_APFS_Recovery'],
+  ]) {
+    test(`disk: unsupported partition order ${order.join(', ')} is refused before any disk change`, () => {
+      const g = guest();
+      writeFileSync(join(g.home, 'partitions'), order.map((content, i) => `${content} disk0s${i + 1} ${content === 'Apple_APFS' ? 44107026944 : 524288000}`).join('\n') + '\n');
+      const result = g.run(['disk', '60']);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(result.stderr, /unsupported.*layout/i);
+      for (const content of order) assert.ok(result.stderr.includes(content), result.stderr);
+      assert.deepEqual(g.diskCalls(), ['list -plist physical'], 'no erase, delete, repair or resize on an unsupported layout');
+      assert.ok(existsSync(join(g.home, 'recovery-size')), 'the recovery container remains');
+    });
+  }
 
   test('disk: a recovery container eraseVolume refuses is deleted as a container', () => {
     const g = guest();

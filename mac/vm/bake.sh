@@ -457,7 +457,7 @@ trial_field() { # <marker> <key>
 }
 # Follows the trial clone through out/ until it powers off (0), or until a bound says to stop it (1, t_end why).
 trial_follow() {
-  local start=$SECONDS assigned_at='' asked_at='' done_at='' seen=' ' marker
+  local start=$SECONDS assigned_at='' asked_at='' done_at='' unfit_at='' seen=' ' marker
   while :; do
     kill -0 "$tart_run_pid" 2>/dev/null || { t_end='the guest powered itself off'; return 0; }
     for marker in $markers; do
@@ -470,7 +470,11 @@ trial_follow() {
       assigned_at=$SECONDS
     fi
     [[ -n $done_at || ! -f $t_out/done ]] || done_at=$SECONDS
-    if [[ -n $done_at ]]; then
+    [[ -n $unfit_at || ! -f $t_out/unfit ]] || unfit_at=$SECONDS
+    if [[ -n $unfit_at ]]; then
+      # No runner started and no wrapper remains to answer an idle stop: only the power-off is still owed.
+      ((SECONDS - unfit_at < end_wait)) || { t_end="the guest is unfit, but it did not power off within $end_wait s"; return 1; }
+    elif [[ -n $done_at ]]; then
       ((SECONDS - done_at < end_wait)) || { t_end="its runner is done, but it did not power off within $end_wait s"; return 1; }
     elif [[ -n $assigned_at ]]; then
       ((SECONDS - assigned_at < job_bound)) || { t_end="its job outlived $job_bound_min min"; return 1; }

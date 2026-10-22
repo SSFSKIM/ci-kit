@@ -1475,6 +1475,62 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     await finish(m, a);
   });
 
+  for (const poweredOff of [true, false]) {
+    test(`unfit recovery counts an image failure and deletes the clone (${poweredOff ? 'powered off' : 'still running with a queued job'})`, async () => {
+      const m = lane({ queue: [['ci-kit-mac-vm']] });
+      const a = m.start();
+      const clone = await m.booted();
+      await a.kill();
+      m.mark('unfit', 'the display mode cannot be read');
+      // Two earlier image failures: recovery must count the third and pause, not silently discard it.
+      writeFileSync(join(m.logs, 'vm-failures'), 'total_image=2\nimage_run=2\n');
+      if (poweredOff) {
+        m.powerOff(clone);
+        await m.until(() => m.state(clone) === 'stopped', 'the guest powered off');
+      }
+      const b = m.start();
+      await m.until(() => m.reserved() === null && !m.clones().includes(clone), 'unfit recovery teardown', 15_000);
+      assert.equal(m.failures().total_image, '3');
+      assert.match(m.pause(), /3 image failures in a row/);
+      assert.match(m.log(), /the guest started no runner: the display mode cannot be read/);
+      assert.equal(m.failures().total_raced, '0');
+      assert.equal(m.alerts().length, 1);
+      assert.match(m.alerts()[0], /paused after 3 image failures/);
+      await finish(m, b);
+    });
+  }
+
+  for (const firstSeen of ['kicking', 'recovery', 'stopping']) {
+    test(`unfit in ${firstSeen} counts once across a failed stop and a launcher restart`, async () => {
+      const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_STOP_ANSWER: '60' } });
+      m.flag('fail-stop');
+      if (firstSeen === 'stopping') m.flag('fail-kickoff-late');
+      const a = m.start();
+      const clone = await m.booted();
+      if (firstSeen === 'stopping') {
+        await m.until(() => existsSync(join(m.out, 'stop-request')), 'the failed kickoff requested a stop');
+        assert.equal(m.failures().total_image, '1', 'the kickoff failure is already counted');
+      }
+      let current = a;
+      if (firstSeen === 'recovery') await a.kill();
+      m.mark('unfit', 'the display mode cannot be read');
+      if (firstSeen === 'recovery') current = m.start();
+      await m.until(() => m.calls().some((call) => call.startsWith(`stop ${clone} `)), 'unfit stops promptly', 15_000);
+      await m.until(() => m.failures().total_image === '1', 'one image failure');
+      await current.kill();
+      assert.ok(m.reserved(), 'a failed stop keeps the reservation');
+      m.flag('fail-stop', false);
+      const b = m.start();
+      await m.until(() => !m.clones().includes(clone), 'unfit deleted after restart', 15_000);
+      assert.equal(m.failures().total_image, '1', 'the same clone is not counted a second time');
+      assert.equal(m.failures().image_run, '1');
+      assert.equal(m.failures().total_raced, '0');
+      assert.deepEqual(m.alerts(), [], 'unfit cannot hide a cancelled job');
+      assert.match(m.log(), /the guest started no runner: the display mode cannot be read/);
+      await finish(m, b);
+    });
+  }
+
   test('a runner that exits while listening, with no job, is an image failure', async () => {
     const m = lane({ queue: [['ci-kit-mac-vm']] });
     const a = m.start();
