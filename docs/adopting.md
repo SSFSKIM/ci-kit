@@ -169,7 +169,9 @@ The gate's command asks for the cache:
 cache=()
 if [ "${CI_KIT_BUILD_CACHE:-}" = gha ]; then
   scope="myimage-$(date -u +%G-W%V)"
-  cache=(--cache-from "type=gha,scope=$scope" --cache-to "type=gha,mode=min,scope=$scope,ignore-error=true")
+  cache=(--output "type=image,compression=zstd,oci-mediatypes=true"
+         --cache-from "type=gha,scope=$scope"
+         --cache-to "type=gha,mode=min,scope=$scope,compression=zstd,ignore-error=true")
 fi
 docker build ${cache[@]+"${cache[@]}"} -t myimage .   # the ${...+...} form keeps bash 3.2's set -u quiet
 ```
@@ -185,9 +187,12 @@ docker build ${cache[@]+"${cache[@]}"} -t myimage .   # the ${...+...} form keep
 - `mode=min` exports the layers of the image built, which for a single-stage build is every step; a multi-stage build
   whose earlier stages are slow needs `mode=max`. `ignore-error=true` keeps a cache service failure from failing
   the gate.
-- **The first build of a scope costs more.** It uploads every layer it built (about 45 s for 650 MB of layers), and a
-  build that hits still downloads and unpacks each layer (about 22 MB/s through BuildKit's backend), so the cache
-  pays where building a layer takes longer than moving it.
+- **zstd layers.** The containerd image store keeps every layer compressed, so the daemon compresses what it builds:
+  gzip took 37–51 s of a 600 MB image's build, zstd 10–13 s, cache or no cache. The cache's `compression=zstd`
+  keeps its layers the image's own, and a hit downloads and unpacks them faster too.
+- **What a hit still costs.** The first build of a scope uploads every layer it built (about 40 s for 600 MB), and a
+  build that hits downloads and unpacks each one: 25 s for the same 600 MB, the download 13 s of it, in a 27 s warm
+  build of an image that takes 92–101 s uncached. The cache pays where building a layer takes longer than moving it.
 - **Which runs read a cache.** GitHub scopes a cache entry to the ref that wrote it. A run reads its own ref's entries
   and the default branch's (a PR run its base branch's too), never a sibling's. A PR's later pushes and re-runs read
   what its earlier runs wrote. Every `ci-gate` call pushes a ref of its own, so it reads only the default branch's
