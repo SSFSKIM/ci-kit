@@ -87,6 +87,7 @@ test('planOutput shapes I3: runs_on per lane, setup resolved, pool flag', () => 
     ],
     pool: true,
     note: '',
+    cache_write: false,
   });
 });
 
@@ -118,6 +119,23 @@ gates:
   assert.deepEqual(planOutput(c, c.gates).gates.map((g) => g.build_cache), ['gha', 'gha', null]);
 });
 
+test('a schedule selects every build_cache gate, whatever its paths and on, and no other', () => {
+  const c = parseConfig(`
+version: 1
+gates:
+  - {name: img, run: x, build_cache: gha, paths: ["img/**"]}
+  - {name: unit, run: y}
+  - {name: pr-only, run: z, build_cache: gha, on: [pr]}
+`, { isPrivate: false });
+  assert.deepEqual(names(selectGates(c, { event: 'schedule' })), ['img', 'pr-only']);
+  assert.deepEqual(selectGates(config, { event: 'schedule' }), []);
+});
+
+test('planOutput says whether the build cache is written', () => {
+  assert.equal(planOutput(config, [], { cacheWrite: true }).cache_write, true);
+  assert.equal(planOutput(config, []).cache_write, false);
+});
+
 test('planOutput of an empty selection says so', () => {
-  assert.deepEqual(planOutput(config, []), { gates: [], pool: false, note: 'no gates selected' });
+  assert.deepEqual(planOutput(config, []), { gates: [], pool: false, note: 'no gates selected', cache_write: false });
 });

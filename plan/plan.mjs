@@ -24,9 +24,14 @@ function changedFiles(base, head) {
   return out.split('\0').filter(Boolean);
 }
 
+// The events a gate's `on` names, and the build cache's seeding schedule, which selects by build_cache alone.
+const PLANNED = [...EVENTS, 'schedule'];
+
 function plan(env) {
   const event = env.CI_KIT_EVENT;
-  if (!EVENTS.includes(event)) throw new ConfigError([`CI_KIT_EVENT must be pr, ci-ref or dispatch, not "${event ?? ''}"`]);
+  if (!PLANNED.includes(event)) {
+    throw new ConfigError([`CI_KIT_EVENT must be pr, ci-ref, dispatch or schedule, not "${event ?? ''}"`]);
+  }
   const configPath = env.CI_KIT_CONFIG || '.github/ci-kit.yml';
 
   let text;
@@ -48,7 +53,7 @@ function plan(env) {
   }
 
   let changed = [];
-  const needsChanges = event !== 'dispatch' && !(explicit && explicit.length > 0);
+  const needsChanges = event !== 'dispatch' && event !== 'schedule' && !(explicit && explicit.length > 0);
   if (needsChanges) {
     if (!env.CI_KIT_BASE || !env.CI_KIT_HEAD) {
       throw new ConfigError([`CI_KIT_BASE and CI_KIT_HEAD are required for event ${event}`]);
@@ -56,7 +61,11 @@ function plan(env) {
     changed = changedFiles(env.CI_KIT_BASE, env.CI_KIT_HEAD);
   }
 
-  return planOutput(config, selectGates(config, { event, explicit, explicitSource, changedFiles: changed }));
+  // The build cache is written on the default branch only: every run reads that branch's entries, while what another
+  // ref writes is read by nothing but that ref's own later runs.
+  const cacheWrite = Boolean(env.CI_KIT_DEFAULT_BRANCH) && env.CI_KIT_REF === `refs/heads/${env.CI_KIT_DEFAULT_BRANCH}`;
+  const selected = selectGates(config, { event, explicit, explicitSource, changedFiles: changed });
+  return planOutput(config, selected, { cacheWrite });
 }
 
 try {

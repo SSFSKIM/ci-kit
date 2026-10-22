@@ -28,6 +28,9 @@ export function trailerGates(message) {
 // event: pr | ci-ref | dispatch. explicit: a gate list from the dispatch input or the trailer, or null.
 // changedFiles: repo-relative paths (ignored for an explicit list and for a dispatch).
 export function selectGates(config, { event, explicit = null, explicitSource = 'the gate list', changedFiles = [] }) {
+  // A schedule is the build cache's seeding run (docs/adopting.md, "Build cache"): every gate with a cache, whatever
+  // its paths and on, so that the default branch holds each scope.
+  if (event === 'schedule') return config.gates.filter((g) => g.build_cache);
   if (explicit && explicit.length > 0) {
     const known = config.gates.map((g) => g.name);
     const unknown = explicit.filter((n) => !known.includes(n));
@@ -43,7 +46,8 @@ export function selectGates(config, { event, explicit = null, explicitSource = '
   });
 }
 
-export function planOutput(config, selected) {
+// cacheWrite: whether the build_cache gates write the cache as well as read it (plan.mjs decides).
+export function planOutput(config, selected, { cacheWrite = false } = {}) {
   return {
     gates: selected.map((g) => ({
       name: g.name,
@@ -57,5 +61,6 @@ export function planOutput(config, selected) {
     })),
     pool: selected.some((g) => g.lane === 'pool'),
     note: selected.length === 0 ? 'no gates selected' : '',
+    cache_write: cacheWrite,
   };
 }
