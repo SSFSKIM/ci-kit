@@ -11,8 +11,8 @@
 # boot's reservation, which the wait then sees: never reported clear with a guest coming. The wait's first read is made
 # under the same lock as the write.
 #
-# owner names the booking session: [A-Za-z0-9][A-Za-z0-9._-]*, so it is a file name and nothing else, whatever shell
-# it passes through. The wait polls every CI_KIT_VM_TICK s (5) for at most CI_KIT_VM_HOLD_WAIT s (3600: a guest's
+# owner names the booking session: [A-Za-z0-9][A-Za-z0-9._-]*, not ending in .tmp (a write under way, to the holds'
+# readers), so it is a file name and nothing else, whatever shell it passes through. The wait polls every CI_KIT_VM_TICK s (5) for at most CI_KIT_VM_HOLD_WAIT s (3600: a guest's
 # running bound of 50 min, and its boot, kickoff and teardown). Exit 0: no guest. 1: past the bound a guest is still
 # there (what stands is printed; the hold stays, so none comes after it). 2: usage. 3: the lock or the hold's file
 # could not be taken or written (nothing changed). Tests move CI_KIT_TART; Bash 3.2: macOS's own.
@@ -43,8 +43,11 @@ usage() {
   sed -n '/^#   hold.sh/s/^# \{0,1\}//p' "$0" >&2
   exit 2
 }
+# Every reader of the holds (lane-reads.sh, bake.sh, install.sh) skips a vm-hold.*.tmp as a write under way, so an
+# owner ending in .tmp would be a hold nothing reads.
 owner_ok() { # <owner>
-  [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { say "refused: the owner '$1' is not a name ([A-Za-z0-9][A-Za-z0-9._-]*)"; exit 2; }
+  [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && $1 != *.tmp ]] ||
+    { say "refused: the owner '$1' is not a name ([A-Za-z0-9][A-Za-z0-9._-]*, not ending in .tmp)"; exit 2; }
 }
 
 # Whether the lane has no guest: no reservation, and Tart lists no maws-vm-* VM but stopped ones. Anything that cannot
@@ -94,10 +97,12 @@ case ${1:-} in
     owner_ok "$2"
     [[ $3 == timed || $3 == maintenance ]] || usage
     file=$ci_kit_logs/vm-hold.$2
+    # Staged outside the vm-hold.* names, so no reader ever takes it for a hold.
+    staged=$ci_kit_logs/.vm-hold.$2.$$
     lock 120 || { say "the desktop lock stayed taken for 120 s; nothing written"; exit 3; }
-    if ! printf '%s since %s\n' "$3" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$file.tmp" 2>/dev/null ||
-      ! mv -f "$file.tmp" "$file" 2>/dev/null; then
-      rm -f "$file.tmp" 2>/dev/null
+    if ! printf '%s since %s\n' "$3" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$staged" 2>/dev/null ||
+      ! mv -f "$staged" "$file" 2>/dev/null; then
+      rm -f "$staged" 2>/dev/null
       unlock
       say "$file could not be written; nothing held"
       exit 3

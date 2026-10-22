@@ -944,7 +944,7 @@ fold() {
 }
 # TEARDOWN: tried at once, then each poll until it is through.
 step_teardown() {
-  local vms status
+  local vms status why
   ((now_epoch >= td_next)) || return 0
   td_next=$((now_epoch + queue_poll))
   [[ -n $td_since ]] || td_since=$now_epoch
@@ -956,11 +956,15 @@ step_teardown() {
     tart_stop_verified "$clone" "$stop_timeout"
     status=$?
     # Its end cannot be told (Tart cannot list, the process table cannot be read): it is stopped by name all the same,
-    # once, and released only once the end is verified.
+    # at each poll until a stop goes through, and released only once the end is verified.
     if ((status == 2)) && [[ -z $td_forced ]]; then
-      td_forced=1
-      say "$clone: its end cannot be told ($tart_why); tart stop by name"
-      tart_call $((stop_timeout + 30)) stop "$clone" --timeout "$stop_timeout" >/dev/null 2>&1
+      why=$tart_why
+      if tart_call $((stop_timeout + 30)) stop "$clone" --timeout "$stop_timeout" >/dev/null 2>&1; then
+        td_forced=1
+        say "$clone: its end cannot be told ($why); stopped by name (tart stop)"
+      else
+        note forced "$clone: its end cannot be told ($why), and tart stop by name failed; tried again each poll"
+      fi
       tart_stop_verified "$clone" "$stop_timeout"
       status=$?
     fi
@@ -990,7 +994,7 @@ step_teardown() {
   fi
   unlock
   say "$clone: deleted, and the reservation released, $((now_epoch - td_since)) s into the teardown"
-  forget teardown
+  forget teardown; forget forced
   alert_close cannot-stop "$clone is stopped and deleted"
   if [[ -n $pause_after ]]; then
     pause_set memory $((now_epoch + warn_pause)) "memory pressure warned during $clone's job"

@@ -583,7 +583,46 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     assert.equal(readdirSync(m.logs).filter((name) => name.startsWith('vm-hold.') && name !== 'vm-hold.cua-2').length, 0);
     assert.equal(existsSync(join(m.home, 'owned')), false);
     assert.equal(await m.holdCommand(['hold', 'bench-1', 'forever']).exited, 2);
+    // Every reader of the holds skips vm-hold.*.tmp as a write under way: such an owner would hold nothing.
+    const staging = m.holdCommand(['hold', 'bench.tmp', 'timed']);
+    assert.equal(await staging.exited, 2);
+    assert.match(staging.output(), /refused: the owner 'bench\.tmp' is not a name \(.*not ending in \.tmp\)/);
+    assert.equal(existsSync(join(m.logs, 'vm-hold.bench.tmp')), false);
+    assert.deepEqual(readdirSync(m.logs).filter((name) => name.startsWith('.vm-hold.')), [], 'no staging left');
     await finish(m, a);
+  });
+
+  test('the docs\' vm_hold helper checks the owner before ssh, and quotes every argument into the remote command', () => {
+    const docs = readFileSync(join(mac, '../docs/mac-lane.md'), 'utf8');
+    const helper = /```bash\n(# vm_hold [\s\S]*?)```/.exec(docs)?.[1];
+    assert.ok(helper, 'the helper is in docs/mac-lane.md');
+    const home = mkdtempSync(join(root, 'vm-hold-'));
+    const bin = join(home, 'bin');
+    mkdirSync(join(home, 'ci-kit-vm/kit/vm'), { recursive: true });
+    mkdirSync(bin);
+    // ssh: the remote command run by a shell, as sshd runs it; hold.sh: its arguments, one a line.
+    executable(join(bin, 'ssh'), `printf '%s\\n' "$1" >> "$HOME/ssh.calls"\nexec /bin/bash -c "$2"`);
+    executable(join(home, 'ci-kit-vm/kit/vm/hold.sh'), `printf '%s\\n' "$@" > "$HOME/hold.args"`);
+    const run = (...args) => {
+      rmSync(join(home, 'hold.args'), { force: true });
+      const result = spawnSync('/bin/bash', ['-c', `${helper}\nvm_hold "$@"`, 'vm_hold', ...args], { encoding: 'utf8', env: { HOME: home, PATH: `${bin}:/usr/bin:/bin` } });
+      const held = existsSync(join(home, 'hold.args')) ? readFileSync(join(home, 'hold.args'), 'utf8').split('\n').slice(0, -1) : null;
+      return { status: result.status, stderr: result.stderr, held };
+    };
+    assert.deepEqual(run('hold', 'bench-1', 'timed'), { status: 0, stderr: '', held: ['hold', 'bench-1', 'timed'] });
+    assert.deepEqual(run('release', 'bench-1').held, ['release', 'bench-1']);
+    assert.deepEqual(run('wait').held, ['wait']);
+    const calls = readFileSync(join(home, 'ssh.calls'), 'utf8');
+    for (const owner of ['x;touch $HOME/owned', '$(touch $HOME/owned)', 'bench.tmp', '']) {
+      const refused = run('hold', owner, 'timed');
+      assert.equal(refused.status, 2, owner);
+      assert.match(refused.stderr, /vm_hold: not an owner/, owner);
+      assert.equal(refused.held, null, owner);
+    }
+    assert.equal(readFileSync(join(home, 'ssh.calls'), 'utf8'), calls, 'no ssh for a refused owner');
+    // What the local check does not cover still reaches the remote shell as one word.
+    assert.deepEqual(run('hold', 'bench-1', 'timed; touch $HOME/owned').held, ['hold', 'bench-1', 'timed; touch $HOME/owned']);
+    assert.equal(existsSync(join(home, 'owned')), false);
   });
 
   test('holds have owners: two overlap, one is removed, the lane stays held; with both gone a clone boots', async () => {
@@ -741,6 +780,34 @@ describe('the VM lane\'s launcher', { concurrency: 4, ...macOnly }, () => {
     m.flag('fail-list', false);
     await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
     assert.equal(m.failures().total_memory, '1');
+    await finish(m, b);
+  });
+
+  test('recovery that cannot list Tart: a stop by name that fails is tried again at each poll until one goes through, and the reservation stays until the end is verified', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const a = m.start();
+    const clone = await m.booted();
+    await m.listening(clone);
+    await a.kill();
+    m.flag('fail-list');
+    m.flag('fail-stop');
+    const b = m.start();
+    await m.waitLog(/recovery waits: Tart cannot list its VMs/);
+    m.memory({ pressure: 4, available: 8 });
+    await m.waitLog(new RegExp(`${clone}: its end cannot be told \\(Tart cannot list its VMs\\), and tart stop by name failed; tried again each poll`));
+    const stops = () => m.calls().filter((call) => call === `stop ${clone} --timeout 30`).length;
+    await m.until(() => stops() >= 2, 'the stop tried again');
+    assert.equal(m.state(clone), 'running');
+    m.flag('fail-stop', false);
+    await m.waitLog(new RegExp(`${clone}: its end cannot be told \\(Tart cannot list its VMs\\); stopped by name \\(tart stop\\)`));
+    await m.until(() => m.state(clone) === 'stopped', 'the guest stopped');
+    const after = stops();
+    await sleep(2000);
+    assert.equal(stops(), after, 'no stop once one went through');
+    assert.ok(m.reserved(), 'the reservation stands while the end cannot be verified');
+    m.memory();
+    m.flag('fail-list', false);
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
     await finish(m, b);
   });
 

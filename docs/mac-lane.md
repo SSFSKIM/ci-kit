@@ -594,22 +594,37 @@ installed kit's `vm/hold.sh`; the lane is held while any exists, so one owner's 
 through its reservation's write, so a hold is either seen by a boot, which then boots nothing, or written after that
 boot's reservation, which its wait then sees. A file written by hand has neither guarantee: it can land between the
 boot's read and its reservation, and a wait for the reservation's absence then reports no guest while one boots. The
-owner is a name (`[A-Za-z0-9][A-Za-z0-9._-]*`), refused otherwise, so it never reaches a shell as anything but a word. The first line says its kind. Each hold is logged once per
-change, and alerted after 6 h (`ci-kit alert: vm lane on <machine> held by <owner> since <minute>`). The booking a
-session makes through CI-opt says which kind it needs:
+owner is a name (`[A-Za-z0-9][A-Za-z0-9._-]*`, not ending in `.tmp`, which the holds' readers skip as a write under
+way), refused otherwise. The first line says its kind. Each hold is logged once per change, and alerted after 6 h
+(`ci-kit alert: vm lane on <machine> held by <owner> since <minute>`).
+
+`hold.sh`'s own check comes too late for an `ssh` command line: the remote shell parses the command, owner included,
+before `hold.sh` runs. Every command below goes through this helper, pasted into the coordinator's shell first, which
+checks the owner locally and quotes each argument into the remote command (`printf %q`), so the remote shell reads each
+as one word:
+
+```bash
+# vm_hold hold <owner> timed|maintenance | vm_hold release <owner> | vm_hold wait
+vm_hold() {
+  [[ $1 == wait ]] || { [[ ${2:-} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && $2 != *.tmp ]] || { echo "vm_hold: not an owner: ${2:-}" >&2; return 2; }; }
+  ssh mini "~/ci-kit-vm/kit/vm/hold.sh $(printf '%q ' "$@")"
+}
+```
+
+The booking a session makes through CI-opt says which kind it needs:
 - **Untimed** (cua's functional sessions): CI-opt takes the host's instances down as for any hold (below) and leaves
   the lane running, so the guest goes on taking `solo` jobs while the session has the host's desktop. No marker.
 - **Timed** (MAWS's benches, anything that reads the machine's timing): the marker first, then the wait for the
   reservation to go, then the host's instances; at release the marker is removed first, then the instances come back.
 
   ```bash
-  owner=<session>   # the booking session's name: one file per owner, [A-Za-z0-9][A-Za-z0-9._-]*
-  ssh mini "~/ci-kit-vm/kit/vm/hold.sh hold $owner timed"
+  owner=<session>   # the booking session's name: one file per owner
+  vm_hold hold "$owner" timed
   #   expect: ci-kit vm hold: held: …/vm-hold.<owner> (timed), then ci-kit vm hold: no guest
   #   (at most the running bound; in practice the guest job's own length and its boot). Exit 1, "not clear after …",
-  #   means a guest is still there: the hold stays; run `hold.sh wait` until it says no guest.
+  #   means a guest is still there: the hold stays; run `vm_hold wait` until it says no guest.
   # … take the host's instances down, as for any hold; the session runs …
-  ssh mini "~/ci-kit-vm/kit/vm/hold.sh release $owner"   # at release, before the instances come back
+  vm_hold release "$owner"   # at release, before the instances come back
   #   expect: ci-kit vm hold: released: …/vm-hold.<owner>
   ```
 
@@ -703,8 +718,8 @@ commands, `owner` is the session's name, as for a timed hold, and `cand` the can
    `maws-vm-*` VM running), take the host's instances down as for any hold, and boot the launcher out:
 
    ```bash
-   owner=<session>
-   ssh mini "~/ci-kit-vm/kit/vm/hold.sh hold $owner maintenance"
+   owner=<session>   # with vm_hold pasted (the VM lane, "Holds have owners")
+   vm_hold hold "$owner" maintenance
    #   expect: ci-kit vm hold: held: …/vm-hold.<owner> (maintenance), then ci-kit vm hold: no guest
    # take the host's instances down (Disable and enable, above: every com.ssfskim.ci-kit.mac-runner*), noting which were enabled
    ssh mini 'launchctl bootout gui/$(id -u)/com.ssfskim.ci-kit.vm-lane; launchctl print gui/$(id -u)/com.ssfskim.ci-kit.vm-lane >/dev/null 2>&1 || echo booted out'
@@ -786,7 +801,7 @@ commands, `owner` is the session's name, as for a timed hold, and `cand` the can
 
 7. **Release**, in this order: bring the launcher back (`launchctl bootstrap gui/$(id -u)
    ~/Library/LaunchAgents/com.ssfskim.ci-kit.vm-lane.plist`, if its agent is enabled), remove your hold
-   (`ssh mini "~/ci-kit-vm/kit/vm/hold.sh release $owner"`), and bring back the host's instances that were enabled. The launcher's
+   (`vm_hold release "$owner"`), and bring back the host's instances that were enabled. The launcher's
    start reconciles job clones only and boots from the pointer's VM from then on, naming the golden at every boot.
 
 8. **Retire** the old golden after the first green production job from the new one (`vm-lane.log` names the golden at
