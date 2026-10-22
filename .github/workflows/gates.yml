@@ -26,6 +26,7 @@ jobs:
       pool: ${{ steps.plan.outputs.pool }}
       note: ${{ steps.plan.outputs.note }}
       base: ${{ steps.plan.outputs.base }}
+      cache_write: ${{ steps.plan.outputs.cache_write }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@v7
@@ -65,6 +66,7 @@ jobs:
           CI_KIT_PRIVATE: ${{ github.event.repository.private }}
           CI_KIT_GATES: ${{ github.event.inputs.gates }}
           CI_KIT_HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+          CI_KIT_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
           fail() { echo "::error::${1//%/%25}"; exit 2; }
@@ -75,8 +77,18 @@ jobs:
               base=$(git rev-parse --verify "origin/$DEFAULT_BRANCH") || fail "ci-kit: no default branch origin/$DEFAULT_BRANCH to diff against"
               export CI_KIT_EVENT=ci-ref CI_KIT_BASE=$base CI_KIT_HEAD=$GITHUB_SHA ;;
             workflow_dispatch) export CI_KIT_EVENT=dispatch CI_KIT_BASE= CI_KIT_HEAD= ;;
-            *) fail "ci-kit: event $EVENT_NAME is not planned (pull_request, push to ci/**, workflow_dispatch)" ;;
+            # The build cache's seeding run (docs/adopting.md, "Build cache"). A schedule has no event payload, so the
+            # repository's visibility and default branch come from the API.
+            schedule)
+              repo=$(curl -fsS --retry 3 -H "Authorization: Bearer $CI_KIT_TOKEN" "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY") \
+                || fail "ci-kit: a schedule could not read $GITHUB_REPOSITORY's visibility and default branch"
+              CI_KIT_PRIVATE=$(jq -r .private <<<"$repo") DEFAULT_BRANCH=$(jq -r .default_branch <<<"$repo")
+              export CI_KIT_PRIVATE CI_KIT_EVENT=schedule CI_KIT_BASE= CI_KIT_HEAD= ;;
+            *) fail "ci-kit: event $EVENT_NAME is not planned (pull_request, push to ci/**, workflow_dispatch, schedule)" ;;
           esac
+          unset CI_KIT_TOKEN
+          # The planner writes the build cache only on the default branch.
+          export CI_KIT_REF=$GITHUB_REF CI_KIT_DEFAULT_BRANCH=$DEFAULT_BRANCH
           # The gates' CI_KIT_BASE: where the commit they check out ($GITHUB_SHA) left the base, so that a two-dot
           # `git diff $CI_KIT_BASE $CI_KIT_HEAD` is the change. Empty on a dispatch, which has no change basis.
           gate_base=
@@ -100,6 +112,7 @@ jobs:
             echo "pool=$(jq .pool "$RUNNER_TEMP/plan.json")"
             echo "note=$(jq -r .note "$RUNNER_TEMP/plan.json")"
             echo "base=$gate_base"
+            echo "cache_write=$(jq .cache_write "$RUNNER_TEMP/plan.json")"
           } >> "$GITHUB_OUTPUT"
 
       # A pool gate needs the pool box: ensure creates it if none exists, without waiting for it to boot (spec §3).
@@ -156,6 +169,24 @@ jobs:
       - name: Enable pnpm
         if: matrix.gate.setup.pnpm
         run: corepack enable
+
+      # build_cache: gha (docs/adopting.md, "Build cache"). The runner hands the cache service's token and URLs to JS
+      # actions only, never to run: steps, so this step exports them for the rest of the job: what buildx fills a
+      # type=gha cache's token, url, url_v2 and version from (docker/buildx build/opt.go, addGithubToken). The hosted
+      # runners' Docker uses the containerd image store, whose default builder exports a type=gha cache itself.
+      # CI_KIT_BUILD_CACHE_WRITE tells the command to write the cache too: on the default branch only (plan.mjs).
+      - name: Expose the build cache
+        if: matrix.gate.build_cache == 'gha'
+        uses: actions/github-script@v9
+        env:
+          CI_KIT_CACHE_WRITE: ${{ needs.plan.outputs.cache_write }}
+        with:
+          script: |
+            for (const name of ['ACTIONS_RUNTIME_TOKEN', 'ACTIONS_RESULTS_URL', 'ACTIONS_CACHE_URL', 'ACTIONS_CACHE_SERVICE_V2']) {
+              if (process.env[name]) core.exportVariable(name, process.env[name]);
+            }
+            core.exportVariable('CI_KIT_BUILD_CACHE', 'gha');
+            if (process.env.CI_KIT_CACHE_WRITE === 'true') core.exportVariable('CI_KIT_BUILD_CACHE_WRITE', '1');
 
       - name: Install
         if: matrix.gate.setup.install != ''

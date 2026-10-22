@@ -78,15 +78,16 @@ test('planOutput shapes I3: runs_on per lane, setup resolved, pool flag', () => 
     gates: [
       {
         name: 'unit', run: 'npm test', runs_on: ['ubuntu-latest'], timeout: 30,
-        setup: { node: '24', pnpm: false, install: 'npm ci', fetch_depth: 1 }, artifacts: [], env: {},
+        setup: { node: '24', pnpm: false, install: 'npm ci', fetch_depth: 1 }, artifacts: [], env: {}, build_cache: null,
       },
       {
         name: 'big', run: 'npm run big', runs_on: ['self-hosted', 'ci-kit-pool', 'cpus-8'], timeout: 30,
-        setup: { node: '24', pnpm: false, install: 'npm ci', fetch_depth: 1 }, artifacts: [], env: {},
+        setup: { node: '24', pnpm: false, install: 'npm ci', fetch_depth: 1 }, artifacts: [], env: {}, build_cache: null,
       },
     ],
     pool: true,
     note: '',
+    cache_write: false,
   });
 });
 
@@ -106,6 +107,35 @@ gates:
   assert.equal(out.pool, false);
 });
 
+test('planOutput carries a gate\'s build_cache, with or without the shared setup', () => {
+  const c = parseConfig(`
+version: 1
+setup: {node: "22"}
+gates:
+  - {name: img, run: x, build_cache: gha}
+  - {name: bare, run: y, setup: false, build_cache: gha}
+  - {name: plain, run: z}
+`, { isPrivate: false });
+  assert.deepEqual(planOutput(c, c.gates).gates.map((g) => g.build_cache), ['gha', 'gha', null]);
+});
+
+test('a schedule selects every build_cache gate, whatever its paths and on, and no other', () => {
+  const c = parseConfig(`
+version: 1
+gates:
+  - {name: img, run: x, build_cache: gha, paths: ["img/**"]}
+  - {name: unit, run: y}
+  - {name: pr-only, run: z, build_cache: gha, on: [pr]}
+`, { isPrivate: false });
+  assert.deepEqual(names(selectGates(c, { event: 'schedule' })), ['img', 'pr-only']);
+  assert.deepEqual(selectGates(config, { event: 'schedule' }), []);
+});
+
+test('planOutput says whether the build cache is written', () => {
+  assert.equal(planOutput(config, [], { cacheWrite: true }).cache_write, true);
+  assert.equal(planOutput(config, []).cache_write, false);
+});
+
 test('planOutput of an empty selection says so', () => {
-  assert.deepEqual(planOutput(config, []), { gates: [], pool: false, note: 'no gates selected' });
+  assert.deepEqual(planOutput(config, []), { gates: [], pool: false, note: 'no gates selected', cache_write: false });
 });

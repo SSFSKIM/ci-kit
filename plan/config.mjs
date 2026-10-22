@@ -14,13 +14,15 @@ export const LANES = ['hosted', 'hosted-macos', 'pool', 'mac'];
 export const PRIVATE_LANES = ['pool', 'mac'];
 export const EVENTS = ['pr', 'ci-ref', 'dispatch'];
 export const POOL_SIZES = [2, 4, 8, 16];
+// What a gate's build_cache may name: the cache backend its job is given a builder and the runtime for.
+export const BUILD_CACHES = ['gha'];
 // The reusable workflow's own jobs: a gate with one of these names would be indistinguishable from them in checks.
 const RESERVED = ['plan', 'verdict'];
 const TOP_KEYS = ['version', 'setup', 'gates'];
 const SETUP_KEYS = ['node', 'pnpm', 'install', 'fetch_depth'];
 // actions/checkout's depth when setup does not say: the tested commit alone.
 export const DEFAULT_FETCH_DEPTH = 1;
-const GATE_KEYS = ['name', 'run', 'lane', 'cpus', 'timeout', 'paths', 'on', 'artifacts', 'setup', 'env'];
+const GATE_KEYS = ['name', 'run', 'lane', 'cpus', 'timeout', 'paths', 'on', 'artifacts', 'setup', 'env', 'build_cache'];
 const NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 // The kit sets CI_KIT_BASE, CI_KIT_HEAD, CI_KIT_RUN... in gate steps; a gate's env must not shadow or be shadowed by them.
@@ -137,6 +139,15 @@ function readGate(raw, index, seen, isPrivate, errors) {
     else err('setup: must be true or false');
   }
 
+  // Per gate, not in the shared setup: it hands the job the cache service's token, which no other gate should hold.
+  // Hosted only: a pool job's container has no Docker daemon, and GitHub's macOS runners have no Docker.
+  let buildCache = null;
+  if (raw.build_cache !== undefined) {
+    if (!BUILD_CACHES.includes(raw.build_cache)) err(`build_cache: must be one of ${BUILD_CACHES.join(', ')}`);
+    else if (lane !== 'hosted') err('build_cache: only for lane hosted');
+    else buildCache = raw.build_cache;
+  }
+
   const env = {};
   if (raw.env !== undefined) {
     if (!isMapping(raw.env)) err('env: must be a mapping of names to strings');
@@ -150,7 +161,7 @@ function readGate(raw, index, seen, isPrivate, errors) {
     }
   }
 
-  return { name: raw.name, run: raw.run, lane, cpus, timeout, paths, on, artifacts, setup, env };
+  return { name: raw.name, run: raw.run, lane, cpus, timeout, paths, on, artifacts, setup, env, build_cache: buildCache };
 }
 
 // `isPrivate` is the repo's visibility (the event payload's repository.private): pool and mac lanes are private-only.
