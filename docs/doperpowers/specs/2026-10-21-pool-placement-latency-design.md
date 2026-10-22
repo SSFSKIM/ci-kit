@@ -107,9 +107,23 @@ toward the boot alone, and below it for the jobs a warm runner covers.
   - Acceptance 4 (a day's median queued → started ≤ 50 s) is read from `latency-report.mjs` after a day of traffic.
 - [ ] M5 — Pre-launch of a run's gate VMs (the owner chose it 2026-10-21; no warm runner). (2026-10-21) Built, reviewer-medium clean after one fix wave, ci-gate green; PR to
   CI-opt. Deploy (`launcher` + `webhook`) on CI-opt's go; Acceptance 5 is read from the live numbers.
-- [ ] M6 — Stock-out and quota resilience. Sized from the day's data (2026-10-21); approved by CI-opt 18:5xZ with
-  NAT (Decision Log). Hyperdisk raises filed. Build order: NAT, proved in us-central1 first; then the race and the
-  counts; then the placements.
+- [ ] M6 — Stock-out and quota resilience. Sized from the day's data (2026-10-21); approved by CI-opt with NAT.
+  - [x] (2026-10-21 19:46Z) NAT: #82 merged (1757fd7); `network`, `bake`, launcher 00014-b8p. Rolled back 19:58Z to
+    00013-78r: GitHub stalls NAT bursts (Surprises). NAT parked; #83 (1b97c25) makes egress a `gce.json` switch,
+    external by default.
+  - [x] (2026-10-21 21:34Z) Race and counts: #84 merged (aebe86e) after three review rounds; `deploy.sh base`
+    (monitoring.viewer) and launcher 00015-s2p (rollback 00013-78r).
+  - [x] (2026-10-21 23:26Z) Placements: #85 merged (7292a8b): eight placements, max_vcpus 386, the CPUS_PER_VM_FAMILY scope fix, the
+    per-family bake smoke, the 5-minute stock-out memory, `deploy.sh`'s traffic check. `deploy.sh network` and the
+    boot-sample smokes from the PR's checkout (5 of 6 new placements green; C4D us-central1 stocked out); from merged
+    main `deploy.sh bake`, the manual bake ci-kit-bake-4zcgz, and launcher 00016-8ct at 22:45Z (rollback 00015-s2p),
+    serving 100% by deploy.sh's own check. The bake (image -224528-8ogy-7292a8b1 ready) smoked 7 placements and
+    skipped C4D us-central1 for capacity (16 tries); a sandbox walk burst ran green across us-west4, us-central1 and
+    us-east1, and missed M6's 90 s bound (Surprises: a refusal costs 6–21 s).
+  - [x] (2026-10-22 00:08Z) Walk admission and follow-up ticks: #87 merged (41debfb) after one review round (1 P1, 2 P2,
+    1 P3 fixed; 1 P2 deferred); `deploy.sh base` (cloudquotas.viewer) and launcher 00017-ldn (rollback 00016-8ct). The
+    rerun burst: 20 of 20 jobs started 32–67 s after queued (median 42 s), none past 90 s, all in one tick; refusals 12
+    (capacity), against 33 (21 quota, 12 capacity) before.
   Follow-up outside M6's proof (CI-opt): the tick's preparation before its first allocation, 5.1 s at 18:45 and 6.2 s
   to the first insert, brought to M3's ≤ 5 s.
 
@@ -627,6 +641,50 @@ VM's walk.
   originals keep their reservation and cover; race outcomes are observed (first claim, both, neither, unresolved);
   never-online runners are an ERROR, not cover, with alerts on them and on NAT allocation failure; the 20 s trigger
   and the NAT port range are provisional, re-sized from logged insert times and the burst's peak port use.
+- 2026-10-21 (CI-opt, M6): **Cloud NAT parked; job VMs keep external IPs, and egress becomes a `gce.json` switch.**
+  Live behind the NAT (launcher 00014-b8p, 19:46–19:58Z), GitHub's runner endpoints stalled bursts: a MAWS run on C3D
+  started 84–110 s after queued, a 20-job sandbox burst 39–132 s. The launcher went back to 00013-78r. A same-hour
+  experiment (20 check VMs per point, us-central1) ruled out the per-IP ratio: spreading the burst over more NAT
+  addresses did not help (Surprises: the four-point curve). The reason is GitHub's edge under concurrent NAT flows.
+  More VMs per region now come from the address raises (left in review, not refiled) and from M6's placements, since
+  each new region brings its own 8 addresses; `egress: "nat"` is the one-line config that re-enables NAT. Router, NAT,
+  Private Google Access, the never-online rule and the alerts stay. M6's placements are therefore sized per region by
+  min(family vCPUs, 8 addresses × the machine size), and `max_vcpus` is the sum of those, not of the vCPU grants.
+
+- 2026-10-21 (M6, placements): **the bake's smoke guarantee is per family, not per placement.** At 22:00Z C4D
+  us-central1 had no capacity in any zone, on demand included (c4d-highcpu-2/4/8, three tries); with eight placements
+  a smoke-every-placement bake would block every image whenever one placement is stocked out. A placement refused for
+  capacity or quota in every zone is skipped with a warning; the image is ready when each family has a passing smoke;
+  a smoke VM that boots and fails still fails the bake. Cost: a skipped region's first use of a new image can fall on
+  a job once (first use measured up to 145 s accepted → RUNNING, against 6–7 s warm). The alternative that lost: the
+  strict per-placement bake, which blocks every image while any one placement is stocked out. Placements stay in
+  `gce.json` while stocked out (CI-opt): the stock-out memory costs one refused try per zone per 5 minutes, and the
+  placement serves when capacity returns.
+- 2026-10-21 (M6): **stocked-out zones are remembered for 5 minutes** (zone, machine, provisioning), in the launcher
+  process. Eight placements mean 26 spot attempts before on demand, more than a 45 s tick can try at ~2 s a refusal;
+  without the memory a job could wait on spot refusals indefinitely while on demand had room.
+- 2026-10-21 (CI-opt, M6 walk): **a placement's room is known before its insert: the walk skips a full one.** The live
+  burst missed M6's 90 s bound on refusals that cost 6–21 s each and that concurrent walks each paid (Surprises). Fix 1,
+  built in this run (CI-opt: "Don't park it"): each placement's limits are read live, regions.get for
+  `IN_USE_ADDRESSES` and `INSTANCES` and Cloud Quotas' `CPUS_PER_VM_FAMILY` (region, vm_family) grant for the family's
+  vCPUs, cached 10 minutes in the process; what holds them is the tick's listing (job and bake VMs) plus its own sends,
+  and a placement a send would pass is skipped without an insert. A refusal that still happens closes that limit for the
+  rest of the tick, for every size, which also covers a limit that was wrong. Live limits, not config caps: a new
+  `gce.json` key would be refused by a launcher on older code (the config-before-code skew again), and the grants still
+  reconciling (addresses in us-central1 and us-west4, Hyperdisk Balanced) land without a commit. The cost: one IAM role
+  (`roles/cloudquotas.viewer`) and a read every 10 minutes; a failed first read means no admission, as before. The
+  alternative that lost: per-placement caps in `gce.json`, stale by construction and a skew of their own. Fix 2 (one probe
+  insert per untried zone before the rest follow) is built only if the rerun burst still misses on capacity refusals.
+  Walk order stays C4D first, C3D us-central1 after (CI-opt): a preemption costs a lost job and a rerun, 2–5 min.
+- 2026-10-21 (M6 walk): **the tick's deadline is a 45 s constant, and a launch it cuts off now gets a follow-up tick.**
+  `TICK_BUDGET_MS` = 45 s bounds when a tick starts new attempts (inserts already sent wait up to 40 s more, so a tick runs
+  up to ~90 s). It is a constant, well below Cloud Run's 300 s request timeout, Cloud Scheduler's 300 s attempt deadline
+  and Pub/Sub's 300 s ack deadline, because every request stays open for its tick's whole run (`--cpu-throttling`: a tick
+  with no open request has no CPU). Before this, a launch cut off at it was retried at once only if another webhook
+  request had arrived during the tick, else at the minute tick, up to 60 s later: part of the tail. Now a tick that cut a
+  launch off (`cut` on its summary) runs a follow-up 10 s after its start inside the same request, at most 3 in a row and
+  none starting 180 s past the first, so no request nears the 300 s deadlines.
+
 
 ## Surprises & Discoveries
 
@@ -653,7 +711,135 @@ VM's walk.
 - 2026-10-21 (M6 research): both address preferences sit at partial grants, still reconciling: us-west4 8 of
   64, us-central1 32 of 64. A default region's `HDB-TOTAL-GB` is 500 (us-west4 was raised to 4096). Every unknown
   insert of the day settled as created, after 41–121 s.
+- 2026-10-21 (follow-up, CI-opt's unit-cache data): **the 33–56 s "Cleaning up orphan processes" tails on 4 of 74
+  MAWS unit shards are not orphan cleanup.** Each job's "Complete job" step started and ended in the same second; the
+  wait came after it, in the runner's final results/log upload drain (`JobServerQueue`, files uploaded one after
+  another, no overall budget). One VM's serial log shows it (ci-kit-gce-hsd1uqp9p0, job 119388200223 of run
+  39647845404): step-log uploads begin 17:57:13, :31, :31, :49, the job log 17:57:50, "Results upload queue drained"
+  17:58:08. The others (runs 39660255689, 39660267988) lost their tails to the serial backlog at poweroff. No fix is
+  evidenced: an orphan-killing hook runs before this drain, and `RUNNER_TRACKING_ID`, `process.clean` and the
+  runner's HTTP knobs do not shorten it. Closed as "cause: the runner's result upload drain; no fix yet". The
+  instrumentation for later: `gce/vm/job.mjs` line-filters the runner's stdout to its `JobExtension`, `JobRunner`
+  and `JobServerQueue` lines before the serial sink, so the end of a job survives the 115200-baud backlog. Related:
+  the runner's "Retrieving an AAD auth token took a long time" warning appears on VMs with and without external IPs
+  (2–39 s; 11 VMs today), so it is GitHub's, not the NAT's.
+- 2026-10-21 (M6, NAT): **GitHub's runner endpoints stall new connections from Cloud NAT in a burst.** 20 c3d-4
+  check VMs per point, us-central1, the same hour (serial logs, per VM):
+
+  | egress | NAT addresses | VMs with a refused connect | boot → "Connected to GitHub", median / max | → listening, median |
+  |---|---:|---:|---:|---:|
+  | external IPs | — | 2 / 20 | 12.4 / 26.7 s | 15.9 s |
+  | NAT, 1024 ports a VM | 1 | 12 / 19 | 57.1 / 75.8 s | 57.3 s |
+  | NAT, 8192 ports a VM | 3 | 12 / 20 | 53.6 / 76.2 s | 70.0 s |
+  | NAT, 32768 ports a VM | 11 | 15 / 20 | 70.4 / 107.6 s | 74.6 s |
+
+  The runner's `Location.GetConnectionData` to pipelines*.actions.githubusercontent.com takes ~20 s an attempt, or is
+  reset ("Connection refused"). Zero NAT drops, at most 14 ports in use per VM; 6 VMs (us-west4) or 2 VMs through the
+  NAT connected in ~9 s. Not port exhaustion, not the per-address ratio. Open question, not a task: what in GitHub's
+  edge treats concurrent NAT flows this way (a packet-level probe from a no-IP VM would tell). The git-core PPA's 503s
+  that hour were Launchpad's (the Mac saw them too).
+
+- 2026-10-21 (M6): **the live C4D family-quota refusal is `CPUS_PER_VM_FAMILY`, not `C4D_CPUS`.** Its operation
+  error reads "Quota 'CPUS_PER_VM_FAMILY' exceeded.  Limit: 50.0 in region us-west4." with
+  `quotaInfo.dimensions.vm_family: "C4D"`. The parser matched only `<FAMILY>_CPUS`, so this refusal was remembered for
+  the whole region: harmless with one family a region, wrong once C4D and C3D share us-central1, us-east1 and
+  us-east4. The placements PR scopes it to (region, family).
+
+- 2026-10-21 (M6): **us-central1's regional `CPUS` quota (200) does not bind C3D or C4D.** GCE's regional CPUS quota
+  covers only the families without a quota of their own; C3D and C4D have theirs. During the 26-VM us-central1 burst
+  (19:50Z) Cloud Monitoring's quota usage showed instances 26 and cpus_all_regions 154, and no regional cpus series.
+  So us-central1's 216 family vCPUs (C4D 24 + C3D 192) count in full toward `max_vcpus`.
+
+- 2026-10-21 (M6 smoke): **an image's first use in a region is slow, then warm.** Accepted → RUNNING on the first
+  check VM in each new placement: C4D us-east1 39 s, us-east4 10.8 s, us-east5 19.6 s; C3D us-east1 145 s, us-east4
+  43.5 s. A second sample in us-east1: 7.4 s (C4D), 6.1 s (C3D). The bake's per-placement smoke absorbs it.
+
+- 2026-10-22 (M6 walk, launcher 00017-ldn): **admission by live limits removed every quota refusal from the burst.** The
+  same 20 × cpus-4 burst (sandbox run 39697568771) launched all 20 VMs in one tick (46.7 s): us-west4 8 (its addresses),
+  us-east1-d 6, us-east5-a 6. C4D us-central1 and us-east4 were skipped as full from the start, rightly: MAWS's VMs
+  from 00:00:40Z held their 24 vCPUs each. Refusals: 12, all capacity (us-east1-b and -c, 6 each, the walks in flight
+  together), against 33 the first time; quota refusals 21 → 0. Queued → started 32–67 s, median 42 s (was 26–163 s,
+  median 53 s, 9 past 90 s). No follow-up tick fired (`cut` 0): the tick ended inside its budget, so the whole gain
+  here is admission's. The tick summary's `full` counted the skips: us-west4 addresses 36, us-central1 C4D 48, us-east1
+  C4D 18, us-east4 C4D 18.
+- 2026-10-21 (M6 rollout): **a config merge goes live before the code it needs.** The launcher reads `gce.json` from
+  main on every tick but runs its deployed revision's code. #85 changed both, so from its merge (7292a8b) until
+  launcher 00016-8ct (22:45Z) 00015-s2p walked the eight placements without the CPUS_PER_VM_FAMILY scope, the
+  stock-out memory or the east regions' rates. Debt, not this run (CI-opt; ci-kit #72). Two fixes to weigh: read
+  `gce.json` at the revision's own kit commit, which costs the one-commit config edit (dropping a stocked-out
+  placement, `max_vcpus`, the egress switch would each need a launcher deploy); or have `gce.json` declare the
+  minimum kit it needs and the launcher refuse a newer config, which costs a field every code-needing config change
+  must remember to raise (forgetting it is tonight's skew again) and a launcher that keeps its last accepted config
+  until the deploy lands.
+
+- 2026-10-21 (M6, live walk on 00016-8ct): **a refusal costs 6–21 s, not ~2 s, and concurrent walks each pay it.**
+  Sandbox run 39693012581 put 20 cpus-4 jobs (80 vCPUs) into one tick. The walk did what #85 built: us-west4 filled
+  at its 8 addresses, C4D us-central1 took 3 and refused on `CPUS_PER_VM_FAMILY` for its family alone, the stocked-out
+  us-east1-b and -c were skipped the next tick for -d, and 3 races fired (all three originals created). But a refusal
+  is the insert operation's error: quota 5.5–17 s, capacity 15–21 s. Walks in flight together each paid the same one
+  (9 address refusals in us-west4, 6 family refusals in us-central1, 12 capacity refusals in us-east1 in one tick),
+  three in a row spent the tick's budget, and those walks ended on the deadline without reaching us-east4, us-east5
+  or C3D. 9 of 20 jobs started 101–163 s after queued, past M6's 90 s bound (the 163 s one also paid the new image's
+  first use in C4D us-central1, the placement the bake skipped). The Decision Log's "~2 s a refusal" premise is
+  wrong. Not rolled back: 00015-s2p on the same `gce.json` lacks the stock-out memory and the family scope.
+
 
 ## Outcomes & Retrospective
 
-(at completion)
+(2026-10-21, written as M6's placements went to review and refreshed after their rollout; the day-long readings below
+are still to come.)
+
+**What the pool does now.**
+- It spans placements: C4D us-west4 first, then the M6 additions (C4D us-central1, us-east1, us-east4, us-east5; C3D
+  us-central1, us-east1, us-east4), spot everywhere before on demand. Quota memory is scoped by what ran out, now with
+  C4D's live `CPUS_PER_VM_FAMILY` refusal scoped to (region, family), and a stocked-out zone is skipped for 5 minutes.
+  `max_vcpus` went 192 → 242 → 386, each step the grants the pool can actually use.
+- C4D against C3D on MAWS class 1a (M2): static 463 → 335 s, unit 570 → 427 s (the unit gain inside C3D's own
+  spread over the day's nine runs), insert accepted → started 48.4 → 37.4 s a VM.
+- The start: a tick is requested by GitHub's webhook (M4), launches before it cleans up (M3), and boots without
+  cloud-init (RUNNING → started 31.4 → 16.3 s on c3d-4). M5 pre-launches a run's gate VMs while its plan runs. On the
+  live gate runs since: the first pre-launched run's jobs started 26–32 s after queued (its plan's delivery lost to
+  a receiver rollout); with the race launcher live, run 39681922143's six pool jobs started 1–6 s after queued, their
+  VMs up before the gates were created. Before this work a pool job waited ~100 s.
+- A slow insert races a second allocation (M6) and every insert's timing, refusal and race outcome is counted on the
+  tick summary and the daily line, with the day's NAT.
+
+**Still to read** (a day of rows; `gce/latency-report.mjs`): Acceptance 4 (a day's median queued → started ≤ 50 s),
+Acceptance 5 (gate jobs ≤ 25 s after queued with pre-launch), M3's tick start → first insert ≤ 5 s and ≤ 26 s
+accepted → started on c3d-4 (C4D separately), and day one's unclaimed pre-launched VMs and their cost.
+
+**Open items** (not this run).
+- Spot preemptions, all in C3D us-central1 (CI-opt): 10 VMs on 10-21 (9 in zone a, 1 in b), 4 of them in the 22h
+  hour. Run 39686827712's unit shards 1/4 and 4/4 failed on "runner has received a shutdown signal" at ~22:30Z
+  (`compute.instances.preempted` at 22:31:24Z and 22:31:36Z, us-central1-b). #85 puts the C4D east placements ahead
+  of C3D us-central1: after a day, check whether preemptions drop; if C3D us-central1 keeps being preempted,
+  consider making it on demand only. Count with care: the audit log's count is a floor. Shard 4/4's VM
+  (hsd97y0mde) shut down the way the preempted hsd97qkmmd did, 6.6 s later, and the launcher deleted it as
+  runner-gone 0.4 s before GCE's preemption event would have been stamped, so no event exists. The ledger also
+  calls both VMs `done`, since runner-gone took them before the preemption read. MAWS's rerun-once rule, which
+  reads the job's "The operation was canceled." annotation, counted both and reran each (attempt 3 green).
+- The config-before-code skew (Surprises): pick one of its two fixes.
+- Probe before fan-out (fix 2, not built: the rerun burst met the 90 s bound with admission alone). What it would take
+  out: the 12 capacity refusals walks in flight together paid in us-east1-b and -c (15–21 s each), one probe insert
+  per untried (zone, machine) a tick before the rest follow, at one insert's wait for the followers when the zone has
+  room. Worth building if a day of rows shows capacity refusals in the tail.
+- A race's row carries no zone until its walk returns (review P2 on #87, deferred): a launcher restarted while the
+  race's insert is in flight counts its vCPUs but not its regional room. Bounded by `--max-instances=1` and serialized
+  ticks to a crash mid-insert, costing at most one refusal.
+
+**What did not go as designed.**
+- Cloud NAT (M6) was built, reviewed, deployed and rolled back within the hour: GitHub's runner endpoints stall
+  bursts of new connections through it, whatever the number of NAT addresses. Egress is now a `gce.json` switch,
+  external by default; the address raises and the per-region 8 addresses of new placements carry capacity instead.
+- The first M3 boot change (cloud-init trimmed) was not faster; booting without cloud-init was.
+- The day's research changed M6's premise: the tail was the old launch path and admission, not stock-outs; quota
+  never left a job waiting; the address quota, not CPUs, bound first.
+
+**Lessons.**
+- Measure the live system before designing around a prior: M6's sizing came from a day of audit logs, ledger rows
+  and job records, and moved the design from stock-out fallbacks to addresses and slow inserts.
+- A change to the network path needs a burst test at production concurrency before it carries traffic: two smoke VMs
+  through the NAT were fine; twenty were not.
+- An image's first use in a region costs up to 145 s; a bake that boots each placement absorbs it, and a bake
+  whose guarantee is per placement breaks the day one placement is stocked out.
+- A deploy that leaves traffic on an older revision looks like success: the deploy script now checks.
