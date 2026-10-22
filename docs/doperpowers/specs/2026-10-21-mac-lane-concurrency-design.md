@@ -124,8 +124,10 @@ and by the coordinator's holds, and the design below says what is read and when.
   the reservation fence (a release between reservation and spawn; recovery able to delete a candidate or the golden;
   the bake's hold blocking its own boots; a trial clone able to take a production job), all taken by taking
   maintenance out of automated admission (Decision Log 9–11).
-- [ ] V1 — The second spike: go/no-go on numbers (3 GB and 4 GB guests, the wide display, a baked image, two groups,
-  host memory and a timed row beside).
+- [x] (2026-10-22 08:29Z) V1 — The second spike: go/no-go on numbers (3 GB and 4 GB guests, the wide display, a
+  baked image, two groups, host memory and a timed row beside). **A partial go at 4096 MB with the floor at 60, on the
+  condition that out/ is built outside the guest** (Decision Log, V1's verdict). There was no 3 GB guest to test: the
+  image refuses less than 4 GiB. Run in CI-opt's window 07:05–08:29Z; the numbers are in Surprises and in the report.
 - [x] (2026-10-22 ~03:00Z) V2 — ci-kit: the launcher, the guest's runner and hooks, admission with the host lock, the
   memory guard, the bake. Built as V2a–V2d on branch `vm-lane-v2` (0e99134..), each task reviewed clean
   (task-reviewer, with fix rounds), then the whole branch by reviewer-medium and, on admission, lock and recovery,
@@ -1395,6 +1397,26 @@ hold-aware plan send them to the guest, which this spec leaves open.
   teardown poll until one goes through; an owner ending in `.tmp` is refused (the readers skip `vm-hold.*.tmp`), and
   `hold.sh` stages as `.vm-hold.<owner>.<pid>`; `docs/mac-lane.md`'s `vm_hold` helper checks the owner locally and
   quotes every argument into the ssh command, since the remote shell parses it before `hold.sh` can.
+- 2026-10-22 (V1's verdict, for CI-opt's check against the design): **4096 MB, `CI_KIT_VM_MEMORY_FLOOR` 60, out/
+  built outside the guest.**
+  - **Memory 4096**, bake.sh's default as it stands. The macOS 27 golden-gate image refuses anything under 4 GiB, so
+    "prefer 3 GB" has no candidate.
+  - **out/ built outside the guest.** A 4 GB guest that builds for itself fails the promote criteria. widgets is 0/4:
+    V8's default heap of about 1 GB at 4 GB physical is too small for its build. document-app takes 194–299 s against
+    170 s: its build is 2 min 8 s in the guest against 41 s on the host. Raising the heap to 3 GB gets widgets
+    through, but it puts the guest's swap at about 900 MB and filled its disk on the third build. With out/ built on
+    the host and restored through MAWS's existing `MAWS_E2E_BUILD_CACHE`/`MAWS_E2E_BUILD_KEY` path, both groups ran
+    2/2 green without flags. The guest's pressure-2 samples fell from about a third of a run's samples to about a tenth, and
+    its swap stayed at 15 MB. document-app's warm run was 163 s (≤ 170). Where the build runs is a change to the
+    job's shape; it is CI-opt's to design.
+  - **The floor is 60, not 37.** The design's figure assumed the kernel's available % drops by the guest's share. It
+    does not: a busy 4 GB guest moved it at most 8 points. With a host e2e job beside, the draw was up to 24 points.
+    Pressure 2 began at 35–41 % available (the accidental 8 GB boot), and a 3 GB surge beside the guest left 53 %. At
+    60, a boot keeps the host above the warn boundary with a host job beside, and the floor blocks boots during a
+    surge, as the design meant it to; 37 would admit there. The evening load was not measured, so V4's trials confirm
+    it.
+  - **The bake sets the guest's display with `displayplacer`** (`res:2560x1440 scaling:on`); `tart set --display`
+    does not reach the guest's mode. **The guest's disk grows**: the image has about 2.5 GiB free.
 
 ## Surprises & Discoveries
 
@@ -1473,6 +1495,36 @@ hold-aware plan send them to the guest, which this spec leaves open.
     `sudo -n shutdown` works for `admin` in the base image.
   - **`tart list --format json` also lists cached OCI images** (`"Source":"OCI"`), which the launcher drops. Still to
     be seen with real Tart (V4): `tart run`'s argv as `ps` prints it, `tart stop --timeout` ending the run.
+
+- 2026-10-22, V1 (07:05–08:29Z on the mini; Tart 2.40.1, since `brew upgrade` had nothing newer):
+  - **The image's minimum is 4 GiB.** `tart set --memory 3072` fails with `LessThanMinimalResourcesError`. The first
+    spike script went on and booted the bake at the image's 8 GB default. Host pressure reached 2 with available at
+    35–41 % and swap at 142 → 1388 MB, until the VM was stopped (07:10Z). The script now stops on a failed `set`.
+  - **`--display 2560x1440pt` does not take.** Electron in the guest read 1024x768 at 2, as on 10-21. `displayplacer`
+    in the guest sets mode 25 (`2560x1440 scaling:on`), Electron then reads 2560x1440 at 2, and the mode persists into
+    clones.
+  - **Boot and setup:** 28–35 s to the agent; clone plus warm install 18–21 s.
+  - **The guest's own build is what breaks 4 GB.**
+    - widgets' `electron-vite build` exhausts V8's default heap (about 1 GB at 4 GB physical) in 4 of 4 runs.
+    - document-app's build takes 2 min 8 s in the guest against 41 s on the host, with guest pressure 2 and up to
+      533 MB of swap, all in the build phase. Its test phases saw no pressure 2.
+    - document-app run 1 of 5 failed in the test phase: a `firstWindow` timeout, at pressure 1.
+  - **The heap raised to 3 GB** passes widgets, but the guest swaps up to 890 MB, and three builds in one clone fill
+    its disk (ENOSPC at 215 MiB free).
+  - **out/ prebuilt on the host** (40 s and 39 s for the two variants, 129 MB cached) and restored in the guest:
+    document-app 191 s and 163 s, widgets 124 s and 140 s, all green with no flags. The guest's swap stayed at 15 MB.
+    Its tests ran about 3–4 s slower per Electron launch than after a guest build, and the cause is not known (the
+    report lists the candidates).
+  - **The host under a busy 4 GB guest** stayed at pressure 1, with available at 73–81 % alone and 57–74 % with a host
+    e2e job beside. Swap went 646.5 → 638.5 MB across all the runs.
+    - A real 3 GB surge (6 GB at its peak) beside the guest took available to 53 % and swap to 2465 MB, at pressure 1.
+      The swap was never reclaimed: 2081 MB at the end, at pressure 1 and 85 % available.
+    - The `dashboard-scale` row beside the guest broke only row 4 (542/518/524 ms against 500).
+    - Host `dashboard` passed 11/11.
+  - **TCC:** SIP is disabled in the guest. The system TCC.db pre-grants Accessibility, ScreenCapture and PostEvent to
+    `tart-guest-agent`, osascript and python. `AXIsProcessTrusted` is True from a `tart exec`'d process.
+  - The mini's Homebrew node is v26, which has no corepack; host-side pnpm comes from `/usr/local/bin` (node 22.18.0,
+    pnpm 11.23.0).
 
 ## Outcomes & Retrospective
 
