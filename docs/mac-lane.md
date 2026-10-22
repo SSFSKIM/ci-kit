@@ -728,7 +728,7 @@ commands, `owner` is the session's name, as for a timed hold, and `cand` the can
    and is never scripted: a prompt answered in the image stays answered in every clone, while one left unanswered comes
    up on every job's fresh desktop (the 10-16 incident, `UserNotificationCenter` in front, per job). In the mini's own
    GUI session, reached over Screen Sharing (never VNC into the guest, which would connect to its address), the owner
-   runs `tart run <cand> --dir=maws:<checkout>:ro` in the mini's Terminal; in the guest's window opens Terminal and
+   runs `tart run --dir=maws:<checkout>:ro <cand>` in the mini's Terminal; in the guest's window opens Terminal and
    LibreOffice and answers their first-run prompts; runs one MAWS group from a scratch clone of the share
    (`pnpm e2e:deliverables`), answering Electron's notification prompt as the mini's own setting has it; then removes
    the clone and shuts the guest down. `--register` and `--trial` refuse a candidate still running.

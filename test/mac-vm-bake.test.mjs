@@ -287,7 +287,7 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.match(result.stdout, /baked: maws-vm-candidate-20261022, stopped; the lowest free space during the bake was 120 GB/);
     assert.match(result.stdout, /120 GB free on the volume of .* \(reserve 40 GB\)/);
     // The human's window step, printed for CI-opt to relay: graphics, the maws share, the notification prompt.
-    assert.match(result.stdout, new RegExp(`tart run ${CANDIDATE} --dir=maws:${f.maws}:ro`));
+    assert.match(result.stdout, new RegExp(`tart run --dir=maws:${f.maws}:ro ${CANDIDATE}`));
     assert.match(result.stdout, /pnpm e2e:deliverables/);
     assert.match(result.stdout, /Electron may send notifications/);
     assert.match(result.stdout, /never VNC into the guest/);
@@ -325,6 +325,25 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     const refused = g.run(['--bake']);
     assert.match(refused.stderr, /refused: a VM of the lane runs: maws-vm-trial-20261022T080000Z \(running\)/);
     assert.ok(!g.calls().some((call) => call.startsWith('clone')));
+  });
+
+  test('--bake: a trial record left by an earlier candidate of the same name is moved aside, so it cannot promote this one', () => {
+    const f = fixture();
+    f.writeRecord({});
+    const result = f.run(['--bake', '--name', CANDIDATE]);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /an earlier trial record of maws-vm-candidate-20261022 is kept as .*\.before-<time>; this candidate has none until its own trial/);
+    assert.ok(readdirSync(join(f.vmHome, 'trials')).some((name) => name.startsWith(`${CANDIDATE}.before-`)));
+    assert.match(f.run(['--promote', CANDIDATE]).stderr, /refused: no trial record for maws-vm-candidate-20261022/);
+  });
+
+  test('a machine whose name cannot be read refuses before anything', () => {
+    const f = fixture();
+    rmSync(join(f.home, 'actions-runner-maws/.runner'));
+    const result = f.run(['--bake']);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /the machine's short name cannot be read/);
+    assert.deepEqual(f.calls(), []);
   });
 
   test('--bake: under the disk floor between steps, the bake stops the candidate', () => {

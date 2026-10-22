@@ -21,7 +21,8 @@
 # THE STEPS. Every one is safe to run again: nothing is deleted without a verified stop first (tart.sh: Tart lists it
 # stopped and no `tart run` of it runs), and a step that dies leaves nothing automated to meet it.
 # - --bake: `tart clone` of the base (CI_KIT_VM_BASE, ghcr.io/cirruslabs/macos-golden-gate-base:latest) to
-#   maws-vm-candidate-<YYYYMMDD> (UTC; --name for another id), refused when that candidate or its golden name exists;
+#   maws-vm-candidate-<YYYYMMDD> (UTC; --name for another id), refused when that candidate or its golden name exists
+#   (an earlier trial record of the name is moved aside, so only this candidate's own trial can authorize it);
 #   `tart set --cpu 4 --memory <MB> --display 2560x1440pt` (--memory, 4096 until V1 decides between 3 and 4 GB); a run
 #   with the installed kit (CI_KIT_VM_KIT, ~/ci-kit-vm/kit) and the MAWS checkout (--maws, CI_KIT_VM_MAWS,
 #   ~/Developer/GitHub/MAWS) shared read-only; provision.sh's steps through `tart exec`, the free space read after each
@@ -255,7 +256,7 @@ do_bake() {
   name=${name:-maws-vm-candidate-$(date -u +%Y%m%d)}
   [[ $name =~ ^maws-vm-candidate-[A-Za-z0-9._-]+$ ]] || die "--name takes maws-vm-candidate-<id> (got '$name')"
   golden=maws-vm-golden-${name#maws-vm-candidate-}
-  machine=$(machine_name)
+  machine=$(machine_name) || exit 1
   hold_check
   reserve_check
   none_running
@@ -266,6 +267,11 @@ do_bake() {
   version=$(sed -n 's/^RUNNER_VERSION=\([0-9.]*\).*/\1/p' "$kit/install.sh" 2>/dev/null)
   sha=$(sed -n 's/^RUNNER_SHA256=\([0-9a-f]*\).*/\1/p' "$kit/install.sh" 2>/dev/null)
   [[ -n $version && -n $sha ]] || refuse "the runner's pin cannot be read from $kit/install.sh"
+  # A record left by an earlier candidate of this name (retired, then baked again) must not authorize this one.
+  if [[ -e $trials/$name ]]; then
+    mv -f "$trials/$name" "$trials/$name.before-$(stamp)" || refuse "an earlier trial record of $name cannot be moved aside ($trials/$name)"
+    say "an earlier trial record of $name is kept as $trials/$name.before-<time>; this candidate has none until its own trial"
+  fi
   pnpm=$(perl -MJSON::PP -e 'my $p = JSON::PP->new->decode(do { local $/; <STDIN> }); my ($v) = ($p->{packageManager} // "") =~ /^pnpm\@(\d+\.\d+\.\d+)/; print $v // ""' <"$maws/package.json" 2>/dev/null)
   [[ -n $pnpm ]] || refuse "the MAWS checkout's packageManager names no pnpm version ($maws/package.json)"
   say "baking $name from $base: --cpu 4 --memory $memory --display 2560x1440pt; runner $version, pnpm $pnpm, guest machine $machine-vm"
@@ -291,7 +297,7 @@ do_bake() {
 The human's first-run window step, once, on $name (Design, The image). In the mini's own GUI session, reached over
 Screen Sharing from the MacBook (never VNC into the guest), with the maintenance hold still in place:
   1. Open Terminal on the mini and run:
-       tart run $name --dir=maws:$maws:ro
+       tart run --dir=maws:$maws:ro $name
      A window opens and the guest logs in as admin by itself.
   2. In the guest, open Terminal (Applications > Utilities > Terminal) and answer anything it asks on its first launch.
   3. In the guest, open LibreOffice from Applications, answer its first-run dialogs, and quit it.
@@ -309,7 +315,7 @@ EOF
 do_register() {
   local vm=${1:-} machine slot name labels token tokens=() needed=() i file
   [[ $# -eq 1 && $vm =~ ^maws-vm-(candidate|golden)-[A-Za-z0-9._-]+$ ]] || usage
-  machine=$(machine_name)
+  machine=$(machine_name) || exit 1
   hold_check
   reserve_check
   none_running
@@ -468,7 +474,7 @@ do_trial() {
   candidate=${1:-}
   local machine runner since kick file vms
   [[ $# -eq 1 && $candidate =~ ^maws-vm-candidate-[A-Za-z0-9._-]+$ ]] || usage
-  machine=$(machine_name)
+  machine=$(machine_name) || exit 1
   runner=ci-kit-mac-$machine-vm-trial
   hold_check
   reserve_check
