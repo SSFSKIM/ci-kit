@@ -4,12 +4,13 @@
 # and they never run beside it.
 #
 #   bake.sh --bake [--memory <MB>] [--maws <checkout>] [--name maws-vm-candidate-<id>]
+#   bake.sh --first-run <candidate>            shell part of the first-run step; the candidate must be running
 #   bake.sh --register <candidate or golden>     one registration token a line on stdin, per identity still missing
 #   bake.sh --trial <candidate>
 #   bake.sh --promote <candidate>
 #   bake.sh --retire <VM>
 #
-# THE HOLD. --bake, --register, --trial and --promote check it before anything else and refuse without it: a
+# THE HOLD. --bake, --first-run, --register, --trial and --promote check it before anything else and refuse without it: a
 # vm-hold.<owner> in ~/Library/Logs/ci-kit whose first line starts "maintenance" (CI-opt writes it through
 # `vm/hold.sh hold <owner> maintenance`, under desktop.lock: `maintenance since <time>`), no vm-reserved (a job clone may run while it stands), and the launcher's agent com.ssfskim.ci-kit.vm-lane
 # not loaded (launchctl print), with no launcher holding vm-lane.lock. Each then holds vm-lane.lock itself for its run,
@@ -29,7 +30,16 @@
 #   read-only; provision.sh's steps through `tart exec` (the APFS container grown into
 #   the larger disk and the display mode set first, each verified in the guest), the free space read after each
 #   (the lowest is printed, which the first refresh records; under CI_KIT_VM_DISK_FLOOR GB, 5, the bake stops); the
-#   verified stop. It then prints the human's first-run window step, which is never scripted.
+#   verified stop. It then prints the first-run window step: clicks by the human, or CI-opt through cua in the guest;
+#   the shell part from the MacBook through --first-run. No script answers a prompt.
+# - --first-run: the candidate already running in a window, its agent answering and its MAWS share mounted;
+#   LibreOffice's quarantine absent or user-approved (the window step first). Through tart exec, a scratch clone of
+#   the share at ~/maws-firstrun, pnpm install, then e2e:deliverables with a 3 GB heap, on the runner's PATH, streamed.
+#   A guest-side deadline ends the shell work after CI_KIT_VM_FIRST_RUN_WAIT s (1200); the scratch clone is removed
+#   on success, failure or expiry. Every run first stops scratch processes (argv or cwd, detached Electron included)
+#   and removes leftovers from a cancelled exec (which can kill the EXIT cleanup shell). Failure leaves the guest
+#   running; success asks it to shut down
+#   (sudo -n /sbin/shutdown), then verifies its stop. This step never boots a VM.
 # - --register: boots the candidate or golden named, registers through config.sh each identity whose slot lacks one,
 #   in this order: the production slot (~/ci-kit-vm/vm/identity: ci-kit-mac-<machine>-vm, labels ci-kit-mac-solo and
 #   ci-kit-mac-vm) and the trial slot (~/ci-kit-vm/vm-trial/identity: ci-kit-mac-<machine>-vm-trial, the one label
@@ -116,6 +126,7 @@ answer_bound=$(whole "${CI_KIT_VM_STOP_ANSWER:-}" 180)
 end_wait=$(whole "${CI_KIT_VM_END_WAIT:-}" 60)
 stop_timeout=$(whole "${CI_KIT_VM_STOP_TIMEOUT:-}" 60)
 provision_wait=$(whole "${CI_KIT_VM_PROVISION_WAIT:-}" 3600)
+first_run_wait=$(whole "${CI_KIT_VM_FIRST_RUN_WAIT:-}" 1200)
 result_wait=$(whole "${CI_KIT_VM_TRIAL_RESULT:-}" 120)
 pointer_wait=$(whole "${CI_KIT_VM_POINTER_WAIT:-}" 120)
 job_bound_min=$(minutes "${CI_KIT_VM_JOB_BOUND:-}" 50)
@@ -329,26 +340,155 @@ do_bake() {
   say "baked: $name, stopped; the lowest free space during the bake was $lowest GB"
   cat <<EOF
 
-The human's first-run window step, once, on $name (Design, The image). In the mini's own GUI session, reached over
+The human's first-run window step, once, on $name (Design, The image). The human, or CI-opt through cua, does the
+window step in the guest only; the mini's own prompts stay the human's. In the mini's own GUI session, reached over
 Screen Sharing from the MacBook (never VNC into the guest), with the maintenance hold still in place:
   1. Open Terminal on the mini and run:
-       tart run --dir=maws:$maws:ro $name
-     A window opens and the guest logs in as admin by itself. This one boot keeps the clipboard shared, so the
-     commands below can be pasted in: nothing else runs on the mini under the hold, and a pasteboard does not outlive
-     the guest's shutdown. Every other boot of the lane (job clones, trials, the bake's) runs with --no-clipboard.
-  2. In the guest, open Terminal (Applications > Utilities > Terminal) and answer anything it asks on its first launch.
-  3. In the guest, open LibreOffice from Applications, answer its first-run dialogs, and quit it.
-  4. In the guest's Terminal run, first giving the shell the runner's PATH (its .path): node@22 is keg-only, so a
-     new Terminal finds the base image's Node 24 and no pnpm, while every job gets that PATH:
-       export PATH="\$(cat ~/actions-runner-maws/.path)"
-       git -c safe.directory='*' clone "/Volumes/My Shared Files/maws" ~/maws-firstrun && cd ~/maws-firstrun &&
-         pnpm install --frozen-lockfile && pnpm e2e:deliverables
-     When macOS asks whether Electron may send notifications, answer it as the mini's own setting has it (System
-     Settings > Notifications > Electron on the mini). Answer any other prompt the group raises the same way.
-  5. In the guest's Terminal run:  cd && rm -rf ~/maws-firstrun && sudo shutdown -h now
-     The window closes when the guest has powered off.
-Then: bake.sh --register $name (first refresh only, tokens on stdin), bake.sh --trial $name, bake.sh --promote $name.
+       tart run --no-clipboard --dir=maws:$maws:ro $name
+     A window opens and the guest logs in as admin by itself. Every boot of the lane drops the shared clipboard.
+  2. In the guest's window, by clicks: open Terminal (Applications > Utilities > Terminal) and answer anything it
+     asks on its first launch. Open LibreOffice from Applications, answer its first-run dialogs, and quit it from
+     its menu. Nothing is typed or pasted into the guest.
+  3. From the MacBook run:
+       ssh mini '~/ci-kit-vm/kit/vm/bake.sh --first-run $name'
+     This runs pnpm e2e:deliverables through tart exec. When macOS asks whether Electron may send notifications,
+     answer it in the guest's window as the mini's own setting has it (System Settings > Notifications > Electron
+     on the mini). Answer any other prompt the group raises the same way. No script answers a prompt.
+     On success the scratch clone is removed and the guest shuts down, its stop verified; on failure it stays up
+     for inspection. Rerun --first-run until it passes; it cleans any interrupted run first and shuts the guest
+     down itself only after a pass. Keep the maintenance hold until the procedure is done.
+Only after --first-run passes and the stop is verified: bake.sh --register $name (first refresh only, tokens on stdin), bake.sh --trial $name, bake.sh --promote $name.
 EOF
+}
+
+do_first_run() {
+  local vm=${1:-} vms script status started
+  [[ $# -eq 1 ]] || usage
+  [[ $vm =~ ^maws-vm-candidate-[A-Za-z0-9._-]+$ ]] || refuse "--first-run needs a maws-vm-candidate-<id> (got '$vm')"
+  hold_check
+  ((first_run_wait > 0)) || refuse "CI_KIT_VM_FIRST_RUN_WAIT must be positive (seconds)"
+  vms=$(tart_vms) || refuse 'Tart cannot list its VMs'
+  [[ $(tart_state_in "$vms" "$vm") == running ]] ||
+    refuse "$vm is not running: start it with tart run in the mini's Terminal, as --bake prints"
+  tart_answers "$vm" || refuse "$vm: its guest agent does not answer; wait for the guest to log in and retry --first-run"
+  run_vm=$vm
+  # Unlike in_guest, a failure here must leave the window open. Bound the work in the guest too: killing a host
+  # tart exec can kill the cleanup shell without ending its detached workload. Every retry cleans the scratch
+  # processes and directory first; normal exits and the guest deadline clean them too.
+  script=$(cat <<'GUEST'
+set -euo pipefail
+refuse() { printf 'refused: %s\n' "$*" >&2; exit 1; }
+share='/Volumes/My Shared Files/maws'
+[[ -d $share && -f $share/package.json && -f $share/pnpm-lock.yaml ]] ||
+  refuse "the MAWS share is not mounted at $share; start the candidate with the --dir=maws share as --bake prints"
+app=/Applications/LibreOffice.app
+attrs=$(xattr "$app") || refuse "LibreOffice's quarantine cannot be read at $app"
+if grep -qx com.apple.quarantine <<<"$attrs"; then
+  quarantine=$(xattr -p com.apple.quarantine "$app") || refuse "LibreOffice's quarantine cannot be read"
+  flags=${quarantine%%;*}
+  [[ $flags =~ ^[[:xdigit:]]{1,8}$ ]] || refuse "LibreOffice's quarantine flags cannot be read: $flags"
+  (( (16#$flags & 0x40) != 0 )) ||
+    refuse "LibreOffice is not user-approved: open it in the guest's window, answer its first-run dialogs and quit it from its menu before --first-run"
+fi
+PATH=$(cat "$HOME/actions-runner-maws/.path") || refuse "the runner's PATH cannot be read from ~/actions-runner-maws/.path"
+[[ -n $PATH ]] || refuse "the runner's PATH is empty"
+export PATH
+work=$HOME/maws-firstrun
+# This path belongs only to first-run in a candidate. A cancelled exec can skip EXIT, leaving it and Electron.
+# Electron normally names its binary under node_modules here; pnpm and shells can name only tools elsewhere,
+# so match cwd too. Do not traverse node_modules with lsof +D: the cwd table is enough.
+stop_scratch() {
+  /usr/bin/perl -MTime::HiRes=time,sleep -e '
+    my $work = shift;
+    sub matching {
+      my (%parent, %cmd, %live, %skip, %found);
+      open my $ps, "-|", "/bin/ps", "-axww", "-o", "pid=,ppid=,stat=,command=" or die "ps: $!";
+      while (<$ps>) {
+        next unless /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/;
+        $parent{$1} = $2; $cmd{$1} = $4; $live{$1} = $3 !~ /^Z/;
+      }
+      close $ps or die "first-run: cannot read processes\n";
+      # This scanner carries the scratch path in argv; never select it or the exec that owns it.
+      for (my $pid = $$; $pid && !$skip{$pid}++; $pid = $parent{$pid} // 0) {}
+      for my $pid (keys %cmd) { $found{$pid} = 1 if index($cmd{$pid}, $work) >= 0; }
+      open my $ls, "-|", "/usr/sbin/lsof", "-a", "-u", $<, "-d", "cwd", "-Fpn" or die "lsof: $!";
+      my $pid;
+      while (<$ls>) {
+        chomp;
+        if (/^p(\d+)$/) { $pid = $1; }
+        elsif (/^n(.*)$/ && defined $pid && ($1 eq $work || index($1, "$work/") == 0)) { $found{$pid} = 1; }
+      }
+      close $ls or die "first-run: cannot read process working directories\n";
+      return grep { $live{$_} && !$skip{$_} } keys %found;
+    }
+    sub wait_gone {
+      my $until = time + 5;
+      while (time < $until && grep { kill 0, $_ } @_) { sleep 0.1; }
+    }
+    my @pids = matching();
+    exit 0 unless @pids;
+    print "first-run: stopping scratch processes @pids\n";
+    kill "TERM", @pids;
+    wait_gone(@pids);
+    @pids = matching();
+    my $until = time + 5;
+    while (@pids && time < $until) {
+      print "first-run: killing scratch stragglers @pids\n";
+      kill "KILL", @pids;
+      sleep 0.1;
+      @pids = matching();
+    }
+    die "first-run: scratch processes still run: @pids\n" if @pids;
+  ' "$work"
+}
+printf 'first-run: cleaning owned scratch %s and any previous run\n' "$work"
+stop_scratch
+rm -rf "$work"
+cleanup() {
+  local status=$?
+  trap - EXIT
+  cd "$HOME"
+  stop_scratch && rm -rf "$work" || exit 1
+  exit "$status"
+}
+trap cleanup EXIT
+# The workload carries the absolute scratch in argv even before clone/cd. Expiry ends its main group;
+# EXIT also finds detached Electron and anything else tied to the scratch.
+/usr/bin/perl -MPOSIX=setsid -e '
+  my $seconds = shift;
+  my $pid = fork;
+  defined $pid or exit 125;
+  if (!$pid) { setsid() or exit 126; exec { $ARGV[0] } @ARGV; exit 127; }
+  $SIG{ALRM} = sub {
+    kill "KILL", -$pid; kill "KILL", $pid; waitpid $pid, 0;
+    print STDERR "first-run: timed out after $seconds s\n"; exit 124;
+  };
+  alarm $seconds;
+  waitpid $pid, 0;
+  my $status = $?;
+  alarm 0;
+  exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
+' "$1" /bin/bash -euo pipefail -c '
+  git -c safe.directory="*" clone "/Volumes/My Shared Files/maws" "$1"
+  cd "$1"
+  pnpm install --frozen-lockfile
+  NODE_OPTIONS=--max-old-space-size=3072 pnpm e2e:deliverables
+' first-run "$work"
+GUEST
+)
+  say "$vm: first-run shell (at most $first_run_wait s); answer any prompt in the guest's window"
+  tart_call "$((first_run_wait + 60))" exec "$vm" /bin/bash -c "$script" first-run "$first_run_wait" 2>&1 | tee -a "$bake_log"
+  status=$?
+  ((status == 0)) || die "$vm: first-run failed ($status); stays running: inspect the output and the guest's window, fix the cause, then rerun --first-run $vm"
+  say "$vm: first-run passed; the scratch clone is removed; asking the guest to shut down"
+  tart_call 30 exec "$vm" sudo -n /sbin/shutdown -h now ||
+    say "$vm: shutdown did not acknowledge; checking its end before the verified stop"
+  started=$SECONDS
+  while ((SECONDS - started < end_wait)); do
+    tart_ended "$vm" && break
+    sleep "$tick"
+  done
+  end_vm || die "$vm: first-run passed, but its stop is not verified"
 }
 
 do_register() {
@@ -663,6 +803,7 @@ command=${1:-}
 shift || true
 case $command in
   --bake) do_bake "$@" ;;
+  --first-run) do_first_run "$@" ;;
   --register) do_register "$@" ;;
   --trial) do_trial "$@" ;;
   --promote) do_promote "$@" ;;

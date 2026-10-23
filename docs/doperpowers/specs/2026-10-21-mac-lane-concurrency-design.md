@@ -138,6 +138,19 @@ and by the coordinator's holds, and the design below says what is read and when.
   rebased it onto 489f591c7 and added two gate-plan test commits, final head ecb877349). It also carries M3's
   alert-reader `-<n>` fold.
 - [ ] V4 — Install on the mini, trials, the first proven-VM groups, the mode verdict, the coordinator's holds.
+  - [x] (2026-10-22 21:36Z) Step 1: `install.sh --vm` at e7cef20 in hold 3's tail; the launcher installed disabled;
+    `~/ci-kit-vm` laid out; the exclusive instance (runner id 21) gained `ci-kit-mac-solo`.
+  - [x] (2026-10-23 06:13Z) Step 2, the first refresh, under CI-opt's maintenance hold from 01:13Z:
+    `--bake --memory 4096` 01:14:43–01:21:58Z (7 min), `maws-vm-candidate-20261023`, the lowest free space 126 GB
+    (134 GB before); the first-run step 05:58–06:06Z by CI-opt on the owner's word (Surprises); `--register`: runner
+    2351 `ci-kit-mac-mini-vm` (`ci-kit-mac-solo`, `ci-kit-mac-vm`) and 2352 `ci-kit-mac-mini-vm-trial`
+    (`ci-kit-mac-vm-trial`), both offline; `--trial`: MAWS run 39882681198, job 120184243556 (`e2e:document-app`),
+    success in 4 min 57 s on the trial runner (06:08:26–06:13:23Z), clone deleted; `--promote`: the pointer names
+    `maws-vm-golden-20261023`. The launcher stays disabled until step 3.
+  - [x] (2026-10-23) Step 6's preparation: CI-opt's hold scripts on the MacBook have the timed form
+    (`hold.sh hold <booking> timed` and its wait before the instances; its release first), and the wait for an idle
+    mini counts only the jobs the held runners could take (an untimed hold's lane, and the trial slot, never). The
+    rehearsals remain.
 - [ ] V5 — Widen the proven-VM set; the second guest, if memory ever allows it.
 
 ## Design
@@ -301,7 +314,7 @@ fail rules.
   Aqua session only, like the runners'). It is in the user's GUI session on purpose: Virtualization.framework needs an
   unlocked login keychain on macOS 15+ (Tart's FAQ: "Failed to generate keypair" without one), which auto-login gives
   the mini's session at boot, and the display rule below needs the host's main screen.
-- `mac/vm/bake.sh`: the maintenance procedure's script (`--bake`, `--register`, `--trial`, `--promote`,
+- `mac/vm/bake.sh`: the maintenance procedure's script (`--bake`, `--first-run`, `--register`, `--trial`, `--promote`,
   `--retire`), run by the coordinator under the maintenance hold and refusing to run outside it (The image).
 - `mac/vm/guest/`: what runs inside a clone. `kickoff.sh` starts the one job's runner under `wrapper.sh`, which owns the
   listener, writes the `out/` markers from the listener's diag log and process, answers the idle handshake and powers
@@ -369,7 +382,7 @@ released only after the VM's end is verified; the guard samples through every ro
   and Python. A runner the guest agent starts inherits those; one launchd starts as `/bin/bash` holds nothing. V1 reads
   the rows and the guest's `csrutil status` before anything relies on them.
 - **Why the guest powers itself off.** `wrapper.sh`, after the runner exits, copies `_diag` and the hooks log to
-  `out/`, writes `out/done <exit code>`, and runs `sudo shutdown -h now` (`admin` has passwordless sudo in the base
+  `out/`, writes `out/done <exit code>`, and runs `sudo -n /sbin/shutdown -h now` (`admin` has passwordless sudo in the base
   image). `tart run` then returns, which is the launcher's signal that the job is over; the launcher still verifies
   the VM's state before it deletes (teardown), and a clone that never powers off hits the running bound.
 - **Self-update.** The runner updates itself when GitHub asks, inside the clone, and the update is lost with it: the
@@ -527,8 +540,8 @@ to 37% at its lowest, and the host swapped 36 MB at the boot and 269 MB at most.
 **The disk reserve.** Tart's clone reclaims cached images up to its prune limit but admits nothing, and an APFS clone
 allocates as it writes, so a job or a bake can fill the volume while it runs. Before any boot (condition 5) the
 launcher reads the free space of the volume holding `~/.tart` (`df`) and admits only above `CI_KIT_VM_DISK_RESERVE`
-(40 GB: a job clone's writes, a few GB, plus a bake's peak, which V4 measures and the default then follows). The same
-read goes with every memory sample: under half the reserve no next guest boots (`vm-pause`, reason `disk`, cleared
+(40 GB: V4 step 2 measured an 8 GB bake peak, with a few GB more for a job clone; the reserve stays 40 GB,
+Decision Log). The same read goes with every memory sample: under half the reserve no next guest boots (`vm-pause`, reason `disk`, cleared
 when the space is back); under a floor of 5 GB (`CI_KIT_VM_DISK_FLOOR`) the guest is stopped as at critical memory,
 since a full volume damages the host, and the alert says `disk`. `bake.sh` reads the reserve before it starts and
 refuses below it. Admission state writes that fail for lack of space fail closed; a release stamp that fails is
@@ -553,9 +566,10 @@ pixels at 72 PPI, a 1x display. The default is 1024x768.
 
 **The image: what is baked, and what invalidates it.** The base is `ghcr.io/cirruslabs/macos-golden-gate-base`,
 macOS 27 for parity with the host, already on the mini (41 GB on disk, pulled 10-21): `admin`/`admin`, auto-login,
-passwordless sudo, SSH and Screen Sharing on, Gatekeeper disabled (`spctl --global-disable` in its template, so a
-cask's "downloaded from the Internet" prompt does not come up), the Tart guest agent, Homebrew, node@24, `gh`, and the
-TCC rows above (from the templates' source; the images' own contents are read in V1). `bake.sh` clones it, sets
+passwordless sudo, SSH and Screen Sharing on, the Tart guest agent, Homebrew, node@24, `gh`, and the
+TCC rows above (from the templates' source; the images' own contents are read in V1). The template disables
+Gatekeeper (`spctl --global-disable`), but V4 step 2 still raised LibreOffice's "downloaded from the Internet"
+prompt; the first-run window step answers it. `bake.sh` clones it, sets
 `--cpu 4 --memory <V1's size> --display 2560x1440pt`, boots it with the host's MAWS checkout shared read-only (the
 owner's `gh` login on the mini keeps that checkout at master), and through `tart exec`:
 - Node 22 (MAWS's `engines`, what its setup action installs per job) and pnpm 11.23.0 (its `packageManager`, read from
@@ -567,11 +581,15 @@ owner's `gh` login on the mini keeps that checkout at master), and through `tart
 - the runner at `install.sh`'s pinned version, in `~/actions-runner-maws`, with a `.env` whose hook variables point at
   the kit's share, `CI_KIT_MACHINE=<machine>-vm`, `CI_KIT_VM_GUEST=1`, `LANG=en_US.UTF-8`, and a `.path`; the
   compiled helpers (`cursor-park`, `window-list`) built there, since the share is read-only;
-- then the human's part, once, in a window (`tart run <golden>` with graphics, from the mini's own GUI session, which
-  the owner reaches over Screen Sharing; no VNC into the guest, which would be a connection to its address): open
-  Terminal and LibreOffice, and run one MAWS group so Electron's notification prompt is answered, because a prompt
-  answered in the image stays answered in every clone, while one left unanswered would come up on every job's fresh
-  desktop (the 10-16 incident, `UserNotificationCenter` in front, would recur per job). The image never holds a runner
+- then the first-run window step, once, on the candidate (`tart run --no-clipboard --dir=maws:<checkout>:ro <candidate>`
+  with graphics, from the mini's own GUI session, reached over Screen Sharing; no VNC into the guest, which would be
+  a connection to its address): the human, or CI-opt through cua, opens Terminal and LibreOffice, answers their
+  first-run dialogs and quits LibreOffice from its menu. From the MacBook, `bake.sh --first-run <candidate>` over
+  ssh to the mini runs one MAWS group through `tart exec`, with the runner's PATH and a 3 GB heap. Any prompt it
+  raises is answered in the guest's window, never by the script. A prompt answered in the image stays answered in
+  every clone, while one left unanswered would come up on every job's fresh desktop (the 10-16 incident,
+  `UserNotificationCenter` in front, would recur per job). The owner's 2026-10-23 ruling permits CI-opt to answer
+  the guest's first-run prompts through cua; the host's prompts stay the human's. The image never holds a runner
   identity: registration (step 4 below) runs `config.sh` in a booted image and moves `.runner`, `.credentials` and
   `.credentials_rsaparams` to the slot on the host, leaving the image clean. Those three files let a holder take that
   runner's jobs, which is what today's `~/actions-runner-maws/.credentials` on the host already allows; no new class of
@@ -599,11 +617,12 @@ checks:
    and boots out the launcher's agent (`launchctl bootout gui/$(id -u)/com.ssfskim.ci-kit.vm-lane`). `bake.sh`
    reads all three before every step: the hold file, no reservation, the agent not loaded (`launchctl print`).
 2. **The reserve.** `bake.sh` reads the volume's free space and refuses under `CI_KIT_VM_DISK_RESERVE`; it prints the
-   figure, and the first refresh (V4) records the bake's peak to set the default.
+   figure. The first refresh (V4 step 2) measured an 8 GB peak; the default stays 40 GB (Decision Log).
 3. **The bake** (`bake.sh --bake`): `tart clone` of the base to `maws-vm-candidate-<date>`, `tart set`, `tart run`
    with the MAWS checkout and the kit shared, the provisioning through `tart exec` (above), `tart stop`, and the stop
    verified (`tart list` stopped, no `tart run` of its name in the process table) before the step reports done. The
-   human's window step follows, on the candidate.
+   first-run window step follows, on the candidate; `--first-run` runs its shell part from the MacBook through ssh
+   to the mini, leaving only clicks in the guest (Decision Log, 2026-10-23).
 4. **Registration** (`bake.sh --register`, once per identity, not per refresh): boots the candidate or the golden
    image, runs `config.sh --unattended --no-default-labels` with a token from stdin (piped from the MacBook as
    `install.sh` takes it) for the production identity (`ci-kit-mac-<machine>-vm`, labels `ci-kit-mac-solo,
@@ -1522,6 +1541,19 @@ hold-aware plan send them to the guest, which this spec leaves open.
   audit also fixed boot undo treating a failed second Tart list as an absent clone, which could release before
   deletion. An unreadable list now defers to the reserved teardown.
 
+- 2026-10-23 (CI-opt; V4 step 2): **The disk reserve stays 40 GB.** The measured bake peak was 8 GB and a job clone
+  writes a few GB; 40 GB is several times that and costs nothing while the volume has 124 GB free. Rejected: the
+  peak plus a clone (about 15 GB), tighter with nothing gained.
+- 2026-10-23 (CI-opt; V4 step 2): **The first-run step's shell part runs from the MacBook through
+  `bake.sh --first-run`; the guest's window takes only clicks; its boot drops the shared clipboard.** Typing into
+  the guest over Screen Sharing failed on 10-23: keystrokes were too slow and were dropped. Rejected: keep typed
+  steps (failed); Screen Sharing or VNC straight into the guest (the design forbids connecting to its address);
+  scripting the prompts' answers (a prompt answered by a script is the incident class the step exists to prevent).
+  **The owner's ruling, 2026-10-23:** on later refreshes CI-opt may answer the guest's first-run prompts through
+  cua, including LibreOffice's Gatekeeper "Open" and Electron's notification prompt, inside the guest only. The
+  mini's own prompts stay the human's. Rejected: the step staying the human's alone, which 10-23 showed costs a
+  human sitting for each refresh.
+
 ## Surprises & Discoveries
 
 - 2026-10-21, M1 (ci-kit #67), from its reviews:
@@ -1629,6 +1661,31 @@ hold-aware plan send them to the guest, which this spec leaves open.
     `tart-guest-agent`, osascript and python. `AXIsProcessTrusted` is True from a `tart exec`'d process.
   - The mini's Homebrew node is v26, which has no corepack; host-side pnpm comes from `/usr/local/bin` (node 22.18.0,
     pnpm 11.23.0).
+
+- 2026-10-23, V4 step 2 (the first refresh):
+  - **The bake took 7 min, not the planned 15 min.** Free space was 134 GB before it, lowest 126 GB during it,
+    and 124 GB after the registration and the trial.
+  - **The bake's share was 2168 commits behind master.** CI-opt fast-forwarded the mini's MAWS checkout
+    (0f5dce7bc → 4c12e4a1b) by a push from the MacBook before the bake. **Debt:** the procedure assumes the owner
+    keeps that checkout at master; `bake.sh` does not check it.
+  - **Typing into the guest's window over Screen Sharing was unusable.** The owner delegated the step to CI-opt
+    for this once. CI-opt used cua on the mini's desktop for the clicks, and `tart exec <cand> /bin/bash -c '…'`
+    over ssh from the MacBook for the shell; the guest agent runs in the guest's login session.
+    - Terminal's first launch raised nothing. LibreOffice's Gatekeeper prompt was answered "Open"; its quarantine
+      flags changed from `0181` to `01c1` (the user-approved bit, `0x40`). LibreOffice was quit from its menu.
+    - `pnpm e2e:deliverables` first exited 134 in electron-vite's build, V8's default heap as V1 saw for widgets.
+      With `NODE_OPTIONS=--max-old-space-size=3072` it passed 12/12.
+    - Under `tart exec`, `sudo shutdown` is not found: its PATH has no `/sbin`. `sudo -n /sbin/shutdown -h now`
+      works, the full path the wrapper already uses.
+    - No notification prompt came up. Neither the guest's nor the mini's notification preferences has an Electron
+      entry. The guest's `/` had 12 GiB free afterwards.
+  - **The human step had no start check-in.** The hold began at 01:13Z for the bake. The step was sent to the owner
+    at 01:32Z and began at 05:18Z: 3 h 46 min with the held mini idle in between, because nothing checked that it
+    had started. The coordinator now sets a start check-in on any human step under a hold.
+  - **Two of the earlier "Not yet seen on the mini (V4)" items are now seen.** A process the kickoff starts outlives
+    the `tart exec` that started it: the trial's wrapper ran its job to `out/done` after kickoff returned.
+    `sudo -n /sbin/shutdown -h now` works for `admin`: the trial guest powered itself off. Still unseen:
+    `tart stop --timeout` ending a run.
 
 ## Outcomes & Retrospective
 

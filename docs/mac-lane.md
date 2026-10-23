@@ -744,8 +744,9 @@ commands, `owner` is the session's name, as for a timed hold, and `cand` the can
 
 2. **The reserve.** `--bake`, `--register` and `--trial` read the free space of the volume of `~/.tart` and refuse
    under `CI_KIT_VM_DISK_RESERVE` GB (40), printing the figure. `--bake` also prints the lowest free space it saw
-   between its steps, and stops under the floor (5 GB): the first refresh records that peak, from which the reserve's
-   default is set.
+   between its steps, and stops under the floor (5 GB). The first refresh (2026-10-23) measured an 8 GB bake peak:
+   134 GB free before, lowest 126 GB during, 124 GB after registration and the trial. The default stays 40 GB,
+   several times the bake peak and a job clone's few GB of writes.
 
 3. **The bake** clones the base to `maws-vm-candidate-<YYYYMMDD>` (UTC; `--name maws-vm-candidate-<id>` for another),
    sets `--cpu 4 --memory <MB> --display 2560x1440pt --disk-size 60`, boots it with the installed kit and the MAWS
@@ -765,18 +766,46 @@ commands, `owner` is the session's name, as for a timed hold, and `cand` the can
    #   expect: … baked: maws-vm-candidate-<id>, stopped; the lowest free space during the bake was <n> GB
    ```
 
-   **Then the human's first-run window step, once, on the candidate,** which `--bake` prints with the candidate's name
-   and is never scripted: a prompt answered in the image stays answered in every clone, while one left unanswered comes
-   up on every job's fresh desktop (the 10-16 incident, `UserNotificationCenter` in front, per job). In the mini's own
-   GUI session, reached over Screen Sharing (never VNC into the guest, which would connect to its address), the owner
-   runs `tart run --dir=maws:<checkout>:ro <cand>` in the mini's Terminal (this one boot keeps the clipboard shared, so
-   the commands can be pasted in: nothing else runs under the hold, and a pasteboard does not outlive the guest's
-   shutdown; every other boot of the lane runs with `--no-clipboard`); in the guest's window opens Terminal and
-   LibreOffice and answers their first-run prompts; gives the guest's Terminal the runner's PATH
-   (`export PATH="$(cat ~/actions-runner-maws/.path)"`: the baked Node 22 is Homebrew's keg-only `node@22`, so a new
-   Terminal finds the base image's Node 24 and no pnpm, while every job gets that PATH); runs one MAWS group from a
-   scratch clone of the share (`pnpm e2e:deliverables`), answering Electron's notification prompt as the mini's own setting has it; then removes
-   the clone and shuts the guest down. `--register` and `--trial` refuse a candidate still running.
+   **Then the first-run window step, once, on the candidate,** which `--bake` prints with the candidate's name.
+   A prompt answered in the image stays answered in every clone, while one left unanswered comes up on every job's
+   fresh desktop (the 10-16 incident, `UserNotificationCenter` in front, per job). The human, or CI-opt through cua
+   on the owner's 2026-10-23 ruling, does the window step. The mini's own prompts stay the human's. No script
+   answers a prompt.
+
+   1. In the mini's Terminal, reached over Screen Sharing from the MacBook (never VNC into the guest, which would
+      connect to its address), run `tart run --no-clipboard --dir=maws:<checkout>:ro <cand>`. The guest logs in as
+      admin by itself. This boot drops the shared clipboard like every other boot of the lane.
+   2. In the guest's window, by clicks, open Terminal (Applications > Utilities > Terminal) and answer anything it
+      asks on first launch. Open LibreOffice from Applications, answer its first-run dialogs, and quit it from its
+      menu. Nothing is typed or pasted into the guest.
+   3. From the MacBook run:
+
+      ```bash
+      ssh mini '~/ci-kit-vm/kit/vm/bake.sh --first-run <cand>'
+      ```
+
+      Answer any prompt the group raises in the guest's window, including Electron's notification prompt as the
+      mini's own setting has it (System Settings > Notifications > Electron). On the first refresh no notification
+      prompt came up, and neither the guest's nor the mini's preferences had an Electron entry.
+
+   `--first-run` requires the maintenance hold, a running candidate with its guest agent answering, and the MAWS
+   share mounted at `/Volumes/My Shared Files/maws`. It refuses while LibreOffice's quarantine flags lack the
+   user-approved bit (`0x40`): on 10-23, answering Gatekeeper's "Open" changed `0181` to `01c1`. The group launches
+   `soffice`, so that window step comes first.
+
+   The shell part runs through `tart exec` in the guest's login session. It reads the runner's PATH from
+   `~/actions-runner-maws/.path` (the baked Node 22 is keg-only; a fresh Terminal finds Node 24 and no pnpm), makes
+   `~/maws-firstrun` as a scratch clone of the share, runs `pnpm install --frozen-lockfile`, then runs
+   `NODE_OPTIONS=--max-old-space-size=3072 pnpm e2e:deliverables`, streaming its output. In the 4 GB guest the first
+   attempt exited 134 in electron-vite's build; with that heap it passed 12/12. The shell work has a 20 min bound
+   (`CI_KIT_VM_FIRST_RUN_WAIT`, seconds). At the start, and on success, failure or expiry, it stops processes whose
+   arguments or working directory name the scratch, including detached Electron, and removes the clone. It gives
+   them 5 s after TERM, then kills stragglers and verifies they are gone. This scratch belongs only to the first-run
+   step in a candidate. A cancelled `tart exec` can kill the cleanup shell; the next run cleans its leftovers first.
+   A failure leaves the guest up for inspection and returns non-zero. Fix the cause and rerun `--first-run` until it
+   passes. Only then does it shut the guest down itself, with `sudo -n /sbin/shutdown -h now`, and verify the stop:
+   under `tart exec`, sudo's PATH has no `/sbin`, so the full path is needed. Run `--register` only after that pass
+   and verified stop. `--register` and `--trial` refuse a candidate still running.
 
 4. **Registration**, once per identity, not per refresh (the first refresh, or after a slot's identity is removed):
    `--register` boots the candidate (or the golden), runs the runner's `config.sh --unattended --no-default-labels`
@@ -992,8 +1021,9 @@ gh api repos/SSFSKIM/MAWS/actions/runs/<run-id>/jobs --jq '.jobs[]|select(.concl
 (`gh run view --json jobs` has no runner name; the jobs API's `runner_name` does.)
 
 **Human-only prompts.** A first launch of a GUI app can raise a macOS prompt (Gatekeeper for a downloaded app, a
-Keychain or notification request). They are answered by the human, in that machine's GUI session, never by an agent
-and never through cua.
+Keychain or notification request). On a host, including the mini, they are answered by the human, in that machine's
+GUI session, never by an agent and never through cua. Inside the VM lane's guest, during a refresh's first-run step,
+CI-opt may answer the prompts through cua on the owner's ruling of 2026-10-23. Never on the host.
 
 **Readiness hold: LibreOffice.** `/Applications/LibreOffice.app` (Homebrew cask) is quarantined until the human first
 opens it on that machine and allows Gatekeeper's "downloaded from the Internet" prompt. Until then, no group that
