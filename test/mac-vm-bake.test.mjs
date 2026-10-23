@@ -330,7 +330,7 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.ok(f.calls().findIndex((call) => call.startsWith(`set ${CANDIDATE} `)) < f.calls().findIndex((call) => call.startsWith('run ')), f.calls().join('\n'));
     assert.deepEqual(text(join(f.vms, CANDIDATE, 'run.args')).trim().split('\n'), ['--no-graphics', '--no-clipboard', `--dir=kit:${mac}:ro`, `--dir=maws:${f.maws}:ro`, CANDIDATE]);
     const script = '/bin/bash /Volumes/My Shared Files/kit/vm/provision.sh';
-    assert.deepEqual(f.exec(CANDIDATE), [`${script} check`, `${script} disk 60`, `${script} display`, `${script} node 11.23.0`, `${script} store`, `${script} libreoffice`,
+    assert.deepEqual(f.exec(CANDIDATE), [`${script} check`, `${script} disk 60`, `${script} quiet`, `${script} display`, `${script} node 11.23.0`, `${script} store`, `${script} libreoffice`,
       `${script} runner ${installPin('RUNNER_VERSION')} ${installPin('RUNNER_SHA256')} mini-vm`, `${script} workrepo`, `${script} helpers`]);
     assert.match(result.stdout, /the seeded MAWS work repository \(workrepo\)/);
     // Its end verified before the step reports done: a stop, then Tart's list.
@@ -383,6 +383,17 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.match(result.stderr, /maws-vm-candidate-20261022: the disk grown to 60 GB \(disk\) failed \(1: provision: disk failed\)/);
     assert.equal(f.state(CANDIDATE), 'stopped');
     assert.equal(f.exec(CANDIDATE).length, 2, 'stopped at the disk step');
+  });
+
+  test('--bake: quiet verification failure stops the candidate before the display and installs', () => {
+    const f = fixture();
+    f.flag('fail-quiet');
+    const result = f.run(['--bake', '--name', CANDIDATE]);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /background services off \(quiet\) failed/);
+    assert.equal(f.state(CANDIDATE), 'stopped');
+    assert.equal(f.exec(CANDIDATE).length, 3, 'check, disk, quiet; no later provisioning');
+    assert.ok(f.calls().some((call) => call.startsWith(`stop ${CANDIDATE} `)));
   });
 
   test('--bake: a provision step that fails stops the candidate, verified, and leaves it; a VM of the lane running refuses the bake', () => {
@@ -1237,5 +1248,126 @@ for file in .runner .credentials .credentials_rsaparams; do echo "$file of $3" >
     assert.equal(none.status, 1);
     assert.match(none.stderr, /no registration token on stdin/);
     assert.match(g.run(['register', 'vm-trial', 'x', 'y', 'https://github.com/SSFSKIM/MAWS'], 't\n').stderr, /the identity-vm-trial share is not shown read-write/);
+  });
+});
+
+// quiet uses only command boundaries, so these guest tests run on Linux CI too. The fake keeps launchd's persistent
+// overrides separate from its loaded services: disabling alone must not stand in for bootout, or vice versa.
+describe('the quiet image (provision.sh quiet)', () => {
+  const gui = [
+    'BiomeAgent', 'assistantd', 'biomesyncd', 'chronod', 'corespotlightd', 'duetexpertd', 'intelligencecontextd',
+    'jetpackassetd', 'knowledge-agent', 'managedcorespotlightd', 'mediaanalysisd', 'passd', 'photoanalysisd',
+    'remindd', 'siriinferenced', 'siriknowledged', 'spotlightknowledged', 'suggestd', 'triald',
+  ].map((name) => `gui/${process.getuid()}/com.apple.${name}`);
+  const system = ['AssetCacheTetheratorService', 'PerfPowerServices', 'audioanalyticsd'].map((name) => `system/com.apple.${name}`);
+  const targets = [...gui, ...system];
+  const indexing = '/:\n\tIndexing disabled.\n/System/Volumes/Data:\n\tIndexing disabled.\n/System/Volumes/Preboot:\n\tIndexing disabled.\n';
+  function guest({ absent = [], states = 'disabled' } = {}) {
+    const home = mkdtempSync(join(root, 'quiet-'));
+    const bin = join(home, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(home, 'index-status'), indexing);
+    for (const target of targets.filter((target) => !absent.includes(target))) writeFileSync(join(home, `loaded-${target.replaceAll('/', '_')}`), '');
+    executable(join(bin, 'sudo'), `[[ $1 == -n ]] || exit 64
+shift
+[[ ! -e $HOME/sudo-fail ]] || exit 1
+CI_TEST_ROOT=1 exec "$@"`);
+    executable(join(bin, 'mdutil'), `echo "mdutil $*" >> "$HOME/calls"
+case "$*" in
+  '-a -i off') [[ $CI_TEST_ROOT == 1 && ! -e $HOME/mdutil-fail ]] || exit 1; touch "$HOME/index-off" ;;
+  '-a -s') [[ -e $HOME/index-off && ! -e $HOME/status-fail ]] || exit 1; cat "$HOME/index-status" ;;
+  *) exit 64 ;;
+esac`);
+    executable(join(bin, 'launchctl'), `echo "launchctl $*" >> "$HOME/calls"
+command=$1 target=$2
+if [[ $target == system* ]]; then [[ $CI_TEST_ROOT == 1 ]] || exit 64
+else [[ -z $CI_TEST_ROOT ]] || exit 64; fi
+key=$(echo "$target" | tr / _)
+[[ ! -e $HOME/$command-fail ]] || exit 5
+case $command in
+  disable) [[ -e $HOME/disable-stuck ]] || touch "$HOME/disabled-$key" ;;
+  print) [[ -e $HOME/loaded-$key ]] || exit 113; echo "$target = { state = running }" ;;
+  bootout)
+    [[ ! -e $HOME/bootout-race ]] || { rm -f "$HOME/loaded-$key"; exit 3; }
+    [[ -e $HOME/loaded-$key ]] || exit 3
+    rm "$HOME/loaded-$key" ;;
+  print-disabled)
+    echo 'disabled services = {'
+    for file in "$HOME/disabled-$key"_*; do
+      [[ -e $file ]] || continue
+      label=$(basename "$file" | sed -E 's/^disabled-(system|gui_[0-9]+)_//')
+      [[ ! -e $HOME/wrong-label ]] || label="$label.extra"
+      printf '  "%s" => %s\\n' "$label" '${states}'
+    done
+    echo '}' ;;
+  *) exit 64 ;;
+esac`);
+    const env = { HOME: home, PATH: '/usr/bin:/bin', CI_KIT_VM_SUDO: join(bin, 'sudo'),
+      CI_KIT_VM_MDUTIL: join(bin, 'mdutil'), CI_KIT_VM_LAUNCHCTL: join(bin, 'launchctl') };
+    return {
+      home,
+      run: () => spawnSync('/bin/bash', [provision, 'quiet'], { encoding: 'utf8', env }),
+      flag: (name) => writeFileSync(join(home, name), ''),
+      calls: () => (text(join(home, 'calls')) ?? '').trim().split('\n'),
+    };
+  }
+
+  test('disables indexing and exactly the measured services in their own domains, boots them out, and is repeatable', () => {
+    const g = guest();
+    const first = g.run();
+    assert.equal(first.status, 0, first.stdout + first.stderr);
+    assert.deepEqual(g.calls().filter((call) => call.startsWith('mdutil ')), ['mdutil -a -i off', 'mdutil -a -s']);
+    assert.deepEqual(g.calls().filter((call) => call.startsWith('launchctl disable ')), targets.map((target) => `launchctl disable ${target}`));
+    assert.deepEqual(g.calls().filter((call) => call.startsWith('launchctl bootout ')), targets.map((target) => `launchctl bootout ${target}`));
+    for (const target of targets) {
+      const key = target.replaceAll('/', '_');
+      assert.ok(existsSync(join(g.home, `disabled-${key}`)), target);
+      assert.ok(!existsSync(join(g.home, `loaded-${key}`)), target);
+    }
+    const again = g.run();
+    assert.equal(again.status, 0, again.stderr);
+    assert.equal(g.calls().filter((call) => call.startsWith('launchctl bootout ')).length, targets.length, 'no bootout of an unloaded service');
+  });
+
+  test('a missing label still gets a verified persistent override; a service disappearing during bootout is already done', () => {
+    const g = guest({ absent: [gui[0], system[0]], states: 'true' });
+    g.flag('bootout-race');
+    const result = g.run();
+    assert.equal(result.status, 0, result.stderr);
+    for (const target of [gui[0], system[0]]) {
+      assert.ok(g.calls().includes(`launchctl disable ${target}`));
+      assert.ok(!g.calls().includes(`launchctl bootout ${target}`));
+      assert.match(result.stdout, new RegExp(target.replaceAll('.', '\\.')));
+    }
+  });
+
+  for (const [why, output] of [
+    ['one volume still enabled', indexing.replace('Preboot:\n\tIndexing disabled.', 'Preboot:\n\tIndexing enabled.')],
+    ['no volumes', ''],
+    ['missing the data volume', '/:\n\tIndexing disabled.\n/System/Volumes/Preboot:\n\tIndexing disabled.\n'],
+    ['unknown status', indexing + '/Volumes/Other:\n\tError: unable to perform operation.\n'],
+  ]) test(`refuses indexing readback with ${why}`, () => {
+    const g = guest();
+    writeFileSync(join(g.home, 'index-status'), output);
+    const result = g.run();
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /indexing.*disabled/i);
+    assert.ok(!g.calls().some((call) => call.startsWith('launchctl disable ')), 'no launchd changes after failed indexing verification');
+  });
+
+  for (const flag of ['sudo-fail', 'mdutil-fail', 'status-fail', 'disable-fail', 'disable-stuck', 'print-fail', 'bootout-fail', 'print-disabled-fail', 'wrong-label']) {
+    test(`refuses ${flag}, rather than claiming a quiet image`, () => {
+      const g = guest();
+      g.flag(flag);
+      const result = g.run();
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      assert.match(result.stderr, /provision:/);
+    });
+  }
+  test('an enabled launchd override does not pass the disabled readback', () => {
+    const g = guest({ states: 'enabled' });
+    const result = g.run();
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /not disabled/);
   });
 });

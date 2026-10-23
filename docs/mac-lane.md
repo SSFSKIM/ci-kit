@@ -764,9 +764,10 @@ booking.
 3. **The bake** clones the base to `maws-vm-candidate-<YYYYMMDD>` (UTC; `--name maws-vm-candidate-<id>` for another),
    sets `--cpu 4 --memory <MB> --display 2560x1440pt --disk-size 60`, boots it with the installed kit and the MAWS
    checkout shared read-only (`--maws`, default `~/Developer/GitHub/MAWS`), provisions it through `tart exec` (`mac/vm/provision.sh`'s steps: the base's tools and `python3`; the APFS
-   container grown into the 60 GB disk, the recovery container after it removed first, and the result verified; the
-   display set to 2560x1440 with scaling on through `displayplacer` and read back, since `tart set --display` does not
-   reach the guest's mode; Node 22 and the checkout's pnpm
+   container grown into the 60 GB disk, the recovery container after it removed first, and the result verified;
+   Spotlight indexing and the measured background services turned off (`quiet`, below); the display set to
+   2560x1440 with scaling on through `displayplacer` and read back, since `tart set --display` does not reach the
+   guest's mode; Node 22 and the checkout's pnpm
    through corepack; the warm store from a scratch clone; LibreOffice; the runner at `install.sh`'s pin in
    `~/actions-runner-maws`, its `.env` naming the hooks through `~/ci-kit` → the kit share, `CI_KIT_MACHINE=mini-vm`,
    `CI_KIT_VM_GUEST=1` and `LANG=en_US.UTF-8`, and its `.path`; the seeded MAWS work repository (`workrepo`, below);
@@ -777,6 +778,34 @@ booking.
    repository depend on it. The first refresh found it 2168 commits behind; a `gh` login alone does not keep it
    current. The coordinator updates it before the bake and checks its branch and commit against GitHub's master.
    The bake does not fetch the host checkout or check its freshness against GitHub.
+
+   **The image quiets the guest's boot, not its macOS desktop.** `provision.sh quiet` runs after `disk` and before
+   `display` and the installs, so the bake's own dependency and checkout writes are not indexed either. It runs
+   `sudo -n mdutil -a -i off`, then requires `mdutil -a -s` to report `Indexing disabled.` for every volume it lists,
+   including `/`, `/System/Volumes/Data` and `/System/Volumes/Preboot`. It disables and boots out exactly these
+   services (`com.apple.` before each name), with no pattern search over the jobs loaded at bake time:
+
+   | Domain | Services |
+   |---|---|
+   | `gui/<guest uid>` | `BiomeAgent`, `assistantd`, `biomesyncd`, `chronod`, `corespotlightd`, `duetexpertd`, `intelligencecontextd`, `jetpackassetd`, `knowledge-agent`, `managedcorespotlightd`, `mediaanalysisd`, `passd`, `photoanalysisd`, `remindd`, `siriinferenced`, `siriknowledged`, `spotlightknowledged`, `suggestd`, `triald` |
+   | `system` (through `sudo -n`) | `AssetCacheTetheratorService`, `PerfPowerServices`, `audioanalyticsd` |
+
+   Every label must read disabled in its domain's `launchctl print-disabled` (`disabled` or `true`). A label not
+   loaded (`launchctl print` exits 113) is logged and still gets a verified disabled override: this makes the step
+   repeatable, covers an idle service and lets a future macOS remove one without breaking the bake. An absent
+   service needs no bootout; a failed disable, unreadable state, enabled or missing override, or failed bootout
+   while the service remains loaded fails the bake. The persistent overrides and indexing setting carry into the
+   clones. A new base that changes the status format or volume layout must be checked, not silently accepted.
+
+   This is the list measured in launch-cost probe 4 (2026-10-23), not a general debloat: nothing of WindowServer,
+   TCC, LaunchServices or fseventsd is touched. Against `maws-vm-golden-20261023b` (4 vCPU, 4096 MB), three
+   interleaved fresh clones per arm ran MAWS's 19-test document e2e with mean test sums of 154.1 s before and
+   107.8 s after (-30%; ranges 145.4–167.5 s and 104.1–110.3 s, all 19/19 green). Warm runs were 99–105 s;
+   mean load1 at test start fell from 60.6 to 38.2. The measurement justifies this list alone, not more services.
+
+   **Spotlight queries (`mdfind`) return nothing in a guest with indexing off.** An e2e test that depends on
+   `mdfind` detection cannot run on the VM lane. MAWS's current only Spotlight use is ClaudeUsage app detection
+   (`src/main/gateway/claude-usage-app.ts`); ClaudeUsage is not installed in the guest, so its answer is unchanged.
 
    **The image carries a work repository, not just a warm store.** After installing the runner (which replaces its
    directory), `workrepo` clones the share's master into `<runner>/<work folder>/MAWS/MAWS`, normally

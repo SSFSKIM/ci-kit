@@ -6,6 +6,8 @@
 #   check                                the base: macOS's version, Homebrew, python3 (installed when the system's
 #                                        cannot run runner-state.py) and the Swift compiler
 #   disk <GB>                            the APFS container grown into the disk bake.sh set to <GB> (below), verified
+#   quiet                                Spotlight indexing off and the measured background services disabled and
+#                                        booted out, read back; the settings persist into every fresh clone
 #   display                              the display at 2560x1440 with scaling on, through displayplacer (installed
 #                                        from its tap), read back: `tart set --display` does not reach the guest's
 #                                        mode, and the mode set here persists into every clone
@@ -105,6 +107,39 @@ agent_resize_wait() {
   done
 }
 
+# THE QUIET IMAGE. Probe 4 (2026-10-23) took the fresh clone's 19-test document run from 154.1 s to 107.8 s
+# (mean test sums, three interleaved runs each, all green) with indexing off and exactly these launchd overrides.
+# Nothing of WindowServer, TCC, LaunchServices or fseventsd is changed. The list is explicit, not a match against
+# today's loaded jobs: a service that is idle at bake time must stay disabled when the clone next boots too.
+# The command paths, like diskutil's above, can be replaced by test stand-ins; system changes use passwordless sudo.
+quiet_launchctl() { # <domain> <command> <target>
+  local domain=$1
+  shift
+  if [[ $domain == system ]]; then
+    "${CI_KIT_VM_SUDO:-/usr/bin/sudo}" -n "${CI_KIT_VM_LAUNCHCTL:-/bin/launchctl}" "$@"
+  else
+    "${CI_KIT_VM_LAUNCHCTL:-/bin/launchctl}" "$@"
+  fi
+}
+quiet_service() { # <domain> <label>
+  local domain=$1 target=$1/$2 status
+  quiet_launchctl "$domain" disable "$target" || fail "cannot disable $target"
+  # An absent job (113 from print) is already out, whether this step ran before or a later macOS removed the label.
+  # Keep its override and verify it below anyway: absence alone never proves a persistent disable. Other lookup
+  # errors fail the bake. A job may disappear between print and bootout; only a second not-found makes that harmless.
+  if quiet_launchctl "$domain" print "$target" >/dev/null 2>&1; then
+    if ! quiet_launchctl "$domain" bootout "$target"; then
+      status=0
+      quiet_launchctl "$domain" print "$target" >/dev/null 2>&1 || status=$?
+      ((status == 113)) || fail "cannot boot out $target"
+    fi
+  else
+    status=$?
+    ((status == 113)) || fail "cannot read $target (launchctl print exited $status)"
+    say "$target is not loaded; keeping its disabled override"
+  fi
+}
+
 write_env() { # <machine>
   [[ $1 =~ ^[a-z0-9-]+$ ]] || fail "env takes the guest's machine name (got '$1')"
   [[ -d $vm_runner ]] || fail "no runner at $vm_runner"
@@ -152,6 +187,41 @@ case $step in
         fail "the container $l_apfs is $(gb "$l_apfs_size") of the $(gb "$l_size") disk $l_disk after the resize: it did not grow into the disk"
     fi
     say "the container $l_apfs is $(gb "$l_apfs_size") of the $(gb "$l_size") disk $l_disk; / has $(df -g / | awk 'NR == 2 { print $4 }') GiB free"
+    ;;
+  quiet)
+    export LC_ALL=C
+    mdutil=${CI_KIT_VM_MDUTIL:-/usr/bin/mdutil}
+    "${CI_KIT_VM_SUDO:-/usr/bin/sudo}" -n "$mdutil" -a -i off || fail 'cannot turn Spotlight indexing off'
+    indexing=$("$mdutil" -a -s) || fail 'cannot read Spotlight indexing (mdutil -a -s)'
+    # Check every reported volume, not just the first disabled line, and require the three volumes the base reports.
+    # Empty, partial or unfamiliar output cannot certify the image; a new base's layout needs a deliberate check.
+    python3 -I -c '
+import sys
+lines = [line.strip() for line in sys.stdin if line.strip()]
+volumes = lines[::2]
+valid = (len(lines) % 2 == 0
+         and {"/:", "/System/Volumes/Data:", "/System/Volumes/Preboot:"} <= set(volumes)
+         and all(volume.startswith("/") and volume.endswith(":") for volume in volumes)
+         and all(status == "Indexing disabled." for status in lines[1::2]))
+sys.exit(0 if valid else 1)' <<<"$indexing" || fail "Spotlight indexing is not verified disabled on every volume: $indexing"
+    say "$indexing"
+    gui_services=(BiomeAgent assistantd biomesyncd chronod corespotlightd duetexpertd intelligencecontextd
+      jetpackassetd knowledge-agent managedcorespotlightd mediaanalysisd passd photoanalysisd remindd
+      siriinferenced siriknowledged spotlightknowledged suggestd triald)
+    system_services=(AssetCacheTetheratorService PerfPowerServices audioanalyticsd)
+    for domain in "gui/$(id -u)" system; do
+      if [[ $domain == system ]]; then services=("${system_services[@]}"); else services=("${gui_services[@]}"); fi
+      for service in "${services[@]}"; do quiet_service "$domain" "com.apple.$service"; done
+      disabled=$(quiet_launchctl "$domain" print-disabled "$domain") || fail "cannot read disabled services in $domain"
+      for service in "${services[@]}"; do
+        # launchctl versions print either disabled/enabled or true/false. Compare the entire quoted label literally
+        # (its dots are not regex wildcards); an absent override, or an explicitly enabled one, fails the bake.
+        awk -v label="\"com.apple.$service\"" '
+          $1 == label && $2 == "=>" && ($3 == "disabled" || $3 == "true") { found = 1 }
+          END { exit !found }' <<<"$disabled" || fail "$domain/com.apple.$service is not disabled in launchctl print-disabled"
+        say "$domain/com.apple.$service disabled and not loaded"
+      done
+    done
     ;;
   display)
     [[ -x $vm_displayplacer ]] || brew install jakehilborn/jakehilborn/displayplacer
@@ -272,6 +342,6 @@ print(os.path.join(runner, work))' "$vm_runner" "$runner_work") || fail 'cannot 
     say "$name registered with $labels; its identity is in the identity-$slot share, and none is left in $vm_runner"
     ;;
   *)
-    fail "unknown step '${step}' (check, disk, display, node, store, libreoffice, runner, workrepo, env, helpers, register)"
+    fail "unknown step '${step}' (check, disk, quiet, display, node, store, libreoffice, runner, workrepo, env, helpers, register)"
     ;;
 esac
