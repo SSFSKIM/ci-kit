@@ -48,6 +48,9 @@ step=kit
 git clone --quiet https://github.com/SSFSKIM/ci-kit.git /opt/ci-kit
 git -C /opt/ci-kit checkout --quiet "$KIT_SHA"
 
+install -d -m 0755 /etc/ci-kit
+export CI_KIT_BAKE_MANIFEST=/etc/ci-kit/bake-manifest.json
+curl -sf --max-time 10 -H 'Metadata-Flavor: Google' "$MD/attributes/ci-kit-bake-manifest" > "$CI_KIT_BAKE_MANIFEST"
 . /opt/ci-kit/pool/bake/prepare.sh
 
 # Unlike the Hetzner box, a GCE image is used only once its caches are whole: a cold image costs every job it serves.
@@ -87,10 +90,13 @@ apt-get clean
 docker image prune --force > /dev/null
 # A VM made from this disk gets its own machine id, and none of this boot's logs.
 cloud-init clean --logs --machine-id
+rm -rf /var/lib/cloud/instances /var/lib/cloud/instance /var/lib/cloud/data /var/lib/cloud/seed
+rm -rf /root/.aws /root/.config/gcloud /root/.git-credentials /root/.netrc /tmp/ci-kit-warm-* /tmp/ci-kit-electron-*
 # The builder's name would otherwise be every job VM's; ci-kit-gce-instance.service sets the instance's.
 : > /etc/hostname
 journalctl --rotate > /dev/null 2>&1 || true
 journalctl --vacuum-time=1s > /dev/null 2>&1 || true
 sync
+curl -sf --max-time 10 -X PUT -H 'Metadata-Flavor: Google' --data-binary @"$CI_KIT_BAKE_MANIFEST" "$MD/guest-attributes/ci-kit/manifest" > /dev/null
 report ok
 step=done

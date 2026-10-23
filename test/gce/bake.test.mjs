@@ -201,15 +201,12 @@ test('an earlier bake\'s check runner is swept once it is 4 h old and not busy; 
   assert.deepEqual(staleBakeRunners(runners, now).map((r) => r.id), [1]);
 });
 
-// Review (M6 placements, P2): a bake smokes each placement in turn, so the bake job's task timeout (gce/deploy.sh)
-// grows with the placements, and STALE_MS must stay above it: a younger bake's builder, check runner or unready image
-// may belong to a bake still running, which an overlapping bake must not sweep.
-test('the bake job outlives its own bounds for the shipped placements, and STALE_MS outlives the bake job', () => {
-  const deploy = readFileSync(new URL('../../gce/deploy.sh', import.meta.url), 'utf8');
-  const taskMs = Number(/--task-timeout=(\d+)m/.exec(deploy)[1]) * 60_000;
+// GCE resources are cleaned before the sequential EC2 stages start. Their stale bound covers the GCE
+// stage, not the full multi-account job; deployment's account-dependent timeout is exercised in ec2/bake.test.mjs.
+test('GCE stale cleanup cannot sweep an in-flight stage for the shipped placements', () => {
   const shipped = parseGceConfig(readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
-  assert.ok(taskMs >= BAKE_TIMEOUT_MS + shipped.placements.length * SMOKE_TIMEOUT_MS + CHECK_TIMEOUT_MS, `task timeout ${taskMs / 60_000} min`);
-  assert.ok(STALE_MS > taskMs, `STALE_MS ${STALE_MS / 3600_000} h against a ${taskMs / 60_000} min bake`);
+  const stageMs = BAKE_TIMEOUT_MS + shipped.placements.length * SMOKE_TIMEOUT_MS + CHECK_TIMEOUT_MS;
+  assert.ok(STALE_MS > stageMs + 30 * 60_000, 'GCE stage and cleanup margin must precede stale cleanup');
 });
 
 test('the image goes into the family unready, labelled with the kit commit and the run', () => {

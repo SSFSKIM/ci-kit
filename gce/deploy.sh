@@ -139,14 +139,20 @@ network() {
 }
 
 bake() {
-  # The job runs the bake orchestrator only; the builder clones the kit at the commit it bakes (main's head).
-  # Its timeout stays above the bake's own bounds (builder 30 min, a smoke 15 in each placement in turn, eight since
-  # M6, real job 10, the image and the cleanup), so the bake's cleanup always runs; a typical bake takes about 15 min
-  # plus a few per placement. STALE_MS (gce/bake/plan.mjs, 4 h) stays above it, so no other bake sweeps a live one's
-  # check runner or image.
+  # Source deploy includes ec2/, pool/bake/, lib/aws.mjs and package-lock.json's SDK dependencies.
+  # Roles come only from pool/config/ec2.json; there are no AWS keys or duplicate role env maps.
+  # GCE keeps its 180-minute envelope, followed by each account's builder (30), image (30), smoke/check
+  # (20 each) and cleanup, with API margin. Disabled accounts still receive images, like their guard legs.
+  local accounts timeout
+  accounts=$(node -e '
+    const fs = require("node:fs");
+    try { console.log(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).accounts.length); }
+    catch (e) { if (e.code === "ENOENT") console.log(0); else throw e; }
+  ' "$KIT/pool/config/ec2.json")
+  timeout=$((180 + 120 * accounts))
   g run jobs deploy ci-kit-bake --source="$KIT" --region="$REGION" --service-account="$SA" \
     --command=launcher --args=node,gce/bake/bake.mjs --labels=ci-kit=bake \
-    --tasks=1 --max-retries=0 --task-timeout=180m --cpu=1 --memory=512Mi
+    --tasks=1 --max-retries=0 --task-timeout="${timeout}m" --cpu=1 --memory=512Mi
   g run jobs add-iam-policy-binding ci-kit-bake --region="$REGION" \
     --member="serviceAccount:$SA" --role=roles/run.invoker > /dev/null
   echo "deploy: bake job ok"

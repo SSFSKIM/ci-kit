@@ -8,9 +8,8 @@ export const BAKE_TIMEOUT_MS = 30 * 60_000;
 export const SMOKE_TIMEOUT_MS = 15 * 60_000;
 // From the dispatch to the check VM's power-off: a boot of about a minute and a job of about one.
 export const CHECK_TIMEOUT_MS = 10 * 60_000;
-// A bake's builder, check runner or unready image younger than this may belong to a bake still running, so an
-// overlapping bake and the launcher leave it alone. It stays above the bake job's task timeout in gce/deploy.sh (180 min
-// for eight placements smoked in turn), which bounds a bake's life; test/gce/bake.test.mjs holds the two together.
+// A GCE stage's builder, check runner or unready image younger than this may still be in use. GCE cleanup
+// precedes the EC2 account stages, so this bounds GCE's stage rather than the multi-account job timeout.
 export const STALE_MS = 4 * 3600_000;
 export const KEEP_READY = 2;
 // The builder needs memory for the image build and pnpm's fetch; it is on demand, since a preempted bake is a lost
@@ -166,10 +165,10 @@ const bakeLabels = (runId, role) => ({ 'ci-kit': 'gce-builder', 'ci-kit-run': St
 
 // The builder: stock Ubuntu running the builder script once, with a one-hour installation token, scoped to reading
 // MAWS's contents, in its metadata. The App key never reaches a VM.
-export const builderInstance = ({ name, zone, machine, runId, script, token, placement, egress, diskGb = BUILDER_DISK_GB }) =>
+export const builderInstance = ({ name, zone, machine, runId, script, token, manifest, placement, egress, diskGb = BUILDER_DISK_GB }) =>
   vm({
     name, zone, machine, diskGb, diskType: BUILDER_DISK_TYPE, placement, egress, sourceImage: UBUNTU, labels: bakeLabels(runId, 'builder'),
-    metadata: { 'startup-script': script, 'ci-kit-gh-token': token },
+    metadata: { 'startup-script': script, 'ci-kit-gh-token': token, ...(manifest ? { 'ci-kit-bake-manifest': JSON.stringify(manifest) } : {}) },
     maxRunSeconds: BAKE_TIMEOUT_MS / 1000 + 15 * 60,
   });
 

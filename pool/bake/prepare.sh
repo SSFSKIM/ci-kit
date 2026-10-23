@@ -9,9 +9,16 @@
 
 step=node
 mkdir -p "$CACHE/toolcache/node"
-index=$(curl -sf --max-time 60 https://nodejs.org/dist/index.json)
+# Hetzner still resolves its own versions; the multi-cloud bake passes one resolved manifest.
+if [ -z "${CI_KIT_BAKE_MANIFEST:-}" ]; then
+  index=$(curl -sf --max-time 60 https://nodejs.org/dist/index.json)
+fi
 for major in 22 24; do
-  v=$(jq -r --arg m "v$major." '[.[] | select(.version | startswith($m))][0].version' <<< "$index")
+  if [ -n "${CI_KIT_BAKE_MANIFEST:-}" ]; then
+    v=$(jq -er --arg m "$major" '.node[$m] | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$CI_KIT_BAKE_MANIFEST")
+  else
+    v=$(jq -r --arg m "v$major." '[.[] | select(.version | startswith($m))][0].version' <<< "$index")
+  fi
   curl -sfL --max-time 300 "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz" -o /tmp/node.tar.xz
   dir="$CACHE/toolcache/node/${v#v}/x64"
   mkdir -p "$dir"
