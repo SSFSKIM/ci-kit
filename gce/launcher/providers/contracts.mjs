@@ -1,4 +1,4 @@
-// Shared data boundary. Provider effects arrive in M3; these shapes do not select a cloud or change admission.
+// Shared provider boundary. These shapes do not select a cloud or change admission.
 /**
  * @typedef {'gce'|'ec2'} ProviderName
  * @typedef {'any'|'gce'|'ec2'} RequiredProvider

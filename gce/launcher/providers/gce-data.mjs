@@ -1,4 +1,4 @@
-// Pure GCE data adaptation. No API calls: the existing launcher still supplies every effect.
+// Pure GCE data adaptation. No API calls: providers/gce.mjs supplies the cloud effects.
 import { machineCpus } from '../../bake/plan.mjs';
 import { providerRunnerLabels } from './contracts.mjs';
 
