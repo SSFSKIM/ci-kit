@@ -32,6 +32,7 @@ const LOW_BUDGET = 0.2; // requested ticks stop while the App's remaining GitHub
 
 async function fetchText(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+  if (res.status === 404) return null; // a deletion commit has no raw file; absence is not a failed refresh
   if (!res.ok) throw new Error(`GET ${url}: ${res.status}`);
   return res.text();
 }
@@ -58,12 +59,12 @@ async function reconcile(preparation) {
     setup = null;
     throw err;
   })));
-  const { cfg, config, poolRepos } = await preparation.time('config', () => d.source());
+  const { cfg, config, poolRepos, ec2, repoProviders } = await preparation.time('config', () => d.source());
   const key = `${cfg.ledger.repo}#${cfg.ledger.issue_title}`;
   if (!d.ledgers.has(key)) d.ledgers.set(key, createGceLedger(d.gh, cfg.ledger, { log }));
   const error = (message, fields) => say('ERROR', message, fields);
   const provider = createProvider({ gce: d.gce, cfg, config, log, limits: d.limits });
-  const launcher = new Launcher({ provider, gh: d.gh, ledger: d.ledgers.get(key), cfg, config, poolRepos, log, error, stockouts: d.stockouts });
+  const launcher = new Launcher({ provider, gh: d.gh, ledger: d.ledgers.get(key), cfg, config, poolRepos, ec2, repoProviders, log, error, stockouts: d.stockouts });
   return { config: config.slice(0, 8), repos: cfg.repos.map((r) => r.repo), ...(await launcher.tick(preparation)), github: d.gh.stats() };
 }
 
