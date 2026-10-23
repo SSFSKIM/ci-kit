@@ -41,7 +41,7 @@ measurement exists.
 - [x] (2026-10-23 12:37Z) M1: the measurement spike. Verdict in
   `docs/doperpowers/specs/2026-10-23-ec2-pool-m1-verdict.md` (f5827cf, merged here); summary in Surprises &
   Discoveries. Every spike instance, volume, AMI, snapshot and GCE VM deleted; AWS spend at most $0.735.
-- [ ] Owner's go after the M1 cost finding (asked 2026-10-23 ~12:50Z: proceed credit-first, overflow only, or stop).
+- [x] (2026-10-23 13:1xZ) Owner's go after the M1 cost finding: "Proceed, credit first" (rejected: overflow only, stop).
 - [ ] M2: data contracts, v2 ledger with v1 reads, and provider-qualified keys; no behaviour change.
 - [ ] M3: GCE effects extracted behind the provider; no behaviour change.
 - [ ] M4: scheduling over providers, proved with a fake second provider; GCE-only behaviour unchanged.
