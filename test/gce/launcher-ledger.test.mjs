@@ -286,12 +286,12 @@ function fakeIssue({ comments = [], issues = [{ number: 7, title: 'pool ledger',
 }
 const LEDGER = { repo: SBX, issue_title: 'pool ledger' };
 
-test('the store reads only the recent window, creates a launch row, and finalizes that same comment in place', async () => {
+test('the store discovers old active rows on a full read, creates a launch row, and finalizes that same comment in place', async () => {
   const f = fakeIssue({ comments: [{ id: 1, body: 'an old Hetzner row', updated_at: '2026-10-01T00:00:00Z' }] });
   const store = createGceLedger(f.gh, LEDGER, { now: () => T0 });
   const launching = launchRow({ alloc: 'tb0abc0001', repo: SBX, cpus: 4, at: T0, config: 'x' });
   await store.read();
-  assert.deepEqual(f.calls, ['list', 'read #7 since 2026-10-15T10:00:00.000Z']);
+  assert.deepEqual(f.calls, ['list', 'read #7 since undefined']);
   await store.upsert(launching);
   await store.read();
   const running = runningRow((await store.rows())[0], INST);
@@ -317,10 +317,10 @@ test('a later read asks only for what changed since the last one (with an overla
   await store.read();
   assert.deepEqual(f.calls, ['list', `read #7 since ${iso(T0 - 5 * 60_000)}`], 'from the last read (at T0), less 5 min');
   assert.deepEqual((await store.rows()).map((r) => [r.alloc, r.state]).sort(), [['tb0abc0001', 'running'], ['tb0abc0002', 'launching']]);
-  // A comment last updated before the window leaves it, as it would from a whole read.
+  // Non-final allocations remain reserved even when their last update predates the cost window.
   f.clock.t = T0 + WINDOW_MS + 90_000;
   await store.read();
-  assert.deepEqual((await store.rows()).map((r) => r.alloc), ['tb0abc0002']);
+  assert.deepEqual((await store.rows()).map((r) => r.alloc).sort(), ['tb0abc0001', 'tb0abc0002']);
 });
 
 test('a comment this store deleted (a duplicate row) does not come back from the store\'s own memory', async () => {
@@ -587,7 +587,7 @@ test('a comment another writer deleted leaves this store\'s memory at its next w
   f.clock.t += FULL_READ_MS;
   f.calls.length = 0;
   await a.read();
-  assert.ok(f.calls.includes(`read #7 since ${iso(f.clock.t - WINDOW_MS)}`), 'a whole read of the window');
+  assert.ok(f.calls.includes('read #7 since undefined'), 'a full read discovers non-final allocations outside the cost window');
   assert.equal((await a.rows())[0].state, 'deleting', 'A no longer holds the deleted final comment');
   await a.upsert(final);
   assert.equal(parseRow(f.state.comments.find((c) => c.id === 1).body).state, 'final', 'and A finalizes the allocation');
@@ -602,7 +602,7 @@ test('a whole read keeps a comment this store just wrote that GitHub does not li
   const listing = f.gh.issueComments;
   f.gh.issueComments = async (...args) => (await listing(...args)).filter((c) => Date.parse(c.updated_at) < f.clock.t); // listing lag
   await store.read();
-  assert.deepEqual((await store.rows()).map((r) => r.alloc), ['tb0abc0002']);
+  assert.deepEqual((await store.rows()).map((r) => r.alloc).sort(), ['tb0abc0001', 'tb0abc0002']);
 });
 
 

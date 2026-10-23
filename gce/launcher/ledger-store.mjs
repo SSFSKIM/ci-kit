@@ -1,10 +1,10 @@
 // The GCE ledger on GitHub (spec I12): one comment per allocation on the current ledger issue, plus the daily lines.
-// The store holds the comments updated in the last 26 h (a VM lives at most max_run_minutes, and the daily line needs
-// yesterday), so a read stays small however long an issue grows. Writes keep that copy current. The store lives as
+// The store holds non-final allocations regardless of age, plus comments updated in the last 26 h for costs.
+// A cold/full read discovers old non-final rows; incremental reads fetch recent changes. Writes keep that copy current. The store lives as
 // long as the launcher's instance, so after its first read of an issue it asks only for the comments updated since
 // its last read, less READ_OVERLAP_MS for GitHub's listing lag (spec M3: a busy day's window is several pages, read
 // one after another before every tick's first launch). An incremental read shows no deletion, so at most every
-// FULL_READ_MS the store reads an issue's whole window again and forgets a comment GitHub no longer lists (another
+// FULL_READ_MS the store reads an issue again and forgets a comment GitHub no longer lists (another
 // writer's dedupe removed it), unless that comment is too recent for the listing to show yet. A row never moves back: before an update the comment is read
 // again and the write is dropped if the comment is already as far along (a final row is never rewritten). Issue
 // comments have no compare-and-swap, so during an overlap of two ticks a row is eventually final rather than
@@ -19,7 +19,7 @@
 // there by its id. A read that finds the current issue at ROTATE_AT comments opens the next one. Two ticks that
 // both do so open two; every reader then takes the newer as current, and the rows either wrote stay in view because
 // both issues are read. An issue this store opened stays in its reads until GitHub's listing shows it. An older
-// issue is closed once nothing on it was updated inside the window and the issue
+// issue is closed once it has no non-final row or update inside the window and the issue
 // after it is a window old (a tick that listed before that one existed may still be writing to it).
 import { renderRow, parseRow, rowComments, rowsOf, moreFinal, renderDaily, dailyDays } from './ledger.mjs';
 
@@ -73,10 +73,13 @@ export function createGceLedger(gh, { repo, issue_title: title }, { now = Date.n
     return Promise.all(issues.map(async (i) => {
       const h = held.get(i.number);
       const whole = h.wholeAt === null || t - h.wholeAt >= FULL_READ_MS;
-      const since = whole ? cutoff : new Date(Math.max(t - WINDOW_MS, h.readAt - READ_OVERLAP_MS)).toISOString();
+      // A cold/full read must see old non-final allocations: inventory outages can outlive the cost window.
+      // Open issues are bounded by rotation; only finalized history ages out, and an issue with live rows stays open.
+      const since = whole ? undefined : new Date(h.readAt - READ_OVERLAP_MS).toISOString();
       const before = [...h.byId.values()];
-      const fresh = await gh.issueComments(repo, i.number, { since });
-      for (const [id, c] of h.byId) if (c.updated_at < cutoff) h.byId.delete(id);
+      const retain = (c) => c.updated_at >= cutoff || (parseRow(c.body)?.state && parseRow(c.body).state !== 'final');
+      const fresh = (await gh.issueComments(repo, i.number, since ? { since } : {})).filter(retain);
+      for (const [id, c] of h.byId) if (!retain(c)) h.byId.delete(id);
       if (whole) {
         // Gone from GitHub: held before this read, not listed by it, and old enough that the listing would show it.
         const listed = new Set(fresh.map((c) => c.id));

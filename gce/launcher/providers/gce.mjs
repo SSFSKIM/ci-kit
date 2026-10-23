@@ -62,7 +62,7 @@ export function createProvider({ gce, cfg, config, now = Date.now, log = () => {
   const recorder = () => createPreparation({ now });
   const uncertain = () => ({ outcome: 'uncertain', detail: '' });
   const provider = {
-    name: 'gce',
+    name: 'gce', account: cfg.project,
     candidates: (config, size) => placements(size, config),
 
     // Start limits beside the ledger read, but list VMs only AFTER that read: a running row must precede the

@@ -51,7 +51,7 @@ async function deps(preparation) {
   github = gh;
   // stockouts: capacity refusals remembered across ticks (logic.mjs stockoutMemory), for this process's life; limits:
   // the placements' quota limits (room.mjs), read live and kept for minutes.
-  return { gce, gh, source, ledgers: new Map(), stockouts: stockoutMemory(), limits: createLimits(gce, log) };
+  return { gce, gh, source, ledgers: new Map(), providerState: new Map(), stockouts: stockoutMemory(), limits: createLimits(gce, log) };
 }
 
 async function reconcile(preparation) {
@@ -64,7 +64,7 @@ async function reconcile(preparation) {
   if (!d.ledgers.has(key)) d.ledgers.set(key, createGceLedger(d.gh, cfg.ledger, { log }));
   const error = (message, fields) => say('ERROR', message, fields);
   const provider = createProvider({ gce: d.gce, cfg, config, log, limits: d.limits });
-  const launcher = new Launcher({ provider, gh: d.gh, ledger: d.ledgers.get(key), cfg, config, poolRepos, ec2, repoProviders, log, error, stockouts: d.stockouts });
+  const launcher = new Launcher({ provider, gh: d.gh, ledger: d.ledgers.get(key), cfg, config, poolRepos, ec2, repoProviders, log, error, stockouts: d.stockouts, providerState: d.providerState });
   return { config: config.slice(0, 8), repos: cfg.repos.map((r) => r.repo), ...(await launcher.tick(preparation)), github: d.gh.stats() };
 }
 
