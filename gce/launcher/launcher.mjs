@@ -794,13 +794,17 @@ export class Launcher {
     }
     if (raced) this.log(`${name}: not created (${tried}); its race serves ${what}`);
     else this.log(`${name}: not created (${result.stop}: ${tried}); ${what} waits`);
+    const ended = finalRow(walked, { end: result.stop === 'exhausted' || result.stop === 'failed' ? 'refused' : 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb, egress: this.cfg.egress });
+    // Persist definite exhaustion first. A crash at unregister then leaves a final row the five-minute orphan
+    // rule can recognize, not a launching row protected as uncertain. A failed final write releases neither debit.
+    if (!(await this.write(ended))) { seen.launches.push(walked); return { held: true, raced }; }
+    seen.rowOf.set(alloc, ended);
+    ctx.admission.release(alloc);
     await this.gh.deleteRunner(repo, jit.runner.id).catch((err) => {
       if (err.status !== 404) this.log(`unregister ${name}: ${err.message}; the orphan-runner rule retries`);
     });
-    const abandoned = finalRow(walked, { end: result.stop === 'exhausted' || result.stop === 'failed' ? 'refused' : 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb, egress: this.cfg.egress });
-    if (await this.write(abandoned)) { seen.rowOf.set(alloc, abandoned); ctx.admission.release(alloc); }
-    seen.launches.push(abandoned);
-    return { held: seen.rowOf.get(alloc).state !== 'final', raced };
+    seen.launches.push(ended);
+    return { raced };
   }
 
   // The race of an insert still unsettled RACE_AFTER_MS after it was sent (spec M6): once every queued job's launch has

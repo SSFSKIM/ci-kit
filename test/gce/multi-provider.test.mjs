@@ -426,3 +426,65 @@ test('a delayed prior race marker cannot overwrite the next EC2 attempt coordina
   assert.equal(persisted.client_token, `${persisted.alloc}-2`);
   assert.equal(persisted.sent_at, new Date(start + 20_000).toISOString());
 });
+
+test('a crash at the actual refused-runner unregister boundary recovers through the five-minute orphan rule', async () => {
+  const s = setup({ refs: [ref('ec2', 'a')] }); s.a.outcome = 'quota';
+  const queued = s.queue();
+  const remove = s.w.github.deleteRunner;
+  let atBoundary = false, crash;
+  s.w.github.deleteRunner = async (...args) => {
+    if (!atBoundary) {
+      atBoundary = true;
+      return new Promise((_resolve, reject) => { crash = () => reject(new Error('process lost at unregister')); });
+    }
+    return remove(...args);
+  };
+  const interrupted = s.make().tick();
+  await until(() => atBoundary);
+  const [beforeCrash] = await s.rows();
+  queued.status = 'completed';
+  s.w.advance(6 * 60_000);
+  const cold = createGceLedger(s.w.github, s.cfg.ledger, { now: s.w.now });
+  await s.make({ ledger: cold }).tick();
+  const afterRestart = await s.w.github.runners(repo);
+  crash();
+  await interrupted;
+  assert.equal(beforeCrash.state, 'final', 'refusal must already be durable when unregister begins');
+  assert.equal(beforeCrash.end, 'refused');
+  assert.ok(!afterRestart.some((r) => r.name === beforeCrash.instance), 'known absence reaps the refused orphan after five minutes');
+});
+
+test('the five-minute orphan rule still protects a truly uncertain launch until ten-minute reconciliation', async () => {
+  const s = setup({ refs: [ref('ec2', 'a')], max: 8 }); s.a.outcome = 'uncertain';
+  const queued = s.queue();
+  const ticking = s.make({ after: s.w.after }).tick();
+  await until(() => s.a.calls.some(([k]) => k === 'reconcile'));
+  s.w.advance(45_000);
+  await ticking;
+  const [original] = await s.rows();
+  queued.status = 'completed';
+  s.a.reconcileLaunch = async (r) => ({ outcome: s.w.now() - Date.parse(r.sent_at) >= 10 * 60_000 ? 'abandoned' : 'uncertain', detail: '' });
+  s.w.advance(9 * 60_000 + 14_000); // send + 9:59
+  await s.make().tick();
+  assert.ok((await s.w.github.runners(repo)).some((r) => r.name === original.instance));
+  assert.equal((await s.rows())[0].state, 'launching');
+  s.w.advance(1000);
+  await s.make().tick();
+  assert.ok(!(await s.w.github.runners(repo)).some((r) => r.name === original.instance));
+  assert.equal((await s.rows())[0].end, 'abandoned');
+});
+
+test('a failed final-refusal write keeps both reservations and the registration rather than admitting fallback', async () => {
+  const s = setup({ refs: [ref('ec2', 'a', 8), ref('ec2', 'b')], max: 8 });
+  s.a.outcome = 'quota';
+  const write = s.ledger.upsert;
+  s.ledger.upsert = async (r, opts) => { if (r.end === 'refused') throw new Error('final write unavailable'); return write(r, opts); };
+  s.queue();
+  const out = await s.make().tick();
+  const [row] = await s.rows();
+  assert.equal(out.launched.length, 0);
+  assert.equal(row.state, 'launching');
+  assert.equal(row.reserved, 8);
+  assert.equal(s.b.calls.filter(([k]) => k === 'launch').length, 0);
+  assert.ok((await s.w.github.runners(repo)).some((r) => r.name === row.instance));
+});
