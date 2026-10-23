@@ -50,6 +50,13 @@ test('EC2 validates disabled accounts too: identity, region, placements, disk, r
   bad({ roles: { launcher: account().roles.launcher } }, /roles.bake/);
 });
 
+test('EC2 accepts a provisioned initialization rate only inside the EBS API range', () => {
+  assert.equal(ec2([{ ...account(), initialization_mibps: 200 }]).accounts[0].initialization_mibps, 200);
+  for (const initialization_mibps of [0, 99, 301, 200.5, '200', null]) {
+    assert.throws(() => ec2([{ ...account(), initialization_mibps }]), /initialization_mibps/);
+  }
+});
+
 test('EC2 does not admit on-demand job configuration at account or placement level', () => {
   for (const provisioning of ['standard', 'on-demand']) {
     assert.throws(() => ec2([{ ...account(), provisioning }]), /unknown key "provisioning"/);

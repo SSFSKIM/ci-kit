@@ -1,4 +1,4 @@
-{"repos":[{"repo":"SSFSKIM/ci-kit-sandbox"},{"repo":"SSFSKIM/MAWS"},{"repo":"SSFSKIM/manim-master"}],
+{"repos":[{"repo":"SSFSKIM/ci-kit-sandbox","providers":[{"provider":"ec2","account":"290475840169"},{"provider":"gce"}]},{"repo":"SSFSKIM/MAWS"},{"repo":"SSFSKIM/manim-master"}],
  "project":"ssfskim-ci-kit","network":"ci-kit",
  "placements":[
   {"region":"us-west4","subnetwork":"ci-kit-us-west4","zones":["us-west4-a","us-west4-b","us-west4-c"],
