@@ -7,6 +7,7 @@
 // key would be refused by a launcher running older code. What holds each limit comes from the tick's own listing,
 // plus what its walks have sent.
 import { machineCpus } from '../bake/plan.mjs';
+import { providerKey } from './providers/contracts.mjs';
 
 export const LIMITS_TTL_MS = 10 * 60_000; // grants change by hand, hours apart; a tick reads them from the cache
 export const FAMILY_QUOTA = 'CPUS-PER-VM-FAMILY-per-project-region';
@@ -96,32 +97,36 @@ export function limitsCache({ read, ttlMs = LIMITS_TTL_MS, now = Date.now, log =
 // instance and address, and its vCPUs in each family a placement offers in its zone (its machine is not recorded, so
 // where two families share the zone both count it, the safe side). Null without limits: nothing is skipped, as before
 // admission.
-export function createRoom({ limits, instances, egress, pending = [], placements = [] }) {
+export function createRoom({ limits, instances, egress, pending = [], placements = [], provider = 'gce', account = null }) {
   if (!limits) return null;
+  // Limits belong to this provider/account. Inventory and attempts keep their own identities, so a foreign
+  // refusal or reservation cannot close this room. Human-readable GCE diagnostics keep their existing wording.
+  const key = (scope, label) => providerKey({ provider: scope.provider ?? provider, account: scope.account ?? account }, label);
+  const label = (k) => JSON.parse(k).at(-1);
   const caps = new Map();
-  for (const [region, n] of Object.entries(limits.addresses ?? {})) caps.set(`${region} addresses`, n);
-  for (const [region, n] of Object.entries(limits.instances ?? {})) caps.set(`${region} instances`, n);
-  for (const [key, n] of Object.entries(limits.vcpus ?? {})) caps.set(`${key.replace('|', ' ')} vCPUs`, n);
+  for (const [region, n] of Object.entries(limits.addresses ?? {})) caps.set(key({}, `${region} addresses`), n);
+  for (const [region, n] of Object.entries(limits.instances ?? {})) caps.set(key({}, `${region} instances`), n);
+  for (const [pair, n] of Object.entries(limits.vcpus ?? {})) caps.set(key({}, `${pair.replace('|', ' ')} vCPUs`), n);
   const held = new Map();
   const add = (key, n) => held.set(key, (held.get(key) ?? 0) + n);
   for (const i of instances) {
     const region = regionOf(i.zone);
-    add(`${region} instances`, 1);
+    add(key(i, `${region} instances`), 1);
     if (i.status === 'TERMINATED') continue;
-    add(`${region} ${familyOf(i.machine)} vCPUs`, i.vcpus);
-    if (i.egress !== 'nat') add(`${region} addresses`, 1);
+    add(key(i, `${region} ${familyOf(i.machine)} vCPUs`), i.vcpus);
+    if (i.egress !== 'nat') add(key(i, `${region} addresses`), 1);
   }
   for (const u of pending) {
     const region = regionOf(u.zone);
-    add(`${region} instances`, 1);
-    if (u.egress !== 'nat') add(`${region} addresses`, 1);
+    add(key(u, `${region} instances`), 1);
+    if (u.egress !== 'nat') add(key(u, `${region} addresses`), 1);
     const families = new Set(placements.filter((p) => p.zones.includes(u.zone)).flatMap((p) => Object.values(p.machines).map(familyOf)));
-    for (const family of families) add(`${region} ${family} vCPUs`, u.vcpus);
+    for (const family of families) add(key(u, `${region} ${family} vCPUs`), u.vcpus);
   }
   const closed = new Set(); // limits a refusal closed for the tick
   const needs = (p) => {
     const region = p.placement.region;
-    return [[`${region} ${familyOf(p.machine)} vCPUs`, machineCpus(p.machine)], [`${region} instances`, 1], ...(egress === 'nat' ? [] : [[`${region} addresses`, 1]])];
+    return [[key(p, `${region} ${familyOf(p.machine)} vCPUs`), machineCpus(p.machine)], [key(p, `${region} instances`), 1], ...(egress === 'nat' ? [] : [[key(p, `${region} addresses`), 1]])];
   };
   const over = (p) => needs(p).find(([key, n]) => closed.has(key) || (caps.has(key) && (held.get(key) ?? 0) + n > caps.get(key)));
   const skipped = {};
@@ -130,12 +135,12 @@ export function createRoom({ limits, instances, egress, pending = [], placements
     // The limit an attempt would pass, as "<region> <limit> held/cap", or null.
     why(p) {
       const o = over(p);
-      return o ? `${o[0]} ${held.get(o[0]) ?? 0}/${caps.get(o[0])}` : null;
+      return o ? `${label(o[0])} ${held.get(o[0]) ?? 0}/${caps.get(o[0])}` : null;
     },
     // An attempt the walk skipped for want of room, counted by the limit it would pass (the tick summary's `full`).
     skip(p) {
       const o = over(p);
-      if (o) skipped[o[0]] = (skipped[o[0]] ?? 0) + 1;
+      if (o) skipped[label(o[0])] = (skipped[label(o[0])] ?? 0) + 1;
     },
     skipped: () => ({ ...skipped }),
     take: (p) => needs(p).forEach(([key, n]) => add(key, n)),
@@ -144,12 +149,13 @@ export function createRoom({ limits, instances, egress, pending = [], placements
       const base = (metric ?? '').replace(/^PREEMPTIBLE_/, '');
       const region = p.placement.region;
       const family = familyOf(p.machine);
-      const key = base === 'IN_USE_ADDRESSES' ? `${region} addresses`
+      const limit = base === 'IN_USE_ADDRESSES' ? `${region} addresses`
         : base === 'INSTANCES' ? `${region} instances`
           : base === 'CPUS_PER_VM_FAMILY' || base === `${family.toUpperCase()}_CPUS` ? `${region} ${family} vCPUs` : null;
-      if (key && base === metric) {
-        closed.add(key);
-        caps.set(key, Math.min(caps.get(key) ?? Infinity, held.get(key) ?? 0));
+      if (limit && base === metric) {
+        const k = key(p, limit);
+        closed.add(k);
+        caps.set(k, Math.min(caps.get(k) ?? Infinity, held.get(k) ?? 0));
       }
     },
   };

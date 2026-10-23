@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  launchRow, runningRow, withJob, jobRecord, finalRow, renderRow, parseRow, rowsOf, moreFinal, dollars, dailyLine, renderDaily, dailyDays,
+  launchRow, runningRow, attemptRow, withJob, jobRecord, finalRow, renderRow, parseRow, rowsOf, moreFinal, dollars, dailyLine, renderDaily, dailyDays,
 } from '../../gce/launcher/ledger.mjs';
 import { createGceLedger, ROTATE_AT, WINDOW_MS, FULL_READ_MS } from '../../gce/launcher/ledger-store.mjs';
 import { createLedgerStore } from '../../pool/lib/ledger-store.mjs';
@@ -44,10 +44,10 @@ test('timing: a row carries its job\'s run, workflow, queued and started times a
     id: 119166794835, run_id: 39583515002, name: 'static', workflow: '.github/workflows/gate.yml', status: 'in_progress',
     created_at: '2026-10-21T10:17:58Z', started_at: '2026-10-21T10:20:04Z', runner_name: 'ci-kit-gce-tb0abc0001', labels: ['cpus-4'],
   };
-  const record = { id: 119166794835, name: 'static', run: 39583515002, workflow: '.github/workflows/gate.yml', queued: '2026-10-21T10:17:58Z', started: '2026-10-21T10:20:04Z' };
+  const record = { labels: ['cpus-4'], required_provider: 'any', id: 119166794835, name: 'static', run: 39583515002, workflow: '.github/workflows/gate.yml', queued: '2026-10-21T10:17:58Z', started: '2026-10-21T10:20:04Z' };
   assert.deepEqual(jobRecord(apiJob), record);
   assert.deepEqual(withJob(up, apiJob).job, record);
-  assert.deepEqual(jobRecord({ id: 5, name: 'probes', run_id: 7, created_at: '2026-10-21T10:00:00Z', started_at: null }), { id: 5, name: 'probes', run: 7, queued: '2026-10-21T10:00:00Z' }, 'what GitHub has not set is left out');
+  assert.deepEqual(jobRecord({ id: 5, name: 'probes', run_id: 7, created_at: '2026-10-21T10:00:00Z', started_at: null }), { id: 5, name: 'probes', run: 7, queued: '2026-10-21T10:00:00Z', labels: [], required_provider: 'any' }, 'what GitHub has not set is left out');
   const done = finalRow(withJob(up, apiJob), { end: 'done', deleted: T0 + 600_000, job: record, diskGb: 50 });
   assert.deepEqual([done.job, done.running, done.cpus], [record, up.running, 4], 'the size is the row\'s cpus');
   assert.deepEqual(parseRow(renderRow(done)), done);
@@ -603,4 +603,32 @@ test('a whole read keeps a comment this store just wrote that GitHub does not li
   f.gh.issueComments = async (...args) => (await listing(...args)).filter((c) => Date.parse(c.updated_at) < f.clock.t); // listing lag
   await store.read();
   assert.deepEqual((await store.rows()).map((r) => r.alloc), ['tb0abc0002']);
+});
+
+
+test('the store reads mixed versions without migration and keeps v2 attempt coordinates across a restart', async () => {
+  const old = { alloc: 'tb0abc0001', instance: 'ci-kit-gce-tb0abc0001', repo: SBX, cpus: 2, reserved: 4,
+    at: iso(T0), state: 'launching', config: 'old', job: { id: 42, name: 'unit' } };
+  const oldBody = `<!-- ci-kit-gce-ledger ${JSON.stringify(old)} -->`;
+  const f = fakeIssue({ comments: [{ id: 1, body: oldBody }] });
+  const make = () => createGceLedger(f.gh, LEDGER, { now: () => T0 });
+  const first = make();
+  await first.read();
+  assert.equal((await first.rows())[0].provider, 'gce');
+  assert.equal(f.state.comments[0].body, oldBody, 'reading never rewrites historical comments');
+  assert.equal(f.calls.some((c) => c.startsWith('update')), false);
+  const ec2 = attemptRow(launchRow({ alloc: 'tb0abc0002', repo: SBX, cpus: 2, reserved: 2, at: T0, config: 'new',
+    provider: 'ec2', account: '290475840169' }), { zone: 'us-east-2c', client_token: 'tb0abc0002-1', sent_at: iso(T0), request: 'SECRET' });
+  await first.upsert(ec2);
+  const restarted = make();
+  await restarted.read();
+  const rows = await restarted.rows();
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.find((r) => r.alloc === ec2.alloc), ec2);
+  assert.doesNotMatch(f.state.comments.map((c) => c.body).join(''), /SECRET/);
+  const gce = rows.find((r) => r.alloc === old.alloc);
+  await restarted.upsert(runningRow(gce, INST));
+  const persisted = parseRow(f.state.comments.find((c) => c.id === 1).body);
+  assert.deepEqual([persisted.v, persisted.provider, persisted.cpus, persisted.reserved], [2, 'gce', 2, 4]);
+  assert.deepEqual(persisted.job, { id: 42, name: 'unit', labels: [], required_provider: 'any' });
 });

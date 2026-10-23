@@ -3,6 +3,8 @@
 import { randomBytes } from 'node:crypto';
 import { refusal, machineCpus, networkInterface } from '../bake/plan.mjs';
 import { workDir } from '../../pool/agent/docker.mjs';
+import { candidateKey, providerKey } from './providers/contracts.mjs';
+import { gceCandidate, gceInstance } from './providers/gce-data.mjs';
 
 const MIN = 60_000;
 export const RUNNER_ORPHAN_MS = 5 * MIN; // a runner with no instance (a crash between mint and insert)
@@ -44,7 +46,7 @@ const last = (url) => (url ?? '').split('/').pop();
 // The fields of an instance the launcher decides on.
 export function viewInstance(i) {
   const machine = last(i.machineType);
-  return {
+  const view = {
     name: i.name,
     alloc: allocOf(i.name) ?? i.labels?.['ci-kit-alloc'] ?? null,
     zone: last(i.zone),
@@ -61,6 +63,8 @@ export function viewInstance(i) {
     egress: i.networkInterfaces ? (i.networkInterfaces.some((n) => n.accessConfigs?.length) ? 'external' : 'nat') : null,
     raw: i,
   };
+  const instance = gceInstance(i, view);
+  return { ...view, ...instance, account: instance.candidate.account, region: instance.candidate.region };
 }
 
 export const isGce = (r) => r?.labels?.['ci-kit'] === 'gce';
@@ -181,7 +185,11 @@ export function placements(cpus, cfg) {
         const key = `${machine}|${zone}|${provisioning}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        out.push({ machine, provisioning, zone, placement });
+        out.push({
+          ...gceCandidate({ account: cfg.project, size: cpus, machine, provisioning, zone, region: placement.region,
+            subnet: placement.subnetwork, disk: { type: placement.disk_type, sizeGB: cfg.disk_gb } }),
+          placement,
+        });
       }
     }
   }
@@ -203,12 +211,13 @@ export function quotaScope(err, attempt) {
   const vcpus = machineCpus(attempt.machine);
   const region = /in region ([a-z0-9-]+)/.exec(message)?.[1] ?? attempt.placement.region;
   const metric = quotaMetric(err);
-  if (!metric) return { region, family: familyOf(attempt.machine), vcpus };
+  const identity = { provider: attempt.provider ?? 'gce', account: attempt.account ?? null };
+  if (!metric) return { ...identity, region, family: familyOf(attempt.machine), vcpus };
   const spot = metric.startsWith('PREEMPTIBLE_') ? { spot: true } : {};
   const base = metric.replace(/^PREEMPTIBLE_/, '');
-  if (base === 'CPUS_ALL_REGIONS' || / globally/.test(message)) return { ...spot, vcpus };
+  if (base === 'CPUS_ALL_REGIONS' || / globally/.test(message)) return { ...identity, ...spot, vcpus };
   const family = base === 'CPUS_PER_VM_FAMILY' ? familyOf(attempt.machine) : /^([A-Z0-9]+)_CPUS$/.exec(base)?.[1]?.toLowerCase();
-  return family ? { region, family, ...spot, vcpus } : { region, ...spot, vcpus };
+  return family ? { ...identity, region, family, ...spot, vcpus } : { ...identity, region, ...spot, vcpus };
 }
 
 // The quota a refusal's message names ('C4D_CPUS', 'IN_USE_ADDRESSES', ...), or undefined.
@@ -216,6 +225,7 @@ export const quotaMetric = (err) => /Quota '([A-Z0-9_]+)' exceeded/.exec(err?.me
 
 // Whether a remembered refusal covers an attempt: in its scope, and of the same or more vCPUs.
 export const quotaBlocks = (memory, attempt) => memory.some((q) =>
+  providerKey(q) === providerKey(attempt) &&
   (!q.region || q.region === attempt.placement.region) && (!q.family || q.family === familyOf(attempt.machine)) &&
   (!q.spot || attempt.provisioning === 'spot') && machineCpus(attempt.machine) >= q.vcpus);
 
@@ -228,7 +238,7 @@ export const quotaBlocks = (memory, attempt) => memory.some((q) =>
 export const STOCKOUT_TTL_MS = 5 * 60_000;
 export function stockoutMemory({ ttlMs = STOCKOUT_TTL_MS } = {}) {
   const until = new Map();
-  const key = (p) => `${p.machine}|${p.zone}|${p.provisioning}`;
+  const key = candidateKey;
   return {
     add: (p, at) => until.set(key(p), at + ttlMs),
     has(p, at) {
