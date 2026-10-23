@@ -17,7 +17,9 @@ export async function resolveManifest({ sha, gh, fetch: fetcher = globalThis.fet
   const raw = { accept: 'application/vnd.github.raw+json', text: true };
   const lock = await gh.request('GET', `/repos/SSFSKIM/MAWS/contents/pnpm-lock.yaml?ref=${revision}`, raw);
   // ci-kit is public; the restricted MAWS installation token need not grant it access.
-  const dockerfile = await gh.request('GET', `/repos/SSFSKIM/ci-kit/contents/pool/image/Dockerfile?ref=${sha}`, raw);
+  const source = await fetcher(`https://raw.githubusercontent.com/SSFSKIM/ci-kit/${sha}/pool/image/Dockerfile`, { signal: AbortSignal.timeout(60_000) });
+  if (!source.ok) throw new Error('cannot read pinned runner Dockerfile');
+  const dockerfile = await source.text();
   const runner_version = /FROM ghcr\.io\/actions\/actions-runner:(\d+\.\d+\.\d+)@sha256:/.exec(dockerfile)?.[1];
   if (!runner_version) throw new Error('runner image must pin its version and digest');
   return { v: 1, kit_commit: sha, node, maws: { revision, lock_sha256: digest(lock) }, runner_version };

@@ -17,14 +17,17 @@ test('one manifest resolves moving inputs once and fetches the lock at the resol
     paths.push(path);
     if (path.endsWith('/commits/HEAD')) return { sha: revision };
     if (path.includes('pnpm-lock.yaml')) { assert.ok(path.endsWith(`?ref=${revision}`)); return lock; }
-    if (path.includes('Dockerfile')) { assert.ok(path.endsWith(`?ref=${sha}`)); return 'FROM ghcr.io/actions/actions-runner:2.338.0@sha256:deadbeef\n'; }
     throw Error(path);
   } };
-  let reads = 0;
-  const manifest = await manifestApi.resolveManifest({ sha, gh, fetch: async () => { reads++; return { ok: true, json: async () => [{version:'v24.10.0'}, {version:'v22.20.0'}, {version:'v22.19.0'}] }; } });
+  const reads = [];
+  const manifest = await manifestApi.resolveManifest({ sha, gh, fetch: async (url, options) => {
+    reads.push(url);
+    assert.equal(options.headers?.authorization, undefined, 'public reads must not use the MAWS-only token');
+    return { ok: true, json: async () => [{version:'v24.10.0'}, {version:'v22.20.0'}, {version:'v22.19.0'}], text: async () => 'FROM ghcr.io/actions/actions-runner:2.338.0@sha256:deadbeef\n' };
+  } });
   assert.deepEqual(manifest, base);
-  assert.equal(reads, 1);
-  assert.equal(paths.length, 3);
+  assert.deepEqual(reads, ['https://nodejs.org/dist/index.json',`https://raw.githubusercontent.com/SSFSKIM/ci-kit/${sha}/pool/image/Dockerfile`]);
+  assert.equal(paths.length, 2);
 });
 
 test('warm evidence rejects changed pins, failed warming and parity mismatch before promotion', () => {
