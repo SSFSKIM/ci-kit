@@ -686,13 +686,13 @@ Angle-bracket ids come from the run or resource being checked. AWS commands use 
 
 ### Tests (M2–M6; Acceptance 3 and 9 and the milestone contracts)
 
-In the ci-kit implementation worktree, install dependencies before a focused test. Run the full suite off-host
+In the ci-kit implementation worktree, install dependencies before a focused test (coverage logic below). Run the full suite off-host
 through ci-kit's own `bin/ci-gate`, which tests committed HEAD, not uncommitted changes. `test/ec2/` exists from
 M5; before that the scheduler's second provider is a fake under `test/gce/`.
 
     cd /private/tmp/ci-kit-ec2
     npm ci --no-audit --no-fund
-    node --test --test-timeout=15000 <one-focused-test-file>
+    node --test --test-timeout=15000 test/gce/launcher-logic.test.mjs
     bin/ci-gate . --gates test
     # expect: the focused test passes; PASS test, then GREEN <run-url> from the remote gate
 
