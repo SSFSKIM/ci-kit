@@ -84,7 +84,22 @@ case $command in
     interactive=''; if [[ $1 == -i ]]; then interactive=1; shift; fi
     name=$1; shift
     [[ $(state "$name") == running ]] || { echo 'Error: VM is not running' >&2; exit 1; }
+    [[ ! -e $t/no-agent ]] || exit 1
     [[ $1 != true ]] || exit 0
+    if [[ $1 == /bin/bash && $2 == -c ]]; then
+      script=$3; shift 3
+      path='/Volumes/My Shared Files/maws'; script=\${script//"$path"/"$HOME/guest/share"}
+      path='/Applications/LibreOffice.app'; script=\${script//"$path"/"$HOME/guest/LibreOffice.app"}
+      export HOME=$HOME/guest
+      export PATH=$HOME/bin:/usr/bin:/bin
+      exec /bin/bash -c "$script" "$@"
+    fi
+    if [[ $1 == sudo ]]; then
+      [[ $* == 'sudo -n /sbin/shutdown -h now' ]] || exit 64
+      [[ ! -e $t/fail-shutdown ]] || exit 1
+      [[ -e $t/shutdown-stays-up ]] || echo stopped > "$vms/$name/state"
+      exit 0
+    fi
     printf '%s\\n' "$*" >> "$vms/$name/exec"
     if [[ $1 == /bin/bash && $2 == */kit/vm/provision.sh ]]; then
       step=$3
@@ -227,7 +242,7 @@ const trialClone = (f) => f.names().find((name) => name.startsWith('maws-vm-tria
 
 describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...macOnly }, () => {
   // The hold: every step but --retire refuses without it, before it calls Tart at all.
-  const steps = [['--bake'], ['--register', CANDIDATE], ['--trial', CANDIDATE], ['--promote', CANDIDATE]];
+  const steps = [['--bake'], ['--first-run', CANDIDATE], ['--register', CANDIDATE], ['--trial', CANDIDATE], ['--promote', CANDIDATE]];
   test('every step but --retire refuses outside the maintenance hold, and calls Tart for nothing', async () => {
     const cases = [
       ['no hold', (f) => rmSync(join(f.logs, 'vm-hold.ci-opt')), /refused: no maintenance hold/],
@@ -313,15 +328,12 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.match(result.stdout, /baked: maws-vm-candidate-20261022, stopped; the lowest free space during the bake was 120 GB/);
     assert.match(result.stdout, /120 GB free on the volume of .* \(reserve 40 GB\)/);
     // The human's window step, printed for CI-opt to relay: graphics, the maws share, the notification prompt.
-    assert.match(result.stdout, new RegExp(`tart run --dir=maws:${f.maws}:ro ${CANDIDATE}`));
+    assert.match(result.stdout, new RegExp(`tart run --no-clipboard --dir=maws:${f.maws}:ro ${CANDIDATE}`));
     assert.match(result.stdout, /pnpm e2e:deliverables/);
-    // The baked runtime, as jobs get it: the runner's .path before any pnpm.
-    const steps = result.stdout.slice(result.stdout.indexOf("The human's first-run window step"));
-    const exported = steps.indexOf('export PATH="$(cat ~/actions-runner-maws/.path)"');
-    assert.ok(exported > 0 && exported < steps.indexOf('pnpm install'), steps);
+    assert.match(result.stdout, new RegExp(`ssh mini '~/ci-kit-vm/kit/vm/bake.sh --first-run ${CANDIDATE}'`));
     assert.match(result.stdout, /Electron may send notifications/);
     assert.match(result.stdout, /never VNC into the guest/);
-    assert.match(result.stdout, /This one boot keeps the clipboard shared/);
+    assert.doesNotMatch(result.stdout, /clipboard shared|In the guest.s Terminal run|export PATH=/);
     assert.match(f.log(), /bake held for maintenance by ci-opt \(maintenance since/);
   });
 
@@ -451,6 +463,126 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.match(g.run(['--register', 'macos-base'], { input: 'a\nb\n' }).stderr, /usage|bake\.sh --register/);
   });
 
+});
+
+// Execute the actual first-run shell in a scratch guest; only external tools and the guest's absolute paths are fake.
+function firstRunFixture() {
+  const f = fixture();
+  const guest = join(f.home, 'guest');
+  for (const dir of ['bin', 'runner-bin', 'share', 'LibreOffice.app', 'actions-runner-maws']) mkdirSync(join(guest, dir), { recursive: true });
+  writeFileSync(join(guest, 'share/package.json'), '{}');
+  writeFileSync(join(guest, 'share/pnpm-lock.yaml'), 'lockfileVersion: 9');
+  writeFileSync(join(guest, 'actions-runner-maws/.path'), `${guest}/runner-bin:${guest}/bin:/usr/bin:/bin\n`);
+  writeFileSync(join(guest, 'quarantine'), '01c1;6718b124;Homebrew Cask;uuid\n');
+  executable(join(guest, 'bin/xattr'), `if [[ $1 == -p ]]; then cat "$HOME/quarantine"; else [[ ! -f $HOME/quarantine ]] || echo com.apple.quarantine; fi`);
+  executable(join(guest, 'bin/git'), `printf 'git %s\\n' "$*" >> "$HOME/commands"
+[[ $1 == -c && $2 == 'safe.directory=*' && $3 == clone && $4 == "$HOME/share" && $5 == "$HOME/maws-firstrun" ]] || exit 64
+mkdir "$5"`);
+  executable(join(guest, 'runner-bin/pnpm'), `printf 'pnpm %s NODE_OPTIONS=%s PATH=%s\\n' "$*" "\${NODE_OPTIONS-unset}" "$PATH" >> "$HOME/commands"
+[[ -d $HOME/maws-firstrun ]] || exit 64
+if [[ $1 == install ]]; then
+  [[ $2 == --frozen-lockfile ]] || exit 64
+  [[ ! -e $HOME/fail-install ]] || exit 17
+else
+  [[ $1 == e2e:deliverables && \${NODE_OPTIONS:-} == --max-old-space-size=3072 ]] || exit 64
+  echo 'deliverables: running'
+  if [[ -e $HOME/pause-group ]]; then
+    touch "$HOME/group-started"
+    until [[ -e $HOME/group-go ]]; do sleep 0.05; done
+  fi
+  [[ ! -e $HOME/fail-group ]] || exit 18
+  echo 'deliverables: 12/12'
+fi`);
+  f.vm(CANDIDATE, 'running');
+  return { ...f, guest, commands: () => text(join(guest, 'commands')) ?? '' };
+}
+
+describe('the first-run shell (bake.sh --first-run)', macOnly, () => {
+  test('refuses a non-candidate, a stopped or missing VM, an unanswered agent, a missing share and unapproved LibreOffice', () => {
+    const cases = [
+      [() => {}, GOLDEN, /refused:.*maws-vm-candidate/],
+      [(f) => f.vm(CANDIDATE, 'stopped'), CANDIDATE, /refused:.*not running.*tart run/],
+      [(f) => rmSync(join(f.vms, CANDIDATE), { recursive: true }), CANDIDATE, /refused:.*not running.*tart run/],
+      [(f) => f.flag('no-agent'), CANDIDATE, /refused:.*guest agent.*answer/],
+      [(f) => rmSync(join(f.guest, 'share'), { recursive: true }), CANDIDATE, /refused:.*MAWS share.*mounted/],
+      [(f) => writeFileSync(join(f.guest, 'quarantine'), '0181;6718b124;Homebrew Cask;uuid\n'), CANDIDATE,
+        /refused:.*LibreOffice.*guest.s window.*first-run/],
+      [(f) => writeFileSync(join(f.guest, 'quarantine'), 'garbled\n'), CANDIDATE, /refused:.*quarantine.*read/],
+    ];
+    for (const [arrange, name, message] of cases) {
+      const f = firstRunFixture();
+      arrange(f);
+      const result = f.run(['--first-run', name]);
+      assert.notEqual(result.status, 0, result.stdout + result.stderr);
+      assert.match(result.stdout + result.stderr, message);
+      assert.equal(f.commands(), '', 'no clone or pnpm before the checks');
+      assert.ok(!f.calls().some((call) => /sudo|^stop /.test(call)), 'a refusal leaves the guest up');
+    }
+  });
+
+  test('runs on the runner PATH with the heap raised, streams output before completion, removes the clone and verifies shutdown', async () => {
+    const f = firstRunFixture();
+    writeFileSync(join(f.guest, 'pause-group'), '');
+    const run = f.start(['--first-run', CANDIDATE]);
+    await f.until(() => run.output().includes('deliverables: running'), 'streamed group output');
+    assert.ok(existsSync(join(f.guest, 'maws-firstrun')), 'the clone is present while the group runs');
+    writeFileSync(join(f.guest, 'group-go'), '');
+    assert.equal(await run.exited, 0, run.output());
+    assert.match(f.commands(), /pnpm install --frozen-lockfile/);
+    assert.match(f.commands(), /pnpm e2e:deliverables NODE_OPTIONS=--max-old-space-size=3072 PATH=.*guest\/runner-bin:/);
+    assert.match(run.output(), /deliverables: 12\/12/);
+    assert.equal(existsSync(join(f.guest, 'maws-firstrun')), false);
+    const calls = f.calls();
+    const shutdown = calls.indexOf(`exec ${CANDIDATE} sudo -n /sbin/shutdown -h now`);
+    assert.ok(shutdown >= 0 && calls.slice(shutdown + 1).includes('list --format json'), calls.join('\n'));
+    assert.equal(f.state(CANDIDATE), 'stopped');
+    assert.match(run.output(), /its end is verified/);
+    assert.match(f.log(), /deliverables: 12\/12/);
+  });
+
+  test('install and group failures remove the clone, leave the guest running and say how to retry', () => {
+    for (const fail of ['fail-install', 'fail-group']) {
+      const f = firstRunFixture();
+      writeFileSync(join(f.guest, fail), '');
+      const result = f.run(['--first-run', CANDIDATE]);
+      assert.notEqual(result.status, 0, result.stdout + result.stderr);
+      assert.equal(existsSync(join(f.guest, 'maws-firstrun')), false);
+      assert.equal(f.state(CANDIDATE), 'running');
+      assert.ok(!f.calls().some((call) => /sudo|^stop /.test(call)), f.calls().join('\n'));
+      assert.match(result.stderr, /stays running.*inspect.*--first-run/);
+      if (fail === 'fail-install') assert.doesNotMatch(f.commands(), /pnpm e2e/);
+    }
+  });
+
+  test('a zero deadline is refused rather than leaving the guest work unbounded', () => {
+    const f = firstRunFixture();
+    const result = f.run(['--first-run', CANDIDATE], { extra: { CI_KIT_VM_FIRST_RUN_WAIT: '0' } });
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stderr, /FIRST_RUN_WAIT.*positive/);
+    assert.equal(f.commands(), '');
+  });
+
+  test('an expired guest deadline removes the clone without shutting down', () => {
+    const f = firstRunFixture();
+    writeFileSync(join(f.guest, 'pause-group'), '');
+    const result = f.run(['--first-run', CANDIDATE], { extra: { CI_KIT_VM_FIRST_RUN_WAIT: '1' } });
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout + result.stderr, /124|timed out/);
+    assert.equal(existsSync(join(f.guest, 'maws-firstrun')), false);
+    assert.equal(f.state(CANDIDATE), 'running');
+    assert.ok(!f.calls().some((call) => /sudo|^stop /.test(call)));
+  });
+
+  test('no quarantine attribute is allowed; a failed verified stop is not reported as success', () => {
+    const f = firstRunFixture();
+    rmSync(join(f.guest, 'quarantine'));
+    f.flag('shutdown-stays-up');
+    f.flag('fail-stop');
+    const result = f.run(['--first-run', CANDIDATE], { extra: { CI_KIT_VM_END_WAIT: '0' } });
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout + result.stderr, /end cannot be verified/);
+    assert.equal(existsSync(join(f.guest, 'maws-firstrun')), false);
+  });
 });
 
 // The trials run one at a time: a trial clone is named after the second it starts, and Tart's VMs, like the process
