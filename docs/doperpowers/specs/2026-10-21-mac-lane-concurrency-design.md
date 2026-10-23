@@ -147,6 +147,19 @@ and by the coordinator's holds, and the design below says what is read and when.
     (`ci-kit-mac-vm-trial`), both offline; `--trial`: MAWS run 39882681198, job 120184243556 (`e2e:document-app`),
     success in 4 min 57 s on the trial runner (06:08:26–06:13:23Z), clone deleted; `--promote`: the pointer names
     `maws-vm-golden-20261023`. The launcher stays disabled until step 3.
+  - [x] (2026-10-23 07:35Z) Step 3's first production-shaped guest job: MAWS run 39917787432 (scratch 13dfded17,
+    `Lane: vm`, `MAC_VM_E2E: document-app`). e2e-build on the pool 07:27:51–07:29:34Z; the launcher booted
+    07:29:51Z (pressure 1, available 72%, swap steady, 124 GB free, mode always); the job ran
+    07:30:23–07:34:49Z on ci-kit-mac-mini-vm, display read 2560x1440 scaling:on; the guest powered itself off;
+    the clone was deleted and the reservation released 07:34:59Z. 48 s from queue to start. The launcher has been
+    on since 07:26Z.
+  - [x] (2026-10-23 07:24Z) Step 3's launch-cost probe 1 (results in Surprises). Probe 2 is pending.
+  - [x] (2026-10-23 08:44Z) Step 4 wave 1: document-app, widgets and to-human, each 3/3 green in the guest.
+    `default` stays exclusive, because its build is not `e2e-build.sh <variant>`. The rest goes in later waves
+    after probe 2.
+  - [x] (2026-10-23) Step 4's checkout preparation: `provision.sh workrepo` seeds the runner's repository from
+    the bake's MAWS share after runner installation; depth-1 delta fetch verified locally (Surprises). The next
+    image refresh and a guest job's checkout timing remain to be measured on the mini.
   - [x] (2026-10-23) Step 6's preparation: CI-opt's hold scripts on the MacBook have the timed form
     (`hold.sh hold <booking> timed` and its wait before the instances; its release first), and the wait for an idle
     mini counts only the jobs the held runners could take (an untimed hold's lane, and the trial slot, never). The
@@ -1554,6 +1567,27 @@ hold-aware plan send them to the guest, which this spec leaves open.
   mini's own prompts stay the human's. Rejected: the step staying the human's alone, which 10-23 showed costs a
   human sitting for each refresh.
 
+- 2026-10-23 (CI-opt; V4 step 4): **The image pre-seeds the runner's work repository.** Wave 1's nine guest
+  checkouts took 50–221 s, against 4–7 s on the host's kept checkout; job totals were 134–419 s against 74–145 s,
+  with comparable test steps (Surprises). An empty guest workspace makes checkout v7 fetch the whole tree each time.
+  The bake now clones the read-only MAWS share's master into the runner's work folder, after installing the runner,
+  and sets origin to `https://github.com/SSFSKIM/MAWS`. No MAWS workflow change is needed.
+  - **Depth 1, single-branch, no tags, no local clone shortcuts.** The bare-remote experiment in Surprises showed
+    the same 4,740-byte next fetch from a shallow seed as from full history, against 4,214,714 bytes from empty.
+    `--no-local` honors the depth and leaves no hardlinks or alternates; cloning rather than copying leaves the
+    host's credentials, dirty files, config and locks behind. The local MAWS sample added about 433 MiB including
+    its tree and `.git`. Full history spends image space without reducing this transfer.
+  - **The path follows the runner's setting.** `.runner`'s `workFolder` when present; a fresh bake has no runner
+    identity yet, so it uses the same `_work` setting registration passes to `config.sh`. The repository is
+    `<work folder>/MAWS/MAWS`. The image still holds no runner credentials.
+  - **Rejected:** git alternates onto the mini's MAWS checkout shared into every job clone (a live dependence on
+    the host checkout's freshness and one more share per job); a MAWS-side change to checkout (a fresh directory
+    fetches the whole tree whatever the depth); caching the tree in the job cache share (it duplicates what git
+    already does incrementally).
+  - **The cost taken:** each clone fetches from the bake's commit, not the preceding job's. A long-unrefreshed
+    golden grows that delta, another refresh trigger. The coordinator brings the bake's share to current master;
+    freshness against GitHub is still the procedure's check, not an automated fetch by the bake.
+
 ## Surprises & Discoveries
 
 - 2026-10-21, M1 (ci-kit #67), from its reviews:
@@ -1686,6 +1720,53 @@ hold-aware plan send them to the guest, which this spec leaves open.
     the `tart exec` that started it: the trial's wrapper ran its job to `out/done` after kickoff returned.
     `sudo -n /sbin/shutdown -h now` works for `admin`: the trial guest powered itself off. Still unseen:
     `tart stop --timeout` ending a run.
+
+- 2026-10-23, V4 steps 3–4:
+  - **Launch-cost probe 1** (the MAWS architect's script; one clone of maws-vm-golden-20261023; out/ plain built
+    on the host at MAWS ef19e6224; 19 tests per arm, all green; host held and idle). Per-arm sum and median per test:
+    - r0 restored with cp -R, 142.9 s, 5.26 s;
+    - r1 restored again, 125.3 s, 6.21 s;
+    - p restored with cp -Rp, 155.4 s, 6.86 s;
+    - x xattrs cleared, 125.7 s, 5.24 s;
+    - a build in the guest (3 GB heap) at 07:19:48–07:21:18Z;
+    - b built in place, 87.6 s, 3.52 s;
+    - r2 restored last, 83.8 s, 3.52 s.
+
+    So the restore is not the cost: r2, restored with cp -R, matched b. Time since boot alone is not it either:
+    r0 through x spanned 10 min with no gain. The step change came at the build, together with available memory
+    going from 43% to 61%. Spotlight indexing is already disabled in the image (`mdutil -s /`). Every restored
+    file carried com.apple.provenance, and clearing it changed nothing. V8's code cache is out as well, since every
+    launch gets a fresh userData. Probe 2 (settle, purge, a memory balloon) is to come.
+  - **Wave 1.** Host reference at 5a4b93b4c, run 39919031522. Guest runs 39919720060, 39921644971 and 39924602325
+    at scratch aaa4d83db. Per job, total (checkout/setup/download/tests) in seconds:
+    - document-app: host 145 (7/9/0/115); guest 302 (124/26/20/116), 375 (139/29/37/154), 297 (74/21/19/164).
+    - widgets: host 91 (5/9/0/63); guest 254 (68/39/20/113), 419 (221/49/8/123), 252 (50/35/32/119).
+    - to-human: host 74 (4/9/0/47); guest 134 (54/23/19/22), 358 (207/69/31/36), 243 (154/21/33/20).
+
+    No warning or failure annotations. The guest's worst job was 419 s.
+  - **Checkout starts empty without a seed.** The guest logs say `Deleting the contents of
+    '/Users/admin/actions-runner-maws/_work/MAWS/MAWS'`, then `git init` and a depth-1 fetch of all 8,397 files.
+    checkout v7's `src/git-directory-helper.ts` keeps an existing directory only with `.git` and a matching fetch
+    URL; it removes index/shallow locks, detaches HEAD, deletes local branches and conflicting remote refs, checks
+    submodule status, then runs `git clean -ffdx` and `git reset --hard HEAD`. Any failed preparation recreates it.
+    `src/url-helper.ts` gives `https://github.com/SSFSKIM/MAWS` for the default HTTPS checkout (no `.git` suffix).
+    `workrepo` leaves a normal clone with this origin, no source config, no alternates and no stale locks.
+    Kickoff deletes only `_diag` and the old build-cache link; the wrapper and guest's job-started hook leave the
+    work repository alone. The host's sweep and janitor manage processes, not repository contents; guest hooks
+    call neither.
+  - **The local fetch-transfer experiment chose shallow history.** A synthetic repository held 128 deterministic
+    32 KiB binary files, then ten history commits appending 1 KiB each. A bare mirror stood in for GitHub; shallow
+    (depth 1) and full single-branch seeds were cloned at that tip. Both were detached and their local master
+    branches deleted, as checkout does. Master advanced four commits (300 bytes appended and a 4 KiB file added).
+    A protocol-v2 `fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +<sha>:refs/remotes/origin/master`
+    then transferred **4,214,714 bytes from empty, 4,740 from the shallow seed, 4,740 from the full seed**.
+    `GIT_TRACE_PACKFILE` measured the received pack bytes, not disk growth or elapsed time; all three checked out
+    the same resulting tree. The shallow boundary does not force the old tree's objects to be sent again.
+  - **The image's added repository payload is modest.** Running the actual provision step locally against MAWS
+    master ac360e484 gave 8,387 tracked files and `du -sk` of **443,068 KiB total, 165,788 KiB `.git`** (about
+    433 MiB total). This sample is a different commit from wave 1, so its file count differs. This is local
+    allocated repository size, not a measurement of the guest disk's physical growth. The next bake prints its own
+    seed commit and size; production checkout time after refresh is not yet measured.
 
 ## Outcomes & Retrospective
 

@@ -334,6 +334,8 @@ do_bake() {
   disk_follow
   in_guest 900 "the runner $version (runner)" /bin/bash "$provision" runner "$version" "$sha" "$machine-vm"
   disk_follow
+  in_guest "$provision_wait" 'the seeded MAWS work repository (workrepo)' /bin/bash "$provision" workrepo
+  disk_follow
   in_guest 900 'the compiled helpers (helpers)' /bin/bash "$provision" helpers
   disk_follow
   end_vm || die "$name is baked, but its stop is not verified"

@@ -506,7 +506,7 @@ into per machine (`install.sh --vm`), and a Mac without it has none of what foll
 |---|---|
 | Launcher | `mac/vm/lane.sh`, the program of the LaunchAgent `com.ssfskim.ci-kit.vm-lane` (RunAtLoad, KeepAlive, Aqua session only, `ProcessType` Interactive), run from the installed kit. It is the only automated way a guest starts: it reads the queue every 15 s, decides admission, boots a job clone, follows it through its one job and deletes it. Its header has the lifecycle, the boot rule, the guard and every input. |
 | Installed kit | `~/ci-kit-vm/kit`, a copy of `mac/` that `install.sh` publishes with the hooks' staged swap, so the checkout can move on. Every clone is shown it read-only, so a hook change needs no image refresh. |
-| Golden image | the local Tart VM `~/ci-kit-vm/golden` names (`maws-vm-golden-<id>`): the macOS 27 base (`ghcr.io/cirruslabs/macos-golden-gate-base`) with Node 22, pnpm, the warm store, LibreOffice, the runner and the compiled helpers baked in. It is never run for a job; only the [maintenance procedure](#the-vm-lanes-maintenance) makes or replaces it. |
+| Golden image | the local Tart VM `~/ci-kit-vm/golden` names (`maws-vm-golden-<id>`): the macOS 27 base (`ghcr.io/cirruslabs/macos-golden-gate-base`) with Node 22, pnpm, the warm store, LibreOffice, the runner, its seeded MAWS work repository and the compiled helpers baked in. It is never run for a job; only the [maintenance procedure](#the-vm-lanes-maintenance) makes or replaces it. |
 | Job clone | `maws-vm-job-vm-<time>`, an APFS copy of the golden image (seconds; it holds only what the job writes), run with `tart run --no-graphics --no-clipboard` (its pasteboard is never the host's) and four directory shares: the kit and the slot's identity read-only, its `out/` and `cache/` read-write. |
 | Slot | `~/ci-kit-vm/vm/`: `identity/` (the runner's `.runner`, `.credentials`, `.credentials_rsaparams`, copied into each clone and never baked), `out/` (what the guest writes back: its markers, `_diag`, its hooks log), `cache/` (MAWS's e2e build cache). The trial slot, `~/ci-kit-vm/vm-trial/`, is the same for a candidate's trial and serves nothing else. |
 | In the guest | `mac/vm/guest/`: `kickoff.sh` (run by `tart exec`, which is gRPC to the Tart guest agent, never the guest's address) makes the clone the slot's runner and starts `wrapper.sh`, which runs `run.sh --once`, writes the `out/` markers (its header is the protocol), answers the idle stop and powers the guest off; `hooks/` is the guest's start and end, cut down: the display and dialog check, Terminal in front, the posture line with `vm=` and `clone=`, no sweep, no alert, no `gh`. |
@@ -715,8 +715,10 @@ The golden image is made, tried and replaced by one procedure, the coordinator's
 `mac/vm/bake.sh` under a full hold of the mini with the launcher's agent booted out, so nothing automated boots,
 recovers or releases while it runs. It is run on invalidation, never on a schedule: a runner the image's is behind
 (`vm-lane.log` says `refresh trigger: the runner updated itself` per job), MAWS's Node or pnpm pins, a stale store
-(a job's `pnpm install` past 60 s in `vm-out/<clone>/`), the mini's macOS moving, a new Electron bundle id or
-LibreOffice version wanting its first-run window again. A refresh takes the mini for its length, as a timed hold does.
+(a job's `pnpm install` past 60 s in `vm-out/<clone>/`), a growing checkout delta from a long-unrefreshed work
+repository, the mini's macOS moving, a new Electron bundle id or LibreOffice version wanting its first-run window
+again. Every job starts from the image's repository, not the preceding job's fetched commits, so a stale golden
+makes each job fetch the accumulated delta again. A refresh takes the mini for its length, as a timed hold does.
 
 `bake.sh` checks the hold before every step but `--retire`, and refuses without it: a `vm-hold.<owner>` whose first
 line starts `maintenance` (`hold.sh hold <owner> maintenance` writes `maintenance since <time>`), no `vm-reserved`, the launcher's agent not loaded (`launchctl print`), and no launcher
@@ -750,16 +752,38 @@ commands, `owner` is the session's name, as for a timed hold, and `cand` the can
 
 3. **The bake** clones the base to `maws-vm-candidate-<YYYYMMDD>` (UTC; `--name maws-vm-candidate-<id>` for another),
    sets `--cpu 4 --memory <MB> --display 2560x1440pt --disk-size 60`, boots it with the installed kit and the MAWS
-   checkout shared read-only (`--maws`, default `~/Developer/GitHub/MAWS`, which the owner's `gh` login keeps at
-   master), provisions it through `tart exec` (`mac/vm/provision.sh`'s steps: the base's tools and `python3`; the APFS
+   checkout shared read-only (`--maws`, default `~/Developer/GitHub/MAWS`), provisions it through `tart exec` (`mac/vm/provision.sh`'s steps: the base's tools and `python3`; the APFS
    container grown into the 60 GB disk, the recovery container after it removed first, and the result verified; the
    display set to 2560x1440 with scaling on through `displayplacer` and read back, since `tart set --display` does not
    reach the guest's mode; Node 22 and the checkout's pnpm
    through corepack; the warm store from a scratch clone; LibreOffice; the runner at `install.sh`'s pin in
    `~/actions-runner-maws`, its `.env` naming the hooks through `~/ci-kit` → the kit share, `CI_KIT_MACHINE=mini-vm`,
-   `CI_KIT_VM_GUEST=1` and `LANG=en_US.UTF-8`, and its `.path`; the compiled helpers in `~/ci-kit-helpers/`), and
-   verifies its stop. `--memory` is the guest's size in MB, 4096 by default (V1's size); under 4096 is refused at once,
-   the base image's minimum being 4 GiB.
+   `CI_KIT_VM_GUEST=1` and `LANG=en_US.UTF-8`, and its `.path`; the seeded MAWS work repository (`workrepo`, below);
+   the compiled helpers in `~/ci-kit-helpers/`), and verifies its stop. `--memory` is the guest's size in MB, 4096 by
+   default (V1's size); under 4096 is refused at once, the base image's minimum being 4 GiB.
+
+   **Before baking, bring the mini's shared MAWS checkout to current master.** Both the warm store and the work
+   repository depend on it. The first refresh found it 2168 commits behind; a `gh` login alone does not keep it
+   current. The coordinator updates it before the bake and checks its branch and commit against GitHub's master.
+   The bake does not fetch the host checkout or check its freshness against GitHub.
+
+   **The image carries a work repository, not just a warm store.** After installing the runner (which replaces its
+   directory), `workrepo` clones the share's master into `<runner>/<work folder>/MAWS/MAWS`, normally
+   `~/actions-runner-maws/_work/MAWS/MAWS`. It reads `.runner`'s `workFolder` if present; before registration it uses
+   the same `_work` setting as `register`. The clone is depth 1, single-branch, without tags, made through git's
+   transport (`--no-local`) so it holds its own objects: no hardlinks, alternates, copied host config, credentials,
+   dependencies or dirty files. Its origin is `https://github.com/SSFSKIM/MAWS`, exactly the URL checkout v7 expects.
+   The `.git` directory, clean tree and valid HEAD let checkout detach, remove old refs, clean and reset without
+   deleting the repository, then fetch only the changes since the seed. Full history is unnecessary: a local
+   bare-remote experiment transferred 4,740 bytes for the next depth-1 fetch from either shallow or full seeds,
+   versus 4,214,714 bytes from empty (the spec's Surprises records the method).
+
+   The step prints the seed commit and its tree-plus-`.git` size. A local MAWS master sample on 2026-10-23 added
+   443,068 KiB (about 433 MiB), of which 165,788 KiB was `.git`; the next bake reports its own size. This is the
+   repository payload, not a measurement of the Tart disk's physical growth. Kickoff clears `_diag` and links the
+   build cache, not the work repository; neither the wrapper nor the guest hooks clear it. The host sweep and
+   janitor terminate processes, not checkout directories, and are not run as guest job hooks. No MAWS share is
+   needed by a job clone: the bake alone reads it.
 
    ```bash
    ssh mini '~/ci-kit-vm/kit/vm/bake.sh --bake --memory 4096'
