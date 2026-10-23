@@ -526,7 +526,9 @@ Reports have three meanings: `telemetry` (boot stages or a notice), `claimed` (a
 “the runner has taken its job” for report-driven coverage exclusion and retirement, as GCE's single terminal
 `ci-kit/job` report does today. Boot or notice alone never marks a runner claimed or triggers cleanup. A guest
 claim signal is nonterminal information, not retirement authority; the provider retains it in the nonterminal
-telemetry channel. Independently, GitHub jobs, busy runners and recorded jobs still establish claims as today.
+telemetry channel if supplied. This guest emits boot, notice and exit only, not a separate claimed signal.
+Independently, GitHub jobs, busy runners and recorded jobs still establish claims as today; terminal evidence
+continues to establish report-driven coverage exclusion and retirement.
 `readReports` separates telemetry from the optional terminal object; consumers never test the truthiness of the
 whole bundle. Contract tests cover boot-only and notice-only bundles as well as terminal reports.
 
@@ -885,8 +887,7 @@ terminates itself.
 **Touches:** new `gce/launcher/providers/ec2.mjs` (one instance per configured account), `lib/aws.mjs`,
 `pool/config/ec2.json`, using M4's `accounts` parser; `pool/config/gce.json`'s sandbox entry;
 `ec2/vm/` and the container-start pieces shared with `gce/vm/job.mjs`; `gce/bake/bake.mjs`'s EC2 stage and its
-builder beside `gce/bake/builder.sh`; `gce/vm/smoke.sh`; `gce/deploy.sh` for role ARN environment variables;
-`ec2/setup.sh`; and tests under `test/ec2/`. It consumes M1's disk/zone verdict and M4's scheduler and produces
+builder beside `gce/bake/builder.sh`; `gce/vm/smoke.sh`; `ec2/setup.sh`; and tests under `test/ec2/`. It consumes M1's disk/zone verdict and M4's scheduler and produces
 EC2's `createProvider`, `awsCredentials`, the AMI and config for M6.
 
 **Decisions owned here:** the EC2 provider observes only pool-tagged instances. A test double of the EC2 API,
@@ -1484,6 +1485,14 @@ The production chain is reviewed at each boundary:
   the design. Federation audiences derive from the role ARN's account, STS uses the configured regional endpoint,
   and Cost Explorer always uses its explicit us-east-1 endpoint and signing region.
   Date/Author: 2026-10-23, controller; M5 client-interface coordination.
+
+- Decision: M5 reads role ARNs from each account's `roles` config, not duplicate deploy environment variables.
+  The guest emits the specified boot, notice and exit reports without a separate claimed event; providers retain
+  any supplied claimed signal as nonterminal telemetry. Terminal reports still establish report-driven exclusion
+  and retirement, independently of GitHub job/busy-runner and recorded-job claims.
+  Rationale: per-account config already owns role identity, and the guest has no required separate claim signal.
+  This removes stale single-account deployment wording without changing the report contract or claim semantics.
+  Date/Author: 2026-10-23, M5 executor and controller.
 
 ## Outcomes & Retrospective
 
