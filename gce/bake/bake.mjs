@@ -18,7 +18,8 @@ import { createGce, accessToken, GceError } from '../../lib/gce.mjs';
 import { createAppTokens } from '../../lib/github-app.mjs';
 import { createGitHub } from '../../lib/github.mjs';
 import { WARM_SCOPE } from '../../pool/bake/warm.mjs';
-import { parseGceConfig } from '../launcher/config.mjs';
+import { parseGceConfig, parseEc2Config } from '../launcher/config.mjs';
+import { resolveManifest, verifyManifest, manifestLabels, bakeProviders } from '../../pool/bake/manifest.mjs';
 import {
   reportOutcome, checkOutcome, ownsBakeInstance, ownsBakeImage, refusedOutright, staleBakeInstances, staleBakeRunners, imagesToPrune, placements,
   smokeMachines, refusal, bakeRunId, bakeNames, builderInstance, smokeInstance, checkInstance, checkJitRequest, imageBody, fillBuilderScript,
@@ -85,14 +86,19 @@ async function look(gce, vm, path, runId, last) {
 // Polls a builder or smoke VM until it reported and powered off, or failed.
 async function awaitReport(gce, vm, path, timeoutMs, { runId, sleep, now, log }) {
   const start = now();
-  let report = null;
+  let report = null, manifest = null;
   for (;;) {
     let instance;
     ({ instance, report } = await look(gce, vm, path, runId, report));
+    // Guest attributes can disappear on poweroff; retain the manifest alongside the success report.
+    if (instance && path === 'ci-kit/bake') {
+      try { manifest = (await gce.guestAttribute(vm.zone, vm.name, 'ci-kit/manifest')) ?? manifest; }
+      catch (err) { if (!(err instanceof GceError && err.status === 404)) throw err; }
+    }
     const outcome = reportOutcome({ instance, report, elapsedMs: now() - start, timeoutMs });
     if (outcome.done) {
       log(`${vm.name}: ${outcome.ok ? 'ok' : outcome.reason} after ${Math.round((now() - start) / 1000)} s`);
-      return outcome;
+      return { ...outcome, manifest };
     }
     await sleep(POLL_MS);
   }
@@ -143,7 +149,8 @@ async function realJob(gce, gh, { cfg, names, runId, image, check, sleep, now, l
 
 // One bake. Returns { image, check } (the real job's run URL) once the image is ready; throws with the reason
 // otherwise. gh: a GitHub client for ci-kit-sandbox (CHECK_SCOPE).
-export async function runBake(gce, { cfg, sha, runId, token, gh, script, sleep, now = Date.now, log = () => {} }) {
+export async function runBake(gce, { cfg, sha, manifest, runId, token, gh, script, sleep, now = Date.now, log = () => {} }) {
+  if (!manifest || manifest.kit_commit !== sha) throw new Error('ci-kit: the bake needs its resolved manifest');
   const names = bakeNames(runId, sha);
   const wait = { runId, sleep, now, log };
   const check = { name: null, runner: null, run: null };
@@ -161,9 +168,10 @@ export async function runBake(gce, { cfg, sha, runId, token, gh, script, sleep, 
   }
   try {
     const builder = await createFirst(gce, placements(cfg.placements, () => BUILDER_MACHINES),
-      ({ machine, zone, placement }) => builderInstance({ name: names.builder, zone, machine, runId, script, token, placement, egress: cfg.egress }), log);
+      ({ machine, zone, placement }) => builderInstance({ name: names.builder, zone, machine, runId, script, token, manifest, placement, egress: cfg.egress }), log);
     const built = await awaitReport(gce, builder, 'ci-kit/bake', BAKE_TIMEOUT_MS, wait);
     if (!built.ok) throw new Error(`ci-kit: the builder did not finish: ${built.reason}`);
+    const actualManifest = verifyManifest(JSON.parse(built.manifest), manifest);
 
     // The disk is consistent: the guest powered off after reporting. Re-check ownership right before imaging it.
     const owned = await gce.instance(builder.zone, builder.name);
@@ -171,7 +179,9 @@ export async function runBake(gce, { cfg, sha, runId, token, gh, script, sleep, 
     // An insert refused outright made nothing of this run's (a name collision leaves the other image alone). One
     // whose outcome is uncertain may have made the image, so the cleanup looks for it, and deletes it only by label.
     try {
-      await gce.insertImage(imageBody({ name: names.image, family: cfg.image_family, zone: builder.zone, disk: builder.name, sha, runId }));
+      const body = imageBody({ name: names.image, family: cfg.image_family, zone: builder.zone, disk: builder.name, sha, runId });
+      Object.assign(body.labels, manifestLabels(actualManifest));
+      await gce.insertImage(body);
     } catch (err) {
       if (!refusedOutright(err)) image = names.image;
       throw err;
@@ -214,7 +224,7 @@ export async function runBake(gce, { cfg, sha, runId, token, gh, script, sleep, 
     await gce.setImageLabels(image, { ...made.labels, 'ci-kit-ready': 'true' });
     ready = true;
     log(`image ${image} is ready`);
-    return { image, check: url, skipped };
+    return { image, check: url, skipped, manifest: actualManifest };
   } finally {
     await cleanUp(gce, { cfg, runId, image: ready ? null : image, gh, check, sleep, now, log });
   }
@@ -303,9 +313,28 @@ async function main() {
   // The real job's: ci-kit-sandbox only, minted as needed, so it is fresh after a long build.
   const gh = createGitHub(createAppTokens({ ...app, scope: CHECK_SCOPE }));
   const script = fillBuilderScript(await readFile(new URL('./builder.sh', import.meta.url), 'utf8'), { sha });
-  log(`bake ${runId}: kit ${sha.slice(0, 8)}, project ${cfg.project}`);
-  const { image, check, skipped } = await runBake(gce, { cfg, sha, runId, token, gh, script, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), log });
-  log(`done: ${image}, real job ${check}${skipped.length ? `; not smoked (no zone took its VM): ${skipped.join(', ')}` : ''}`);
+  let ec2Config = null;
+  try { ec2Config = parseEc2Config(await readFile(new URL('../../pool/config/ec2.json', import.meta.url), 'utf8')); }
+  catch (err) { if (err.code !== 'ENOENT') throw err; }
+  const accounts = ec2Config?.accounts ?? [];
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  log(`bake ${runId}: kit ${sha.slice(0, 8)}, project ${cfg.project}, ${accounts.length} EC2 accounts`);
+  await bakeProviders({
+    resolve: () => resolveManifest({ sha, gh: createGitHub(token) }),
+    gce: (manifest) => runBake(gce, { cfg, sha, manifest, runId, token, gh, script, sleep, log }),
+    accounts,
+    ec2: async (account, manifest) => {
+      const { createAws } = await import('../../lib/aws.mjs');
+      const { runEc2Bake } = await import('../../ec2/bake/bake.mjs');
+      // The bake role can launch builders only. The runtime role can launch only pool-image smoke/job VMs.
+      const aws = createAws({ roleArn: account.roles.bake, region: account.region, log });
+      const runtimeAws = createAws({ roleArn: account.roles.launcher, region: account.region, log });
+      return runEc2Bake(aws, { runtimeAws, cfg: account, manifest, runId,
+        token: await createAppTokens({ ...app, scope: WARM_SCOPE })(), gh,
+        script: await readFile(new URL('../../ec2/bake/builder.sh', import.meta.url), 'utf8'), sleep, log });
+    },
+  });
+  log('done: every configured provider passed smoke and its real sandbox job');
 }
 
 // Both sides canonical: argv[1] is the path as typed, the module URL is resolved through symlinks.

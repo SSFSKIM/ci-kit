@@ -35,7 +35,7 @@
  * @property {string} createdAt
  *
  * @typedef {{outcome: 'accepted'|'capacity'|'quota'|'denied'|'throttled'|'uncertain', scope?: string, detail: string, id?: string}} LaunchResult
- * @typedef {LaunchResult|{outcome: 'abandoned', detail: string}} ReconcileResult
+ * @typedef {(LaunchResult & {instance?: Instance})|{outcome: 'abandoned', detail: string}} ReconcileResult
  * @typedef {{kind: 'telemetry'|'claimed', [field: string]: unknown}} TelemetryReport
  * @typedef {{kind: 'terminal', [field: string]: unknown}} TerminalReport
  * @typedef {{telemetry: TelemetryReport[], terminal?: TerminalReport}} AllocationReports

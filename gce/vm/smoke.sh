@@ -1,5 +1,5 @@
 #!/bin/bash
-# The smoke check of a new GCE image (spec §3a Image, bake step 4). The job unit runs it in a job container in place of
+# The shared smoke check of a new GCE or EC2 image. The job unit runs it in a job container in place of
 # the runner, on a VM booted from the image with no JIT config, so it sees what a job would see. One line per check,
 # then `ci-kit smoke: ok` or `ci-kit smoke: failed:<check>` at the first failure.
 set -uo pipefail
@@ -25,7 +25,15 @@ nonempty() { [ -n "$(ls -A "$1" 2> /dev/null)" ]; }
 # A cache warm.json records is present; one it does not record (the lockfile pins no such package) is not required.
 warmed() { ! jq -e --arg k "$1" 'has($k)' "$C/warm.json" || find "$2" -name "$3" | grep -q .; }
 writable() { touch "$1/.ci-kit-smoke" && rm "$1/.ci-kit-smoke"; }
-metadata_refused() { ! curl -s --max-time 5 -o /dev/null http://169.254.169.254/; }
+metadata_refused() {
+  local address
+  # Any HTTP response (including IMDSv2's 401) means the firewall failed. Do not use curl --fail here.
+  for address in 'http://169.254.169.254/' 'http://[fd00:ec2::254]/'; do
+    if curl -s --noproxy '*' --max-time 5 -o /dev/null "$address"; then return 1; fi
+  done
+  ! curl -s --noproxy '*' --max-time 5 -o /dev/null -X PUT \
+    -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token
+}
 
 check cpus test "$(nproc)" = "$CI_KIT_EXPECT_CPUS"
 check user test "$(id -un)" = runner

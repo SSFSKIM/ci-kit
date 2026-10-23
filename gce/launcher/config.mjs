@@ -87,7 +87,7 @@ export function parseGceConfig(text) {
   return { ...cfg, egress: cfg.egress ?? DEFAULT_EGRESS };
 }
 
-const EC2_ACCOUNT = ['account', 'enabled', 'region', 'placements', 'disk_gb', 'security_group', 'report_bucket', 'roles', 'credit'];
+const EC2_ACCOUNT = ['account', 'enabled', 'region', 'placements', 'disk_gb', 'initialization_mibps', 'security_group', 'report_bucket', 'roles', 'credit'];
 const date = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && Number.isFinite(Date.parse(v)) && new Date(v).toISOString().slice(0, 10) === v;
 const ec2Machine = (v) => typeof v === 'string' && /^[a-z][a-z0-9]*\.[a-z0-9]+$/.test(v);
 
@@ -102,6 +102,7 @@ function checkEc2Account(a, i, errors) {
   if ('enabled' in a && typeof a.enabled !== 'boolean') errors.push(`${where}: enabled must be a boolean`);
   if (a.region !== 'us-east-2') errors.push(`${where}: region must be us-east-2`);
   if (!positive(a.disk_gb)) errors.push(`${where}: disk_gb must be a positive integer`);
+  if ('initialization_mibps' in a && (!Number.isInteger(a.initialization_mibps) || a.initialization_mibps < 100 || a.initialization_mibps > 300)) errors.push(`${where}: initialization_mibps must be an integer from 100 through 300`);
   if (typeof a.security_group !== 'string' || !/^sg-[0-9a-f]+$/.test(a.security_group)) errors.push(`${where}: security_group must be a security group id`);
   if (typeof a.report_bucket !== 'string' || !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(a.report_bucket)) errors.push(`${where}: report_bucket must be a bucket name`);
   if (!Array.isArray(a.placements) || !a.placements.length) errors.push(`${where}: placements must be a non-empty list`);

@@ -21,7 +21,8 @@ import { createGceLedger } from './ledger-store.mjs';
 import { Launcher } from './launcher.mjs';
 import { createPreparation } from './preparation.mjs';
 import { stockoutMemory } from './logic.mjs';
-import { createProvider, createLimits } from './providers/gce.mjs';
+import { createLimits } from './providers/gce.mjs';
+import { createProviders } from './providers/index.mjs';
 import { createTicker } from './ticker.mjs';
 import { createHandler } from './routes.mjs';
 
@@ -63,8 +64,8 @@ async function reconcile(preparation) {
   const key = `${cfg.ledger.repo}#${cfg.ledger.issue_title}`;
   if (!d.ledgers.has(key)) d.ledgers.set(key, createGceLedger(d.gh, cfg.ledger, { log }));
   const error = (message, fields) => say('ERROR', message, fields);
-  const provider = createProvider({ gce: d.gce, cfg, config, log, limits: d.limits });
-  const launcher = new Launcher({ provider, gh: d.gh, ledger: d.ledgers.get(key), cfg, config, poolRepos, ec2, repoProviders, log, error, stockouts: d.stockouts, providerState: d.providerState });
+  const providers = createProviders({ gce: d.gce, cfg, config, ec2, log, limits: d.limits });
+  const launcher = new Launcher({ provider: providers[0], providers, gh: d.gh, ledger: d.ledgers.get(key), cfg, config, poolRepos, ec2, repoProviders, log, error, stockouts: d.stockouts, providerState: d.providerState });
   return { config: config.slice(0, 8), repos: cfg.repos.map((r) => r.repo), ...(await launcher.tick(preparation)), github: d.gh.stats() };
 }
 

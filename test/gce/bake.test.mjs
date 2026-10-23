@@ -18,6 +18,8 @@ import { fakeGce, fakeSandbox, instanceShape, imageShape, FOREIGN } from './fake
 
 const CFG = ONE_REGION_CFG;
 const SHA = 'a'.repeat(40);
+const MANIFEST = { v:1, kit_commit:SHA, node:{22:'v22.20.0',24:'v24.10.0'}, maws:{revision:'b'.repeat(40),lock_sha256:'c'.repeat(64)},runner_version:'2.338.0' };
+const BAKED = {...MANIFEST,warm:{'maws-files':{ok:true,detail:''},'pnpm-fetch':{ok:true,detail:''}}};
 const RUN = '20261016-094500-k3x9';
 const SUBNET = 'regions/us-central1/subnetworks/ci-kit-us-central1';
 const MIN = 60_000;
@@ -201,15 +203,12 @@ test('an earlier bake\'s check runner is swept once it is 4 h old and not busy; 
   assert.deepEqual(staleBakeRunners(runners, now).map((r) => r.id), [1]);
 });
 
-// Review (M6 placements, P2): a bake smokes each placement in turn, so the bake job's task timeout (gce/deploy.sh)
-// grows with the placements, and STALE_MS must stay above it: a younger bake's builder, check runner or unready image
-// may belong to a bake still running, which an overlapping bake must not sweep.
-test('the bake job outlives its own bounds for the shipped placements, and STALE_MS outlives the bake job', () => {
-  const deploy = readFileSync(new URL('../../gce/deploy.sh', import.meta.url), 'utf8');
-  const taskMs = Number(/--task-timeout=(\d+)m/.exec(deploy)[1]) * 60_000;
+// GCE resources are cleaned before the sequential EC2 stages start. Their stale bound covers the GCE
+// stage, not the full multi-account job; deployment's account-dependent timeout is exercised in ec2/bake.test.mjs.
+test('GCE stale cleanup cannot sweep an in-flight stage for the shipped placements', () => {
   const shipped = parseGceConfig(readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
-  assert.ok(taskMs >= BAKE_TIMEOUT_MS + shipped.placements.length * SMOKE_TIMEOUT_MS + CHECK_TIMEOUT_MS, `task timeout ${taskMs / 60_000} min`);
-  assert.ok(STALE_MS > taskMs, `STALE_MS ${STALE_MS / 3600_000} h against a ${taskMs / 60_000} min bake`);
+  const stageMs = BAKE_TIMEOUT_MS + shipped.placements.length * SMOKE_TIMEOUT_MS + CHECK_TIMEOUT_MS;
+  assert.ok(STALE_MS > stageMs + 30 * 60_000, 'GCE stage and cleanup margin must precede stale cleanup');
 });
 
 test('the image goes into the family unready, labelled with the kit commit and the run', () => {
@@ -236,12 +235,12 @@ const clock = () => {
   let t = Date.parse('2026-10-16T09:45:00Z');
   return { now: () => t, sleep: async (ms) => { t += ms; } };
 };
-const OK_BUILDER = [{ status: 'RUNNING' }, { status: 'RUNNING', attrs: { 'ci-kit/bake': 'ok' } }, { status: 'STOPPING' }, { status: 'TERMINATED' }];
+const OK_BUILDER = [{ status: 'RUNNING' }, { status: 'RUNNING', attrs: { 'ci-kit/bake': 'ok', 'ci-kit/manifest': JSON.stringify(BAKED) } }, { status: 'STOPPING' }, { status: 'TERMINATED' }];
 const OK_SMOKE = [{ status: 'RUNNING' }, { status: 'RUNNING', attrs: { 'ci-kit/smoke': 'ok' } }, { status: 'TERMINATED' }];
 // The check VM and its run, polled in step: the VM boots, its runner takes the job, the job ends, the VM powers off.
 const OK_CHECK = [{ status: 'RUNNING' }, { status: 'RUNNING' }, { status: 'RUNNING', attrs: { 'ci-kit/job': 'exit:0' } }, { status: 'TERMINATED' }];
 const OK_RUN = [{ status: 'queued' }, { status: 'in_progress', took: true }, { status: 'completed', conclusion: 'success', ranOn: true }];
-const bake = (gce, c = clock(), gh = fakeSandbox({ run: OK_RUN })) => runBake(gce, { cfg: CFG, sha: SHA, runId: RUN, token: 'ghs_x', gh, script: '#!/bin/bash\n', ...c, log: () => {} });
+const bake = (gce, c = clock(), gh = fakeSandbox({ run: OK_RUN })) => runBake(gce, { cfg: CFG, sha: SHA, manifest: MANIFEST, runId: RUN, token: 'ghs_x', gh, script: '#!/bin/bash\n', ...c, log: () => {} });
 const ready = (gce) => gce.state.images.filter((i) => i.family === 'ci-kit-runner' && i.labels?.['ci-kit-ready'] === 'true').map((i) => i.name);
 const leftInstances = (gce) => gce.state.instances.filter((i) => i.labels?.['ci-kit'] === 'gce-builder').map((i) => i.name);
 
@@ -262,7 +261,7 @@ test('an ok builder and a passing smoke publish one ready image, and leave no bu
 test('under gce.json\'s egress "nat", no VM of the bake (builder, smoke, check) takes an external address', async () => {
   const gce = fakeGce({ scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: OK_CHECK } });
   const cfg = { ...CFG, egress: 'nat' };
-  const result = await runBake(gce, { cfg, sha: SHA, runId: RUN, token: 'ghs_x', gh: fakeSandbox({ run: OK_RUN }), script: '#!/bin/bash\n', ...clock(), log: () => {} });
+  const result = await runBake(gce, { cfg, sha: SHA, manifest: MANIFEST, runId: RUN, token: 'ghs_x', gh: fakeSandbox({ run: OK_RUN }), script: '#!/bin/bash\n', ...clock(), log: () => {} });
   assert.equal(result.image, `ci-kit-runner-${RUN}-aaaaaaaa`);
   assert.deepEqual([...new Set(gce.inserted.map((b) => b.labels['ci-kit-role']))].sort(), ['builder', 'check', 'smoke']);
   assert.ok(gce.inserted.every((b) => b.networkInterfaces.every((n) => !n.accessConfigs)), 'no VM of the bake takes an external address');
@@ -331,7 +330,7 @@ test('one region, two placements: a smoke VM each: the cpus-2 machine, then the 
 
 // The new form (spec 2026-10-21): C4D us-west4 first, C3D us-central1 second.
 const NEW_CFG = { ...CFG, placements: [WEST, CENTRAL] };
-const bakeNew = (gce, gh = fakeSandbox({ run: OK_RUN })) => runBake(gce, { cfg: NEW_CFG, sha: SHA, runId: RUN, token: 'ghs_x', gh, script: '#!/bin/bash\n', ...clock(), log: () => {} });
+const bakeNew = (gce, gh = fakeSandbox({ run: OK_RUN })) => runBake(gce, { cfg: NEW_CFG, sha: SHA, manifest: MANIFEST, runId: RUN, token: 'ghs_x', gh, script: '#!/bin/bash\n', ...clock(), log: () => {} });
 const disk = (b) => b.disks[0].initializeParams.diskType.split('/').pop();
 
 test('across placements: one builder, a smoke VM in each placement on its own subnetwork and disk type, before the image is ready', async () => {
@@ -362,7 +361,7 @@ test('a smoke VM failing in any placement keeps the image unready and deletes it
 // every machine family of gce.json passed a smoke in at least one placement (it boots on that family's hardware).
 const FAMILIES_CFG = { ...CFG, placements: [WEST, C4D_CENTRAL, CENTRAL] };
 const C4D_CENTRAL_SMOKES = 4 * 4; // c4d-highcpu-2, -4, -8, -16 in its four zones
-const bakeFamilies = (gce, log = () => {}) => runBake(gce, { cfg: FAMILIES_CFG, sha: SHA, runId: RUN, token: 'ghs_x', gh: fakeSandbox({ run: OK_RUN }), script: '#!/bin/bash\n', ...clock(), log });
+const bakeFamilies = (gce, log = () => {}) => runBake(gce, { cfg: FAMILIES_CFG, sha: SHA, manifest: MANIFEST, runId: RUN, token: 'ghs_x', gh: fakeSandbox({ run: OK_RUN }), script: '#!/bin/bash\n', ...clock(), log });
 
 test('a placement refused everywhere is skipped with a warning while another of its family passed: the image is ready', async () => {
   const lines = [];
@@ -555,7 +554,7 @@ test('a runner still busy past the 6 min retry window is logged, not thrown over
   const gce = fakeGce({ scripts: { builder: OK_BUILDER, smoke: OK_SMOKE, check: [{ status: 'RUNNING' }] } });
   const gh = fakeSandbox({ run: [{ status: 'queued' }, { status: 'in_progress', took: true }], busyDeletes: 100 });
   const logs = [];
-  await assert.rejects(runBake(gce, { cfg: CFG, sha: SHA, runId: RUN, token: 'ghs_x', gh, script: '#!/bin/bash\n', ...clock(), log: (m) => logs.push(m) }), /timeout/);
+  await assert.rejects(runBake(gce, { cfg: CFG, sha: SHA, manifest: MANIFEST, runId: RUN, token: 'ghs_x', gh, script: '#!/bin/bash\n', ...clock(), log: (m) => logs.push(m) }), /timeout/);
   assert.ok(logs.some((m) => /cleanup: check runner failed: .*sweep unregisters it/.test(m)));
   assert.equal(gh.calls.filter((c) => c === `unregister ${RUNNER}`).length, 13); // 13 attempts, 30 s apart: 6 min
   assert.deepEqual(gh.state.runners.map((r) => r.name), [RUNNER]);

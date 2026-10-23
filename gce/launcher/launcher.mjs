@@ -333,7 +333,13 @@ export class Launcher {
         const inst = part.instances.find((i) => i.alloc === row.alloc);
         if (inst) { const next = runningRow(row, inst); if (await this.write(next)) seen.rowOf.set(row.alloc, next); continue; }
         const result = await part.api.reconcileLaunch(row);
-        if (result.outcome === 'uncertain' || result.outcome === 'accepted') continue; // accepted is recorded from inventory
+        if (result.outcome === 'accepted' && result.instance) {
+          // An accepted VM can boot and terminate before restart. Persist creation evidence (and its disk charge)
+          // even though live inventory cannot contain it, then let ordinary row settlement classify its end.
+          const next = runningRow(row, result.instance);
+          if (await this.write(next)) seen.rowOf.set(row.alloc, next);
+        }
+        if (result.outcome === 'uncertain' || result.outcome === 'accepted') continue;
         const next = finalRow(row, { end: result.outcome === 'abandoned' ? 'abandoned' : 'refused', deleted: this.now(), diskGb: this.cfg.disk_gb });
         if (await this.write(next)) {
           seen.rowOf.set(row.alloc, next);
@@ -426,7 +432,7 @@ export class Launcher {
   }
 
   async settleProviderRows(seen, out) {
-    const pending = seen.rows.filter((r) => r.state !== 'final' && !(r.provider === 'ec2' && r.state === 'launching' && !seen.instances.some((i) => i.alloc === r.alloc)));
+    const pending = seen.rows.map((r) => seen.rowOf.get(r.alloc) ?? r).filter((r) => r.state !== 'final' && !(r.provider === 'ec2' && r.state === 'launching' && !seen.instances.some((i) => i.alloc === r.alloc)));
     const live = new Set(seen.instances.map((i) => i.alloc));
     let preempted = new Map();
     if (seen.complete && pending.some((r) => r.state !== 'deleting' && !live.has(r.alloc))) preempted = (seen.api.preemptions ? await seen.api.preemptions() : new Map());
@@ -706,7 +712,8 @@ export class Launcher {
         const sent = this.now();
         const slow = race ? null : this.after(RACE_AFTER_MS);
         if (group.provider === 'ec2') {
-          const next = { ...row, zone: p.zone, client_token: `${alloc}-${attempts.indexOf(p) + 1}`, sent_at: iso(sent) };
+          const next = { ...row, zone: p.zone, client_token: `${alloc}-${attempts.indexOf(p) + 1}`, sent_at: iso(sent),
+            price: p.price, disk_gb: p.disk.sizeGB, region: p.region, zone_id: p.zoneId, machine: p.machine, provisioning: p.provisioning };
           // The preceding attempt's delayed race marker must land before these reconciliation coordinates.
           await (marking = marking.then(async () => {
             await this.ledger.upsert(next);

@@ -5,6 +5,7 @@
 import { machineCpus } from '../bake/plan.mjs';
 import { providerRunnerName, requiredProvider } from './providers/contracts.mjs';
 import { MEMORY_GIB } from './providers/gce-data.mjs';
+import { ec2Dollars } from './providers/ec2-data.mjs';
 
 const ROW_MARK = 'ci-kit-gce-ledger';
 const DAILY_MARK = 'ci-kit-gce-daily';
@@ -149,7 +150,7 @@ export function runningRow(row, inst) {
     ...v2Row(row), account: row.account ?? c.account ?? null, machine: c.machine, zone: c.zone, provisioning: c.provisioning,
     ...(region ? { region } : {}), ...(c.zoneId ? { zone_id: c.zoneId } : {}),
     ...(inst.id != null ? { instance_id: String(inst.id) } : {}), ...(diskType ? { diskType } : {}),
-    ...(c.price ? { price: c.price } : {}),
+    ...(c.price ? { price: c.price } : {}), ...(row.provider === 'ec2' && c.disk?.sizeGB ? { disk_gb: c.disk.sizeGB } : {}),
     created: iso(inst.createdAt ? Date.parse(inst.createdAt) : inst.created), ...(inst.running ? { running: iso(inst.running) } : {}), state: 'running',
   };
 }
@@ -170,11 +171,12 @@ export const withJob = (row, job) => ({ ...v2Row(row), job: jobRecord(job) });
 // before rows named their own.
 export function finalRow(row, { end, deleted, job, diskGb, egress, state = 'final' }) {
   const seconds = row.created ? Math.max(0, Math.round((deleted - Date.parse(row.created)) / 1000)) : null;
-  const cost = seconds === null || row.provider === 'ec2' ? null : dollars({
+  const cost = seconds === null ? null : row.provider === 'ec2' ? ec2Dollars(row, seconds, end) : dollars({
     machine: row.machine, zone: row.zone, provisioning: row.provisioning, seconds, diskGb, diskType: row.diskType, egress: row.egress ?? egress,
   });
   return {
     ...v2Row(row), ...(job ? { job } : {}),
+    ...(row.provider === 'ec2' && end === 'preempted' && seconds !== null && seconds < 3600 && row.price ? { price: { ...row.price, source: 'interrupted-free' } } : {}),
     deleted: iso(deleted), seconds, dollars: cost === null ? null : round4(cost), end, state,
   };
 }

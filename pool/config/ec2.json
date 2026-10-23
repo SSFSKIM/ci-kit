@@ -1,0 +1,19 @@
+{
+  "enabled": true,
+  "accounts": [{
+    "account": "290475840169", "enabled": true, "region": "us-east-2",
+    "placements": [
+      {"zone": "us-east-2c", "subnet": "subnet-0110187a2f23b0d25", "machines": {"2": "c8a.large", "4": "c8a.xlarge", "8": "c8a.2xlarge", "16": "c8a.4xlarge"}},
+      {"zone": "us-east-2a", "subnet": "subnet-01046dc75127e7e11", "machines": {"2": "c8a.large", "4": "c8a.xlarge", "8": "c8a.2xlarge", "16": "c8a.4xlarge"}},
+      {"zone": "us-east-2b", "subnet": "subnet-0efc861caf2eeb888", "machines": {"2": "c8a.large", "4": "c8a.xlarge", "8": "c8a.2xlarge", "16": "c8a.4xlarge"}}
+    ],
+    "disk_gb": 50, "initialization_mibps": 200,
+    "security_group": "sg-04b8b036fd64144d6", "report_bucket": "ci-kit-ec2-reports-290475840169",
+    "roles": {
+      "launcher": "arn:aws:iam::290475840169:role/ci-kit-ec2-launcher",
+      "bake": "arn:aws:iam::290475840169:role/ci-kit-ec2-bake",
+      "guard": "arn:aws:iam::290475840169:role/ci-kit-ec2-guard"
+    },
+    "credit": {"enabled": false, "since": "2026-10-23", "until": "2027-04-17", "budget_usd": 180}
+  }]
+}

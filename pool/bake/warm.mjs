@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { parse } from '../../vendor/yaml/dist/index.js';
 import { createGitHub } from '../../lib/github.mjs';
 import { CACHE, CACHE_ENV } from '../agent/docker.mjs';
+import { digest } from './manifest.mjs';
 
 const sh = promisify(execFile);
 const MAWS = 'SSFSKIM/MAWS';
@@ -40,21 +41,29 @@ async function step(name, fn) {
   console.log(`warm ${name}: ${results[name].ok ? 'ok' : 'FAILED'} ${results[name].detail}`);
 }
 
+export async function warmFiles(gh, manifest) {
+  const files = {};
+  for (const file of FILES) {
+    try {
+      files[file] = await gh.request('GET', `/repos/${MAWS}/contents/${file}${manifest ? `?ref=${manifest.maws.revision}` : ''}`, { accept: 'application/vnd.github.raw+json', text: true });
+    } catch (err) {
+      if (err.status !== 404 || file === 'package.json' || file === 'pnpm-lock.yaml') throw err;
+    }
+  }
+  if (manifest && digest(files['pnpm-lock.yaml']) !== manifest.maws.lock_sha256) throw new Error('MAWS lockfile differs from bake manifest');
+  return files;
+}
+
 async function main() {
   const token = process.env.CI_KIT_GH_TOKEN?.trim();
   if (!token) throw new Error('CI_KIT_GH_TOKEN is not set (an installation token that can read MAWS)');
   const gh = createGitHub(token);
+  const manifestPath = process.env.CI_KIT_BAKE_MANIFEST;
+  const manifest = manifestPath ? JSON.parse(await readFile(manifestPath, 'utf8')) : null;
   const dir = await mkdtemp(join(tmpdir(), 'ci-kit-warm-'));
   let lock = null;
   await step('maws-files', async () => {
-    for (const file of FILES) {
-      try {
-        const text = await gh.request('GET', `/repos/${MAWS}/contents/${file}`, { accept: 'application/vnd.github.raw+json', text: true });
-        await writeFile(join(dir, file), text);
-      } catch (err) {
-        if (err.status !== 404 || file === 'package.json' || file === 'pnpm-lock.yaml') throw err;
-      }
-    }
+    for (const [file, text] of Object.entries(await warmFiles(gh, manifest))) await writeFile(join(dir, file), text);
     lock = parse(await readFile(join(dir, 'pnpm-lock.yaml'), 'utf8'));
     return FILES.join(', ');
   });
@@ -85,7 +94,8 @@ async function main() {
     }
   }
   await rm(dir, { recursive: true, force: true });
-  await writeFile(`${CACHE}/warm.json`, `${JSON.stringify(results, null, 2)}\n`).catch(() => {});
+  await writeFile(`${CACHE}/warm.json`, `${JSON.stringify(results, null, 2)}\n`);
+  if (manifest) await writeFile(manifestPath, `${JSON.stringify({ ...manifest, warm: results }, null, 2)}\n`);
   if (Object.values(results).some((r) => !r.ok)) process.exit(1);
 }
 
