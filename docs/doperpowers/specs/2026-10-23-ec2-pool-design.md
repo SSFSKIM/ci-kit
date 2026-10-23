@@ -46,6 +46,8 @@ measurement exists.
   Task review approved without findings; committed-head test gate green: run 40003608129, implementation 0de12c4.
   Live GCE parity remains the merged-main M3 proof. AWS spend remains at most $0.735 (no M2 resources).
 - [ ] M3: GCE effects extracted behind the provider; no behaviour change.
+  Implementation fe16bdb reviewed clean on 2026-10-23; remote gate 40006417067 green. Merged-main deploy and
+  MAWS class 1a/v2-row proof remain outstanding. AWS spend unchanged at most $0.735.
 - [ ] M4: scheduling over providers, proved with a fake second provider; GCE-only behaviour unchanged.
 - [ ] M5: the EC2 provider, its image and its one-time setup, serving ci-kit-sandbox.
 - [ ] M6: credit preference, reports, guard, the MAWS canary and acceptance.
@@ -1045,6 +1047,16 @@ The production chain is reviewed at each boundary:
   Evidence: the verdict's launch log. Zone order c -> a -> b.
 
 ## Decision Log
+
+- Decision: M3 preserves GCE's existing walker via a provider outcome adapter that retains original GCE error
+  evidence. The GCE provider additionally owns batched reconciliation, existence/preemption reads and NAT
+  telemetry; ledger and JIT settlement remain scheduler-owned. Its optional observation inputs preserve the
+  existing ledger/inventory ordering and asynchronous bounded room wait. These are transitional GCE seams,
+  not cross-provider scheduling policy: M4 owns their generalization.
+  Rationale: extract cloud effects without silently changing reconciliation concurrency, failure classification,
+  reservation timing or daily accounting. GCE reports expose only exit/failure values as terminal evidence;
+  nonterminal telemetry and guest-claim signals cannot trigger the legacy claim or retirement consumers.
+  Date/Author: 2026-10-23, M3 executor and controller; task review approved.
 
 - Decision: M2 names the image's ci-kit provenance field `image_commit`, sourced from the selected GCE image's
   existing `ci-kit-commit` label. Candidate adds optional `family`, supplied by the GCE data adapter, so M4 can
