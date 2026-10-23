@@ -42,7 +42,7 @@ measurement exists.
   `docs/doperpowers/specs/2026-10-23-ec2-pool-m1-verdict.md` (f5827cf, merged here); summary in Surprises &
   Discoveries. Every spike instance, volume, AMI, snapshot and GCE VM deleted; AWS spend at most $0.735.
 - [x] (2026-10-23 13:1xZ) Owner's go after the M1 cost finding: "Proceed, credit first" (rejected: overflow only, stop).
-- [x] (2026-10-23 19:0xZ) M2: data contracts, v2 ledger with v1 reads, and provider-qualified keys; no behaviour change.
+- [x] (2026-10-23 18:37Z) M2: data contracts, v2 ledger with v1 reads, and provider-qualified keys; no behaviour change.
   Task review approved without findings; committed-head test gate green: run 40003608129, implementation 0de12c4.
   Live GCE parity remains the merged-main M3 proof. AWS spend remains at most $0.735 (no M2 resources).
 - [ ] M3: GCE effects extracted behind the provider; no behaviour change.
