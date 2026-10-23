@@ -1341,10 +1341,19 @@ esac`);
     }
   });
 
+  test('accepts a readback without Preboot, which mdutil reports only while it is mounted (the first bake read two)', () => {
+    const g = guest();
+    writeFileSync(join(g.home, 'index-status'), '/:\n\tIndexing disabled.\n/System/Volumes/Data:\n\tIndexing disabled.\n');
+    const result = g.run();
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.ok(g.calls().includes(`launchctl disable ${gui[0]}`));
+  });
+
   for (const [why, output] of [
     ['one volume still enabled', indexing.replace('Preboot:\n\tIndexing disabled.', 'Preboot:\n\tIndexing enabled.')],
     ['no volumes', ''],
     ['missing the data volume', '/:\n\tIndexing disabled.\n/System/Volumes/Preboot:\n\tIndexing disabled.\n'],
+    ['missing the system volume', '/System/Volumes/Data:\n\tIndexing disabled.\n'],
     ['unknown status', indexing + '/Volumes/Other:\n\tError: unable to perform operation.\n'],
   ]) test(`refuses indexing readback with ${why}`, () => {
     const g = guest();
