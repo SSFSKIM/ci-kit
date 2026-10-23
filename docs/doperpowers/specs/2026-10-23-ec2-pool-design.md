@@ -66,9 +66,9 @@ measurement exists.
   from M1's <=$0.735, plus this execution's one $0.01 Cost Explorer read.
 - [ ] M5: the EC2 provider, its image and its one-time setup, serving ci-kit-sandbox.
   Code reviewed approved through be1dd1a; full gate 40018176821 green at 12c6cdd (successor is whitespace only).
-  Initialization metadata for non-200 rates is deferred to ci-kit #108 entry 2. The design owner requires the
-  missing image-residue smoke assertions before merge; correction underway, not deferred. Setup, deployment,
-  bake and all live M5 proofs remain outstanding.
+  Initialization metadata for non-200 rates is deferred to ci-kit #108 entry 2. Required image-residue smoke
+  assertions fixed in 116bab4: injected-artifact RED/GREEN, focused guest tests 41/41. Final PR-head gate,
+  setup, deployment, bake and all live M5 proofs remain outstanding.
 - [ ] M6: credit preference, reports, guard, the MAWS canary and acceptance.
 
 ## What it must not be
