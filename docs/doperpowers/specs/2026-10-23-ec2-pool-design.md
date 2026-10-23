@@ -433,7 +433,8 @@ The roles:
   - `ec2:TerminateInstances` and `ec2:DeleteVolume`, on resources tagged `ci-kit-pool=ec2` only;
   - read with `ec2:Describe*` (instances, images, instance types, type offerings, zones, spot price history, volumes)
     and `servicequotas:GetServiceQuota`, region us-east-2;
-  - `s3:PutObject` and `s3:GetObject` on the report bucket's `reports/` prefix;
+  - `s3:PutObject` and `s3:GetObject` on the report bucket's `reports/` prefix, plus `s3:ListBucket` on that
+    dedicated bucket so a missing object returns 404 rather than an indistinguishable 403 (also granted to bake);
   - `ce:GetCostAndUsage`.
 - `ci-kit-ec2-bake`: read and terminate rights for pool builders, plus `RunInstances` for Canonical-owned AMIs
   (`099720109477`) or this account's pool-tagged AMIs, with `ci-kit-purpose=builder` required on instance and
@@ -683,9 +684,13 @@ grouping: an original uses `alloc`, a race uses `race.of` with `race.demand`'s r
 rewriting; the explicit group on each new descendant survives even without its original row.
 
 Cost per row comes from the provider: GCE's formula as today (`gce/launcher/ledger.mjs`); EC2's from that zone's
-spot price at launch, per second with a 60 s minimum, plus gp3 GB-seconds and public IPv4 time. An EC2 compute
-charge waived for a provider interruption is recorded as such
-(`price.source: interrupted-free`); disk, IPv4 and initialization charges are not erased with it.
+spot price at launch, per second with a 60 s minimum, plus gp3 GB-seconds (its own 60 s minimum) and public IPv4
+time. For the Linux image, an EC2-initiated interruption in the first hour waives compute; after the first hour,
+all compute seconds used are billed. A waived compute charge is recorded as `price.source: interrupted-free`;
+disk, IPv4 and initialization charges are not erased with it. Sources:
+https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/billing-for-interrupted-spot-instances.html and
+https://aws.amazon.com/ebs/pricing/. Price metadata alone never proves a volume was created and incurs no
+initialization charge for a request never received by EC2.
 
 If M1 selects provisioned EBS initialization, its per-volume charge is a candidate price input and enters the
 row cost at volume creation. It is charged on the snapshot's full data size even if the volume is deleted early,
@@ -1022,9 +1027,9 @@ code, not the CLI's nonzero status, since both authorized and unauthorized dry-r
 
 The builder/smoke guard deadline protections are unchanged by which role launched the VM.
 
-Before M6 enables preference, run setup's billing proof through the federated launcher credentials, with a
+Before M6 enables preference, explicitly run `ec2/setup.sh --billing-proof` through the federated launcher credentials, with a
 14400-second STS request and Cost Explorer signing for us-east-1. The proof makes `GetCostAndUsage` for the
-configured interval and records success without logging credentials. The known `ci-kit-ops` success is not a
+configured interval and records success without logging credentials. Ordinary setup reports this paid proof as pending instead of repeating it; the known `ci-kit-ops` success is not a
 substitute. If the federated read fails, stop M6 and escalate the access failure.
 
 ### Real jobs and overflow (M3, M5, M6; Acceptance 2, 3 and 9)
@@ -1135,7 +1140,7 @@ observations in this spec's Progress and Surprises & Discoveries.
                  stateReason?: string, candidate: Candidate, createdAt: string }
     LaunchResult = { outcome: 'accepted'|'capacity'|'quota'|'denied'|'throttled'|'uncertain',
                      scope?: string, detail: string, id?: string }
-    ReconcileResult = LaunchResult | { outcome: 'abandoned', detail: string }
+    ReconcileResult = (LaunchResult & { instance?: Instance }) | { outcome: 'abandoned', detail: string }
     Provider = {
       name: 'gce' | 'ec2', account: string,
       candidates(config, size) : Candidate[],               // ordered for one logical size
@@ -1173,7 +1178,9 @@ request. For EC2, `reconcileLaunch` observes that zone by allocation tag and cli
 instance was found (the scheduler records running), `uncertain` means the wait continues, and `abandoned` means
 a successful observation found none at least 10 min after `sent_at`. An unknown inventory never yields
 `abandoned`. The scheduler owns finalization, reservation release and JIT removal; the guard owns late VMs
-whose rows are final. Reconciliation never replays the launch request.
+whose rows are final. Reconciliation never replays the launch request. An accepted result may carry the observed `instance`, even
+when it is already gone: the scheduler preserves its actual creation time and immutable price/disk evidence
+before finalization, so a lost response followed by rapid termination does not erase the initialization charge.
 
 Ledger v2 retains `cpus` as logical size and `reserved` as physical vCPUs, adds the provider/account fields in
 Ledger rows and cost, and stores `job.labels` and `job.required_provider` for pre-launch shapes. V1 jobs read as requiring `any`,
@@ -1521,6 +1528,16 @@ The production chain is reviewed at each boundary:
   with Canonical/builder coupling enforced only in code (not IAM), and a third builder-only role (extra setup
   for the same enforcement). Official authorization reference: https://servicereference.us-east-1.amazonaws.com/v1/ec2/ec2.json.
   Date/Author: 2026-10-23, design-owner confirmation relayed to M5 executor and controller.
+
+- Decision: Reconciliation may return an observed gone instance, preserving creation/launch price evidence before
+  finalization. Persisted price metadata alone never charges an uncreated volume. Apply the documented first-hour
+  EC2 interruption compute waiver and gp3's independent 60-second minimum; initialization remains charged per
+  created volume. Add dedicated-bucket ListBucket so missing reports are distinguishable from authorization
+  errors; 403 remains an error, never pending. Run setup's paid billing proof explicitly with `--billing-proof`.
+  Rationale: accepted-but-lost responses can outlive a short VM; neither that race nor a compute waiver erases
+  created-volume costs. Report absence and access failure are distinct outcomes. The explicit billing command
+  avoids repeated paid reads during idempotent setup while retaining M6's mandatory federated proof.
+  Date/Author: 2026-10-23, M5 executor and controller; AWS pricing documentation cited above.
 
 ## Outcomes & Retrospective
 
