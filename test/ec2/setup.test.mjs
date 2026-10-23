@@ -34,8 +34,8 @@ test('launcher cannot launch foreign images or untagged resources; bake Canonica
   const launcher = roles.launcher.policy, bake = roles.bake.policy;
   const imageContext = ctx({ 'ec2:Owner': config.account, 'ec2:ResourceTag/ci-kit-pool': 'ec2' });
   assert.equal(allowed(launcher, 'ec2:RunInstances', arn('image', 'ami-pool'), imageContext), true);
-  assert.equal(allowed(launcher, 'ec2:RunInstances', arn('image', 'ami-foreign'), ctx({ 'ec2:Owner': '099720109477' })), false);
-  assert.equal(allowed(bake, 'ec2:RunInstances', arn('image', 'ami-canonical'), ctx({ 'ec2:Owner': '099720109477' })), true);
+  assert.equal(allowed(launcher, 'ec2:RunInstances', arn('image', 'ami-foreign'), ctx({ 'ec2:Owner': 'amazon', 'aws:ResourceAccount': '099720109477' })), false);
+  assert.equal(allowed(bake, 'ec2:RunInstances', arn('image', 'ami-canonical'), ctx({ 'ec2:Owner': 'amazon', 'aws:ResourceAccount': '099720109477' })), true);
   for (const purpose of ['job', 'smoke', 'builder']) {
     const tags = ctx({ 'aws:RequestTag/ci-kit-pool': 'ec2', 'aws:RequestTag/ci-kit-purpose': purpose });
     for (const resource of ['instance', 'volume']) {
@@ -260,3 +260,128 @@ for (const script of ['setup-cli.mjs', 'setup-proof.mjs', 'setup.sh']) {
     });
   }
 }
+
+
+test('Canonical alias must match its numeric owner; another amazon-owned AMI and absent ownership fail closed', () => {
+  const { bake, launcher } = buildRoles(config, claims);
+  const canonical = ctx({ 'ec2:Owner': 'amazon', 'aws:ResourceAccount': '099720109477' });
+  // The controller established this global key with live positive/negative DryRuns. Decoded legacy
+  // authorization context spells it aws:Account, not literally aws:ResourceAccount.
+  assert.equal(allowed(bake.policy, 'ec2:RunInstances', arn('image', 'ami-0fc53b217ec1ad816'), canonical), true);
+  assert.equal(allowed(launcher.policy, 'ec2:RunInstances', arn('image', 'ami-0fc53b217ec1ad816'), canonical), false);
+  assert.equal(allowed(bake.policy, 'ec2:RunInstances', arn('image', 'ami-053ef5d7ebe355f4a'), ctx({ 'ec2:Owner': 'amazon', 'aws:ResourceAccount': '137112412989' })), false);
+  assert.equal(allowed(bake.policy, 'ec2:RunInstances', arn('image', 'ami-unknown'), ctx({ 'ec2:Owner': 'amazon' })), false);
+  assert.equal(allowed(bake.policy, 'ec2:RunInstances', arn('image', 'ami-unknown'), ctx({ 'aws:ResourceAccount': '099720109477' })), false);
+  assert.equal(allowed(bake.policy, 'ec2:RunInstances', arn('image', 'ami-unknown'), ctx({ 'ec2:Owner': 'someone-else', 'aws:ResourceAccount': '099720109477' })), false);
+});
+
+function roleFixture() {
+  const expected = buildRoles(config, claims).bake;
+  const state = {
+    role: { Arn: expected.arn, MaxSessionDuration: expected.duration, AssumeRolePolicyDocument: structuredClone(expected.trust) },
+    policy: structuredClone(expected.policy), attached: [], names: ['ci-kit-pool'],
+  };
+  const events = [];
+  const aws = async (service, operation, input) => {
+    events.push({ service, operation, input });
+    if (operation === 'get-role') return { Role: state.role };
+    if (operation === 'list-attached-role-policies') return { AttachedPolicies: state.attached };
+    if (operation === 'list-role-policies') return { PolicyNames: state.names };
+    if (operation === 'get-role-policy') return { PolicyDocument: structuredClone(state.policy) };
+    if (operation === 'put-role-policy') { state.policy = JSON.parse(input.PolicyDocument); return {}; }
+    throw new Error(`unexpected ${service} ${operation}`);
+  };
+  return { expected, state, aws, events, log: line => events.push({ log: line }) };
+}
+
+function driftPolicy(fixture) {
+  fixture.state.policy.Statement[0].Action = ['ec2:DescribeInstances'];
+  return structuredClone(fixture.state.policy);
+}
+
+test('explicit policy update logs both policies before the only write and verifies a fresh readback', async () => {
+  const f = roleFixture();
+  const before = driftPolicy(f);
+  assert.equal(await ensureRole(f.aws, f.expected, f.log, { updatePolicies: true }), true);
+  const writes = f.events.filter(e => e.operation && !/^(get|list)-/.test(e.operation));
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0], { service: 'iam', operation: 'put-role-policy', input: {
+    RoleName: 'ci-kit-ec2-bake', PolicyName: 'ci-kit-pool', PolicyDocument: JSON.stringify(f.expected.policy),
+  } });
+  const diffIndex = f.events.findIndex(e => e.log?.includes('---') && e.log.includes('+++'));
+  const putIndex = f.events.indexOf(writes[0]);
+  assert.ok(diffIndex >= 0 && diffIndex < putIndex, 'auditable diff must be printed before writing');
+  const diff = f.events[diffIndex].log;
+  assert.match(diff, /ci-kit-ec2-bake\/ci-kit-pool.*current/);
+  assert.match(diff, /ci-kit-ec2-bake\/ci-kit-pool.*desired/);
+  // A complete before/after diff must reconstruct the actual old and desired policies, not just claim change.
+  const deleted = diff.split('\n').filter(line => line.startsWith('-') && !line.startsWith('---')).map(line => line.slice(1)).join('\n');
+  const added = diff.split('\n').filter(line => line.startsWith('+') && !line.startsWith('+++')).map(line => line.slice(1)).join('\n');
+  assert.deepEqual(JSON.parse(deleted), before);
+  assert.deepEqual(JSON.parse(added), f.expected.policy);
+  assert.ok(f.events.slice(putIndex + 1).some(e => e.operation === 'get-role-policy'), 'must verify the applied permissions');
+  assert.deepEqual(f.state.policy, f.expected.policy);
+});
+
+test('default mode refuses changed permissions and explicit mode leaves matching roles alone', async () => {
+  const f = roleFixture();
+  driftPolicy(f);
+  await assert.rejects(ensureRole(f.aws, f.expected, f.log), /permissions mismatch/);
+  assert.ok(f.events.every(e => e.operation && /^(get|list)-/.test(e.operation)));
+  const clean = roleFixture();
+  assert.equal(await ensureRole(clean.aws, clean.expected, clean.log, { updatePolicies: true }), false);
+  assert.ok(clean.events.every(e => e.operation && /^(get|list)-/.test(e.operation)));
+});
+
+test('explicit mode cannot repair protected role attributes or unexpected policy attachments/names', async () => {
+  for (const drift of ['identity', 'duration', 'trust', 'boundary', 'attached', 'extra-policy', 'missing-policy']) {
+    const f = roleFixture();
+    driftPolicy(f);
+    if (drift === 'identity') f.state.role.Arn = 'arn:aws:iam::111122223333:role/ci-kit-ec2-bake';
+    if (drift === 'duration') f.state.role.MaxSessionDuration = 3600;
+    if (drift === 'trust') f.state.role.AssumeRolePolicyDocument.Statement = [];
+    if (drift === 'boundary') f.state.role.PermissionsBoundary = { PermissionsBoundaryArn: 'arn:aws:iam::290475840169:policy/boundary' };
+    if (drift === 'attached') f.state.attached = [{ PolicyArn: 'arn:aws:iam::aws:policy/AdministratorAccess' }];
+    if (drift === 'extra-policy') f.state.names.push('unrelated-policy');
+    if (drift === 'missing-policy') f.state.names = [];
+    await assert.rejects(ensureRole(f.aws, f.expected, f.log, { updatePolicies: true }), /mismatch|unexpected/);
+    assert.ok(f.events.every(e => e.operation && /^(get|list)-/.test(e.operation)), `${drift} must stop before writes or a repair diff`);
+  }
+});
+
+test('policy update fails if the readback does not match the intended permissions', async () => {
+  const f = roleFixture();
+  driftPolicy(f);
+  const aws = async (service, operation, input) => {
+    if (operation === 'put-role-policy') { f.events.push({ service, operation, input }); return {}; }
+    return f.aws(service, operation, input);
+  };
+  await assert.rejects(ensureRole(aws, f.expected, f.log, { updatePolicies: true }), /readback.*mismatch/);
+  const put = f.events.findIndex(e => e.operation === 'put-role-policy');
+  assert.ok(put >= 0);
+  assert.ok(f.events.slice(put + 1).some(e => e.operation === 'get-role-policy'));
+  assert.ok(!f.events.some(e => e.log?.startsWith('setup: updated')));
+});
+
+test('account setup forwards explicit policy repair and reports an unchanged next run', async () => {
+  const f = accountFixture(), logs = [];
+  const input = { config: { ...config, security_group: undefined }, claims, aws: f.aws, log: line => logs.push(line) };
+  const { config: resolved } = await setupAccount(input);
+  f.state.policies.get('ci-kit-ec2-bake').Statement[0].Action = ['ec2:DescribeInstances'];
+  const count = f.mutations.length;
+  const updated = await setupAccount({ ...input, config: resolved, updatePolicies: true });
+  assert.equal(updated.changed, true);
+  assert.deepEqual(f.mutations.slice(count).map(({ service, op, input }) => [service, op, input.RoleName, input.PolicyName]), [
+    ['iam', 'put-role-policy', 'ci-kit-ec2-bake', 'ci-kit-pool'],
+  ]);
+  assert.equal((await setupAccount({ ...input, config: resolved, updatePolicies: true })).changed, false);
+  assert.equal(f.mutations.length, count + 1);
+  assert.equal(logs.at(-1), 'setup: nothing to change');
+});
+
+test('CLI accepts explicit policy repair before reading config and cannot treat it as an unknown flag', () => {
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL('../../ec2/setup-cli.mjs', import.meta.url)), '--update-policies', '--config', '/ci-kit-no-such-config/file.json'], { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /ENOENT/);
+  assert.doesNotMatch(result.stderr, /Unknown option/);
+});

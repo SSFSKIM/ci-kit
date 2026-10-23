@@ -26,11 +26,11 @@ export function operatorAws(profile, region = 'us-east-2') {
 export async function main(args = process.argv.slice(2)) {
   const { values } = parseArgs({ args, options: {
     config: { type: 'string' }, account: { type: 'string' }, profile: { type: 'string' },
-    'google-service-account': { type: 'string' }, 'billing-proof': { type: 'boolean' },
+    'google-service-account': { type: 'string' }, 'billing-proof': { type: 'boolean' }, 'update-policies': { type: 'boolean' },
     since: { type: 'string' }, through: { type: 'string' }, help: { type: 'boolean' },
   } });
   if (values.help) {
-    console.log('Usage: AWS_PROFILE=operator ec2/setup.sh [--config FILE] [--account ID] [--profile NAME]\n  [--google-service-account EMAIL] [--billing-proof] [--since DATE] [--through DATE]\nCreates missing resources; refuses existing drift without changing it. Billing proof is explicit (a paid read), and is required before enabling credit preference.');
+    console.log('Usage: AWS_PROFILE=operator ec2/setup.sh [--config FILE] [--account ID] [--profile NAME]\n  [--google-service-account EMAIL] [--update-policies] [--billing-proof] [--since DATE] [--through DATE]\nCreates missing resources; refuses existing drift by default. --update-policies prints current/desired policy diffs and replaces only each role\'s ci-kit-pool inline policy, with readback verification. Trust, duration, role identity and other policy attachments must still match. Billing proof is explicit (a paid read), and is required before enabling credit preference.');
     return;
   }
   const config = await readAccount(values.config, values.account);
@@ -40,7 +40,7 @@ export async function main(args = process.argv.slice(2)) {
   if (who.Account !== config.account) throw new Error(`setup: operator account mismatch: expected ${config.account}, got ${who.Account}`);
   const tokenProvider = operatorTokenProvider(values['google-service-account']);
   const claims = identityClaims(await tokenProvider(`https://ci-kit/${config.account}/ec2`), config.account);
-  const result = await setupAccount({ config, claims, aws });
+  const result = await setupAccount({ config, claims, aws, updatePolicies: values['update-policies'] });
   if (values['billing-proof']) await proveBilling(result.config, { tokenProvider, since: values.since, through: values.through });
   else console.log('setup: billing proof pending; run ec2/setup.sh --billing-proof before enabling credit preference');
 }
