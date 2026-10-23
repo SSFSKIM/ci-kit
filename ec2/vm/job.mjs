@@ -175,14 +175,22 @@ export async function checkImage(root = '/') {
     throw new Error('incomplete bake manifest');
   }
   if (!await exists('etc/cloud/cloud-init.disabled')) throw new Error('cloud-init enabled');
-  for (const name of ['var/lib/cloud/instance', 'var/lib/cloud/data/instance-id', 'var/lib/cloud/data/previous-instance-id']) {
-    if (await exists(name)) throw new Error('cloud-init identity remains');
+  if (await exists('var/lib/cloud/instance')) throw new Error('cloud-init identity remains');
+  // Cloud-init is disabled on these images: persisted state is from the builder, not this guest's boot.
+  // Empty container directories are harmless; current generator/job state lives separately under /run.
+  for (const name of ['var/lib/cloud/instances', 'var/lib/cloud/data', 'var/lib/cloud/seed']) {
+    if (await exists(name) && (await readdir(path(name))).length) throw new Error('cloud-init state remains');
   }
-  if (await exists('var/lib/cloud/instances') && (await readdir(path('var/lib/cloud/instances'))).length) {
-    throw new Error('cloud-init cache remains');
+  for (const name of ['root/.aws', 'root/.config/gcloud', 'root/.git-credentials', 'root/.netrc']) {
+    if (await exists(name)) throw new Error('builder credential artifact remains');
   }
-  for (const name of ['root/.aws', 'root/.config/gcloud']) {
-    if (await exists(name)) throw new Error('builder credential directory remains');
+  for (const [directory, pattern, category] of [
+    ['var/log', /^cloud-init(?:-output)?\.log(?:\..+)?$/, 'cloud-init log'],
+    ['tmp', /^ci-kit-(?:warm|electron)-/, 'builder temporary artifact'],
+  ]) {
+    if (await exists(directory) && (await readdir(path(directory))).some(name => pattern.test(name))) {
+      throw new Error(`${category} remains`);
+    }
   }
 }
 

@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { runGuest, imdsClient, armDeadline, putReport, finalizeGuest } from '../../ec2/vm/job.mjs';
 import * as guest from '../../ec2/vm/job.mjs';
 import { prepareContainer, runContainer } from '../../pool/vm/container.mjs';
-import { mkdtemp, mkdir, writeFile, rm, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, chmod, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 
 const data = () => ({ v: 1, alloc: 'abc123', jit: 'secret-jit', deadline: '2026-10-24T02:00:00Z',
   report: { boot: 'https://s3.example/boot?signature=secret', notice: 'https://s3.example/notice', exit: 'https://s3.example/exit' } });
@@ -159,7 +159,7 @@ test('an iptables failure fails closed before preparing a workdir or running a j
   assert.equal(made, false);
 });
 
-test('host smoke rejects stale cloud-init identity or credentials without exposing host files to the job', async t => {
+async function imageFixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'ci-kit-guest-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'etc/ci-kit'), { recursive: true });
@@ -169,6 +169,11 @@ test('host smoke rejects stale cloud-init identity or credentials without exposi
   const manifest = { v: 1, kit_commit: 'abc', node: { 22: 'v22.23.0', 24: 'v24.10.0' },
     maws: { revision: 'def', lock_sha256: '123' }, runner_version: '2.338.0', warm: { install: { ok: true } } };
   await writeFile(join(root, 'etc/ci-kit/bake-manifest.json'), JSON.stringify(manifest));
+  return root;
+}
+
+test('host smoke rejects stale cloud-init identity or credentials without exposing host files to the job', async t => {
+  const root = await imageFixture(t);
   await guest.checkImage(root);
   await mkdir(join(root, 'var/lib/cloud/instances/i-builder'));
   await writeFile(join(root, 'var/lib/cloud/instances/i-builder/user-data.txt'), 'secret-token');
@@ -180,6 +185,54 @@ test('host smoke rejects stale cloud-init identity or credentials without exposi
   await rm(join(root, 'root/.aws'), { recursive: true });
   await writeFile(join(root, 'etc/ci-kit/bake-manifest.json'), '{}');
   await assert.rejects(guest.checkImage(root), /manifest/);
+});
+
+test('host smoke rejects each retained builder state, log, credential and temporary artifact', async t => {
+  const artifacts = [
+    ['var/lib/cloud/instance', 'cloud-init', 'symlink'],
+    ['var/lib/cloud/instances/i-builder/user-data.txt', 'cloud-init'],
+    ['var/lib/cloud/data/instance-id', 'cloud-init'],
+    ['var/lib/cloud/data/previous-instance-id', 'cloud-init'],
+    ['var/lib/cloud/data/status.json', 'cloud-init'],
+    ['var/lib/cloud/seed/nocloud/user-data', 'cloud-init'],
+    ['var/log/cloud-init.log', 'cloud-init'],
+    ['var/log/cloud-init-output.log', 'cloud-init'],
+    ['var/log/cloud-init.log.1.gz', 'cloud-init'],
+    ['var/log/cloud-init-output.log.1', 'cloud-init'],
+    ['root/.aws/credentials', 'credential'],
+    ['root/.config/gcloud/access_tokens.db', 'credential'],
+    ['root/.git-credentials', 'credential', 'empty'],
+    ['root/.netrc', 'credential', 'empty'],
+    ['tmp/ci-kit-warm-builder/.git/config', 'temporary'],
+    ['tmp/ci-kit-electron-builder/auth.json', 'temporary'],
+    ['tmp/ci-kit-warm-token', 'temporary'],
+    ['tmp/ci-kit-electron-token', 'temporary', 'symlink'],
+  ];
+  for (const [artifact, category, type] of artifacts) {
+    await t.test(artifact, async t => {
+      const root = await imageFixture(t);
+      const target = join(root, artifact);
+      await mkdir(dirname(target), { recursive: true });
+      if (type === 'symlink') await symlink('/nonexistent-builder-state', target);
+      else await writeFile(target, type === 'empty' ? '' : 'secret-builder-residue');
+      await assert.rejects(guest.checkImage(root), error => {
+        assert.match(error.message, new RegExp(category));
+        assert.ok(!error.message.includes('secret-builder-residue'));
+        return true;
+      });
+    });
+  }
+});
+
+test('host smoke permits fresh guest identity, runtime state and unrelated logs or temporary files', async t => {
+  const root = await imageFixture(t);
+  for (const file of ['etc/machine-id', 'etc/hostname', 'etc/ssh/ssh_host_ed25519_key',
+    'run/ci-kit-ec2/state.json', 'run/cloud-init/cloud-init-generator.log', 'var/log/syslog', 'tmp/current-guest']) {
+    const target = join(root, file);
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, 'new-guest-state');
+  }
+  await guest.checkImage(root);
 });
 
 test('deadline and killed-unit finalizers report terminal failure and power off even when PUT fails', async () => {
