@@ -64,8 +64,8 @@ test('repo list controls order, fresh fallback registrations, and instance-scope
   assert.ok(runners[0].labels.some((l) => l.name === 'ci-kit-ec2'));
 });
 
-test('two queued admissions reserve cap synchronously before a delayed first ledger write', async () => {
-  const s = setup({ refs: [ref('ec2', 'a', 8), ref('ec2', 'b')] });
+test('concurrent queued admissions reserve both account caps before a delayed first ledger write', async () => {
+  const s = setup({ refs: [ref('ec2', 'a', 8), ref('ec2', 'b', 8)] });
   let release;
   const first = new Promise((r) => { release = r; });
   const original = s.ledger.upsert;
@@ -74,9 +74,10 @@ test('two queued admissions reserve cap synchronously before a delayed first led
     if (row.state === 'launching' && row.account === 'b') release();
     return original(row, opts);
   };
-  s.queue(); s.queue();
+  s.queue(); s.queue(); s.queue();
   const out = await s.make().tick();
   assert.equal(out.launched.length, 2);
+  assert.equal(out.waiting, 1);
   assert.deepEqual((await s.rows()).map((r) => r.account).sort(), ['a', 'b']);
 });
 
@@ -112,6 +113,10 @@ test('unknown EC2 inventory keeps old reservations and suppresses all its effect
   s.w.advance(31 * 60_000);
   await s.make().tick(); await s.make().tick();
   assert.equal(s.logs.filter((x) => x.includes('inventory unknown for 30 min')).length, 1);
+  s.w.advance(48 * 3600_000);
+  const cold = createGceLedger(s.w.github, s.cfg.ledger, { now: s.w.now });
+  await s.make({ ledger: cold }).tick();
+  assert.equal((await cold.rows()).find((r) => r.alloc === 'held').state, 'launching', 'cold restart after a multi-day outage still holds the row');
 });
 
 async function until(cond) {
@@ -357,4 +362,12 @@ test('a terminal orphan VM is retired with its actual provider/account, not a sy
   assert.equal(r.account, 'a');
   assert.equal(r.repo, repo);
   assert.equal(r.end, 'orphan');
+});
+
+test('oldest demand that cannot fit the global budget holds the queue, rather than admitting a younger smaller job', async () => {
+  const s = setup({ refs: [ref('gce', ONE_REGION_CFG.project)], max: 4 });
+  s.queue(16); s.w.advance(1); s.queue(2);
+  const out = await s.make().tick();
+  assert.equal(out.launched.length, 0);
+  assert.equal(out.waiting, 2);
 });

@@ -44,3 +44,15 @@ test('persistent speculative groups count successful fallback and race once, ign
   assert.deepEqual([...prelaunchedFor(rows, run).get(8)], ['original']);
   assert.deepEqual([...prelaunchedFor(rows.slice(1), run).get(8)], ['original'], 'restart without original preserves grouping');
 });
+
+test('mixed live runners and pending allocations cover provider-only jobs once before generic demand', () => {
+  for (const provider of ['gce', 'ec2']) {
+    const live = row('live', provider, { state: 'running' });
+    const pending = row('pending', provider === 'gce' ? 'ec2' : 'gce');
+    const instance = { provider, account: live.account, alloc: live.alloc, name: live.instance, cpus: 8, vcpus: 8, repoLabel: 'o--r', status: 'RUNNING', created: now - 1000, running: now - 1000 };
+    const rows = [live, pending];
+    const plan = planLaunches({ queued: [job(1), job(2, 'gce'), job(3, 'ec2')], instances: [instance], rows, runners: runnersFor(rows), now, cfg, admission: false });
+    assert.equal(plan.inflight, 16, 'the live row and its listed VM are one reservation');
+    assert.deepEqual(plan.launches.map((x) => x.job.id), [1]);
+  }
+});

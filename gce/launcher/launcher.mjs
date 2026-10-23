@@ -582,6 +582,8 @@ export class Launcher {
   // allocation's slow insert (`race`: {of, demand}, spec M6) walks the `attempts` it was given and is never raced
   // itself. Its row keeps its walk's refusals and slow inserts (walkRecord).
   async launch(item, ctx) {
+    const admissionItem = item.admissionItem ?? item;
+    if (!item.race && ctx.root.globalWaiter && ctx.root.globalWaiter !== admissionItem) return {};
     const walk = providerWalk({ ...item, cfg: this.cfg, repoProviders: this.repoProviders, providers: this.providers, ec2: this.ec2, creditPreference: this.creditPreference });
     if (walk.unlisted) {
       const key = `unservable:${item.repo}:${item.job.id}`;
@@ -590,6 +592,7 @@ export class Launcher {
     }
     const groups = item.groups ?? walk.groups;
     let budgetBlocked = false;
+    let globalBlocked = false;
     for (let index = 0; index < groups.length; index += 1) {
       if (this.now() >= ctx.deadline) break;
       const group = groups[index];
@@ -604,16 +607,27 @@ export class Launcher {
         this.log(`${item.job ? `job ${item.job.id}` : `run ${item.prelaunch.run}`} in ${item.repo} waits: every placement for its size is full, out of quota this tick, or recently stocked out on ${key}`);
         continue;
       }
-      const image = await ctx.preparation.time('images.wait', () => ctx.seen.images.get(key));
-      if (!image) { this.log(`no ready image in family ${this.cfg.image_family}; demand in ${item.repo} waits on ${key}`); continue; }
       const alloc = this.newAllocation(ctx.seen);
       const reserved = ctx.admission.acquire(alloc, item.repo, { ...group, candidates: attempts });
-      if (reserved === null) { budgetBlocked = true; continue; }
+      if (reserved === null) {
+        budgetBlocked = true;
+        globalBlocked ||= ctx.admission.total() + Math.max(...attempts.map((p) => p.vcpus)) > this.cfg.max_vcpus;
+        continue;
+      }
+      const image = await ctx.preparation.time('images.wait', () => ctx.seen.images.get(key));
+      if (!image || this.now() >= ctx.deadline) {
+        ctx.admission.release(alloc);
+        if (!image) this.log(`no ready image in family ${this.cfg.image_family}; demand in ${item.repo} waits on ${key}`);
+        continue;
+      }
       // The first admitted allocation identifies a speculative demand, including every later fallback and race.
       if (item.prelaunch && !item.prelaunch.group) item.prelaunch = { ...item.prelaunch, group: alloc };
       const result = await this.launchAllocation({ ...item, admissionItem: item.admissionItem ?? item, alloc, reserved, attempts }, { ...ctx, image, room, group, remaining: groups.slice(index + 1) });
       if (result.name || result.held || result.raced) return result;
     }
+    // FIFO applies to the global budget, not a repo's cap or an unavailable provider. Check this before any
+    // asynchronous wait so a younger, smaller job cannot pass an older demand that has no globally fitting walk.
+    if (globalBlocked && !item.race) ctx.root.globalWaiter ??= admissionItem;
     // Cleanup runs beside launches. Only demands declined by a budget wait for it, then retry admission once:
     // a row finalized in this tick releases both debits without delaying the first launches that already fit.
     if (budgetBlocked && !item.afterCleanup) {
