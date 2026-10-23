@@ -1044,6 +1044,15 @@ The production chain is reviewed at each boundary:
 
 ## Decision Log
 
+- Decision: M2 names the image's ci-kit provenance field `image_commit`, sourced from the selected GCE image's
+  existing `ci-kit-commit` label. Candidate adds optional `family`, supplied by the GCE data adapter, so M4 can
+  consume the provider's family without deriving it from a GCE machine name. Pure GCE shape adaptation lives in
+  `providers/gce-data.mjs`; M3 owns `providers/gce.mjs` for effects.
+  Rationale: preserve the existing image provenance and place cloud-specific interpretation at the provider
+  boundary. V1 rows normalize to GCE with unknown account (`null`), rather than inventing a project not stored in
+  their history; the existing hidden ledger comment marker remains readable.
+  Date/Author: 2026-10-23, M2 executor and controller.
+
 - Decision: Verification as in Verification above: one technical spec review plus a buildability review, a review
   per milestone, and reviewer-high on the branch.
   Rationale: a new cloud, IAM and federation, and a scheduler change on the path of every MAWS run.
