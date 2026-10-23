@@ -86,14 +86,19 @@ async function look(gce, vm, path, runId, last) {
 // Polls a builder or smoke VM until it reported and powered off, or failed.
 async function awaitReport(gce, vm, path, timeoutMs, { runId, sleep, now, log }) {
   const start = now();
-  let report = null;
+  let report = null, manifest = null;
   for (;;) {
     let instance;
     ({ instance, report } = await look(gce, vm, path, runId, report));
+    // Guest attributes can disappear on poweroff; retain the manifest alongside the success report.
+    if (instance && path === 'ci-kit/bake') {
+      try { manifest = (await gce.guestAttribute(vm.zone, vm.name, 'ci-kit/manifest')) ?? manifest; }
+      catch (err) { if (!(err instanceof GceError && err.status === 404)) throw err; }
+    }
     const outcome = reportOutcome({ instance, report, elapsedMs: now() - start, timeoutMs });
     if (outcome.done) {
       log(`${vm.name}: ${outcome.ok ? 'ok' : outcome.reason} after ${Math.round((now() - start) / 1000)} s`);
-      return outcome;
+      return { ...outcome, manifest };
     }
     await sleep(POLL_MS);
   }
@@ -145,6 +150,7 @@ async function realJob(gce, gh, { cfg, names, runId, image, check, sleep, now, l
 // One bake. Returns { image, check } (the real job's run URL) once the image is ready; throws with the reason
 // otherwise. gh: a GitHub client for ci-kit-sandbox (CHECK_SCOPE).
 export async function runBake(gce, { cfg, sha, manifest, runId, token, gh, script, sleep, now = Date.now, log = () => {} }) {
+  if (!manifest || manifest.kit_commit !== sha) throw new Error('ci-kit: the bake needs its resolved manifest');
   const names = bakeNames(runId, sha);
   const wait = { runId, sleep, now, log };
   const check = { name: null, runner: null, run: null };
@@ -165,7 +171,7 @@ export async function runBake(gce, { cfg, sha, manifest, runId, token, gh, scrip
       ({ machine, zone, placement }) => builderInstance({ name: names.builder, zone, machine, runId, script, token, manifest, placement, egress: cfg.egress }), log);
     const built = await awaitReport(gce, builder, 'ci-kit/bake', BAKE_TIMEOUT_MS, wait);
     if (!built.ok) throw new Error(`ci-kit: the builder did not finish: ${built.reason}`);
-    const actualManifest = manifest ? verifyManifest(JSON.parse(await gce.guestAttribute(builder.zone, builder.name, 'ci-kit/manifest')), manifest) : null;
+    const actualManifest = verifyManifest(JSON.parse(built.manifest), manifest);
 
     // The disk is consistent: the guest powered off after reporting. Re-check ownership right before imaging it.
     const owned = await gce.instance(builder.zone, builder.name);
@@ -174,7 +180,7 @@ export async function runBake(gce, { cfg, sha, manifest, runId, token, gh, scrip
     // whose outcome is uncertain may have made the image, so the cleanup looks for it, and deletes it only by label.
     try {
       const body = imageBody({ name: names.image, family: cfg.image_family, zone: builder.zone, disk: builder.name, sha, runId });
-      if (actualManifest) Object.assign(body.labels, manifestLabels(actualManifest));
+      Object.assign(body.labels, manifestLabels(actualManifest));
       await gce.insertImage(body);
     } catch (err) {
       if (!refusedOutright(err)) image = names.image;
@@ -218,7 +224,7 @@ export async function runBake(gce, { cfg, sha, manifest, runId, token, gh, scrip
     await gce.setImageLabels(image, { ...made.labels, 'ci-kit-ready': 'true' });
     ready = true;
     log(`image ${image} is ready`);
-    return { image, check: url, skipped, ...(actualManifest ? { manifest: actualManifest } : {}) };
+    return { image, check: url, skipped, manifest: actualManifest };
   } finally {
     await cleanUp(gce, { cfg, runId, image: ready ? null : image, gh, check, sleep, now, log });
   }

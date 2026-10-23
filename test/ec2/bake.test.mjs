@@ -265,3 +265,8 @@ test('unknown full snapshot size fails closed rather than charging the volume al
   await assert.rejects(f.run(),/full written size/);
   assert.ok(!f.calls.some(([n,v])=>n==='CreateTagsCommand' && v.Tags.some((t)=>t.Key==='ci-kit-ready' && t.Value==='true')));
 });
+
+test('GCE stage refuses an absent manifest before launching a builder',async()=>{
+  const {runBake}=await import('../../gce/bake/bake.mjs');
+  await assert.rejects(runBake({}, {sha,runId:'test'}),/manifest/);
+});
