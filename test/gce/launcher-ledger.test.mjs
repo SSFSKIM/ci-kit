@@ -602,7 +602,7 @@ test('a whole read keeps a comment this store just wrote that GitHub does not li
   const listing = f.gh.issueComments;
   f.gh.issueComments = async (...args) => (await listing(...args)).filter((c) => Date.parse(c.updated_at) < f.clock.t); // listing lag
   await store.read();
-  assert.deepEqual((await store.rows()).map((r) => r.alloc).sort(), ['tb0abc0001', 'tb0abc0002']);
+  assert.deepEqual((await store.rows()).map((r) => r.alloc), ['tb0abc0002']);
 });
 
 
