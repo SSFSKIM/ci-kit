@@ -65,6 +65,9 @@ measurement exists.
   run 40015186704: all six pool jobs on GCE, v2 rows, no ERROR logs or rollback. AWS resource spend unchanged
   from M1's <=$0.735, plus this execution's one $0.01 Cost Explorer read.
 - [ ] M5: the EC2 provider, its image and its one-time setup, serving ci-kit-sandbox.
+  Code reviewed approved through be1dd1a; full gate 40018176821 green at 12c6cdd (successor is whitespace only).
+  Two nonblocking findings deferred to ci-kit #108: initialization metadata for non-200 rates and stronger
+  image-residue smoke assertions. Setup, deployment, bake and all live M5 proofs remain outstanding.
 - [ ] M6: credit preference, reports, guard, the MAWS canary and acceptance.
 
 ## What it must not be
@@ -1203,7 +1206,8 @@ The EC2 and regional clients use us-east-2; the Cost Explorer client alone uses 
       {"account": "290475840169", "enabled": true, "region": "us-east-2",
        "placements": [{"zone": "us-east-2b", "subnet": "subnet-…",
                        "machines": {"2": "c8a.large", "4": "c8a.xlarge", "8": "c8a.2xlarge", "16": "c8a.4xlarge"}}],
-       "disk_gb": 50, "security_group": "sg-…", "report_bucket": "ci-kit-ec2-reports-290475840169",
+       "disk_gb": 50, "initialization_mibps": 200, "security_group": "sg-…",
+       "report_bucket": "ci-kit-ec2-reports-290475840169",
        "roles": {"launcher": "arn:aws:iam::290475840169:role/ci-kit-ec2-launcher",
                  "bake": "arn:aws:iam::290475840169:role/ci-kit-ec2-bake",
                  "guard": "arn:aws:iam::290475840169:role/ci-kit-ec2-guard"},
