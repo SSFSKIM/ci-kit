@@ -3,7 +3,8 @@
 import { execFile } from 'node:child_process';
 import { promisify, parseArgs } from 'node:util';
 import { readFile } from 'node:fs/promises';
-import { pathToFileURL, fileURLToPath } from 'node:url';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { RunInstancesCommand } from '@aws-sdk/client-ec2';
 import { GetCostAndUsageCommand } from '@aws-sdk/client-cost-explorer';
 import { createAws } from '../lib/aws.mjs';
@@ -87,6 +88,6 @@ export async function main(args = process.argv.slice(2)) {
   if (outcome !== values.expect) throw new Error(`proof: expected ${values.expect}, received ${outcome ?? 'unexpected successful DryRun response'}`);
   console.log(`proof: ${outcome} role=${values.role} image=${values.image} purpose=${values.purpose} (DryRun only)`);
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && realpathSync(new URL(import.meta.url)) === realpathSync(process.argv[1])) {
   main().catch(error => { console.error(error.message); process.exitCode = 1; });
 }

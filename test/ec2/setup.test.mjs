@@ -1,5 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, symlinkSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { buildRoles, fisTemplate, ensureRole, setupAccount, identityClaims, publicAccessBlock, reportLifecycle } from '../../ec2/setup-lib.mjs';
 import { billingInput, dryRunInput, selectAccount } from '../../ec2/setup-proof.mjs';
 
@@ -239,3 +244,19 @@ test('proof inputs are always DryRun and billing includes gross EC2 compute and 
   assert.equal(selectAccount({ accounts: [config] }).account, config.account);
   assert.throws(() => selectAccount({ accounts: [config] }, '111122223333'), /not configured/);
 });
+
+for (const script of ['setup-cli.mjs', 'setup-proof.mjs', 'setup.sh']) {
+  for (const [flag, expectedStatus, message] of [['--help', 0, /Usage:/], ['--unknown', 1, /Unknown option/]]) {
+    test(`${script} through a symlink handles ${flag} rather than silently exiting`, () => {
+      const dir = mkdtempSync(join(tmpdir(), 'ci-kit-setup-entry-'));
+      try {
+        const link = join(dir, 'ec2');
+        symlinkSync(fileURLToPath(new URL('../../ec2/', import.meta.url)), link);
+        const path = join(link, script);
+        const result = spawnSync(script.endsWith('.sh') ? '/bin/bash' : process.execPath, [path, flag], { encoding: 'utf8', timeout: 10_000 });
+        assert.equal(result.status, expectedStatus, result.stderr);
+        assert.match(`${result.stdout}${result.stderr}`, message);
+      } finally { rmSync(dir, { recursive: true, force: true }); }
+    });
+  }
+}

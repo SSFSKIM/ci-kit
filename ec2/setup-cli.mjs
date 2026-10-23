@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
 import { promisify, parseArgs } from 'node:util';
-import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
 import { identityClaims, setupAccount } from './setup-lib.mjs';
 import { readAccount, operatorTokenProvider, proveBilling } from './setup-proof.mjs';
 
@@ -44,6 +44,6 @@ export async function main(args = process.argv.slice(2)) {
   if (values['billing-proof']) await proveBilling(result.config, { tokenProvider, since: values.since, through: values.through });
   else console.log('setup: billing proof pending; run ec2/setup.sh --billing-proof before enabling credit preference');
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && realpathSync(new URL(import.meta.url)) === realpathSync(process.argv[1])) {
   main().catch(error => { console.error(error.message); process.exitCode = 1; });
 }
