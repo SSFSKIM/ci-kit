@@ -8,7 +8,7 @@ const image = { ImageId: 'ami-123', State: 'available', CreationDate: '2026-10-2
   Tags: tags({ 'ci-kit-pool': 'ec2', 'ci-kit-ready': 'true', 'ci-kit-commit': 'abc123', 'ci-kit-snapshot-gib': '11.46' }) };
 export function fixture() {
   let time = start;
-  const calls = [], objects = new Map(), instances = [];
+  const calls = [], logs = [], objects = new Map(), instances = [];
   const handlers = {
     DescribeInstances: () => ({ Reservations: [{ Instances: instances }] }),
     DescribeImages: () => ({ Images: [image] }),
@@ -22,10 +22,10 @@ export function fixture() {
   };
   const send = async (command) => { const name = command.constructor.name.replace(/Command$/, ''); calls.push([name, command.input]); return handlers[name](command.input); };
   const aws = { ec2: { send }, s3: { send }, presignPut: async ({ key }) => `https://example.com/${key}?signature=secret` };
-  const make = (cfg = account) => createProvider({ aws, account: cfg, cfg: { max_run_minutes: 120 }, now: () => time });
+  const make = (cfg = account) => createProvider({ aws, account: cfg, cfg: { max_run_minutes: 120 }, now: () => time, log: (line) => logs.push(line) });
   const provider = make();
   const row = { alloc: 'alloc1', repo: 'SSFSKIM/ci-kit-sandbox', cpus: 8, image: image.ImageId, zone: 'us-east-2c', client_token: 'alloc1-1', sent_at: new Date(start).toISOString() };
-  return { aws, calls, handlers, instances, objects, provider, make, row, advance: (ms) => { time += ms; } };
+  return { aws, calls, logs, handlers, instances, objects, provider, make, row, advance: (ms) => { time += ms; } };
 }
 export async function prepared(f) { await f.provider.observe(); await f.provider.readyImage(); return f.provider.candidates(account, 8)[0]; }
 export function instance(extra = {}) { return { InstanceId: 'i-123', InstanceType: 'c8a.2xlarge', ImageId: 'ami-123', LaunchTime: new Date(start), State: { Name: 'running' }, Placement: { AvailabilityZone: 'us-east-2c' }, SubnetId: 'subnet-123', InstanceLifecycle: 'spot', Tags: tags({ 'ci-kit-pool': 'ec2', 'ci-kit-purpose': 'job', 'ci-kit-alloc': 'alloc1', 'ci-kit-repo': 'SSFSKIM--ci-kit-sandbox', 'ci-kit-cpus': 8 }), ...extra }; }

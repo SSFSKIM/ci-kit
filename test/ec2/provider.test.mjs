@@ -82,6 +82,15 @@ test('boot and notice are telemetry, only valid terminal exit is retirement evid
   assert.equal((await f.provider.readReports([f.row])).get('alloc1').terminal, undefined);
 });
 
+test('a missing report is pending while denied access is logged as unavailable; neither supplies terminal evidence', async () => {
+  const f = fixture();
+  assert.equal((await f.provider.readReports([f.row])).get('alloc1').terminal, undefined);
+  assert.equal(f.logs.length, 0);
+  f.handlers.GetObject = () => { throw Object.assign(new Error('signed URL must not leak'), { name: 'AccessDenied', $metadata: { httpStatusCode: 403 } }); };
+  assert.equal((await f.provider.readReports([f.row])).get('alloc1').terminal, undefined);
+  assert.equal(f.logs.length, 3); assert.ok(f.logs.every((line) => line.includes('AccessDenied') && !line.includes('signed URL')));
+});
+
 test('initialization charges accrue for failed and idle boots, not refused allocations; interruption waives only compute', async () => {
   const f = fixture(); const c = await prepared(f);
   const row = runningRow(launchRow({ ...f.row, provider: 'ec2', account: account.account, at: start, config: 'abc', reserved: 8 }), { id: 'i-123', candidate: c, createdAt: new Date(start).toISOString() });
