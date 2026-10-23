@@ -66,8 +66,9 @@ measurement exists.
   from M1's <=$0.735, plus this execution's one $0.01 Cost Explorer read.
 - [ ] M5: the EC2 provider, its image and its one-time setup, serving ci-kit-sandbox.
   Code reviewed approved through be1dd1a; full gate 40018176821 green at 12c6cdd (successor is whitespace only).
-  Two nonblocking findings deferred to ci-kit #108: initialization metadata for non-200 rates and stronger
-  image-residue smoke assertions. Setup, deployment, bake and all live M5 proofs remain outstanding.
+  Initialization metadata for non-200 rates is deferred to ci-kit #108 entry 2. The design owner requires the
+  missing image-residue smoke assertions before merge; correction underway, not deferred. Setup, deployment,
+  bake and all live M5 proofs remain outstanding.
 - [ ] M6: credit preference, reports, guard, the MAWS canary and acceptance.
 
 ## What it must not be
@@ -1542,6 +1543,12 @@ The production chain is reviewed at each boundary:
   created-volume costs. Report absence and access failure are distinct outcomes. The explicit billing command
   avoids repeated paid reads during idempotent setup while retaining M6's mandatory federated proof.
   Date/Author: 2026-10-23, M5 executor and controller; AWS pricing documentation cited above.
+
+- Decision: The M5 smoke assertion gap is not deferred: the stated no-secret image guarantee requires smoke to
+  reject cloud-init logs/seed/instance state and root Git/netrc credential residue, including the locations the
+  builder clears. Add injected-artifact coverage and rerun the full gate before merge; no additional review
+  round is required for that bounded correction. Only the non-200 initialization metadata finding is deferred.
+  Date/Author: 2026-10-23, design-owner ruling after M5 review.
 
 ## Outcomes & Retrospective
 
