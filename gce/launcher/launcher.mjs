@@ -668,6 +668,9 @@ export class Launcher {
     const alloc = item.alloc;
     const name = providerRunnerName(group.provider, alloc);
     const reserved = item.reserved;
+    // A proposed race changes the original walk only once this allocation has both budgets and can open its row.
+    // Its original may have settled while admission or the image was awaited; then no child is opened.
+    if (item.onAdmitted && !item.onAdmitted()) { ctx.admission.release(alloc); return {}; }
     let row = launchRow({ alloc, repo, cpus, at, config: this.config, egress: this.cfg.egress, prelaunch, race, reserved,
       provider: group.provider, account: group.account, image: image.id, image_commit: image.manifest['ci-kit-commit'], credit_policy: group.creditPolicy });
     // Acquire happened synchronously before entering this function. Do not release a reservation after an
@@ -703,9 +706,13 @@ export class Launcher {
         const sent = this.now();
         const slow = race ? null : this.after(RACE_AFTER_MS);
         if (group.provider === 'ec2') {
-          row = { ...row, zone: p.zone, client_token: `${alloc}-${attempts.indexOf(p) + 1}`, sent_at: iso(sent) };
-          await this.ledger.upsert(row);
-          seen.rowOf.set(alloc, row);
+          const next = { ...row, zone: p.zone, client_token: `${alloc}-${attempts.indexOf(p) + 1}`, sent_at: iso(sent) };
+          // The preceding attempt's delayed race marker must land before these reconciliation coordinates.
+          await (marking = marking.then(async () => {
+            await this.ledger.upsert(next);
+            row = next;
+            seen.rowOf.set(alloc, row);
+          }));
         }
         const insert = api.launch(row, p, jit.encoded_jit_config).then((result) => {
           if (result.outcome === 'denied') {
@@ -817,9 +824,16 @@ export class Launcher {
     const pending = { ...row, slow: [{ zone: attempt.zone, outcome: 'unknown', sent: iso(sent) }] };
     const marked = hold(async () => { const written = await this.write(pending); if (written) ctx.seen.rowOf.set(row.alloc, pending); return written; });
     if (!(await marked) || !stillPending()) { this.log(`${unsettled}; no race (its pending insert could not be written or settled meanwhile)`); return; }
-    start();
+    let admitted = false;
+    const onAdmitted = () => {
+      if (admitted) return true; // a definitely refused child's fallback is still this race's demand
+      if (!stillPending()) return false;
+      admitted = true;
+      start();
+      return true;
+    };
     const demand = item.job ? { job: item.job.id } : { run: item.prelaunch.run, attempt: item.prelaunch.attempt };
-    const racing = { repo: item.repo, cpus: item.cpus, job: item.job, prelaunch: item.prelaunch, race: { of: row.alloc, demand }, groups };
+    const racing = { repo: item.repo, cpus: item.cpus, job: item.job, prelaunch: item.prelaunch, race: { of: row.alloc, demand }, groups, onAdmitted };
 
     ctx.races.push(this.launch(racing, ctx).then((r) => {
       if (!r.name) { this.log(`${unsettled}; no race (no placement admitted or accepted)`); return; }

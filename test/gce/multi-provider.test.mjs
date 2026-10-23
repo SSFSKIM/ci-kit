@@ -371,3 +371,58 @@ test('oldest demand that cannot fit the global budget holds the queue, rather th
   assert.equal(out.launched.length, 0);
   assert.equal(out.waiting, 2);
 });
+
+test('a race declined by either budget leaves the original free to try its next candidate', async () => {
+  for (const capped of ['global', 'repo']) {
+    const s = setup({ refs: [ref('ec2', 'a', capped === 'repo' ? 8 : undefined)], max: capped === 'global' ? 8 : 64 });
+    let release;
+    s.a.outcome = (_r, c) => c.zone === 'us-east-2a' ? new Promise((r) => { release = r; }) : { outcome: 'accepted', detail: '' };
+    s.queue();
+    const ticking = s.make({ after: s.w.after }).tick();
+    await until(() => release);
+    s.w.advance(20_000);
+    await until(() => s.logs.some((l) => l.includes('no race (no placement')));
+    release({ outcome: 'capacity', detail: 'refused after race admission declined' });
+    const out = await ticking;
+    const calls = s.a.calls.filter(([k]) => k === 'launch');
+    assert.equal(out.launched.length, 1, capped);
+    assert.equal(calls.length, 2, capped);
+    assert.equal(new Set(calls.map(([, r]) => r.alloc)).size, 1, 'next candidate belongs to original allocation');
+    assert.equal((await s.rows()).length, 1);
+    assert.equal((await s.rows())[0].state, 'running');
+  }
+});
+
+test('a delayed prior race marker cannot overwrite the next EC2 attempt coordinates seen after restart', async () => {
+  const s = setup({ refs: [ref('ec2', 'a')], max: 8 });
+  let first, second, marker;
+  s.a.outcome = (_row, c) => new Promise((r) => { if (c.zone === 'us-east-2a') first = r; else second = r; });
+  const write = s.ledger.upsert;
+  let delayed = false;
+  s.ledger.upsert = async (r, opts) => {
+    if (!delayed && r.state === 'launching' && r.slow?.length) {
+      delayed = true;
+      await new Promise((resolve) => { marker = resolve; });
+    }
+    return write(r, opts);
+  };
+  s.queue();
+  const ticking = s.make({ after: s.w.after }).tick();
+  await until(() => first);
+  s.w.advance(20_000);
+  await until(() => marker);
+  first({ outcome: 'capacity', detail: '' });
+  for (let k = 0; k < 30; k++) await new Promise((r) => setImmediate(r));
+  const beforeMarker = s.a.calls.filter(([k]) => k === 'launch').length;
+  marker();
+  await until(() => second);
+  const cold = createGceLedger(s.w.github, s.cfg.ledger, { now: s.w.now });
+  await cold.read();
+  const [persisted] = await cold.rows();
+  second({ outcome: 'accepted', detail: '' });
+  await ticking;
+  assert.equal(beforeMarker, 1, 'next send must wait for prior pending-marker persistence');
+  assert.equal(persisted.zone, 'us-east-2b');
+  assert.equal(persisted.client_token, `${persisted.alloc}-2`);
+  assert.equal(persisted.sent_at, new Date(start + 20_000).toISOString());
+});
