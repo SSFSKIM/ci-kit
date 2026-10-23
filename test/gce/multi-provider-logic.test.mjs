@@ -56,3 +56,10 @@ test('mixed live runners and pending allocations cover provider-only jobs once b
     assert.deepEqual(plan.launches.map((x) => x.job.id), [1]);
   }
 });
+
+test('a persisted EC2 send covers pending demand after a crash before the outcome write', () => {
+  const rows = [row('sent', 'ec2', { slow: undefined, zone: 'us-east-2a', client_token: 'sent-1', sent_at: new Date(now - 1000).toISOString() })];
+  const plan = planLaunches({ queued: [job(1), job(2, 'ec2')], instances: [], rows, runners: runnersFor(rows, { status: 'offline' }), now, cfg, admission: false });
+  assert.deepEqual(plan.launches.map((x) => x.job.id), [1], 'the still-registering runner covers pinned demand while the recorded send is reconciled');
+  assert.equal(plan.inflight, 8);
+});

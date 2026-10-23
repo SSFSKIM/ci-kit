@@ -320,7 +320,7 @@ export function pendingAllocation(row) {
   if (row.state !== 'launching') return false;
   const last = row.slow?.at(-1);
   if (last?.done && last.outcome !== 'created') return false;
-  return Boolean(row.race || unsettledInsert(row));
+  return Boolean(row.race || unsettledInsert(row) || (row.provider === 'ec2' && row.sent_at));
 }
 
 // A row's insert that never settled (outcome unknown, its operation's end not yet learned), or null; none once the row
