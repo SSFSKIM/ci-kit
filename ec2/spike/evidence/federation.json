@@ -1,0 +1,17 @@
+{
+  "began": "2026-10-23T11:56:49.245Z",
+  "claims": {
+    "sub": "110062000894727504485",
+    "azp": "110062000894727504485",
+    "aud": "https://ci-kit/290475840169/ec2",
+    "email": "ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com"
+  },
+  "requestedDurationSeconds": 14400,
+  "maxSessionDuration": 14400,
+  "proof": {
+    "role": "arn:aws:sts::290475840169:assumed-role/ci-kit-ec2-spike/ec2-m1",
+    "expiration": "2026-10-23T15:56:49+00:00",
+    "subject": "110062000894727504485",
+    "audience": "110062000894727504485"
+  }
+}

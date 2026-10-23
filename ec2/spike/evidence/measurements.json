@@ -1,0 +1,1079 @@
+{
+  "boots": [
+    {
+      "id": "ci-kit-spike-1792755636900",
+      "cloud": "gce",
+      "arm": "plain",
+      "zone": "us-east5-a",
+      "apiStart": 1792755640197,
+      "accepted": 1792755641725,
+      "boot": 1792755655145,
+      "guest": 1792755661755,
+      "node": "v22.23.4",
+      "kernel": "7.0.0-1014-gcp",
+      "kit": "7292a8b1dada5e3726dff164d9662ef6bafc3972",
+      "warm": {
+        "maws-files": {
+          "ok": true,
+          "detail": "package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc"
+        },
+        "pnpm-fetch": {
+          "ok": true,
+          "detail": ""
+        },
+        "playwright": {
+          "ok": true,
+          "detail": "1.63.0"
+        },
+        "electron": {
+          "ok": true,
+          "detail": "44.4.5"
+        }
+      },
+      "apiToGuest": 21.558,
+      "apiToListening": null,
+      "bootToGuest": 6.61
+    },
+    {
+      "id": "ci-kit-spike-1792755895592",
+      "cloud": "gce",
+      "arm": "plain",
+      "zone": "us-east5-a",
+      "apiStart": 1792755898741,
+      "accepted": 1792755900287,
+      "boot": 1792755914159,
+      "guest": 1792755920179,
+      "listening": 1792755923246,
+      "node": "v22.23.4",
+      "kernel": "7.0.0-1014-gcp",
+      "kit": "7292a8b1dada5e3726dff164d9662ef6bafc3972",
+      "warm": {
+        "maws-files": {
+          "ok": true,
+          "detail": "package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc"
+        },
+        "pnpm-fetch": {
+          "ok": true,
+          "detail": ""
+        },
+        "playwright": {
+          "ok": true,
+          "detail": "1.63.0"
+        },
+        "electron": {
+          "ok": true,
+          "detail": "44.4.5"
+        }
+      },
+      "apiToGuest": 21.438,
+      "apiToListening": 24.505,
+      "bootToGuest": 6.02,
+      "bootToListening": 9.1
+    },
+    {
+      "id": "i-029d358d0f7d67987",
+      "cloud": "ec2",
+      "arm": "plain",
+      "zone": "us-east-2c",
+      "apiStart": 1792756929642,
+      "accepted": 1792756931787,
+      "boot": 1792756945824,
+      "guest": 1792757001884,
+      "container": 1792757009207,
+      "listening": 1792757025342,
+      "node": "v22.23.4",
+      "kernel": "7.0.0-1014-aws",
+      "kit": "7292a8b1dada5e3726dff164d9662ef6bafc3972",
+      "warm": {
+        "maws-files": {
+          "ok": true,
+          "detail": "package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc"
+        },
+        "pnpm-fetch": {
+          "ok": true,
+          "detail": ""
+        },
+        "playwright": {
+          "ok": true,
+          "detail": "1.63.0"
+        },
+        "electron": {
+          "ok": true,
+          "detail": "44.4.5"
+        }
+      },
+      "apiToGuest": 72.242,
+      "apiToListening": 95.7,
+      "bootToGuest": 56.06,
+      "bootToListening": 79.8
+    },
+    {
+      "id": "i-07ba550ab18348b09",
+      "cloud": "ec2",
+      "arm": "plain",
+      "zone": "us-east-2a",
+      "apiStart": 1792756932493,
+      "accepted": 1792756934597,
+      "boot": 1792756945576,
+      "guest": 1792757011016,
+      "container": 1792757012516,
+      "listening": 1792757024623,
+      "node": "v22.23.4",
+      "kernel": "7.0.0-1014-aws",
+      "kit": "7292a8b1dada5e3726dff164d9662ef6bafc3972",
+      "warm": {
+        "maws-files": {
+          "ok": true,
+          "detail": "package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc"
+        },
+        "pnpm-fetch": {
+          "ok": true,
+          "detail": ""
+        },
+        "playwright": {
+          "ok": true,
+          "detail": "1.63.0"
+        },
+        "electron": {
+          "ok": true,
+          "detail": "44.4.5"
+        }
+      },
+      "apiToGuest": 78.523,
+      "apiToListening": 92.13,
+      "bootToGuest": 65.44,
+      "bootToListening": 79.12
+    },
+    {
+      "id": "i-07c2afd415f33db26",
+      "cloud": "ec2",
+      "arm": "plain",
+      "zone": "us-east-2a",
+      "apiStart": 1792757085693,
+      "accepted": 1792757088023,
+      "boot": 1792757101010,
+      "guest": 1792757167010,
+      "container": 1792757173231,
+      "listening": 1792757183320,
+      "node": "v22.23.4",
+      "kernel": "7.0.0-1014-aws",
+      "kit": "7292a8b1dada5e3726dff164d9662ef6bafc3972",
+      "warm": {
+        "maws-files": {
+          "ok": true,
+          "detail": "package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc"
+        },
+        "pnpm-fetch": {
+          "ok": true,
+          "detail": ""
+        },
+        "playwright": {
+          "ok": true,
+          "detail": "1.63.0"
+        },
+        "electron": {
+          "ok": true,
+          "detail": "44.4.5"
+        }
+      },
+      "apiToGuest": 81.317,
+      "apiToListening": 97.627,
+      "bootToGuest": 66,
+      "bootToListening": 82.47
+    },
+    {
+      "id": "i-0501e1d8e071554ac",
+      "cloud": "ec2",
+      "arm": "init-300",
+      "zone": "us-east-2c",
+      "apiStart": 1792757149599,
+      "accepted": 1792757151651,
+      "boot": 1792757164171,
+      "guest": 1792757178651,
+      "container": 1792757180266,
+      "listening": 1792757187341,
+      "node": "v22.23.4",
+      "kernel": "7.0.0-1014-aws",
+      "kit": "7292a8b1dada5e3726dff164d9662ef6bafc3972",
+      "warm": {
+        "maws-files": {
+          "ok": true,
+          "detail": "package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc"
+        },
+        "pnpm-fetch": {
+          "ok": true,
+          "detail": ""
+        },
+        "playwright": {
+          "ok": true,
+          "detail": "1.63.0"
+        },
+        "electron": {
+          "ok": true,
+          "detail": "44.4.5"
+        }
+      },
+      "apiToGuest": 29.052,
+      "apiToListening": 37.742,
+      "bootToGuest": 14.48,
+      "bootToListening": 23.24
+    },
+    {
+      "id": "i-0c0205031a0cb7a48",
+      "cloud": "ec2",
+      "arm": "prefetch",
+      "zone": "us-east-2c",
+      "apiStart": 1792757161188,
+      "accepted": 1792757163332,
+      "boot": 1792757171088,
+      "guest": 1792757194798,
+      "container": 1792757199728,
+      "listening": 1792757211828,
+      "node": "v22.23.4",
+      "kernel": "7.0.0-1014-aws",
+      "kit": "7292a8b1dada5e3726dff164d9662ef6bafc3972",
+      "warm": {
+        "maws-files": {
+          "ok": true,
+          "detail": "package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc"
+        },
+        "pnpm-fetch": {
+          "ok": true,
+          "detail": ""
+        },
+        "playwright": {
+          "ok": true,
+          "detail": "1.63.0"
+        },
+        "electron": {
+          "ok": true,
+          "detail": "44.4.5"
+        }
+      },
+      "apiToGuest": 33.61,
+      "apiToListening": 50.64,
+      "bootToGuest": 23.71,
+      "bootToListening": 40.78
+    },
+    {
+      "id": "i-07345f85d3bd80a08",
+      "cloud": "ec2",
+      "arm": "plain",
+      "zone": "us-east-2c",
+      "apiStart": 1792757441336,
+      "accepted": 1792757443456,
+      "boot": 1792757455278,
+      "guest": 1792757513988,
+      "container": 1792757521570,
+      "listening": 1792757536693,
+      "node": "v22.23.4",
+      "kernel": "7.0.0-1014-aws",
+      "kit": "7292a8b1dada5e3726dff164d9662ef6bafc3972",
+      "warm": {
+        "maws-files": {
+          "ok": true,
+          "detail": "package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc"
+        },
+        "pnpm-fetch": {
+          "ok": true,
+          "detail": ""
+        },
+        "playwright": {
+          "ok": true,
+          "detail": "1.63.0"
+        },
+        "electron": {
+          "ok": true,
+          "detail": "44.4.5"
+        }
+      },
+      "apiToGuest": 72.652,
+      "apiToListening": 95.357,
+      "bootToGuest": 58.71,
+      "bootToListening": 81.53
+    },
+    {
+      "id": "i-03c2397a198e3d441",
+      "cloud": "ec2",
+      "arm": "plain",
+      "zone": "us-east-2a",
+      "apiStart": 1792757604046,
+      "accepted": 1792757606079,
+      "boot": 1792757617637,
+      "guest": 1792757659957,
+      "container": 1792757663713,
+      "listening": 1792757684887,
+      "node": "v22.23.4",
+      "kernel": "7.0.0-1014-aws",
+      "kit": "7292a8b1dada5e3726dff164d9662ef6bafc3972",
+      "warm": {
+        "maws-files": {
+          "ok": true,
+          "detail": "package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc"
+        },
+        "pnpm-fetch": {
+          "ok": true,
+          "detail": ""
+        },
+        "playwright": {
+          "ok": true,
+          "detail": "1.63.0"
+        },
+        "electron": {
+          "ok": true,
+          "detail": "44.4.5"
+        }
+      },
+      "apiToGuest": 55.911,
+      "apiToListening": 80.841,
+      "bootToGuest": 42.32,
+      "bootToListening": 67.46
+    },
+    {
+      "id": "i-079d7445738540b82",
+      "cloud": "ec2",
+      "arm": "plain",
+      "zone": "us-east-2c",
+      "apiStart": 1792757767457,
+      "accepted": 1792757769552,
+      "boot": 1792757780179,
+      "guest": 1792757836559,
+      "container": 1792757844571,
+      "listening": 1792757854655,
+      "node": "v22.23.4",
+      "kernel": "7.0.0-1014-aws",
+      "kit": "7292a8b1dada5e3726dff164d9662ef6bafc3972",
+      "warm": {
+        "maws-files": {
+          "ok": true,
+          "detail": "package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc"
+        },
+        "pnpm-fetch": {
+          "ok": true,
+          "detail": ""
+        },
+        "playwright": {
+          "ok": true,
+          "detail": "1.63.0"
+        },
+        "electron": {
+          "ok": true,
+          "detail": "44.4.5"
+        }
+      },
+      "apiToGuest": 69.102,
+      "apiToListening": 87.198,
+      "bootToGuest": 56.38,
+      "bootToListening": 74.58
+    },
+    {
+      "id": "i-03eb7e2439a67a7cb",
+      "cloud": "ec2",
+      "arm": "plain",
+      "zone": "us-east-2a",
+      "apiStart": 1792757915965,
+      "accepted": 1792757918116,
+      "boot": 1792757929152,
+      "guest": 1792757967762,
+      "container": 1792757971227,
+      "listening": 1792757988370,
+      "node": "v22.23.4",
+      "kernel": "7.0.0-1014-aws",
+      "kit": "7292a8b1dada5e3726dff164d9662ef6bafc3972",
+      "warm": {
+        "maws-files": {
+          "ok": true,
+          "detail": "package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc"
+        },
+        "pnpm-fetch": {
+          "ok": true,
+          "detail": ""
+        },
+        "playwright": {
+          "ok": true,
+          "detail": "1.63.0"
+        },
+        "electron": {
+          "ok": true,
+          "detail": "44.4.5"
+        }
+      },
+      "apiToGuest": 51.797,
+      "apiToListening": 72.405,
+      "bootToGuest": 38.61,
+      "bootToListening": 59.33
+    },
+    {
+      "id": "i-0045a99fdc0fa84fb",
+      "cloud": "ec2",
+      "arm": "plain",
+      "zone": "us-east-2c",
+      "apiStart": 1792758080230,
+      "accepted": 1792758082417,
+      "boot": 1792758093143,
+      "guest": 1792758150343,
+      "container": 1792758159000,
+      "listening": 1792758178164,
+      "node": "v22.23.4",
+      "kernel": "7.0.0-1014-aws",
+      "kit": "7292a8b1dada5e3726dff164d9662ef6bafc3972",
+      "warm": {
+        "maws-files": {
+          "ok": true,
+          "detail": "package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc"
+        },
+        "pnpm-fetch": {
+          "ok": true,
+          "detail": ""
+        },
+        "playwright": {
+          "ok": true,
+          "detail": "1.63.0"
+        },
+        "electron": {
+          "ok": true,
+          "detail": "44.4.5"
+        }
+      },
+      "apiToGuest": 70.113,
+      "apiToListening": 97.934,
+      "bootToGuest": 57.2,
+      "bootToListening": 85.12
+    },
+    {
+      "id": "i-0e45a371b5e9682df",
+      "cloud": "ec2",
+      "arm": "plain",
+      "zone": "us-east-2a",
+      "apiStart": 1792758229489,
+      "accepted": 1792758231597,
+      "boot": 1792758242838,
+      "guest": 1792758297908,
+      "container": 1792758306896,
+      "listening": 1792758325078,
+      "node": "v22.23.4",
+      "kernel": "7.0.0-1014-aws",
+      "kit": "7292a8b1dada5e3726dff164d9662ef6bafc3972",
+      "warm": {
+        "maws-files": {
+          "ok": true,
+          "detail": "package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc"
+        },
+        "pnpm-fetch": {
+          "ok": true,
+          "detail": ""
+        },
+        "playwright": {
+          "ok": true,
+          "detail": "1.63.0"
+        },
+        "electron": {
+          "ok": true,
+          "detail": "44.4.5"
+        }
+      },
+      "apiToGuest": 68.419,
+      "apiToListening": 95.589,
+      "bootToGuest": 55.07,
+      "bootToListening": 82.45
+    },
+    {
+      "id": "i-075e512618683f687",
+      "cloud": "ec2",
+      "arm": "init-200",
+      "zone": "us-east-2c",
+      "apiStart": 1792758310132,
+      "accepted": 1792758312248,
+      "boot": 1792758322075,
+      "guest": 1792758345435,
+      "container": 1792758346353,
+      "listening": 1792758353421,
+      "node": "v22.23.4",
+      "kernel": "7.0.0-1014-aws",
+      "kit": "7292a8b1dada5e3726dff164d9662ef6bafc3972",
+      "warm": {
+        "maws-files": {
+          "ok": true,
+          "detail": "package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc"
+        },
+        "pnpm-fetch": {
+          "ok": true,
+          "detail": ""
+        },
+        "playwright": {
+          "ok": true,
+          "detail": "1.63.0"
+        },
+        "electron": {
+          "ok": true,
+          "detail": "44.4.5"
+        }
+      },
+      "apiToGuest": 35.303,
+      "apiToListening": 43.289,
+      "bootToGuest": 23.36,
+      "bootToListening": 31.36
+    },
+    {
+      "id": "i-099652d6707005269",
+      "cloud": "ec2",
+      "arm": "plain",
+      "zone": "us-east-2c",
+      "apiStart": 1792758361534,
+      "accepted": 1792758363672,
+      "boot": 1792758375686,
+      "guest": 1792758436076,
+      "container": 1792758445012,
+      "listening": 1792758460151,
+      "node": "v22.23.4",
+      "kernel": "7.0.0-1014-aws",
+      "kit": "7292a8b1dada5e3726dff164d9662ef6bafc3972",
+      "warm": {
+        "maws-files": {
+          "ok": true,
+          "detail": "package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc"
+        },
+        "pnpm-fetch": {
+          "ok": true,
+          "detail": ""
+        },
+        "playwright": {
+          "ok": true,
+          "detail": "1.63.0"
+        },
+        "electron": {
+          "ok": true,
+          "detail": "44.4.5"
+        }
+      },
+      "apiToGuest": 74.542,
+      "apiToListening": 98.617,
+      "bootToGuest": 60.39,
+      "bootToListening": 84.84
+    }
+  ],
+  "benches": [
+    {
+      "id": "ci-kit-spike-1792755895592",
+      "cloud": "gce",
+      "arm": "plain",
+      "n": 0,
+      "start": 1792755923279,
+      "end": 1792756062903,
+      "status": 0,
+      "wall": 139.624,
+      "install": 16.128,
+      "build": 9.371,
+      "unit": 100.955,
+      "total": 126.454,
+      "readBytes": 676491264,
+      "iowaitPct": 4.192178327637357,
+      "device": "nvme0n1",
+      "toolchain": "SPIKE_TOOLCHAIN v22.23.4\n11.23.0",
+      "summary": [
+        " Test Files  433 passed | 1 skipped (434)",
+        "      Tests  6009 passed | 29 skipped (6038)"
+      ]
+    },
+    {
+      "id": "ci-kit-spike-1792755895592",
+      "cloud": "gce",
+      "arm": "plain",
+      "n": 1,
+      "start": 1792756063127,
+      "end": 1792756181070,
+      "status": 0,
+      "wall": 117.943,
+      "install": 4.526,
+      "build": 9.699,
+      "unit": 100.556,
+      "total": 114.781,
+      "readBytes": 553644032,
+      "iowaitPct": 6.354704555416573,
+      "device": "nvme0n1",
+      "toolchain": "SPIKE_TOOLCHAIN v22.23.4\n11.23.0",
+      "summary": [
+        " Test Files  433 passed | 1 skipped (434)",
+        "      Tests  6009 passed | 29 skipped (6038)"
+      ]
+    },
+    {
+      "id": "ci-kit-spike-1792755895592",
+      "cloud": "gce",
+      "arm": "plain",
+      "n": 2,
+      "start": 1792756181253,
+      "end": 1792756299455,
+      "status": 0,
+      "wall": 118.202,
+      "install": 4.547,
+      "build": 9.632,
+      "unit": 100.956,
+      "total": 115.136,
+      "readBytes": 564539392,
+      "iowaitPct": 6.085612239458393,
+      "device": "nvme0n1",
+      "toolchain": "SPIKE_TOOLCHAIN v22.23.4\n11.23.0",
+      "summary": [
+        " Test Files  433 passed | 1 skipped (434)",
+        "      Tests  6009 passed | 29 skipped (6038)"
+      ]
+    },
+    {
+      "id": "ci-kit-spike-1792755895592",
+      "cloud": "gce",
+      "arm": "plain",
+      "n": 3,
+      "start": 1792756299646,
+      "end": 1792756418408,
+      "status": 0,
+      "wall": 118.762,
+      "install": 4.639,
+      "build": 9.626,
+      "unit": 100.578,
+      "total": 114.843,
+      "readBytes": 554024960,
+      "iowaitPct": 6.1634966460049245,
+      "device": "nvme0n1",
+      "toolchain": "SPIKE_TOOLCHAIN v22.23.4\n11.23.0",
+      "summary": [
+        " Test Files  433 passed | 1 skipped (434)",
+        "      Tests  6009 passed | 29 skipped (6038)"
+      ]
+    },
+    {
+      "id": "ci-kit-spike-1792755895592",
+      "cloud": "gce",
+      "arm": "plain",
+      "n": 4,
+      "start": 1792756418603,
+      "end": 1792756537222,
+      "status": 0,
+      "wall": 118.619,
+      "install": 4.562,
+      "build": 9.858,
+      "unit": 100.873,
+      "total": 115.294,
+      "readBytes": 567828480,
+      "iowaitPct": 6.200792630449334,
+      "device": "nvme0n1",
+      "toolchain": "SPIKE_TOOLCHAIN v22.23.4\n11.23.0",
+      "summary": [
+        " Test Files  433 passed | 1 skipped (434)",
+        "      Tests  6009 passed | 29 skipped (6038)"
+      ]
+    },
+    {
+      "id": "ci-kit-spike-1792755895592",
+      "cloud": "gce",
+      "arm": "plain",
+      "n": 5,
+      "start": 1792756537414,
+      "end": 1792756655446,
+      "status": 0,
+      "wall": 118.032,
+      "install": 4.542,
+      "build": 9.58,
+      "unit": 100.801,
+      "total": 114.923,
+      "readBytes": 554758144,
+      "iowaitPct": 6.490441097938695,
+      "device": "nvme0n1",
+      "toolchain": "SPIKE_TOOLCHAIN v22.23.4\n11.23.0",
+      "summary": [
+        " Test Files  433 passed | 1 skipped (434)",
+        "      Tests  6009 passed | 29 skipped (6038)"
+      ]
+    },
+    {
+      "id": "i-029d358d0f7d67987",
+      "cloud": "ec2",
+      "arm": "plain",
+      "n": 0,
+      "start": 1792757025382,
+      "end": 1792757230621,
+      "status": 0,
+      "wall": 205.239,
+      "install": 73.139,
+      "build": 14.839,
+      "unit": 94.339,
+      "total": 182.317,
+      "readBytes": 699011072,
+      "iowaitPct": 12.062608908318303,
+      "device": "nvme0n1",
+      "toolchain": "SPIKE_TOOLCHAIN v22.23.4\n11.23.0",
+      "summary": [
+        " Test Files  433 passed | 1 skipped (434)",
+        "      Tests  6009 passed | 29 skipped (6038)"
+      ]
+    },
+    {
+      "id": "i-0501e1d8e071554ac",
+      "cloud": "ec2",
+      "arm": "init-300",
+      "n": 0,
+      "start": 1792757187387,
+      "end": 1792757312321,
+      "status": 0,
+      "wall": 124.934,
+      "install": 8.525,
+      "build": 10.402,
+      "unit": 95.033,
+      "total": 113.96,
+      "readBytes": 699289600,
+      "iowaitPct": 4.072443768445863,
+      "device": "nvme0n1",
+      "toolchain": "SPIKE_TOOLCHAIN v22.23.4\n11.23.0",
+      "summary": [
+        " Test Files  433 passed | 1 skipped (434)",
+        "      Tests  6009 passed | 29 skipped (6038)"
+      ]
+    },
+    {
+      "id": "i-0c0205031a0cb7a48",
+      "cloud": "ec2",
+      "arm": "prefetch",
+      "n": 0,
+      "start": 1792757211871,
+      "end": 1792757380911,
+      "status": 0,
+      "wall": 169.04,
+      "prefetch": 26.301,
+      "install": 26.712,
+      "build": 8.881,
+      "unit": 84.756,
+      "total": 146.65,
+      "readBytes": 1574604800,
+      "iowaitPct": 14.595293086674637,
+      "device": "nvme0n1",
+      "toolchain": "SPIKE_TOOLCHAIN v22.23.4\n11.23.0",
+      "summary": [
+        " Test Files  433 passed | 1 skipped (434)",
+        "      Tests  6009 passed | 29 skipped (6038)"
+      ]
+    },
+    {
+      "id": "i-029d358d0f7d67987",
+      "cloud": "ec2",
+      "arm": "plain",
+      "n": 1,
+      "start": 1792757230894,
+      "end": 1792757344277,
+      "status": 0,
+      "wall": 113.383,
+      "install": 4.822,
+      "build": 10.535,
+      "unit": 94.051,
+      "total": 109.409,
+      "readBytes": 587124736,
+      "iowaitPct": 4.818167698417981,
+      "device": "nvme0n1",
+      "toolchain": "SPIKE_TOOLCHAIN v22.23.4\n11.23.0",
+      "summary": [
+        " Test Files  433 passed | 1 skipped (434)",
+        "      Tests  6009 passed | 29 skipped (6038)"
+      ]
+    },
+    {
+      "id": "i-029d358d0f7d67987",
+      "cloud": "ec2",
+      "arm": "plain",
+      "n": 2,
+      "start": 1792757344528,
+      "end": 1792757458358,
+      "status": 0,
+      "wall": 113.83,
+      "install": 4.7,
+      "build": 10.459,
+      "unit": 94.232,
+      "total": 109.392,
+      "readBytes": 577458176,
+      "iowaitPct": 4.9566678457729045,
+      "device": "nvme0n1",
+      "toolchain": "SPIKE_TOOLCHAIN v22.23.4\n11.23.0",
+      "summary": [
+        " Test Files  433 passed | 1 skipped (434)",
+        "      Tests  6009 passed | 29 skipped (6038)"
+      ]
+    },
+    {
+      "id": "i-029d358d0f7d67987",
+      "cloud": "ec2",
+      "arm": "plain",
+      "n": 3,
+      "start": 1792757458606,
+      "end": 1792757571340,
+      "status": 0,
+      "wall": 112.734,
+      "install": 4.724,
+      "build": 10.642,
+      "unit": 92.614,
+      "total": 107.979,
+      "readBytes": 576249856,
+      "iowaitPct": 4.929467434489531,
+      "device": "nvme0n1",
+      "toolchain": "SPIKE_TOOLCHAIN v22.23.4\n11.23.0",
+      "summary": [
+        " Test Files  433 passed | 1 skipped (434)",
+        "      Tests  6009 passed | 29 skipped (6038)"
+      ]
+    },
+    {
+      "id": "i-029d358d0f7d67987",
+      "cloud": "ec2",
+      "arm": "plain",
+      "n": 4,
+      "start": 1792757571590,
+      "end": 1792757685013,
+      "status": 0,
+      "wall": 113.423,
+      "install": 4.657,
+      "build": 10.278,
+      "unit": 93.635,
+      "total": 108.57,
+      "readBytes": 576466944,
+      "iowaitPct": 4.951241970734088,
+      "device": "nvme0n1",
+      "toolchain": "SPIKE_TOOLCHAIN v22.23.4\n11.23.0",
+      "summary": [
+        " Test Files  433 passed | 1 skipped (434)",
+        "      Tests  6009 passed | 29 skipped (6038)"
+      ]
+    },
+    {
+      "id": "i-029d358d0f7d67987",
+      "cloud": "ec2",
+      "arm": "plain",
+      "n": 5,
+      "start": 1792757685264,
+      "end": 1792757797981,
+      "status": 0,
+      "wall": 112.717,
+      "install": 4.75,
+      "build": 10.332,
+      "unit": 92.782,
+      "total": 107.865,
+      "readBytes": 577421312,
+      "iowaitPct": 4.970143423182098,
+      "device": "nvme0n1",
+      "toolchain": "SPIKE_TOOLCHAIN v22.23.4\n11.23.0",
+      "summary": [
+        " Test Files  433 passed | 1 skipped (434)",
+        "      Tests  6009 passed | 29 skipped (6038)"
+      ]
+    },
+    {
+      "id": "i-075e512618683f687",
+      "cloud": "ec2",
+      "arm": "init-200",
+      "n": 0,
+      "start": 1792758353476,
+      "end": 1792758468810,
+      "status": 0,
+      "wall": 115.334,
+      "install": 8.952,
+      "build": 8.891,
+      "unit": 83.504,
+      "total": 101.348,
+      "readBytes": 698613760,
+      "iowaitPct": 5.24639862160718,
+      "device": "nvme0n1",
+      "toolchain": "SPIKE_TOOLCHAIN v22.23.4\n11.23.0",
+      "summary": [
+        " Test Files  433 passed | 1 skipped (434)",
+        "      Tests  6009 passed | 29 skipped (6038)"
+      ]
+    }
+  ],
+  "bootStats": {
+    "gce/plain": {
+      "apiRoundTrip": {
+        "n": 1,
+        "p50": 1.546,
+        "p90": 1.546
+      },
+      "apiToKernel": {
+        "n": 1,
+        "p50": 15.418,
+        "p90": 15.418
+      },
+      "kernelToGuest": {
+        "n": 1,
+        "p50": 6.02,
+        "p90": 6.02
+      },
+      "guestToContainer": null,
+      "containerToListening": null,
+      "guestToListening": {
+        "n": 1,
+        "p50": 3.067,
+        "p90": 3.067
+      },
+      "apiToListening": {
+        "n": 1,
+        "p50": 24.505,
+        "p90": 24.505
+      }
+    },
+    "ec2/plain": {
+      "apiRoundTrip": {
+        "n": 10,
+        "p50": 2.12,
+        "p90": 2.187
+      },
+      "apiToKernel": {
+        "n": 10,
+        "p50": 13.349,
+        "p90": 15.317
+      },
+      "kernelToGuest": {
+        "n": 10,
+        "p50": 56.38,
+        "p90": 65.44
+      },
+      "guestToContainer": {
+        "n": 10,
+        "p50": 7.323,
+        "p90": 8.936
+      },
+      "containerToListening": {
+        "n": 10,
+        "p50": 15.139,
+        "p90": 19.164
+      },
+      "guestToListening": {
+        "n": 10,
+        "p50": 22.705,
+        "p90": 27.17
+      },
+      "apiToListening": {
+        "n": 10,
+        "p50": 95.357,
+        "p90": 97.934
+      }
+    },
+    "ec2/init-300": {
+      "apiRoundTrip": {
+        "n": 1,
+        "p50": 2.052,
+        "p90": 2.052
+      },
+      "apiToKernel": {
+        "n": 1,
+        "p50": 14.572,
+        "p90": 14.572
+      },
+      "kernelToGuest": {
+        "n": 1,
+        "p50": 14.48,
+        "p90": 14.48
+      },
+      "guestToContainer": {
+        "n": 1,
+        "p50": 1.615,
+        "p90": 1.615
+      },
+      "containerToListening": {
+        "n": 1,
+        "p50": 7.075,
+        "p90": 7.075
+      },
+      "guestToListening": {
+        "n": 1,
+        "p50": 8.69,
+        "p90": 8.69
+      },
+      "apiToListening": {
+        "n": 1,
+        "p50": 37.742,
+        "p90": 37.742
+      }
+    },
+    "ec2/prefetch": {
+      "apiRoundTrip": {
+        "n": 1,
+        "p50": 2.144,
+        "p90": 2.144
+      },
+      "apiToKernel": {
+        "n": 1,
+        "p50": 9.9,
+        "p90": 9.9
+      },
+      "kernelToGuest": {
+        "n": 1,
+        "p50": 23.71,
+        "p90": 23.71
+      },
+      "guestToContainer": {
+        "n": 1,
+        "p50": 4.93,
+        "p90": 4.93
+      },
+      "containerToListening": {
+        "n": 1,
+        "p50": 12.1,
+        "p90": 12.1
+      },
+      "guestToListening": {
+        "n": 1,
+        "p50": 17.03,
+        "p90": 17.03
+      },
+      "apiToListening": {
+        "n": 1,
+        "p50": 50.64,
+        "p90": 50.64
+      }
+    },
+    "ec2/init-200": {
+      "apiRoundTrip": {
+        "n": 1,
+        "p50": 2.116,
+        "p90": 2.116
+      },
+      "apiToKernel": {
+        "n": 1,
+        "p50": 11.943,
+        "p90": 11.943
+      },
+      "kernelToGuest": {
+        "n": 1,
+        "p50": 23.36,
+        "p90": 23.36
+      },
+      "guestToContainer": {
+        "n": 1,
+        "p50": 0.918,
+        "p90": 0.918
+      },
+      "containerToListening": {
+        "n": 1,
+        "p50": 7.068,
+        "p90": 7.068
+      },
+      "guestToListening": {
+        "n": 1,
+        "p50": 7.986,
+        "p90": 7.986
+      },
+      "apiToListening": {
+        "n": 1,
+        "p50": 43.289,
+        "p90": 43.289
+      }
+    }
+  },
+  "unitStats": {
+    "ec2": {
+      "n": 5,
+      "p50": 93.635,
+      "p90": 94.232
+    },
+    "gce": {
+      "n": 5,
+      "p50": 100.801,
+      "p90": 100.956
+    }
+  }
+}

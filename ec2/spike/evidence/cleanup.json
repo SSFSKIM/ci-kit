@@ -1,0 +1,50 @@
+{
+  "verifiedAt": "2026-10-23T12:36:53Z",
+  "aws": {
+    "nonTerminated": [],
+    "volumes": [],
+    "images": [],
+    "snapshots": []
+  },
+  "gce": {
+    "instances": [],
+    "disks": []
+  },
+  "retained": {
+    "securityGroup": {
+      "id": "sg-04b8b036fd64144d6",
+      "name": "ci-kit-pool",
+      "inbound": [],
+      "tags": [
+        {
+          "Key": "ci-kit-pool",
+          "Value": "ec2-spike"
+        },
+        {
+          "Key": "ci-kit-purpose",
+          "Value": "spike"
+        }
+      ]
+    },
+    "spikeRole": {
+      "arn": "arn:aws:iam::290475840169:role/ci-kit-ec2-spike",
+      "maxSessionDuration": 14400,
+      "tags": [
+        {
+          "Key": "ci-kit-pool",
+          "Value": "ec2-spike"
+        },
+        {
+          "Key": "ci-kit-purpose",
+          "Value": "spike"
+        }
+      ]
+    },
+    "spotServiceLinkedRole": "arn:aws:iam::290475840169:role/aws-service-role/spot.amazonaws.com/AWSServiceRoleForEC2Spot",
+    "gcpBinding": {
+      "serviceAccount": "ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com",
+      "member": "serviceAccount:cli-owner@ytdownload-505811.iam.gserviceaccount.com",
+      "role": "roles/iam.serviceAccountTokenCreator"
+    }
+  }
+}
