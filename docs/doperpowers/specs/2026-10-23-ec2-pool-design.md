@@ -58,8 +58,12 @@ measurement exists.
   providers; M4–M6, Acceptance 11 and Interfaces updated before M4 starts.
 - [x] (2026-10-23) Closed the per-repo review findings before M4: disabled instances remain valid, admission
   reserves both budgets synchronously, and refused pre-launches do not consume slots; M4/M5 proofs updated.
-- [ ] M4: scheduling over providers and each repo's provider list, proved with fake providers (two of one kind in
-  different accounts); GCE-only behaviour unchanged.
+- [x] (2026-10-23 19:59Z) M4: scheduling over providers and each repo's provider list,
+  proved with fake providers in two EC2 accounts. Review approved through 3550a56 after three blocking fixes;
+  Minor alert wording deferred to ci-kit #108 entry 1. Implementation gate 40014371555 and exact PR-head gate
+  40014591706 green; PR #109 merged dcdc629. Fresh-main revision ci-kit-launcher-00020-t8v passed MAWS class 1a
+  run 40015186704: all six pool jobs on GCE, v2 rows, no ERROR logs or rollback. AWS resource spend unchanged
+  from M1's <=$0.735, plus this execution's one $0.01 Cost Explorer read.
 - [ ] M5: the EC2 provider, its image and its one-time setup, serving ci-kit-sandbox.
 - [ ] M6: credit preference, reports, guard, the MAWS canary and acceptance.
 
@@ -1220,6 +1224,14 @@ The production chain is reviewed at each boundary:
   surface and a second control plane to a launcher that runs the owner's private CI.
 
 ## Surprises & Discoveries
+
+- Observation: M4's deployed scheduler preserves the GCE-only live path. MAWS run `40015186704`, attempt 1,
+  tested master `0c86e4861` through wrapper `d69ecff5812793000cc31a9c72531a9185482d34`; static, probes and all four
+  unit shards passed on `ci-kit-gce-*`. Matching v2 rows in sandbox issue #48 name allocations `hsfd7kkod2`,
+  `hsfd7pgdpg`, `hsfd7d10d4`, `hsfd72u0aq`, `hsfd7ty9ru`, `hsfd7p4q0t`, account `ssfskim-ci-kit`, us-west4-a.
+  Evidence: https://github.com/SSFSKIM/MAWS/actions/runs/40015186704 and the attempt jobs/ledger APIs.
+  Fresh-main clone `/private/tmp/ci-kit-ec2-deploy-m4` deployed `dcdc629` as `ci-kit-launcher-00020-t8v` at 100%;
+  rollback revision was `ci-kit-launcher-00019-pxv`. No ERROR logs or rollback occurred during the canary.
 
 - Observation: M3's deployed GCE provider passed the live MAWS class 1a proof with EC2 absent. Run
   `40008135552`, attempt 1, tested MAWS master `0c86e4861` through wrapper `e081f5e69b4bf867f3b2b02728349341ed839c20`.
