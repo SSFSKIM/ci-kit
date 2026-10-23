@@ -782,7 +782,9 @@ booking.
    **The image quiets the guest's boot, not its macOS desktop.** `provision.sh quiet` runs after `disk` and before
    `display` and the installs, so the bake's own dependency and checkout writes are not indexed either. It runs
    `sudo -n mdutil -a -i off`, then requires `mdutil -a -s` to report `Indexing disabled.` for every volume it lists,
-   including `/`, `/System/Volumes/Data` and `/System/Volumes/Preboot`. It disables and boots out exactly these
+   which must include `/` and `/System/Volumes/Data`. mdutil lists only mounted volumes: a bake candidate reports
+   those two, and a booted clone of a golden also `/System/Volumes/Preboot`, so Preboot is checked when listed but
+   not required. It disables and boots out exactly these
    services (`com.apple.` before each name), with no pattern search over the jobs loaded at bake time:
 
    | Domain | Services |
