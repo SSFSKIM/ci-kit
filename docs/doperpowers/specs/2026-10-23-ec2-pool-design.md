@@ -45,9 +45,11 @@ measurement exists.
 - [x] (2026-10-23 18:37Z) M2: data contracts, v2 ledger with v1 reads, and provider-qualified keys; no behaviour change.
   Task review approved without findings; committed-head test gate green: run 40003608129, implementation 0de12c4.
   Live GCE parity remains the merged-main M3 proof. AWS spend remains at most $0.735 (no M2 resources).
-- [ ] M3: GCE effects extracted behind the provider; no behaviour change.
-  Implementation fe16bdb reviewed clean on 2026-10-23; remote gate 40006417067 green. Merged-main deploy and
-  MAWS class 1a/v2-row proof remain outstanding. AWS spend unchanged at most $0.735.
+- [x] (2026-10-23 19:06Z) M3: GCE effects extracted behind the provider; no behaviour change.
+  Implementation fe16bdb reviewed clean; implementation gate 40006417067 and exact PR-head gate 40007392109 green.
+  PR #107 merged c14ac6c; fresh-main deploy serves ci-kit-launcher-00019-pxv. MAWS class 1a run 40008135552
+  passed all six pool jobs on GCE, with v2 rows in sandbox ledger issue #48. No rollback was needed.
+  AWS resource spend remains M1's <=$0.735; this execution also made one Cost Explorer read ($0.01).
 - [ ] M4: scheduling over providers, proved with a fake second provider; GCE-only behaviour unchanged.
 - [ ] M5: the EC2 provider, its image and its one-time setup, serving ci-kit-sandbox.
 - [ ] M6: credit preference, reports, guard, the MAWS canary and acceptance.
@@ -999,6 +1001,16 @@ The production chain is reviewed at each boundary:
   surface and a second control plane to a launcher that runs the owner's private CI.
 
 ## Surprises & Discoveries
+
+- Observation: M3's deployed GCE provider passed the live MAWS class 1a proof with EC2 absent. Run
+  `40008135552`, attempt 1, tested MAWS master `0c86e4861` through wrapper `e081f5e69b4bf867f3b2b02728349341ed839c20`.
+  Static, probes and all four unit shards succeeded on `ci-kit-gce-*` runners. Ledger issue #48 in ci-kit-sandbox
+  recorded `v:2`, `provider:gce`, `account:ssfskim-ci-kit`, actual job ids/labels and image provenance for allocations
+  `hsfbqu5nay`, `hsfbqi7nql`, `hsfbqof83f`, `hsfbq464gc`, `hsfbqgekh0`, `hsfbqc1dr8`, all in us-west4-a.
+  Evidence: https://github.com/SSFSKIM/MAWS/actions/runs/40008135552 ; the attempt-specific jobs API and ledger
+  comments read after completion. Fresh clone `/private/tmp/ci-kit-ec2-deploy-m3` deployed merged-main `c14ac6c`;
+  revision `ci-kit-launcher-00019-pxv` served 100%, with no ERROR logs observed in its canary window.
+  Prior rollback revision was `ci-kit-launcher-00018-tpn` in us-central1; no rollback occurred.
 
 - Observation: The requested spot quota increase landed before M2: us-east-2 now grants 256 vCPUs. Preflight
   found no active EC2 pool instances or pool volumes. Cost Explorer's 2026-10-23 reading had no EC2 charges yet
