@@ -3543,15 +3543,37 @@ euros, jobs, and the projected month at the current rate.
 - **A7.** The "within two guard cycles" timing holds only on hand-dispatched guard runs. GitHub's schedule ran once in 7 h 58 min. The Decision Log accepts this deviation, and GCE's one-minute Scheduler reconciler replaces the guard for every live repo.
 - **A10.** Two cua tests, eof-drain and the chrome-host-run ceiling, pass on structural evidence. Their before-fix failure was never shown (Decision Log).
 - **A12 for Hetzner.** Cost is visible, but the Hetzner interim did not fit the budget. A box stayed up about 24–27 h a day once MAWS flipped, about €180–200 a month. That lasted from 10:04 to 18:38Z on 10-16 only.
-- **A13.** Everything passes. The daily ledger line, the last clause, first posted at 00:00:09Z on 10-17 (Progress, M10 step 4). GitHub reports a simulated preemption as "The operation was canceled" (exit 130), not "runner lost".
+- **A13.** Everything passes. The daily ledger line, the last clause, first posted at 00:00:09Z on 10-17 (Progress, M10 step 4). Re-read on 2026-10-23, [the first line](https://github.com/SSFSKIM/ci-kit-sandbox/issues/1#issuecomment-6226993042) records 99 VMs, 23,686 VM-seconds and $0.3873 for 10-16, with a projected month of $11.62. That was a partial day, not the ongoing month. GitHub reports a simulated preemption as "The operation was canceled" (exit 130), not "runner lost".
 
 **Cost (A12).**
-- **GCE ledger rows so far.**
-  - The sandbox's A13 runs: 48 allocations at about $0.002 each.
-  - MAWS's first GCE gate (run 38949019226) cost $0.0172: probes $0.0019, static $0.0045, unit
-    $0.0108.
-- **Measured month, from the full UTC day 10-17** (measured 10-18 00:43Z; this replaces the earlier estimate of
-  about $41 GCE plus hosted minutes, $45–120 a month):
+- **Measured GCE month, first week, read 2026-10-23.** The daily lines replace the per-gate estimate.
+  They count VMs finalized on each UTC day. Each projected month is that day's dollars multiplied by 30,
+  not a month's invoice. The pool serves the sandbox, MAWS and, from 10-18, manim-master; this is not
+  MAWS's bill alone. VM costs include compute, boot disks and VM network charges, not hosted Actions,
+  image storage, bakes or the launcher.
+  | UTC day | regime | VMs | VM-seconds | ledger dollars | projected 30-day month |
+  |---|---|---:|---:|---:|---:|
+  | [10-17](https://github.com/SSFSKIM/ci-kit-sandbox/issues/1#issuecomment-6243452552) | before pre-launch | 174 | 57,445 | $0.9871 | $29.61 |
+  | [10-18](https://github.com/SSFSKIM/ci-kit-sandbox/issues/1#issuecomment-6256793163) | before pre-launch | 173 | 63,897 | $1.0423 | $31.27 |
+  | [10-19](https://github.com/SSFSKIM/ci-kit-sandbox/issues/1#issuecomment-6280029891) | before pre-launch | 172 | 80,172 | $1.3414 | $40.24 |
+  | [10-20](https://github.com/SSFSKIM/ci-kit-sandbox/issues/1#issuecomment-6304546974) | before pre-launch | 204 | 87,580 | $1.5485 | $46.46 |
+  | [10-21](https://github.com/SSFSKIM/ci-kit-sandbox/issues/1#issuecomment-6329348784) | rollout day | 1,092 | 376,818 | $7.8894 | $236.68 |
+  | [10-22](https://github.com/SSFSKIM/ci-kit-sandbox/issues/48#issuecomment-6354086831) | after pre-launch | 488 | 171,044 | $5.1590 | $154.77 |
+  - Before pre-launch, the four full days 10-17–10-20 total $4.9193: $1.2298 a day and $36.89 for
+    30 days at that rate. The last day's pace was $46.46 a month.
+  - 10-21 is transitional, not another day of the earlier regime: its first recorded pre-launched VM
+    was created at 18:45:17Z. Its daily line also records $0.1685 of NAT address and traffic charges
+    separately from the $7.8894 and its projection.
+  - 10-22 is the first full UTC day after the rollout. Its $154.77 monthly pace is one day's rate,
+    not a stable forecast. Its daily line records 340 pre-launched VMs, 118 unclaimed, costing $2.3241
+    of the $5.1590 total (45.0%). NAT charges are $0.
+  - The [day-one creation cohort](https://github.com/SSFSKIM/ci-kit/issues/99#issuecomment-6354567305),
+    10-22 00:15Z–10-23 00:15Z, is a different boundary: 460 VMs cost $4.9812, with 116 of 338
+    pre-launched VMs unclaimed at $2.2021 (44.2% of the cohort's dollars). All are final. These
+    counts do not replace the daily line's finalization-day counts.
+  - The two regimes are not averaged together. Costs are recorded without reducing CI parallelism.
+- **Historical whole-CI reading for UTC 10-17** (measured 10-18 00:43Z; hosted usage was not remeasured
+  in the first-week GCE reading, so this is not the current total):
   | | 10-17 | month at that rate |
   |---|---|---|
   | GCE spot (ledger daily line: 174 VMs, 57,445 VM-seconds, all spot) | $0.99 | $29.61 |
@@ -3565,8 +3587,29 @@ euros, jobs, and the projected month at the current rate.
     landed.
   - On 10-16, from the flip at 10:04Z to 17:35Z, hosted was 140 billable minutes (`plan` 67, `warm` 58,
     `e2e:desk-web` 15), about $80 a month at the 2-core rate.
-- **Bake cadence stays weekly.** On 10-17, 57 `unit` jobs on GCE spent a median of 30 s (p90 32, max 48) in checkout
-  plus setup, well under the 1.5 min that would have made the bake daily.
+- **Bake cadence, measured 2026-10-23.** The jobs API supplied timings for 992 ledger-linked MAWS
+  GCE `unit` jobs, including numbered shards, started on UTC 10-16–10-22. Checkout and setup
+  completed successfully in 991; one setup failure is excluded. Setup is the sum of
+  `Run actions/checkout@v7` and `Run ./.github/actions/setup`, which installs the toolchain and
+  dependencies. Post-job cleanup and `pnpm build` are excluded, as in the Final account's cadence
+  test. Including the optional `Run ./.github/actions/module-cache` step leaves these medians and
+  p90s unchanged.
+  | UTC day | jobs with successful setup | median setup | p90 setup | maximum setup |
+  |---|---:|---:|---:|---:|
+  | 10-16, partial day | 17 | 38 s | 68 s | 79 s |
+  | 10-17 | 57 | 29 s | 32 s | 47 s |
+  | 10-18 | 46 | 30 s | 32 s | 35 s |
+  | 10-19 | 47 | 32 s | 35 s | 40 s |
+  | 10-20 | 70 | 32 s | 36 s | 51 s |
+  | 10-21 | 545 | 29 s | 41 s | 270 s |
+  | 10-22 | 209 | 20 s | 22 s | 46 s |
+  - The week's median is 28 s, p90 36 s. Six of 991 setups exceeded 90 s, all on 10-21; no daily
+    median approached the 90 s threshold. The reading supports keeping the weekly bake.
+  - Job start to the test step, including runner initialization, gaps and the build, is a separate
+    measure: median 47 s, p90 128 s over 984 jobs that reached the test step after successful setup.
+    On 10-22 it is 32 s, p90 36 s over 209 jobs. The earlier days' build time is not image setup.
+  - Both the live `ci-kit-bake-weekly` scheduler and `gce/deploy.sh` still say `0 18 * * 0`, Sunday
+    18:00 UTC. No schedule was changed. The daily-bake condition is not met.
 - **Mini queue waits on 10-17.** 449 jobs waited a median of 30.6 min (p90 69.5, max 135.2); the mini was busy 798 of
   1,440 minutes. The waits follow the landings, not the day:
   | jobs created (UTC) | jobs | median wait | p90 | busy min |
