@@ -477,6 +477,12 @@ function firstRunFixture() {
   executable(join(guest, 'bin/xattr'), `if [[ $1 == -p ]]; then cat "$HOME/quarantine"; else [[ ! -f $HOME/quarantine ]] || echo com.apple.quarantine; fi`);
   executable(join(guest, 'bin/git'), `printf 'git %s\\n' "$*" >> "$HOME/commands"
 [[ $1 == -c && $2 == 'safe.directory=*' && $3 == clone && $4 == "$HOME/share" && $5 == "$HOME/maws-firstrun" ]] || exit 64
+if [[ -f $HOME/previous.pids ]]; then
+  while IFS= read -r pid; do
+    state=$(/bin/ps -p "$pid" -o stat=)
+    [[ -z $state || $state == Z* ]] || { echo "previous scratch process $pid still runs before clone" >&2; exit 65; }
+  done < "$HOME/previous.pids"
+fi
 mkdir "$5" || exit 1
 if [[ -e $HOME/detach-group ]]; then
   cat > "$5/detached-child" <<'CHILD'
@@ -613,6 +619,7 @@ describe('the first-run shell (bake.sh --first-run)', macOnly, () => {
     const argvExit = once(byArgv, 'exit');
     const cwdExit = once(byCwd, 'exit');
     await once(byArgv.stdout, 'data');
+    writeFileSync(join(f.guest, 'previous.pids'), `${byArgv.pid}\n${byCwd.pid}\n`);
     try {
       const run = f.start(['--first-run', CANDIDATE]);
       assert.equal(await run.exited, 0, run.output());
