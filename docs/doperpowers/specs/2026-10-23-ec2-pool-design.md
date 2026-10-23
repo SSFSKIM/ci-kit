@@ -579,9 +579,10 @@ Constraints for every milestone:
   servers, toolkits or agent skills.
 - Account 290475840169, EC2 region us-east-2. Cost Explorer alone uses `ce.us-east-1.amazonaws.com`, signed
   for us-east-1; its account-policy access was verified on 2026-10-23. Other EC2 regions remain out of scope.
-- Spot vCPU quota is 32 until the pending raise lands. Live tests keep at most 4 c8a.2xlarge at once until
-  `aws service-quotas get-service-quota --service-code ec2 --quota-code L-34B43A08` shows more. The on-demand
-  standard quota is separately 32 vCPUs; the short on-demand builder uses that quota, not the spot grant.
+- Spot vCPU quota is 256 as verified at M2 preflight on 2026-10-23 with
+  `aws service-quotas get-service-quota --service-code ec2 --quota-code L-34B43A08` in us-east-2. Keep live
+  fixtures bounded by their proof and the $25 pre-M6 spend cap rather than filling the expanded quota. The
+  on-demand standard quota is separately 32 vCPUs; the short on-demand builder uses that quota, not the spot grant.
 - Deploys run from a fresh clone of merged `main` only: `gce/deploy.sh <target>`. Secret Manager is not written.
 - The launcher's GCE behaviour with EC2 off is the regression bar for M2–M6 (Acceptance 9).
 - ci-kit's MacBook `npm test` has host-dependent `mac-*` failures (friction tracker #68). Judge the work by
@@ -994,6 +995,12 @@ The production chain is reviewed at each boundary:
   surface and a second control plane to a launcher that runs the owner's private CI.
 
 ## Surprises & Discoveries
+
+- Observation: The requested spot quota increase landed before M2: us-east-2 now grants 256 vCPUs. Preflight
+  found no active EC2 pool instances or pool volumes. Cost Explorer's 2026-10-23 reading had no EC2 charges yet
+  (billing lag), so the M1 resource-based upper bound of $0.735 remains the pre-M2 spend estimate, not zero.
+  Evidence: 2026-10-23 `service-quotas get-service-quota` for L-34B43A08 returned 256; pool-tagged instance and
+  volume lists returned empty; Cost Explorer returned only a zero-dollar AWS Glue group.
 
 - Observation: The GCE placements are ordered by speed, not by price; prices are only reported.
   Evidence: `gce/launcher/logic.mjs` `placements()` walks spot then standard in config order; the owner rejected
