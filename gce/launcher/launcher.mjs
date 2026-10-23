@@ -24,6 +24,7 @@ import {
 } from './logic.mjs';
 import { planPrelaunches } from './prelaunch.mjs';
 import { createRoom } from './room.mjs';
+import { createPreparation } from './preparation.mjs';
 import { launchRow, runningRow, withJob, jobRecord, finalRow, dailyLine, launchCounts, natDay } from './ledger.mjs';
 
 export const TICK_BUDGET_MS = 45_000;
@@ -94,16 +95,18 @@ export class Launcher {
   // provisioning, outcome, seconds from send to settle, null when it never settled}; and of the rows the launches wrote,
   // out.refusals, out.slow and out.onDemand (ledger.mjs launchCounts). out.full: the attempts skipped for want of room,
   // by the limit each would pass (room.mjs); out.cut: the launches the tick's deadline cut off, which the server runs a
-  // follow-up tick for (ticker.mjs).
-  async tick() {
+  // follow-up tick for (ticker.mjs). out.preparation: call spans (preparation.mjs), including the server's setup and
+  // config reads when it passes the tick's recorder.
+  async tick(preparation = createPreparation({ now: this.now })) {
     const deadline = this.now() + this.budgetMs;
     const out = {
       launched: [], prelaunched: [], raced: [], deleted: [], unregistered: [], finalized: [], waiting: 0, firstInsert: null, inserts: [], full: {}, cut: 0,
+      preparation: preparation.calls,
     };
-    const seen = await this.observe();
+    const seen = await preparation.time('observe', () => this.observe(preparation));
     // Launches start first, and the cleanup runs beside them: neither waits for the other. Launching before cleaning
     // up can only under-admit for a tick (a VM about to be deleted still counts against max_vcpus), never over-admit.
-    const done = await Promise.allSettled([this.launchAll(seen, out, deadline), this.cleanUp(seen, out)]);
+    const done = await Promise.allSettled([this.launchAll(seen, out, deadline, preparation), this.cleanUp(seen, out)]);
     const failed = done.find((d) => d.status === 'rejected');
     if (failed) throw failed.reason;
     await this.daily(seen);
@@ -127,7 +130,7 @@ export class Launcher {
 
   // Everything at once, but for two orders that hold: the ledger is read before the instances, and each repo's
   // runners before its jobs.
-  async observe() {
+  async observe(preparation) {
     const { served: listed, both } = servedRepos(this.cfg.repos, this.poolRepos);
     const alerted = Promise.all(both.map(async (repo) => {
       this.log(`refusing ${repo}: it is in gce.json and pool.json, and a repo is served by one backend only`);
@@ -139,20 +142,20 @@ export class Launcher {
     // The ledger is read before the instances: a row seen running was written after its insert, so its VM is in the
     // listing that follows unless it is gone. (A row whose VM is missing is confirmed with a direct read anyway.)
     const store = (async () => {
-      await this.ledger.read();
-      const rows = await this.ledger.rows();
+      await preparation.time('ledger.read', () => this.ledger.read());
+      const rows = await preparation.time('ledger.rows', () => this.ledger.rows());
       const [listing, disks, builders] = await Promise.all([
-        this.gce.listInstances('labels.ci-kit=gce'),
-        this.gce.listDisks('labels.ci-kit=gce'),
-        this.gce.instances('labels.ci-kit=gce-builder'),
+        preparation.time('gce.listInstances', () => this.gce.listInstances('labels.ci-kit=gce')),
+        preparation.time('gce.listDisks', () => this.gce.listDisks('labels.ci-kit=gce')),
+        preparation.time('gce.builders', () => this.gce.instances('labels.ci-kit=gce-builder')),
       ]);
       return { rows, listing, disks: disks.items, builders };
     })();
     // Read now so that a launch does not wait for it; a tick with nothing to launch never looks.
-    const images = this.gce.images('labels.ci-kit=gce-image');
+    const images = preparation.time('gce.images', () => this.gce.images('labels.ci-kit=gce-image'));
     images.catch(() => {});
-    const limits = this.limits ? this.limits.get(this.cfg.placements) : Promise.resolve(null); // never rejects
-    const reads = new Map(listed.map((repo) => [repo, this.readRepo(repo)]));
+    const limits = this.limits ? preparation.time('limits.get', () => this.limits.get(this.cfg.placements)) : Promise.resolve(null); // never rejects
+    const reads = new Map(listed.map((repo) => [repo, this.readRepo(repo, preparation)]));
 
     // Awaited first: it is the one read whose failure fails the tick, and a rejection nobody awaits yet would end the
     // process. Every other read resolves, whatever happens to it.
@@ -187,7 +190,7 @@ export class Launcher {
     for (const repo of [...served, ...rows.map((r) => r.repo)]) byLabel.set(repoLabel(repo), repo);
     for (const i of instances) if (!byLabel.has(i.repoLabel) && rowOf.get(i.alloc)) byLabel.set(i.repoLabel, rowOf.get(i.alloc).repo);
     const runners = new Map();
-    const listings = await Promise.all([...byLabel.values()].map(async (repo) => [repo, await (reads.get(repo)?.runners ?? this.listRunners(repo))]));
+    const listings = await Promise.all([...byLabel.values()].map(async (repo) => [repo, await (reads.get(repo)?.runners ?? this.listRunners(repo, preparation))]));
     for (const [repo, mine] of listings) if (mine) runners.set(repo, mine);
     // quota: the tick's memory of quota refusals (logic.mjs quotaScope), shared by its launches; launches: the rows they
     // wrote last, which the tick's counts read.
@@ -195,7 +198,7 @@ export class Launcher {
 
     // A VM whose job has ended says so in ci-kit/job before its guest powers off. Read beside the jobs, it serves both
     // the cover (an ended job's VM covers nothing) and the cleanup (the VM goes without waiting for its power-off).
-    const reports = this.readReports(seen);
+    const reports = this.readReports(seen, preparation);
     const demand = new Map();
     const queued = [];
     const jobs = [];
@@ -218,15 +221,19 @@ export class Launcher {
   // between the two reads then shows as not queued, never as double demand. The queued runs are listed before the
   // running ones, so a run that starts between the two listings is in the second (listed at once, each could miss it),
   // and a run in both is read once. A failed read resolves to null (visible: to the error), logged.
-  readRepo(repo) {
-    const visible = this.gh.getRepo(repo).then((r) => r.private === true, (err) => err);
-    const runners = this.listRunners(repo);
+  readRepo(repo, preparation) {
+    const visible = preparation.time('github.getRepo', () => this.gh.getRepo(repo), { repo }).then((r) => r.private === true, (err) => err);
+    const runners = this.listRunners(repo, preparation);
     const jobs = runners.then(async (mine) => {
       if (!mine) return null;
       try {
-        const listed = [...(await this.gh.runsByStatus(repo, 'queued')), ...(await this.gh.runsByStatus(repo, 'in_progress'))];
+        const listed = [...(await preparation.time('github.runs.queued', () => this.gh.runsByStatus(repo, 'queued'), { repo })),
+          ...(await preparation.time('github.runs.in_progress', () => this.gh.runsByStatus(repo, 'in_progress'), { repo }))];
         const runs = [...new Map(listed.map((run) => [run.id, run])).values()]; // one that started between is in both
-        const lists = await Promise.all(runs.map(async (run) => (await this.gh.listJobs(repo, run.id)).map((j) => ({ ...j, repo, workflow: run.path }))));
+        const lists = await Promise.all(runs.map(async (run) => {
+          const jobs = await preparation.time('github.listJobs', () => this.gh.listJobs(repo, run.id), { repo, run: run.id });
+          return jobs.map((j) => ({ ...j, repo, workflow: run.path }));
+        }));
         return { jobs: lists.flat(), runs: runs.map((run) => ({ repo, id: run.id, path: run.path, attempt: run.run_attempt ?? 1 })) };
       } catch (err) {
         this.log(`jobs of ${repo}: ${err.message}`);
@@ -236,9 +243,9 @@ export class Launcher {
     return { visible, runners, jobs };
   }
 
-  async listRunners(repo) {
+  async listRunners(repo, preparation) {
     try {
-      const mine = (await this.gh.runners(repo)).filter((r) => r.name.startsWith('ci-kit-gce-'));
+      const mine = (await preparation.time('github.runners', () => this.gh.runners(repo), { repo })).filter((r) => r.name.startsWith('ci-kit-gce-'));
       return new Map(mine.map((r) => [r.name, r]));
     } catch (err) {
       this.log(`runners of ${repo}: ${err.message}`);
@@ -247,11 +254,11 @@ export class Launcher {
   }
 
   // Instance name → its ci-kit/job report (null when none), for the VMs worth reading (reportable()).
-  async readReports(seen) {
+  async readReports(seen, preparation) {
     const runnersOf = (v) => seen.runners.get(this.repoOf(seen, v));
     return new Map(await Promise.all(reportable(seen.instances, runnersOf).map(async (v) => {
       try {
-        return [v.name, await this.gce.guestAttribute(v.zone, v.name, 'ci-kit/job')];
+        return [v.name, await preparation.time('gce.jobReport', () => this.gce.guestAttribute(v.zone, v.name, 'ci-kit/job'), { instance: v.name, zone: v.zone })];
       } catch (err) {
         if (err.status !== 404) this.log(`ci-kit/job of ${v.name}: ${err.message}`);
         return [v.name, null];
@@ -534,7 +541,7 @@ export class Launcher {
 
   // ── launches ───────────────────────────────────────────────────────────────────────────────────────────────────
 
-  async launchAll(seen, out, deadline) {
+  async launchAll(seen, out, deadline, preparation) {
     this.reportNeverOnline(seen);
     const plan = planLaunches({
       queued: seen.queued, instances: seen.instances, runners: seen.demand, now: this.now(), cfg: this.cfg, complete: seen.complete, claimed: seen.claimed,
@@ -547,7 +554,7 @@ export class Launcher {
     }));
     const ahead = prelaunches(plan.inflight);
     if (plan.launches.length + ahead.length === 0) return;
-    const image = newestReadyImage(await seen.images, this.cfg.image_family);
+    const image = newestReadyImage(await preparation.time('images.wait', () => seen.images), this.cfg.image_family);
     if (!image) {
       this.log(`no ready image in family ${this.cfg.image_family}; ${plan.launches.length} job(s) wait, ${ahead.length} pre-launch(es) not made`);
       return;
@@ -563,7 +570,7 @@ export class Launcher {
     // plans against, and the tick ends when its races have.
     // The tick's room in each placement (room.mjs): the limits, less what every ci-kit VM listed holds, job and bake.
     const wait = this.after(LIMITS_WAIT_MS);
-    const limits = await Promise.race([seen.limits, wait.promise.then(() => null)]);
+    const limits = await preparation.time('limits.wait', () => Promise.race([seen.limits, wait.promise.then(() => null)]));
     wait.cancel();
     const bake = seen.builders.filter((b) => b.labels?.['ci-kit'] === 'gce-builder').map(viewInstance);
     // An earlier insert still unsettled and unlisted holds its share as its VM would (planLaunches counts its vCPUs).
@@ -573,7 +580,7 @@ export class Launcher {
     const room = createRoom({ limits, instances: [...seen.instances, ...bake], pending, placements: this.cfg.placements, egress: this.cfg.egress });
     let open;
     const ctx = {
-      seen, deadline, out, image, room, inflight: plan.inflight, races: [],
+      seen, deadline, out, image, room, preparation, inflight: plan.inflight, races: [],
       untried: new Set(plan.launches), firstTried: new Promise((resolve) => { open = resolve; }),
     };
     const opened = () => {
@@ -629,7 +636,7 @@ export class Launcher {
   // itself. Its row keeps its walk's refusals and slow inserts (walkRecord).
   async launch(item, ctx) {
     const { repo, cpus, job, prelaunch, race } = item;
-    const { seen, deadline, out, image } = ctx;
+    const { seen, deadline, out, image, preparation } = ctx;
     const purpose = job ? `job ${job.id}` : `run ${prelaunch.run}'s cpus-${cpus} pre-launch`;
     const what = race ? `the race of ${instanceName(race.of)} for ${purpose}` : purpose;
     const attempts = item.attempts ?? placements(cpus, this.cfg);
@@ -645,10 +652,10 @@ export class Launcher {
     const name = instanceName(alloc);
     const reserved = item.reserved ?? largestMachineCpus(cpus, this.cfg);
     const row = launchRow({ alloc, repo, cpus, at, config: this.config, egress: this.cfg.egress, prelaunch: race ? undefined : prelaunch, race, reserved });
-    await this.ledger.upsert(row); // a launch with no row never happens: this throws, and nothing was created
+    await preparation.time('ledger.launching', () => this.ledger.upsert(row), { repo, instance: name }); // no row, no launch
     let jit;
     try {
-      jit = await this.gh.jitConfig(repo, jitRequest(alloc, cpus));
+      jit = await preparation.time('github.jitConfig', () => this.gh.jitConfig(repo, jitRequest(alloc, cpus)), { repo, instance: name });
     } catch (err) {
       this.log(`jit for ${what} in ${repo} (${name}): ${err.message}`);
       await this.write(finalRow(row, { end: 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb, egress: this.cfg.egress }));

@@ -57,6 +57,22 @@ test('tick log lines: the start logged, else the end less the tick\'s duration; 
   ]);
 });
 
+test('tick preparation spans survive the log reader without becoming extra ticks or changing latency samples', () => {
+  const preparation = [
+    { call: 'config', started: iso('10:18:08'), ms: 500 },
+    { call: 'ledger.read', started: iso('10:18:08.500'), ms: 5_500 },
+    { call: 'github.listJobs', repo: 'SSFSKIM/MAWS', run: 7, started: iso('10:18:09'), ms: 4_000 },
+    { call: 'ledger.launching', repo: 'SSFSKIM/MAWS', instance: 'ci-kit-gce-example', started: iso('10:18:14'), ms: 500 },
+    { call: 'github.jitConfig', repo: 'SSFSKIM/MAWS', instance: 'ci-kit-gce-example', started: iso('10:18:14.500'), ms: 1_000 },
+    { call: 'limits.get', started: iso('10:18:08.500'), ms: null },
+  ];
+  const parsed = ticksOf([{ timestamp: iso('10:18:30'), jsonPayload: {
+    message: 'tick: 1 launched, 0 deleted, 0 finalized', ms: 22_000, started: iso('10:18:08'), firstInsert: iso('10:18:15.500'), preparation,
+  } }]);
+  assert.deepEqual(parsed, [{ start: t('10:18:08'), end: t('10:18:30'), firstInsert: t('10:18:15.500'), preparation }]);
+  assert.deepEqual(stages({ rows: [], ticks: parsed }).tickToFirstInsert, [7_500]);
+});
+
 // Review (M3, P2): insert accepted → job started is measured per VM, never as a sum of the stages' medians, and each
 // machine type's numbers read on their own (the c3d-highcpu-4 median beside the C4D one).
 test('the report gives each machine type\'s VM stages on their own, insert accepted → job started among them', () => {

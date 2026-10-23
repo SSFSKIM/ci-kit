@@ -19,6 +19,7 @@ import { createAppTokens } from '../../lib/github-app.mjs';
 import { createConfigSource } from './source.mjs';
 import { createGceLedger } from './ledger-store.mjs';
 import { Launcher } from './launcher.mjs';
+import { createPreparation } from './preparation.mjs';
 import { stockoutMemory } from './logic.mjs';
 import { limitsCache, readLimits } from './room.mjs';
 import { createTicker } from './ticker.mjs';
@@ -37,10 +38,13 @@ async function fetchText(url) {
 
 let setup = null;
 let github = null; // the App's client once set up: its budget gates requested ticks
-async function deps() {
+async function deps(preparation) {
   const { project } = JSON.parse(await bundled('gce.json'));
   const gce = createGce({ project, token: accessToken() });
-  const [appId, pem] = await Promise.all([gce.secret('ci-kit-app-id'), gce.secret('ci-kit-app-key')]);
+  const [appId, pem] = await Promise.all([
+    preparation.time('secret.appId', () => gce.secret('ci-kit-app-id')),
+    preparation.time('secret.appKey', () => gce.secret('ci-kit-app-key')),
+  ]);
   const gh = createGitHub(createAppTokens({ appId: appId.trim(), pem, owner: 'SSFSKIM' }));
   const source = createConfigSource({ gh, fetchText, readBundled: bundled, bundledCommit: process.env.CI_KIT_COMMIT || 'bundled', log });
   github = gh;
@@ -49,33 +53,34 @@ async function deps() {
   return { gce, gh, source, ledgers: new Map(), stockouts: stockoutMemory(), limits: limitsCache({ read: (placements) => readLimits(gce, placements), log }) };
 }
 
-async function reconcile() {
-  const d = await (setup ??= deps().catch((err) => {
+async function reconcile(preparation) {
+  const d = await preparation.time('setup', () => (setup ??= deps(preparation).catch((err) => {
     setup = null;
     throw err;
-  }));
-  const { cfg, config, poolRepos } = await d.source();
+  })));
+  const { cfg, config, poolRepos } = await preparation.time('config', () => d.source());
   const key = `${cfg.ledger.repo}#${cfg.ledger.issue_title}`;
   if (!d.ledgers.has(key)) d.ledgers.set(key, createGceLedger(d.gh, cfg.ledger, { log }));
   const error = (message, fields) => say('ERROR', message, fields);
   const launcher = new Launcher({ gce: d.gce, gh: d.gh, ledger: d.ledgers.get(key), cfg, config, poolRepos, log, error, stockouts: d.stockouts, limits: d.limits });
-  return { config: config.slice(0, 8), repos: cfg.repos.map((r) => r.repo), ...(await launcher.tick()), github: d.gh.stats() };
+  return { config: config.slice(0, 8), repos: cfg.repos.map((r) => r.repo), ...(await launcher.tick(preparation)), github: d.gh.stats() };
 }
 
 // One tick, logged once whoever asked for it. `started` and the launcher's `firstInsert` time the tick's own share of
 // a job's wait (gce/latency-report.mjs); `trigger` and `requests` say what it served.
 async function tick({ trigger, requests }) {
   const began = Date.now();
+  const preparation = createPreparation();
   const served = { trigger, requests, started: new Date(began).toISOString() };
   try {
-    const out = await reconcile();
+    const out = await reconcile(preparation);
     const extra = [out.prelaunched.length && `${out.prelaunched.length} pre-launched`, out.raced.length && `${out.raced.length} racing a slow insert`].filter(Boolean);
     const ahead = extra.length ? ` (${extra.join(', ')})` : '';
     say('INFO', `tick: ${out.launched.length} launched${ahead}, ${out.deleted.length} deleted, ${out.finalized.length} finalized`,
       { ...out, ...served, ms: Date.now() - began });
     return out;
   } catch (err) {
-    say('ERROR', `tick failed: ${err.stack ?? err.message}`, { ...served, ms: Date.now() - began });
+    say('ERROR', `tick failed: ${err.stack ?? err.message}`, { ...served, preparation: preparation.calls, ms: Date.now() - began });
     throw err;
   }
 }
