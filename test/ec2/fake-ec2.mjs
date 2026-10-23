@@ -29,4 +29,3 @@ export function fixture() {
 }
 export async function prepared(f) { await f.provider.observe(); await f.provider.readyImage(); return f.provider.candidates(account, 8)[0]; }
 export function instance(extra = {}) { return { InstanceId: 'i-123', InstanceType: 'c8a.2xlarge', ImageId: 'ami-123', LaunchTime: new Date(start), State: { Name: 'running' }, Placement: { AvailabilityZone: 'us-east-2c' }, SubnetId: 'subnet-123', InstanceLifecycle: 'spot', Tags: tags({ 'ci-kit-pool': 'ec2', 'ci-kit-purpose': 'job', 'ci-kit-alloc': 'alloc1', 'ci-kit-repo': 'SSFSKIM--ci-kit-sandbox', 'ci-kit-cpus': 8 }), ...extra }; }
-
