@@ -413,7 +413,7 @@ export class Launcher {
       }
     }
     const had = seen.rowOf.get(v.alloc);
-    const base = runningRow(had ?? launchRow({ alloc: v.alloc, repo: repo ?? v.repoLabel, cpus: v.cpus, at: v.created, config: v.config ?? '-', egress: v.egress }), v);
+    const base = runningRow(had ?? launchRow({ alloc: v.alloc, repo: repo ?? v.repoLabel, cpus: v.cpus, at: v.created, config: v.config ?? '-', egress: v.egress, account: this.cfg.project }), v);
     const job = had?.job ?? (await this.jobOf(seen, base));
     let end = a.end;
     if (had?.state === 'deleting') end = had.end;
@@ -577,7 +577,7 @@ export class Launcher {
     const listed = new Set(seen.instances.map((i) => i.alloc));
     const pending = seen.rows.filter((r) => !listed.has(r.alloc) && pendingAllocation(r) && unsettledInsert(r)?.zone)
       .map((r) => ({ zone: unsettledInsert(r).zone, vcpus: r.reserved ?? largestMachineCpus(r.cpus, this.cfg), egress: r.egress }));
-    const room = createRoom({ limits, instances: [...seen.instances, ...bake], pending, placements: this.cfg.placements, egress: this.cfg.egress });
+    const room = createRoom({ account: this.cfg.project, limits, instances: [...seen.instances, ...bake], pending, placements: this.cfg.placements, egress: this.cfg.egress });
     let open;
     const ctx = {
       seen, deadline, out, image, room, preparation, inflight: plan.inflight, races: [],
@@ -651,7 +651,8 @@ export class Launcher {
     seen.rowOf.set(alloc, null);
     const name = instanceName(alloc);
     const reserved = item.reserved ?? largestMachineCpus(cpus, this.cfg);
-    const row = launchRow({ alloc, repo, cpus, at, config: this.config, egress: this.cfg.egress, prelaunch: race ? undefined : prelaunch, race, reserved });
+    const row = launchRow({ alloc, repo, cpus, at, config: this.config, egress: this.cfg.egress, prelaunch: race ? undefined : prelaunch, race, reserved,
+      account: this.cfg.project, image: image.selfLink, image_commit: image.labels?.['ci-kit-commit'] });
     await preparation.time('ledger.launching', () => this.ledger.upsert(row), { repo, instance: name }); // no row, no launch
     let jit;
     try {

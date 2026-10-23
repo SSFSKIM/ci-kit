@@ -162,7 +162,7 @@ test('a reconciled operation\'s own error is the walk\'s: a quota learned throug
     quota: memory,
   });
   assert.deepEqual(result.tried.map((t) => [t.zone, t.outcome, t.metric]), [['us-west4-a', 'quota', 'IN_USE_ADDRESSES'], ['us-central1-a', 'created', undefined]]);
-  assert.deepEqual(memory, [{ region: 'us-west4', vcpus: 4 }], 'an address quota binds the region, not the family');
+  assert.deepEqual(memory, [{ provider: 'gce', account: 'ssfskim-ci-kit', region: 'us-west4', vcpus: 4 }], 'an address quota binds the region, not the family');
 });
 
 test('a race row names its original and the demand that started it, apart from the job its VM ran', () => {

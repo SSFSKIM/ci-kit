@@ -93,7 +93,7 @@ const LIMITS = { addresses: { 'us-west4': 8, 'us-central1': 32 }, instances: { '
 const attempt = (cpus, region, family = 'c4d') => placements(cpus, M6_CFG).find((p) => p.placement.region === region && p.machine.startsWith(family));
 
 test('room: a placement fits while its family\'s vCPUs, its region\'s addresses and its instances stay under their limits', () => {
-  const room = createRoom({ limits: LIMITS, instances: [...Array(7)].map(() => view('us-west4-a', 'c4d-highcpu-4')), egress: 'external' });
+  const room = createRoom({ account: M6_CFG.project, limits: LIMITS, instances: [...Array(7)].map(() => view('us-west4-a', 'c4d-highcpu-4')), egress: 'external' });
   const west = attempt(4, 'us-west4');
   assert.ok(room.fits(west), '7 of 8 addresses');
   room.take(west);
@@ -114,17 +114,17 @@ test('room: a placement fits while its family\'s vCPUs, its region\'s addresses 
 
 test('room counts what holds each limit: a stopped VM no vCPUs or address, a VM behind the NAT no address', () => {
   const instances = [view('us-west4-a', 'c4d-highcpu-16', { status: 'TERMINATED' }), view('us-west4-b', 'c4d-highcpu-16', { egress: 'nat' })];
-  const room = createRoom({ limits: { ...LIMITS, vcpus: { 'us-west4|c4d': 32 } }, instances, egress: 'external' });
+  const room = createRoom({ account: M6_CFG.project, limits: { ...LIMITS, vcpus: { 'us-west4|c4d': 32 } }, instances, egress: 'external' });
   assert.ok(room.fits(attempt(16, 'us-west4')), '16 of 32 vCPUs held');
   room.take(attempt(16, 'us-west4'));
   assert.ok(!room.fits(attempt(2, 'us-west4')));
-  const nat = createRoom({ limits: { ...LIMITS, addresses: { 'us-west4': 0 } }, instances: [], egress: 'nat' });
+  const nat = createRoom({ account: M6_CFG.project, limits: { ...LIMITS, addresses: { 'us-west4': 0 } }, instances: [], egress: 'nat' });
   assert.ok(nat.fits(attempt(4, 'us-west4')), 'a NAT VM takes no address');
-  assert.equal(createRoom({ limits: null, instances: [], egress: 'external' }), null, 'no limits read: no admission');
+  assert.equal(createRoom({ account: M6_CFG.project, limits: null, instances: [], egress: 'external' }), null, 'no limits read: no admission');
 });
 
 test('a refusal that still happens closes its limit for the tick, whatever size asks next', () => {
-  const room = createRoom({ limits: LIMITS, instances: [view('us-west4-a', 'c4d-highcpu-4')], egress: 'external' });
+  const room = createRoom({ account: M6_CFG.project, limits: LIMITS, instances: [view('us-west4-a', 'c4d-highcpu-4')], egress: 'external' });
   const west = attempt(4, 'us-west4');
   room.take(west);
   room.release(west);
@@ -141,7 +141,7 @@ test('a refusal that still happens closes its limit for the tick, whatever size 
 const quotaErr = (metric, region) => new GceError(200, `operation failed: QUOTA_EXCEEDED Quota '${metric}' exceeded.  Limit: 8.0 in region ${region}.`, ['QUOTA_EXCEEDED'], { accepted: true, finished: true });
 
 test('the walk skips a full placement without an insert, and gives back what a refused insert took', async () => {
-  const room = createRoom({ limits: LIMITS, instances: [...Array(8)].map(() => view('us-west4-a', 'c4d-highcpu-4')), egress: 'external' });
+  const room = createRoom({ account: M6_CFG.project, limits: LIMITS, instances: [...Array(8)].map(() => view('us-west4-a', 'c4d-highcpu-4')), egress: 'external' });
   const sent = [];
   const memory = [];
   const result = await walkPlacements(placements(4, M6_CFG), {
@@ -158,7 +158,7 @@ test('the walk skips a full placement without an insert, and gives back what a r
 });
 
 test('review: a closed limit stays closed when another insert in flight gives its share back', () => {
-  const room = createRoom({ limits: LIMITS, instances: [], egress: 'external' });
+  const room = createRoom({ account: M6_CFG.project, limits: LIMITS, instances: [], egress: 'external' });
   const four = attempt(4, 'us-west4');
   room.take(four);
   room.take(four);
@@ -170,9 +170,9 @@ test('review: a closed limit stays closed when another insert in flight gives it
 
 test('review: an unsettled insert of an earlier tick holds its region\'s address, instance and vCPUs while unlisted', () => {
   const pending = [{ zone: 'us-west4-a', vcpus: 4, egress: 'external' }];
-  const room = createRoom({ limits: { ...LIMITS, addresses: { 'us-west4': 1 } }, instances: [], pending, egress: 'external', placements: M6_CFG.placements });
+  const room = createRoom({ account: M6_CFG.project, limits: { ...LIMITS, addresses: { 'us-west4': 1 } }, instances: [], pending, egress: 'external', placements: M6_CFG.placements });
   assert.ok(!room.fits(attempt(4, 'us-west4')));
   assert.equal(room.why(attempt(4, 'us-west4')), 'us-west4 addresses 1/1');
-  const vcpus = createRoom({ limits: { ...LIMITS, vcpus: { 'us-west4|c4d': 6 } }, instances: [], pending, egress: 'external', placements: M6_CFG.placements });
+  const vcpus = createRoom({ account: M6_CFG.project, limits: { ...LIMITS, vcpus: { 'us-west4|c4d': 6 } }, instances: [], pending, egress: 'external', placements: M6_CFG.placements });
   assert.ok(!vcpus.fits(attempt(4, 'us-west4')), '4 of 6 held by the pending insert');
 });

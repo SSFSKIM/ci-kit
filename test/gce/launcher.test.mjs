@@ -86,6 +86,19 @@ test('a job\'s whole life: launch, run, power off, delete, one final row with th
   assert.deepEqual(leftovers(w), { instances: 0, disks: 0, runners: 0 });
 });
 
+test('v2 ledger provenance comes from the actual launcher project and selected image', async () => {
+  const { w, launcher } = setup();
+  w.g.images[0].labels['ci-kit-commit'] = 'baked-sha';
+  w.sim.queue(SBX, L(4));
+  await launcher.tick();
+  const row = only(rows(w));
+  assert.equal(row.v, 2);
+  assert.equal(row.account, CFG.project);
+  assert.equal(row.image, w.g.images[0].selfLink);
+  assert.equal(row.image_commit, 'baked-sha');
+  assert.equal(row.region, 'us-central1');
+});
+
 // Egress (2026-10-21): gce.json's egress picks the VM's network path, and its row keeps the one it launched with, so a
 // change to the file between launch and the final row never reprices the VM.
 test('a VM launched under egress "nat" has no external address and its row says nat; it is priced so after gce.json returns to external', async () => {
@@ -946,7 +959,7 @@ test('timing: the tick reports its first insert, and a row its job\'s run, workf
   const row = only(rows(w));
   assert.deepEqual(row.job, {
     id: job.id, name: 'ci / nproc', run: job.run_id, workflow: '.github/workflows/gate.yml', queued: new Date(T0 + 5_000).toISOString(),
-    started: new Date(T0 + 50_000).toISOString(),
+    started: new Date(T0 + 50_000).toISOString(), labels: L(4), required_provider: 'any',
   });
   assert.equal(row.running, new Date(T0 + 40_000).toISOString());
   w.advance(MIN);

@@ -70,6 +70,13 @@ test('viewInstance reads the fields the launcher decides on', () => {
   assert.deepEqual({ ...v, raw: undefined }, {
     name: `ci-kit-gce-${A(1)}`, alloc: A(1), zone: 'us-central1-a', machine: 'e2-highcpu-2', vcpus: 2, status: 'RUNNING',
     created: T0 - 2 * MIN, running: T0 - 44_000 + 40, repoLabel: 'ssfskim--ci-kit-sandbox', cpus: 2, provisioning: 'spot', config: null, diskType: null, egress: null, raw: undefined,
+    provider: 'gce', account: 'ssfskim-ci-kit', region: 'us-central1', id: null, runner: `ci-kit-gce-${A(1)}`,
+    size: 2, labels: ['self-hosted', 'ci-kit-pool', 'cpus-2', 'ci-kit-gce'], state: 'running', createdAt: '2026-10-16T11:58:00.000Z',
+    candidate: {
+      provider: 'gce', account: 'ssfskim-ci-kit', region: 'us-central1', zone: 'us-central1-a', size: 2,
+      labels: ['self-hosted', 'ci-kit-pool', 'cpus-2', 'ci-kit-gce'], machine: 'e2-highcpu-2', family: 'e2', vcpus: 2, memoryGiB: 2, arch: 'x86_64',
+      provisioning: 'spot', subnet: null, disk: { type: 'pd-balanced', sizeGB: null }, price: { source: 'gce-catalog', at: '2026-10-16T00:00:00Z' },
+    },
   });
   assert.equal(viewInstance(instance({ alloc: A(2), status: 'PROVISIONING' })).running, null, 'never started yet');
   // Its egress, from its network interface: an external address, or none (its region's Cloud NAT).
@@ -224,7 +231,12 @@ test('capacity moves to the next zone, and after every zone refused spot the sam
   const script = Object.fromEntries(['a', 'b', 'c', 'f'].map((z) => [`c3d-highcpu-8/spot@${z}`, cap()]));
   const { tried, result } = await walk(8, script);
   assert.deepEqual(tried, ['c3d-highcpu-8/spot@a', 'c3d-highcpu-8/spot@b', 'c3d-highcpu-8/spot@c', 'c3d-highcpu-8/spot@f', 'c3d-highcpu-8/standard@a']);
-  assert.deepEqual(result.placement, { machine: 'c3d-highcpu-8', provisioning: 'standard', zone: 'us-central1-a', placement: CFG.placements[0] });
+  assert.deepEqual(result.placement, {
+    machine: 'c3d-highcpu-8', provisioning: 'standard', zone: 'us-central1-a', placement: CFG.placements[0],
+    provider: 'gce', account: 'ssfskim-ci-kit', region: 'us-central1', size: 8,
+    labels: ['self-hosted', 'ci-kit-pool', 'cpus-8', 'ci-kit-gce'], family: 'c3d', vcpus: 8, memoryGiB: 16, arch: 'x86_64',
+    subnet: 'ci-kit-us-central1', disk: { type: 'pd-balanced', sizeGB: 50 }, price: { source: 'gce-catalog', at: '2026-10-16T00:00:00Z' },
+  });
 });
 
 test('a quota refusal skips the machine\'s family in its region and moves to the fallback\'s; with none left the walk is exhausted', async () => {

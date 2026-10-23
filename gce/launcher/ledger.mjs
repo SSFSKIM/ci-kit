@@ -2,8 +2,9 @@
 // written `launching` before the JIT mint and finalized in place; and a daily line. A row only moves forward:
 // launching → running (its VM exists) → deleting (just before the launcher's delete call) → final. The hidden mark
 // differs from the Hetzner rows' (pool/lib/ledger.mjs), so each backend's readers see only their own rows.
-import { instanceName } from './logic.mjs';
 import { machineCpus } from '../bake/plan.mjs';
+import { providerRunnerName, requiredProvider } from './providers/contracts.mjs';
+import { MEMORY_GIB } from './providers/gce-data.mjs';
 
 const ROW_MARK = 'ci-kit-gce-ledger';
 const DAILY_MARK = 'ci-kit-gce-daily';
@@ -46,8 +47,6 @@ const RATES = {
     c4d: { spot: { vcpu: 0.0062, gb: 0.000661 }, standard: { vcpu: 0.036834, gb: 0.00393707 } },
   },
 };
-// GiB of memory of each highcpu size (gcloud compute machine-types describe; C4D's is not a fixed ratio).
-const MEMORY_GIB = { e2: { 2: 2, 4: 4, 8: 8, 16: 16 }, c3d: { 4: 8, 8: 16, 16: 32 }, c4d: { 2: 3, 4: 7, 8: 15, 16: 30 } };
 const GB_PER_GIB = 2 ** 30 / 1e9;
 // What a VM's egress costs an hour, by the egress it ran with (gce.json's `egress`, recorded on its row).
 // - external: its ephemeral external IPv4, $0.0025 an hour on spot and $0.005 on demand (Compute Engine's external IP
@@ -119,38 +118,63 @@ const utc = (s) => s.slice(0, 19).replace('T', ' ');
 // launched for} for a race's allocation (spec M6). Either VM's runner may take any job of its repo and size, so the job
 // a VM ran is its row's `job`, never assumed from the demand. reserved: the vCPUs its launch reserved against
 // max_vcpus (the largest machine its walk could land on), which a later tick keeps counting while its VM may appear.
-export const launchRow = ({ alloc, repo, cpus, at, config, egress, prelaunch, race, reserved }) => ({
-  alloc, instance: instanceName(alloc), repo, cpus, at: iso(at), config: config.slice(0, 8), ...(egress ? { egress } : {}),
+export const launchRow = ({ alloc, repo, cpus, at, config, egress, prelaunch, race, reserved,
+  provider = 'gce', account = null, image, image_commit, credit_policy = 'off' }) => ({
+  v: 2, provider, account, alloc, instance: providerRunnerName(provider, alloc), repo, cpus, at: iso(at), config: config.slice(0, 8),
+  ...(image ? { image } : {}), ...(image_commit ? { image_commit } : {}), credit_policy, ...(egress ? { egress } : {}),
   ...(prelaunch ? { prelaunch } : {}), ...(race ? { race } : {}), ...(reserved ? { reserved } : {}), state: 'launching',
 });
 
-// inst: {zone, machine, provisioning, diskType, created (ms), running (ms, when it became RUNNING; absent or null
-// before)}. A VM launched before placements carries no disk type.
-export const runningRow = (row, inst) => ({
-  ...row, machine: inst.machine, zone: inst.zone, provisioning: inst.provisioning, ...(inst.diskType ? { diskType: inst.diskType } : {}),
-  created: iso(inst.created), ...(inst.running ? { running: iso(inst.running) } : {}), state: 'running',
-});
+// Read old comments without rewriting them or guessing the account/image they never recorded. V1 demand was
+// generic by the legacy-label assumption; v2 records demand independently of the allocation's cloud.
+function versionedRow(row) {
+  const v = row.v ?? 1;
+  return {
+    ...row, v, provider: v === 1 ? 'gce' : row.provider, account: row.account ?? null,
+    ...(row.job ? { job: v === 1 ? { ...row.job, labels: [], required_provider: 'any' } : row.job } : {}),
+  };
+}
+const v2Row = (row) => ({ ...versionedRow(row), v: 2 });
+
+// Persist reconciliation coordinates, never the secret-bearing launch request. Called before sending in M5.
+export const attemptRow = (row, { zone, client_token, sent_at }) => ({ ...v2Row(row), zone, client_token, sent_at });
+
+// Accept the existing GCE view and the provider Instance contract during the effects extraction. Neither overwrites
+// the launch's physical reservation with logical cpus or the current configuration.
+export function runningRow(row, inst) {
+  const c = inst.candidate ?? inst;
+  const diskType = c.disk?.type ?? inst.diskType;
+  const region = c.region ?? (row.provider !== 'ec2' ? regionOf(c.zone) : undefined);
+  return {
+    ...v2Row(row), account: row.account ?? c.account ?? null, machine: c.machine, zone: c.zone, provisioning: c.provisioning,
+    ...(region ? { region } : {}), ...(c.zoneId ? { zone_id: c.zoneId } : {}),
+    ...(inst.id != null ? { instance_id: String(inst.id) } : {}), ...(diskType ? { diskType } : {}),
+    ...(c.price ? { price: c.price } : {}),
+    created: iso(inst.createdAt ? Date.parse(inst.createdAt) : inst.created), ...(inst.running ? { running: iso(inst.running) } : {}), state: 'running',
+  };
+}
 
 // What a row keeps of the job its VM ran (M3 Timing in the ledger): its id and name, its run and the run's workflow
 // path (`workflow`, which the launcher adds from the run), and GitHub's queued (created_at) and started times. A
 // field GitHub has not set is left out.
 export function jobRecord(job) {
   const fields = { id: job.id, name: job.name, run: job.run_id, workflow: job.workflow, queued: job.created_at, started: job.started_at };
-  return Object.fromEntries(Object.entries(fields).filter(([, v]) => v != null));
+  const labels = [...(job.labels ?? [])];
+  return { ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v != null)), labels, required_provider: requiredProvider(labels) };
 }
 
-export const withJob = (row, job) => ({ ...row, job: jobRecord(job) });
+export const withJob = (row, job) => ({ ...v2Row(row), job: jobRecord(job) });
 
 // Finalized, or about to be deleted (`state: 'deleting'`). Seconds run from the VM's creation to its deletion; an
 // allocation that never had a VM has neither. job: a jobRecord(). egress: the config's, which prices a row written
 // before rows named their own.
 export function finalRow(row, { end, deleted, job, diskGb, egress, state = 'final' }) {
   const seconds = row.created ? Math.max(0, Math.round((deleted - Date.parse(row.created)) / 1000)) : null;
-  const cost = seconds === null ? null : dollars({
+  const cost = seconds === null || row.provider === 'ec2' ? null : dollars({
     machine: row.machine, zone: row.zone, provisioning: row.provisioning, seconds, diskGb, diskType: row.diskType, egress: row.egress ?? egress,
   });
   return {
-    ...row, ...(job ? { job } : {}),
+    ...v2Row(row), ...(job ? { job } : {}),
     deleted: iso(deleted), seconds, dollars: cost === null ? null : round4(cost), end, state,
   };
 }
@@ -168,7 +192,7 @@ function jobCell(row) {
 export function renderRow(row) {
   const deleted = { launching: 'launching', running: 'running', deleting: `deleting ${row.deleted && utc(row.deleted)}`, final: row.deleted && utc(row.deleted) }[row.state];
   return [
-    `<!-- ${ROW_MARK} ${JSON.stringify(row)} -->`,
+    `<!-- ${ROW_MARK} ${JSON.stringify(v2Row(row))} -->`,
     '| alloc | instance | repo | job (actual) | created (UTC) | deleted (UTC) | machine@zone | spot/standard | seconds | $ | end |',
     '|---|---|---|---|---|---|---|---|---|---|---|',
     `| ${row.alloc} | ${row.instance} | ${row.repo} | ${jobCell(row)} | ${row.created ? utc(row.created) : '-'} | ` +
@@ -187,7 +211,11 @@ function marked(body, mark) {
   }
 }
 
-export const parseRow = (body) => marked(body, ROW_MARK);
+export function parseRow(body) {
+  const row = marked(body, ROW_MARK);
+  if (!row || ![1, 2].includes(row.v ?? 1)) return null;
+  return versionedRow(row);
+}
 
 // An allocation's row comments, the one that counts first: the most final, then the oldest comment. Every reader and
 // writer orders them the same way, so concurrent writers converge on the same comment.

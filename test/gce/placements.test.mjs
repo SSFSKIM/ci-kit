@@ -95,16 +95,16 @@ const at = (cpus, cfg = NEW_CFG) => Object.fromEntries(placements(cpus, cfg).map
 const W8 = at(8)['c4d-highcpu-8/spot@us-west4-a'];
 
 test('a quota refusal is scoped to what ran out, as its message names it', () => {
-  assert.deepEqual(quotaScope(quota('C4D_CPUS'), W8), { region: 'us-west4', family: 'c4d', vcpus: 8 });
-  assert.deepEqual(quotaScope(quota('PREEMPTIBLE_C4D_CPUS'), W8), { region: 'us-west4', family: 'c4d', spot: true, vcpus: 8 });
+  assert.deepEqual(quotaScope(quota('C4D_CPUS'), W8), { provider: 'gce', account: COMMON.project, region: 'us-west4', family: 'c4d', vcpus: 8 });
+  assert.deepEqual(quotaScope(quota('PREEMPTIBLE_C4D_CPUS'), W8), { provider: 'gce', account: COMMON.project, region: 'us-west4', family: 'c4d', spot: true, vcpus: 8 });
   for (const metric of ['INSTANCES', 'IN_USE_ADDRESSES', 'DISKS_TOTAL_GB', 'SSD_TOTAL_GB', 'CPUS']) {
-    assert.deepEqual(quotaScope(quota(metric), W8), { region: 'us-west4', vcpus: 8 }, metric);
+    assert.deepEqual(quotaScope(quota(metric), W8), { provider: 'gce', account: COMMON.project, region: 'us-west4', vcpus: 8 }, metric);
   }
-  assert.deepEqual(quotaScope(quota('PREEMPTIBLE_CPUS'), W8), { region: 'us-west4', spot: true, vcpus: 8 });
-  assert.deepEqual(quotaScope(quota('CPUS_ALL_REGIONS', 'globally'), W8), { vcpus: 8 });
+  assert.deepEqual(quotaScope(quota('PREEMPTIBLE_CPUS'), W8), { provider: 'gce', account: COMMON.project, region: 'us-west4', spot: true, vcpus: 8 });
+  assert.deepEqual(quotaScope(quota('CPUS_ALL_REGIONS', 'globally'), W8), { provider: 'gce', account: COMMON.project, vcpus: 8 });
   // A refusal that names nothing (one settled through its operation's codes) is taken as the machine's family's.
-  assert.deepEqual(quotaScope(new GceError(200, 'operation failed', ['QUOTA_EXCEEDED']), W8), { region: 'us-west4', family: 'c4d', vcpus: 8 });
-  assert.deepEqual(quotaScope(null, W8), { region: 'us-west4', family: 'c4d', vcpus: 8 });
+  assert.deepEqual(quotaScope(new GceError(200, 'operation failed', ['QUOTA_EXCEEDED']), W8), { provider: 'gce', account: COMMON.project, region: 'us-west4', family: 'c4d', vcpus: 8 });
+  assert.deepEqual(quotaScope(null, W8), { provider: 'gce', account: COMMON.project, region: 'us-west4', family: 'c4d', vcpus: 8 });
 });
 
 test('a remembered refusal skips only requests of the same or more vCPUs in its scope', () => {
@@ -132,15 +132,15 @@ const familyQuota = (region) => new GceError(403,
 test('CPUS_PER_VM_FAMILY is the refused machine\'s family quota in its region: C4D refused never blocks C3D beside it', () => {
   const m6 = (cpus) => Object.fromEntries(placements(cpus, M6_CFG).map((p) => [key(p), p]));
   const c4d = m6(8)['c4d-highcpu-8/spot@us-central1-a'];
-  assert.deepEqual(quotaScope(familyQuota('us-central1'), c4d), { region: 'us-central1', family: 'c4d', vcpus: 8 });
-  assert.deepEqual(quotaScope(familyQuota('us-west4'), W8), { region: 'us-west4', family: 'c4d', vcpus: 8 }, 'the live refusal');
+  assert.deepEqual(quotaScope(familyQuota('us-central1'), c4d), { provider: 'gce', account: COMMON.project, region: 'us-central1', family: 'c4d', vcpus: 8 });
+  assert.deepEqual(quotaScope(familyQuota('us-west4'), W8), { provider: 'gce', account: COMMON.project, region: 'us-west4', family: 'c4d', vcpus: 8 }, 'the live refusal');
   const memory = [quotaScope(familyQuota('us-central1'), c4d)];
   assert.equal(quotaBlocks(memory, m6(8)['c3d-highcpu-8/spot@us-central1-a']), false, 'C3D in the same region');
   assert.equal(quotaBlocks(memory, m6(16)['c3d-highcpu-16/standard@us-central1-f']), false);
   assert.equal(quotaBlocks(memory, m6(8)['c4d-highcpu-8/spot@us-central1-b']), true, 'C4D there, same size');
   assert.equal(quotaBlocks(memory, m6(8)['c4d-highcpu-8/spot@us-east1-b']), false, 'C4D in another region');
   // The older per-family form keeps its meaning.
-  assert.deepEqual(quotaScope(quota('C3D_CPUS', 'in region us-central1'), m6(8)['c3d-highcpu-8/spot@us-central1-a']), { region: 'us-central1', family: 'c3d', vcpus: 8 });
+  assert.deepEqual(quotaScope(quota('C3D_CPUS', 'in region us-central1'), m6(8)['c3d-highcpu-8/spot@us-central1-a']), { provider: 'gce', account: COMMON.project, region: 'us-central1', family: 'c3d', vcpus: 8 });
 });
 
 test('C4D refused for its family quota in every region: the walk asks each C4D placement once, then lands on C3D us-central1', async () => {
@@ -177,7 +177,7 @@ test('a family quota refusal skips the rest of that placement and the walk goes 
   assert.deepEqual(tried, ['c4d-highcpu-8/spot@us-west4-a', 'c3d-highcpu-8/spot@us-central1-a']);
   assert.equal(result.placement.zone, 'us-central1-a');
   assert.equal(result.quota, true);
-  assert.deepEqual(memory, [{ region: 'us-west4', family: 'c4d', vcpus: 8 }]);
+  assert.deepEqual(memory, [{ provider: 'gce', account: COMMON.project, region: 'us-west4', family: 'c4d', vcpus: 8 }]);
   // The next launch of the tick does not ask us-west4 again; a smaller one does.
   assert.deepEqual((await walk(16, () => null, memory)).tried, ['c3d-highcpu-16/spot@us-central1-a']);
   assert.deepEqual((await walk(4, () => null, memory)).tried, ['c4d-highcpu-4/spot@us-west4-a']);
@@ -218,7 +218,7 @@ test('every spot attempt remembered stocked out: the walk\'s first attempt is on
 });
 
 test('a walk whose every placement is remembered refused makes no attempt', async () => {
-  const memory = [{ vcpus: 2 }];
+  const memory = [{ provider: 'gce', account: COMMON.project, vcpus: 2 }];
   const { tried, result } = await walk(2, () => null, memory);
   assert.deepEqual(tried, []);
   assert.equal(result.stop, 'exhausted');
