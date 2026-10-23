@@ -92,6 +92,16 @@ case $command in
       path='/Applications/LibreOffice.app'; script=\${script//"$path"/"$HOME/guest/LibreOffice.app"}
       export HOME=$HOME/guest
       export PATH=$HOME/bin:/usr/bin:/bin
+      cd "$HOME" || exit 1
+      if [[ -e $HOME/isolated-exec ]]; then
+        # The real guest RPC owns the stream: a killed guest shell must not leave the host pipe held by its children.
+        # Host descriptors cannot cross that RPC either (fd 10 is Bash's saved copy of the host lane lock).
+        /bin/bash -c "$script" "$@" > "$HOME/exec.out" 2>&1 10>&- &
+        guest=$!; echo "$guest" > "$HOME/exec.pid"
+        wait "$guest"; status=$?
+        cat "$HOME/exec.out"
+        exit "$status"
+      fi
       exec /bin/bash -c "$script" "$@"
     fi
     if [[ $1 == sudo ]]; then
@@ -484,6 +494,12 @@ if [[ -f $HOME/previous.pids ]]; then
   done < "$HOME/previous.pids"
 fi
 mkdir "$5" || exit 1
+if [[ -e $HOME/pause-before-cd ]]; then
+  pwd > "$HOME/precd.cwd"
+  echo "$PPID" > "$HOME/precd.pid"
+  echo "$$" > "$HOME/precd.git.pid"
+  kill -STOP "$PPID"
+fi
 if [[ -e $HOME/detach-group ]]; then
   cat > "$5/detached-child" <<'CHILD'
 trap '' TERM
@@ -633,6 +649,43 @@ describe('the first-run shell (bake.sh --first-run)', macOnly, () => {
       for (const child of [byArgv, byCwd]) {
         try { process.kill(-child.pid, 'SIGKILL'); } catch {}
         children.delete(child);
+      }
+    }
+  });
+
+  test('a cancelled workload paused before cd is recovered while its cwd is still HOME', async () => {
+    const f = firstRunFixture();
+    writeFileSync(join(f.guest, 'isolated-exec'), '');
+    writeFileSync(join(f.guest, 'pause-before-cd'), '');
+    const stat = (pid) => spawnSync('/bin/ps', ['-p', String(pid), '-o', 'stat='], { encoding: 'utf8' }).stdout.trim();
+    let workload, supervisor, outer;
+    const interrupted = f.start(['--first-run', CANDIDATE]);
+    try {
+      await f.until(() => {
+        workload = Number(text(join(f.guest, 'precd.pid')));
+        const clone = Number(text(join(f.guest, 'precd.git.pid')));
+        return workload > 0 && clone > 0 && stat(workload).startsWith('T') && /^(?:Z.*)?$/.test(stat(clone));
+      }, 'workload stopped after clone and before cd');
+      supervisor = Number(spawnSync('/bin/ps', ['-p', String(workload), '-o', 'ppid='], { encoding: 'utf8' }).stdout.trim());
+      outer = Number(text(join(f.guest, 'exec.pid')));
+      assert.ok(supervisor > 0 && outer > 0);
+      assert.equal(text(join(f.guest, 'precd.cwd')).trim(), f.guest, 'the clone ran from HOME, not the scratch');
+      assert.ok(existsSync(join(f.guest, 'maws-firstrun')), 'clone returned with its directory created');
+      // tart-guest-agent cancels the RPC by killing the outer shell, not its detached workload.
+      process.kill(outer, 'SIGKILL');
+      assert.notEqual(await interrupted.exited, 0, interrupted.output());
+      assert.ok(stat(workload).startsWith('T'), 'the paused workload outlived its exec');
+      rmSync(join(f.guest, 'pause-before-cd'));
+      writeFileSync(join(f.guest, 'previous.pids'), `${workload}\n${supervisor}\n`);
+      const retry = f.start(['--first-run', CANDIDATE]);
+      assert.equal(await retry.exited, 0, retry.output() + '\n' + spawnSync('/usr/sbin/lsof', [join(f.logs, 'vm-lane.lock')], { encoding: 'utf8' }).stdout);
+      for (const pid of [workload, supervisor]) assert.match(stat(pid), /^(?:Z.*)?$/, `prior process ${pid} is gone`);
+      assert.equal(existsSync(join(f.guest, 'maws-firstrun')), false);
+      assert.equal(f.state(CANDIDATE), 'stopped');
+    } finally {
+      if (workload > 0) { try { process.kill(-workload, 'SIGKILL'); } catch {} }
+      for (const pid of [outer, supervisor]) {
+        if (pid > 0) { try { process.kill(pid, 'SIGKILL'); } catch {} }
       }
     }
   });
