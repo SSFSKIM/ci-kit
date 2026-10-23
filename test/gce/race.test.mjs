@@ -126,15 +126,15 @@ test('an unresolved launching row (its insert never settled, its VM not listed) 
   // Its runner gone or busy, the row covers nothing, but its VM may still appear: the vCPUs stay reserved.
   const gone = planLaunches({ queued: [job(1)], instances: [], runners: new Map([[SBX, new Map()]]), rows, now: T0, cfg });
   assert.deepEqual([gone.launches.map((l) => l.job.id), gone.inflight], [[1], 8]);
-  // Listed, its VM counts as itself, once; settled (its operation's end learned), the row counts for nothing; nor does
-  // a running row whose VM is gone.
+  // Listed, its VM counts once. Every non-final row retains its debit until finalization, even after a
+  // refusal is learned or a running VM vanishes; neither event alone is a committed final row.
   const vanished = planLaunches({ queued: [job(1)], instances: [], runners, rows: [{ ...rows[0], state: 'running' }], now: T0, cfg });
-  assert.deepEqual([vanished.launches.map((l) => l.job.id), vanished.inflight], [[1], 4]);
+  assert.deepEqual([vanished.launches.map((l) => l.job.id), vanished.inflight], [[1], 8]);
   const listed = planLaunches({ queued: [job(1)], instances: [vm('origaaaaaa')], runners, rows, now: T0, cfg });
   assert.deepEqual([listed.launches, listed.inflight], [[], 4]);
   const settled = [{ ...rows[0], slow: [{ ...rows[0].slow[0], outcome: 'capacity', done: new Date(T0).toISOString() }] }];
   const free = planLaunches({ queued: [job(1)], instances: [], runners, rows: settled, now: T0, cfg });
-  assert.deepEqual([free.launches.map((l) => l.job.id), free.inflight], [[1], 4]);
+  assert.deepEqual([free.launches.map((l) => l.job.id), free.inflight], [[1], 8]);
 });
 
 test('a race\'s launching row keeps its reserved vCPUs before its VM is listed; a reservation is what the row recorded, not today\'s config', () => {
@@ -146,9 +146,9 @@ test('a race\'s launching row keeps its reserved vCPUs before its VM is listed; 
   const p = planLaunches({ queued: [job(1, 2), job(2, 2), job(3, 2)], instances: [], runners, rows: [child], now: T0, cfg });
   assert.equal(p.inflight, 6, 'the row\'s 4, and one more 2');
   assert.deepEqual(p.launches.map((l) => l.job.id), [2], 'job 1 is covered by the race\'s runner; job 3 does not fit');
-  // A launching row that is neither a race's nor unsettled is a launch in flight in another tick: the accepted overlap.
+  // A launching row with no attempt yet is still a non-final allocation: reserve it across a restart too.
   const plain = launchRow({ alloc: 'plainaaaaa', repo: SBX, cpus: 2, at: T0, config: 'c0ffee00', reserved: 4 });
-  assert.equal(planLaunches({ queued: [], instances: [], runners, rows: [plain], now: T0, cfg }).inflight, 0);
+  assert.equal(planLaunches({ queued: [], instances: [], runners, rows: [plain], now: T0, cfg }).inflight, 4);
 });
 
 test('a reconciled operation\'s own error is the walk\'s: a quota learned through reconciliation keeps its metric and scope', async () => {

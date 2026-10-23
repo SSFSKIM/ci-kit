@@ -221,14 +221,14 @@ test('two launchers with different demand snapshots: rows unique per allocation,
   assert.deepEqual([...all.values()].flat().filter((r) => r.state === 'final').map((r) => r.end), ['cancelled-idle', 'cancelled-idle']);
 });
 
-test('a quota refusal is a wait: nothing left behind, the row abandoned, the job still queued for a later tick', async () => {
+test('a quota refusal is a wait: nothing left behind, the row refused, the job still queued for a later tick', async () => {
   const { w, launcher } = setup();
   w.sim.queue(SBX, L(4));
   w.g.insertErrors.push({ match: () => true, error: () => new GceError(403, "Quota 'C3D_CPUS' exceeded", ['quotaExceeded']) });
   const out = await launcher.tick();
   assert.deepEqual(out.launched, []);
   assert.deepEqual(leftovers(w), { instances: 0, disks: 0, runners: 0 });
-  assert.equal(only(rows(w)).end, 'abandoned');
+  assert.equal(only(rows(w)).end, 'refused');
   w.advance(MIN);
   assert.equal((await launcher.tick()).launched.length, 1, 'the next tick launches once quota allows');
 });
@@ -748,7 +748,7 @@ test('placements: quota refused in every placement stops the later launches it c
   const jits = w.log.filter((l) => l.startsWith('jit ')).length;
   assert.ok(jits >= 1 && jits <= 16, `only the launches already under way minted a runner (${jits})`);
   assert.equal(rows(w).size, jits);
-  assert.ok([...rows(w).values()].every((r) => r.at(-1).end === 'abandoned'));
+  assert.ok([...rows(w).values()].every((r) => r.at(-1).end === 'refused'));
   assert.deepEqual(leftovers(w), { instances: 0, disks: 0, runners: 0 });
 });
 

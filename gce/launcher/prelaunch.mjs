@@ -6,6 +6,7 @@
 // was launched for, which is what keeps a later tick, a second launcher or a redelivered event from launching for that
 // run again.
 import { largestMachineCpus } from './logic.mjs';
+import { requiredProvider } from './providers/contracts.mjs';
 
 export const SHAPE_RUNS = 10;
 
@@ -21,7 +22,9 @@ export function runShape(rows, repo, workflow) {
   for (const r of rows) {
     if (!r.job?.run || r.job.workflow !== workflow || !sameRepo(r.repo, repo)) continue;
     const sizes = runs.get(r.job.run) ?? runs.set(r.job.run, new Map()).get(r.job.run);
-    sizes.set(r.cpus, (sizes.get(r.cpus) ?? 0) + 1);
+    const required = r.v === 1 ? 'any' : r.job.required_provider ?? requiredProvider(r.job.labels ?? []);
+    const key = required === 'any' ? r.cpus : `${r.cpus}:${required}`;
+    sizes.set(key, (sizes.get(key) ?? 0) + 1);
   }
   if (!runs.size) return null;
   const recent = [...runs].sort(([a], [b]) => b - a).slice(0, SHAPE_RUNS).map(([, sizes]) => sizes);
@@ -39,14 +42,14 @@ export function runShape(rows, repo, workflow) {
 // the slot to the race.
 export function prelaunchedFor(rows, run) {
   const of = (r) => {
-    if (r.prelaunch?.run === run.id && r.prelaunch.attempt === run.attempt) return r.alloc;
+    if (r.prelaunch?.run === run.id && r.prelaunch.attempt === run.attempt) return r.prelaunch.group ?? r.alloc;
     if (r.race?.demand?.run === run.id && r.race.demand.attempt === run.attempt) return r.race.of;
     return null;
   };
   const out = new Map();
   for (const r of rows) {
     const group = of(r);
-    if (!group || r.end === 'abandoned') continue;
+    if (!group || (run.repo && !sameRepo(r.repo, run.repo)) || ['abandoned', 'refused'].includes(r.end)) continue;
     if (!out.has(r.cpus)) out.set(r.cpus, new Set());
     out.get(r.cpus).add(group);
   }
@@ -67,7 +70,7 @@ const isPoolJob = (job) => job.labels.some((l) => l.toLowerCase() === 'ci-kit-po
 // queued jobs wait (planLaunches). Queued jobs come first: nothing is pre-launched while one waits, and pre-launches go
 // oldest run first, largest size first (a run waits for its slowest gate, and its long gates are the large ones), each
 // reserving its largest machine as a launch does, until one does not fit.
-export function planPrelaunches({ runs, jobs, rows, runners, inflight, waiting, cfg }) {
+export function planPrelaunches({ runs, jobs, rows, runners, inflight, waiting, cfg, admission = true }) {
   if (waiting > 0) return [];
   const out = [];
   let reserved = inflight;
@@ -83,7 +86,7 @@ export function planPrelaunches({ runs, jobs, rows, runners, inflight, waiting, 
     for (const cpus of sizes) {
       for (let k = done.get(cpus) ?? 0; k < shape[cpus]; k += 1) {
         const need = largestMachineCpus(cpus, cfg);
-        if (reserved + need > cfg.max_vcpus) return out;
+        if (admission && reserved + need > cfg.max_vcpus) return out;
         reserved += need;
         out.push({ repo: run.repo, cpus, prelaunch: { run: run.id, attempt: run.attempt, workflow: run.path } });
       }

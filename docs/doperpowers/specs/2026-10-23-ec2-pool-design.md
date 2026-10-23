@@ -19,6 +19,9 @@ After this work:
 - When the credit is spent, or its date passes, new VMs go to GCE first. This needs no deploy, and no running job is
   touched.
 - If AWS refuses capacity or quota, the job is placed on GCE in the same tick.
+- Each pool repo has its own providers: which clouds and accounts it may use, in its own order, with optional
+  vCPU caps, set in ci-kit's pool config. A repo that names none stays on GCE alone. Adding an AWS account for
+  one project is config plus that account's setup run, not a scheduler change.
 
 To see it, push a MAWS class 1a run through `scripts/ci-gate.sh` and read its pool jobs' runner names. Then read the
 launcher's `placed … ec2 …` log lines and the ledger rows.
@@ -45,10 +48,18 @@ measurement exists.
 - [x] (2026-10-23 18:37Z) M2: data contracts, v2 ledger with v1 reads, and provider-qualified keys; no behaviour change.
   Task review approved without findings; committed-head test gate green: run 40003608129, implementation 0de12c4.
   Live GCE parity remains the merged-main M3 proof. AWS spend remains at most $0.735 (no M2 resources).
-- [ ] M3: GCE effects extracted behind the provider; no behaviour change.
-  Implementation fe16bdb reviewed clean on 2026-10-23; remote gate 40006417067 green. Merged-main deploy and
-  MAWS class 1a/v2-row proof remain outstanding. AWS spend unchanged at most $0.735.
-- [ ] M4: scheduling over providers, proved with a fake second provider; GCE-only behaviour unchanged.
+- [x] (2026-10-23 19:06Z) M3: GCE effects extracted behind the provider; no behaviour change.
+  Implementation fe16bdb reviewed clean; implementation gate 40006417067 and exact PR-head gate 40007392109 green.
+  PR #107 merged c14ac6c; fresh-main deploy serves ci-kit-launcher-00019-pxv. MAWS class 1a run 40008135552
+  passed all six pool jobs on GCE, with v2 rows in sandbox ledger issue #48. No rollback was needed.
+  AWS resource spend remains M1's <=$0.735; this execution also made one Cost Explorer read ($0.01).
+- [x] (2026-10-23 19:2xZ) Owner's ruling: per-project providers, built into this initiative ("Per-project, in
+  EC2"; rejected: a provider protocol for outside operators, now or after EC2). Design revised: Each repo's
+  providers; M4–M6, Acceptance 11 and Interfaces updated before M4 starts.
+- [x] (2026-10-23) Closed the per-repo review findings before M4: disabled instances remain valid, admission
+  reserves both budgets synchronously, and refused pre-launches do not consume slots; M4/M5 proofs updated.
+- [ ] M4: scheduling over providers and each repo's provider list, proved with fake providers (two of one kind in
+  different accounts); GCE-only behaviour unchanged.
 - [ ] M5: the EC2 provider, its image and its one-time setup, serving ci-kit-sandbox.
 - [ ] M6: credit preference, reports, guard, the MAWS canary and acceptance.
 
@@ -68,6 +79,9 @@ measurement exists.
   needs none.
 - **A change in GCE behaviour.** With EC2 disabled, the launcher places, prices, logs and ledgers exactly as it
   does today. Existing ledger rows stay readable.
+- **Provider rights in the repo's own hands.** Which accounts a repo may spend, in what order and up to what cap is
+  ci-kit's pool config, read by the launcher. A repo's `.github/ci-kit.yml` does not grant it: a pull request
+  edits that file, and the account owner pays.
 - **ARM.** Graviton (c8g) is cheaper, but it needs an arm64 image and toolchain, which is a separate project.
 - **Automatic reruns after an interruption.** As on GCE, an interrupted job is recorded and fails, and reruns are
   the caller's (`docs/pool.md`, Preemption).
@@ -75,7 +89,10 @@ measurement exists.
 ## Glossary
 
 - **Provider**: a cloud the scheduler can place VMs in: `gce` or `ec2`. In code, a module behind the interface in
-  Interfaces and Dependencies.
+  Interfaces and Dependencies. One provider instance exists per configured account: one GCE project, and one per
+  entry of `ec2.json`'s `accounts`. Its identity is `(provider, account)`, the pair M2's keys already carry.
+- **Provider list**: a pool repo's ordered list of the provider instances it may use, each with an optional vCPU
+  cap (Each repo's providers). Absent means GCE alone.
 - **Candidate**: one concrete way to place one VM: provider, region, zone, machine type, vCPUs, spot or standard,
   image, subnet, disk, logical job size and runner labels. Logical size is not physical vCPUs: GCE's
   c3d-highcpu-4 can serve a `cpus-2` or a `cpus-4` allocation. The scheduler walks candidates for one logical size.
@@ -89,7 +106,8 @@ measurement exists.
   not a script.
 - **Web-identity federation**: AWS STS `AssumeRoleWithWebIdentity`, which trades a Google-signed ID token for
   temporary AWS credentials of a role whose trust policy names that Google identity.
-- **Credit preference**: the placement policy under which EC2 spot candidates come before GCE's. It ends at a
+- **Credit preference**: an account's standing while its credit lasts: its instance keeps its place in each repo's
+  provider list, and once the preference ends it becomes overflow (Placement order). It ends at a
   billing threshold, stale billing, a date or the flag being turned off.
 - **Hydration**: an EBS volume created from an AMI's snapshot fetches each block from S3 the first time it is
   read, so first reads are slow.
@@ -105,7 +123,7 @@ whole acceptance after the parts have passed.
    launcher's AWS configuration carries role ARNs, not keys. Its log shows `aws: assumed <role> until <time>` after
    a start, and it launches EC2 VMs. Both launcher and bake roles have `MaxSessionDuration: 14400`, and federation
    requests 14400 s. The bake launches a Canonical-base builder through its federated role, not `ci-kit-ops`.
-2. **MAWS jobs on EC2 (M6).** With the credit preference on and EC2 enabled for MAWS, a MAWS class 1a run's pool jobs
+2. **MAWS jobs on EC2 (M6).** With the credit preference on and MAWS's provider list naming EC2 first, a MAWS class 1a run's pool jobs
    (static, the unit shards, probes) run on `ci-kit-ec2-*` runners and pass. Each ledger row reads `provider: ec2`,
    with its zone and zone id, `c8a.*`, `spot`, estimated gross dollars and an image id.
 3. **Overflow and launch recovery (M4 scheduling, M5 recovery, M6 live).** When all EC2 candidates refuse definitely, generic demand
@@ -115,6 +133,8 @@ whole acceptance after the parts have passed.
    crosses clouds. Live, overflow can be observed in M6 when a sandbox burst exceeds EC2's spot quota with
    preference on. M5 restart tests prove that a request never received by AWS is abandoned at 10 min, while an
    accepted request with a lost response is found by tag/token and recorded running, with no request replay.
+   M4 pre-launch tests retry on the next tick when all providers refused, count a successful fallback and its
+   races as one speculative slot, and recover the same partial-batch counts after restart.
 4. **The VM cleans up after itself (M5).** Compare `exit.json`'s job-end time with the instance's state-transition
    time: termination follows within 60 s. No volume belonging to that allocation remains. Launch a sandbox VM for
    a label no job uses, with `max_run_minutes: 5` in a test config and no launcher managing it: it powers off and
@@ -136,16 +156,31 @@ whole acceptance after the parts have passed.
    untouched. A newest reading older than 48 h logs `credit preference off: stale billing` and has the same effect.
    Date expiry and `credit.enabled: false` also end the preference without retiring running VMs.
 8. **Reports show both clouds (M6).** `node gce/latency-report.mjs` groups its stages by provider and zone.
-   `node gce/cost-report.mjs` prints per provider: VMs and estimated gross dollars; for EC2 it also prints the
+   `node gce/cost-report.mjs` prints per provider instance: VMs and estimated gross dollars; for a credit account it also prints the
    credit-funded estimate, AWS's `billed_usd`, `through`, `read_at` and remaining budget. Unknown rates print as
    unpriced, never as zero. Row estimates do not drive placement policy. An overlap test starts a fresh reader
    after an older reading is posted last: the newer `read_at` still wins, regardless of comment creation order.
-9. **GCE unchanged when EC2 is off (M2–M4, repeated M6).** With `pool/config/ec2.json` absent or `enabled: false`,
-   the full launcher suite passes, and a class 1a run places on GCE as before. The regression bar is single-cloud
-   behaviour, not retaining an implementation whose repo/size coverage cannot distinguish provider-only jobs.
+9. **GCE unchanged when EC2 is off (M2–M4, live M5, repeated M6).** With `pool/config/ec2.json` absent,
+   top-level `enabled: false`, all listed EC2 accounts disabled, or no repo's list naming EC2, the full launcher
+   suite passes and a generic class 1a run whose repos list GCE places there as before. Lists may still reference
+   EC2: disabling it is valid, takes effect on reload and keeps existing allocations managed and accounted for.
+   An absent file skips those entries with one log per config load and holds non-final EC2 reservations under
+   Unknown EC2 inventory; it does not retain the last enabled config. Use `enabled: false` to switch EC2 off,
+   not file deletion. M4 proves the transitions with fakes; M5 repeats them live. The regression bar is
+   single-cloud behaviour, not retaining repo/size coverage that cannot distinguish provider-only jobs.
 10. **Images in step (M5).** Compare the AMI's tags with the GCE image's labels for one bake: ci-kit commit, Node
     versions, MAWS revision and lockfile hash, runner version and warm results match. Read both smoke logs; the
     same suite passes on both images.
+11. **Each repo on its own providers (M4 tests, M5 and M6 live).** Tests: a repo whose list is GCE alone never
+    opens an EC2 allocation, even with credit preference on; a repo listing GCE before EC2 uses EC2 only after
+    GCE's spot candidates refuse; a repo at its EC2 cap walks its next provider without opening an EC2
+    allocation; two EC2 accounts are walked, capped, refused and remembered separately, and a refusal in one does
+    not skip the other; a job pinned to a cloud its repo does not list stays queued with one log line naming the
+    repo and cloud; removing a provider from a list leaves that repo's running VMs and their coverage untouched.
+    Queued, speculative, race and fallback admissions acquire both budgets before asynchronous work, count each
+    allocation once and reserve physical vCPUs. M4 proves concurrent admission, a race at cap, refusal release
+    and fallback to a physically larger candidate without exceeding the global budget.
+    Live: in M5 only ci-kit-sandbox lists EC2 and MAWS places on GCE alone; in M6 the lists of Acceptance 2 hold.
 
 ## Design
 
@@ -174,9 +209,8 @@ There is no backend interface to reuse from the Hetzner backend: Hetzner shares 
 preparation, not a control-plane interface. This is a new, small boundary for ephemeral VMs. The Hetzner host
 agent is not touched.
 
-The repos the pool serves stay where they are, in `pool/config/gce.json`'s `repos`. EC2 serves the same repos;
-`pool/config/ec2.json` can narrow that with an optional `repos` list, used to canary on ci-kit-sandbox first. No
-repo changes owner.
+The repos the pool serves stay where they are, in `pool/config/gce.json`'s `repos`. No repo changes owner. Which
+providers each of them may use is that repo's provider list (Each repo's providers).
 
 **Runner labels and coverage.** EC2 runners register with `self-hosted, ci-kit-pool, cpus-N, ci-kit-ec2`;
 GCE's carry `ci-kit-gce` instead. Each queued job's labels give a required provider: `gce` when it names
@@ -203,57 +237,131 @@ shapes instead would disable pre-launch until new history accumulates. This chan
 Tests mix generic, GCE-only and EC2-only jobs in the same repo and size, with both runners and pending allocations.
 
 **Unknown EC2 inventory.** A failed EC2 listing does not stop GCE serving. Every non-final EC2 ledger row keeps
-its recorded vCPU reservation against the global budget: launching, running or deleting, including a launching
-row whose VM exists but whose running write failed. Reservation is not coverage. GitHub's runner list is
+its recorded vCPU reservations against the global budget and its `(repo, provider, account)` cap: launching,
+running or deleting, including a launching row whose VM exists but whose running write failed. Reservation is
+not coverage. GitHub's runner list is
 independent of AWS: an online, idle, unclaimed `ci-kit-ec2-*` runner can cover eligible demand under the matching
 rule above; a busy runner covers nothing, and a failed GitHub listing supplies no coverage. A row and its runner
 are never counted twice. That tick makes no EC2 launch, termination or finalization; unseen rows are never
 finalized as gone. If the inventory stays unknown for 30 min, the launcher logs an error once for that outage and
 keeps the same conservative reservations. Non-final rows remain recoverable across restarts and outages
 longer than the ledger's ordinary 26-hour cache window; cache aging or issue rotation cannot release them.
-A failed list is not treated as a successful empty inventory.
+A failed list is not treated as a successful empty inventory. All of this is per provider instance: one EC2
+account's failed listing holds that account's rows and launches only.
+
+### Each repo's providers
+
+The owner ruled on 2026-10-23 that each project has its own providers. Each entry of `gce.json`'s `repos` may
+carry an ordered `providers` list (shape in Interfaces):
+
+    {"repo": "SSFSKIM/MAWS",
+     "providers": [{"provider": "ec2", "account": "290475840169", "max_vcpus": 128}, {"provider": "gce"}]}
+
+- An entry names a provider instance by `provider` and `account`. `account` may be left out when that provider
+  has one configured account, counting disabled accounts too. When it has several, `account` is required.
+  For these list references and caps, the parser refuses only an EC2 account absent from `ec2.json`'s `accounts`
+  while that file is present, an ambiguous account, a GCE account other than `gce.json`'s `project`, a duplicate
+  instance, or a non-positive cap. Reference validity is separate from eligibility to launch.
+- `max_vcpus` caps the physical vCPUs that this repo's non-final allocations reserve on that instance. It counts
+  ledger non-final rows plus this tick's in-memory reservations, counting each allocation once, as the global
+  budget does. Admission acquires both reservations synchronously (Provider-bound allocations). At the cap,
+  the walk skips that instance for this repo: no allocation is opened, and nothing is remembered as a refusal.
+  Absent means no cap beyond the global `max_vcpus`. The owner's standing rule is to maximize parallelism.
+  A cap is for an account's owner to bound what one repo spends there; it is not a default.
+- A repo without `providers` uses GCE alone. EC2 is opt-in per repo: enabling `ec2.json` changes no repo's
+  placement until that repo's list names EC2 (Acceptance 9). This replaces the earlier `repos` narrowing in
+  `ec2.json`.
+- The list governs new allocations only. Removing a provider from it leaves the repo's running VMs, their coverage
+  and their rows alone, just as the end of credit preference does.
+
+A configured instance remains valid when disabled: top-level `ec2.json` `enabled: false` disables all EC2
+instances; an account's optional `enabled: false` disables just that instance (default true). The walk skips it
+for new allocations. Its existing allocations retain reservations and eligible coverage, and its provider still
+observes, reconciles, terminates and reads reports. Disable is a valid reload, so `source.mjs`'s last-good-config
+fallback for invalid input never masks it. **Switch EC2 off with `enabled: false`.**
+
+When `ec2.json` is absent, no EC2 instance exists. List entries naming EC2 are skipped for new allocations, not
+refused by the parser, and logged once per config load, not each tick or job. A confirmed deletion is absence,
+not a read failure that keeps the last good config. Non-final EC2 rows keep both reservations and independent
+GitHub coverage under Unknown EC2 inventory. Deleting the file while EC2 VMs live removes their provider
+management and gives the guard no account legs; the VMs are left to their guest deadlines. This is not the way
+to switch off EC2. Disabled accounts, unlike absent ones, remain guard legs.
+
+A job's required provider (from its labels) filters its repo's list to that cloud. A pinned job whose repo lists
+no instance of that cloud cannot be served. It stays queued, and the launcher logs `unservable: <repo> lists no
+<provider>` once per job. ci-kit's planner emits only generic pool labels, so only a hand-written job can pin.
+Pinning a gate to a cloud from `.github/ci-kit.yml` is a separate, later change.
+
+Coverage is unchanged: runners and allocations already belong to one repo; the current list and launch
+eligibility do not revoke existing coverage. Stock-out, quota, `denied` and `throttled` memory, rooms and
+unknown-inventory holds are kept per provider instance, so one account's refusal never skips another account's
+candidates.
+
+Why the list lives in ci-kit's config: the account owner decides what may be spent there (What it must not be).
+The strongest alternative was each repo declaring its providers in its own `.github/ci-kit.yml`. It lost because a
+pull request edits that file. A repo-side preference within its list can be added later on top of this.
+
+Accounts are configured, not coded. `ec2.json` holds a list of `accounts`, and each account carries its own
+placements, roles, security group, report bucket and optional `credit`. This version configures and proves one
+account live (290475840169); tests exercise two. A second account needs its config entry and its own setup run
+(`ec2/setup.sh`), and the bake and the guard then cover it. GCE stays one project in this version.
 
 ### Placement order and the credit preference
 
-Each provider expands its config into candidates, with their order fixed by config. The scheduler builds one walk
-per size from three groups:
+Each provider instance expands its config into candidates, in config order. For one job, the scheduler builds
+the walk from the repo's launch-eligible instances (Each repo's providers):
 
-| Credit preference | Walk |
+1. The spot candidates of each listed instance, in list order. An instance whose credit preference has ended
+   moves after the repo's other spot instances, keeping its relative order. It becomes overflow.
+2. Then the standard candidates of the listed instances that have them, in list order. Only GCE has standard
+   candidates in this version.
+
+"Ended" applies only to an account with a `credit` block whose preference is off (below). Credit never moves an
+instance ahead of its place in a list; it only demotes a credit account once its preference ends. An EC2 account
+without `credit` is walked where its repos list it.
+
+The pool repos' M6 list, EC2 then GCE, gives the owner's credit-first choice:
+
+| The EC2 account's credit preference | Walk for a repo listing EC2, then GCE |
 |---|---|
 | on | EC2 spot candidates → GCE spot candidates → GCE standard candidates |
 | off | GCE spot candidates → EC2 spot candidates → GCE standard candidates |
 
+A repo listing GCE before EC2 gets the second row whether the preference is on or off. A repo listing GCE alone
+never walks EC2.
+
 EC2 standard (on-demand) candidates are not configured, and the parser refuses them in this version.
 
-Inside each group the order is the config's, the same as today. In EC2 that is a configured zone order, set by M1
-from observed prices and capacity. Prices are reported, not used to rank.
+Inside each instance the order is the config's, the same as today. In EC2 that is a configured zone order, set by
+M1 from observed prices and capacity. Prices are reported, not used to rank.
 
 The scheduler keeps today's per-attempt semantics (`gce/launcher/logic.mjs`, `placements`, stock-out and quota
 memory), with the keys widened to `(provider, account, region, zone, machine, provisioning)`. A refusal in one
-provider never blocks a candidate in the other.
+provider instance never blocks a candidate in another.
 
-**The preference ends** when any of these holds:
+**The preference ends**, per account with a `credit` block, when any of these holds:
 
-- `credit.enabled` is false in `pool/config/ec2.json`;
+- `credit.enabled` is false in that account's entry in `pool/config/ec2.json`;
 - today (UTC) is after `credit.until`;
 - AWS's `billed_usd` is at or above `credit.budget_usd`;
 - the newest billing reading is older than 48 h, or no reading is available.
 
 The launcher logs the change once (`credit preference off: <reason>`); budget and stale data use respectively
-`budget` and `stale billing`. Only new walks change. Repos outside EC2's configured `repos` walk GCE alone.
+`budget` and `stale billing`, and the line names the account. Only new walks change.
 The budget is **$180** against the $200 credit. Billing can lag by about two days; at the expected full EC2 load
 of about $5/day, that is about $10 of unreported spend. The $20 margin covers that lag with about $10 left for
 variation and charges the credit may not cover. This is an estimate, not a hard AWS spending cap.
 
-**The billing reading** comes from AWS, not finalized rows. Once a day the launcher reads Cost Explorer
+**The billing reading** comes from AWS, not finalized rows. Once a day, for each account with a `credit` block,
+the launcher reads that account's Cost Explorer through its launcher role
 (`ce:GetCostAndUsage`), unblended EC2 compute plus EC2-Other since `credit.since`, grouped by record type so
 credits do not hide the gross charges consuming the budget. The daily refresh reads only when the newest
 stored reading is older than 6 h, including across launcher restarts. This is best-effort cost control, not a strict call cap: overlapping launchers or a failed refresh may
 read twice. At $0.01 per call that is accepted; no lock is needed. A launcher with a fresh stored reading makes
 no Cost Explorer call. A failed refresh is logged and leaves the last reading in force until it becomes stale.
 
-Each reading is a new, immutable comment on a dedicated, never-rotated issue titled `ec2 credit` in the
-configured ledger repo, found by title. Its schema is in Interfaces. A missing issue is created and populated
+Each reading is a new, immutable comment on a dedicated, never-rotated issue titled `ec2 credit <account>` in the
+configured ledger repo, found by title; one issue per credit account. Its schema is in Interfaces. A missing issue is created and populated
 by a fresh read; until there is a valid reading for `credit.since`, preference stays off as stale billing.
 Readers select the newest valid `read_at`, not the last comment created. A writer prunes all but the newest
 20 readings; deleting the old readings is safe in any order. Overlapping writers never overwrite each other:
@@ -303,6 +411,10 @@ for Google. The trust policy of each role:
 AWS maps `:aud` to Google's `azp` when the token has one, and `:oaud` to Google's `aud`. M1 reads a real token's
 claims before writing the policy. It does not assume `azp` from the docs.
 
+Everything here is per account. Each configured account has its own roles, and its own audience
+`https://ci-kit/<account>/ec2`. A token minted for one account's roles is refused by another account's trust policy.
+The launcher keeps one credential cache per role ARN.
+
 The launcher and bake roles both have `MaxSessionDuration=14400`. `ec2/setup.sh` sets that value when creating
 roles and validates it on existing roles; a mismatch is reported, never silently changed. AWS's default role
 session limit would reject production's four-hour request, so a shorter proof is not sufficient.
@@ -335,8 +447,10 @@ an isolation boundary: that identity can assume either. The strongest alternativ
 for the bake. It lost because GCE's side already shares the account; the extra rights are pool image management
 and launching a Canonical image only as a pool builder, not unrestricted image launches.
 
-**One-time setup** is `ec2/setup.sh`, run by CI-opt with the `ci-kit-ops` profile. It is idempotent: it creates
-what is missing, changes nothing that exists unless asked, and prints what it did. It sets up:
+**One-time setup** is `ec2/setup.sh`, run once per account: it takes that account's `ec2.json` entry and an
+operator profile for that account (`ci-kit-ops` for 290475840169). It is idempotent: it creates what is missing,
+changes nothing that exists unless asked, and prints what it did. It refuses when the profile's account differs
+from the entry's. In that account, it sets up:
 
 - the Spot service-linked role `AWSServiceRoleForEC2Spot`, without which the first spot launch fails;
 - a security group `ci-kit-pool` with no inbound rules, in the default VPC;
@@ -422,17 +536,35 @@ as on GCE (`docs/pool.md`, Preemption).
 
 ### Provider-bound allocations
 
-The scheduler opens an allocation for provider P, reserves its vCPUs, mints a JIT registration with P's name
-pattern and labels, and walks only P's candidates in the placement order. The ledger's launching write precedes
-the cloud request, as today. One JIT across a cross-provider walk is rejected: GitHub fixes its labels when it
-is minted, so a GCE fallback would otherwise advertise `ci-kit-ec2`.
+Opening an allocation for instance P synchronously acquires both its global vCPU reservation and its
+`(repo, provider, account)` cap reservation in admission, before any asynchronous work: ledger write, JIT mint
+or cloud call. This applies to queued launches, pre-launch speculation, races and fallback alike. Both budgets
+count the ledger's non-final rows and this tick's in-memory reservations, keyed by allocation id so writing a
+reserved allocation's row does not count it twice. `reserved` is physical vCPUs, the largest candidate the
+allocation may try on its instance, not the demand's logical size.
+
+The scheduler then mints a JIT registration with P's name pattern and labels and walks only P's candidates in
+the placement order. The ledger's launching write precedes the cloud request, as today. One JIT across a
+cross-provider walk is rejected: GitHub fixes its labels when it is minted, so a GCE fallback would otherwise
+advertise `ci-kit-ec2`.
 
 | Event | Allocation and next action |
 |---|---|
 | P accepts | Keep P's allocation; record running when observed. |
-| Every eligible candidate of P refuses definitely (capacity, quota, denied or throttled) | End P's allocation `refused`, remove its JIT registration at once, release its reservation, and open a new allocation on the next eligible provider in the same tick. |
-| Launch is uncertain | Keep its allocation, registration and reservation until reconciliation; EC2 resolves by observation or abandonment under the bounded rule below, never request replay. |
-| A slow launch is raced | The race has its own provider-bound allocation, registration and reservation; it never relabels or reuses the original. |
+| Every eligible candidate of P refuses definitely (capacity, quota, denied or throttled) | End P's allocation `refused`, remove its JIT registration at once, release both reservations, and admit a new allocation on the next eligible instance in the same tick. |
+| Launch is uncertain | Keep its allocation, registration and both reservations until reconciliation; EC2 resolves by observation or abandonment under the bounded rule below, never request replay. |
+| A slow launch is raced | Admit the race with its own allocation, registration and both reservations; skip a capped instance and walk the repo's next eligible instance. Never reuse or relabel the original. |
+
+A definite refusal releases both reservations before the fallback acquires its own; every final row releases
+both. An uncertain launch keeps both. Fallback is fresh admission, not a transfer of the previous amount: a
+size-2 demand falling back to GCE's `c3d-highcpu-4` needs 4 physical vCPUs and must pass both budgets anew. A
+capped instance is skipped; no allocation opens without enough global room. Races use the same admission,
+with the original's reservation still held.
+
+One speculative demand occupies one pre-launch slot, regardless of how many fallback or race allocations it
+opens. A definitely refused allocation occupies none. `prelaunch.group` on the rows persists that demand's
+identity across accounts, clouds and restarts (Ledger rows and cost); this slot grouping does not combine their
+vCPU reservations, which remain per allocation.
 
 The walk still keeps all spot groups ahead of GCE standard. A later return to GCE standard after its spot group
 and EC2 refused opens a fresh GCE allocation, not a resurrection of a refused one. Provider-only demand skips
@@ -443,7 +575,7 @@ runner rule, extended to `ci-kit-ec2-*`; it acts only on known inventory and nev
 `RunInstances` is sent. It never holds the launch request: that request contains the JIT configuration and
 presigned URLs, which are secrets. Every tick reconciles with `DescribeInstances` by `ci-kit-alloc` tag and by
 client token in the recorded zone. An instance found there moves the row to running. If successful observation
-still finds none 10 min after `sent_at`, the allocation ends `abandoned`, releases its reservation and removes
+still finds none 10 min after `sent_at`, the allocation ends `abandoned`, releases both reservations and removes
 its JIT registration. Describe consistency is seconds; 10 min gives it ample time without retaining a lost
 request forever. Unknown inventory still prevents finalization under the earlier rule.
 
@@ -462,8 +594,8 @@ unknown inserts are adapted to this contract; its current internal outcome names
 |---|---|---|
 | instance id returned | `accepted` | Row → `running` once the instance shows. |
 | `InsufficientInstanceCapacity`, `SpotMaxPriceTooLow`, `Unsupported` for the zone | `capacity` | Remember the candidate as stocked out for 5 min; try the next candidate. |
-| `MaxSpotInstanceCountExceeded`, `VcpuLimitExceeded` | `quota` | Scope `ec2/us-east-2/spot-standard-family` for this tick; no EC2 spot candidate of any size is tried again this tick; continue to the next eligible provider under a new allocation. |
-| `UnauthorizedOperation`, `AuthFailure`, an STS failure | `denied` | Log loudly. EC2 is off for 10 min, a misconfiguration and not a stock-out. Continue to the next eligible provider under a new allocation. |
+| `MaxSpotInstanceCountExceeded`, `VcpuLimitExceeded` | `quota` | Scope `ec2/<account>/us-east-2/spot-standard-family` for this tick; no spot candidate of that account, of any size, is tried again this tick; continue to the next eligible provider under a new allocation. |
+| `UnauthorizedOperation`, `AuthFailure`, an STS failure | `denied` | Log loudly. That account is off for 10 min, a misconfiguration and not a stock-out. Continue to the next eligible provider under a new allocation. |
 | `RequestLimitExceeded` | `throttled` | Back off EC2 for this tick; continue to the next eligible provider under a new allocation. |
 | Timeout or transport error | `uncertain` | Reconcile by observation in the recorded zone; when a successful observation finds none 10 min after send, end abandoned and unregister. Never replay or reuse across zones/providers. |
 
@@ -505,7 +637,7 @@ No temporary token, JIT config or instance identity may remain in the AMI. The b
 logs and any credential file the warm step used, and smoke asserts their absence.
 
 The bake runs where the GCE bake runs: the Cloud Run job `ci-kit-bake` on its schedule (`gce/deploy.sh`, bake). It
-gains an `ec2` stage after the GCE stage. Either stage failing leaves that provider's previous ready image in
+gains an `ec2` stage after the GCE stage, run for each configured account from the same manifest. Either stage failing leaves that provider's previous ready image in
 service. `.github/workflows/pool-bake.yml` is Hetzner's and is not the place.
 
 ### Ledger rows and cost
@@ -527,7 +659,18 @@ Provider exhaustion gains the final end reason `refused`; existing reasons keep 
 EC2 attempt that remains absent at its ten-minute reconciliation limit uses the existing `abandoned` reason.
 The job record also gains `labels` and `required_provider`, derived from those labels, for coverage and
 pre-launch shapes.
-Each non-final row retains its recorded vCPU reservation; a failed running write must not erase it.
+Each non-final row retains `reserved` against both the global budget and its `(repo, provider, account)` cap;
+a failed running write must not erase either reservation. A final row releases both.
+
+M4 adds `prelaunch.group` to the existing `prelaunch` object: the first allocation's id for one speculative
+demand. Every fallback and race descendant persists the same `{run, attempt, workflow, group}`, even when the
+first allocation is refused. Different demands of the same run and size have different groups. `race.of` keeps
+its existing meaning (the allocation whose slow launch is raced); it is not a fallback link. `prelaunchedFor`
+counts distinct groups per repo, run, attempt and logical size among rows whose end is neither `refused` nor
+`abandoned`. Other final rows still count as served, as today. A group with no such row occupies no slot, so an
+all-refused speculative demand can be retried next tick. For old rows without `prelaunch.group`, retain today's
+grouping: an original uses `alloc`, a race uses `race.of` with `race.demand`'s run and attempt. No old rows need
+rewriting; the explicit group on each new descendant survives even without its original row.
 
 Cost per row comes from the provider: GCE's formula as today (`gce/launcher/ledger.mjs`); EC2's from that zone's
 spot price at launch, per second with a 60 s minimum, plus gp3 GB-seconds and public IPv4 time. An EC2 compute
@@ -552,8 +695,10 @@ Every live EC2 pool instance and its volume carries `ci-kit-purpose=job|builder|
 `max_run_minutes + 15 min` for a job, 2 h for a builder, and 30 min for smoke. These deadlines do not apply to
 AMIs or snapshots: promoted images must survive the builder that made them.
 
-The guard is an EC2 job in `.github/workflows/pool-guard.yml` on `ubuntu-latest`, scheduled every 15 min. It
-assumes `ci-kit-ec2-guard` through GitHub's OIDC, trusted only for
+The guard is an EC2 job in `.github/workflows/pool-guard.yml` on `ubuntu-latest`, scheduled every 15 min, with
+one matrix leg per account in `ec2.json`, including disabled accounts. An absent file yields no EC2 legs.
+One account's failure does not stop another account's leg. Each leg
+assumes that account's `ci-kit-ec2-guard` through GitHub's OIDC, trusted only for
 `repo:SSFSKIM/ci-kit:ref:refs/heads/main`. It lists pool resources and the ledger, then applies predicates by
 purpose, not one broad “stopped pool VM” rule:
 
@@ -677,12 +822,16 @@ rows. Concrete Steps distinguishes that deployment from the run that proves it.
 ### M4 — The scheduler over providers
 
 **At its end:** the scheduler admits mixed provider-labelled demand and can fall back between providers in one
-tick without reusing an allocation or JIT registration. A fake second provider proves this before AWS effects
-are introduced. With only GCE configured, existing observable behaviour is unchanged.
+tick without reusing an allocation or JIT registration. Each job walks its repo's provider list (Each repo's
+providers), with per-instance caps and credit demotion as a policy input. `gce.json`'s parser accepts
+`repos[].providers`; absent means GCE alone. Fake providers prove this before AWS effects are introduced,
+including two instances of one kind in different accounts. With only GCE configured, existing observable
+behaviour is unchanged.
 
-**Touches:** `gce/launcher/launcher.mjs`, `logic.mjs`, `prelaunch.mjs`, `ledger.mjs`, `ledger-store.mjs`, `config.mjs`, provider contract
-tests and scheduler tests under `test/gce/`. It consumes M3's GCE provider and M2's data contracts and produces
-the multi-provider scheduler used by M5. Walk order is an explicit policy input here; durable billing comes in
+**Touches:** `gce/launcher/launcher.mjs`, `logic.mjs`, `prelaunch.mjs`, `ledger.mjs`, `ledger-store.mjs`,
+`config.mjs` (including the EC2 accounts schema), `source.mjs`, provider contract tests and scheduler tests under
+`test/gce/`. It consumes M3's GCE provider and M2's data contracts and produces the multi-provider scheduler and
+config loading used by M5. Walk order is an explicit policy input here; durable billing comes in
 M6. Coverage, unknown inventory and allocation transitions follow Design, not the old repo/size implementation.
 
 **Does not touch:** AWS clients, EC2 images or setup, live credit accounting, reports or the guard.
@@ -699,15 +848,38 @@ M6. Coverage, unknown inventory and allocation transitions follow Design, not th
   refused registrations are removed immediately, and the 5-minute orphan rule catches a crash. Uncertain
   allocations and races retain their own registrations and reservations (Acceptance 3).
 - GCE-only behaviour, including pending launches, races and cleanup, remains green (Acceptance 9).
+- Each repo's providers, as in Acceptance 11's tests. Parser failures are exactly the reference/cap cases in
+  Each repo's providers, not disabled instances or an absent EC2 file. The walk applies list order, demotes a
+  credit instance whose preference is off, and keeps refusal memory and unknown-inventory holds per instance.
+- Config transitions through the real config source with fake providers: start with lists referencing EC2,
+  set top-level `enabled: false`, then delete the file. Disabling takes effect instead of the last good enabled
+  config: generic demand falls back to listed GCE, no new EC2 allocation opens, and existing EC2 allocations
+  retain reservations and coverage and are observed, reconciled, terminated and reported. Deletion gives the
+  same launch behaviour, logs the skipped EC2 entries once per config load, and holds non-final rows under
+  Unknown EC2 inventory instead of managing them. Also prove account-level disable leaves other accounts eligible.
+- Concurrent admission: two 8-vCPU demands in one tick against one instance's 8-vCPU repo cap admit exactly one
+  there, even with its first ledger write delayed. Exercise queued and speculative demand; the second walks the
+  next eligible instance. A row appearing in the ledger does not double-count its in-memory reservation.
+- A race at its original instance's cap skips it and walks the repo's next eligible instance, under both budgets.
+  An uncertain launch retains both reservations; a definite refusal releases both before fallback admission,
+  and finalization releases both. Fallback to `c3d-highcpu-4` for size 2 reserves 4, not 2: prove it fits when
+  the global budget has 4 free and waits when only 2 remain.
+- Pre-launch slots: after every provider refuses, the next tick retries the unfilled demand. In a partial batch,
+  one demand's successful fallback to another account fills exactly one slot; only unfilled demands are retried.
+  Repeat both cases across a restart from persisted rows. Include race descendants sharing `prelaunch.group`
+  with their original and fallback, and prove refused rows occupy no slot.
 
 ### M5 — The EC2 provider, its image and its setup, serving the sandbox
 
 **At its end:** `ec2/setup.sh` is complete; the bake builds, smokes and promotes an AMI beside the GCE image from
-one manifest. `ec2.json` enables only `SSFSKIM/ci-kit-sandbox`. Sandbox jobs explicitly labelled `ci-kit-ec2`
-exercise EC2 without enabling credit preference before its billing reader exists. MAWS and manim-master still
-place on GCE. Live, a sandbox VM runs a job and terminates itself.
+one manifest. `ec2.json` configures one account, 290475840169, with `credit.enabled: false`. Only
+`SSFSKIM/ci-kit-sandbox`'s provider list names it: EC2, then GCE. With the preference off, the sandbox's generic
+demand still walks GCE spot first. Sandbox jobs explicitly labelled `ci-kit-ec2` exercise EC2 before the billing
+reader exists. MAWS and manim-master list nothing and place on GCE alone. Live, a sandbox VM runs a job and
+terminates itself.
 
-**Touches:** new `gce/launcher/providers/ec2.mjs`, `lib/aws.mjs`, `pool/config/ec2.json` and its parser;
+**Touches:** new `gce/launcher/providers/ec2.mjs` (one instance per configured account), `lib/aws.mjs`,
+`pool/config/ec2.json`, using M4's `accounts` parser; `pool/config/gce.json`'s sandbox entry;
 `ec2/vm/` and the container-start pieces shared with `gce/vm/job.mjs`; `gce/bake/bake.mjs`'s EC2 stage and its
 builder beside `gce/bake/builder.sh`; `gce/vm/smoke.sh`; `gce/deploy.sh` for role ARN environment variables;
 `ec2/setup.sh`; and tests under `test/ec2/`. It consumes M1's disk/zone verdict and M4's scheduler and produces
@@ -717,11 +889,14 @@ EC2's `createProvider`, `awsCredentials`, the AMI and config for M6.
 in the style of `test/gce/fake-gce.mjs`, exercises the launch failure table and the report contract. Purpose and
 deadline tags are applied now, before M6's guard consumes them. User-data obeys the defined shape and 16 KB limit.
 Setup creates and validates 14400-second launcher/bake roles and the builder-only Canonical AMI permission.
-The Cost Explorer client uses its explicit endpoint and signing region, not the EC2 client's region.
+The Cost Explorer client uses its explicit endpoint and signing region, not the EC2 client's region. Setup runs
+per account and refuses a profile whose account differs from the entry's. The bake's EC2 stage runs per account.
+Provider construction, federation audiences and credential caches are per account. Parser and provider tests
+use two accounts, while the live proof uses one.
 
 **Does not touch:** the billing preference, report aggregation or guard (M6), or MAWS's placement.
 
-**Proves:** Acceptance 1, the recovery tests in 3, 4 and 10. The live on-demand Canonical builder launch uses
+**Proves:** Acceptance 1, the recovery tests in 3, 4 and 10, and Acceptance 11's M5 live part. The live on-demand Canonical builder launch uses
 the federated bake role,
 with a 14400-second session. Tests pin setup's report of an existing role-duration mismatch without mutation;
 restart after a request that never arrived (abandoned at 10 min, reservation released and JIT removed);
@@ -732,23 +907,30 @@ Boot-only and notice-only reports neither claim nor retire;
 `exit` upload and poweroff on every exit path, including a container that never starts; missing terminal evidence
 is unknown; the job container cannot access IMDS (smoke). If M1 promoted provisioned initialization, tests charge
 it at volume creation for failed boots and idle runners as well as successful jobs.
+Repeat M4's config-transition proof live (Acceptance 9): with sandbox lists still referencing EC2, disable it,
+then remove the file. Both changes route new generic sandbox demand to listed GCE with no EC2 allocation;
+disabled EC2 allocations stay managed and accounted for, while deletion logs the skip once per config load
+and retains non-final reservations under Unknown EC2 inventory. Concrete Steps bounds the deletion fixture.
 
 ### M6 — Credit preference, reports, guard, MAWS canary, acceptance
 
 **At its end:** Cost Explorer's durable reading controls preference; the reports show both clouds; the guard
-runs every 15 min with purpose-aware predicates. `ec2.json` serves all pool repos with `credit.enabled: true`,
-`credit.until: "2027-04-17"`, `credit.budget_usd: 180` and `credit.since` covering the first EC2 spending, including
-the spike and bake. Setup first proves a billing read under the federated launcher role at Cost Explorer's
+runs every 15 min with purpose-aware predicates, one leg per account. The account 290475840169 has
+`credit.enabled: true`, `credit.until: "2027-04-17"`, `credit.budget_usd: 180` and `credit.since` covering the
+first EC2 spending, including the spike and bake. The provider lists of MAWS, ci-kit-sandbox and manim-master
+name EC2, then GCE. Setup first proves a billing read under the federated launcher role at Cost Explorer's
 us-east-1 endpoint; failure stops M6 and is escalated. MAWS's pool jobs then run on EC2 first while the reading
 permits it.
 
-**Touches:** `gce/launcher/` for preference and the dedicated billing issue; `gce/cost-report.mjs` (new;
+**Touches:** `gce/launcher/` for preference and the per-account billing issue; `pool/config/gce.json`'s repo
+lists; `gce/cost-report.mjs` (new;
 `ledger.mjs` already aggregates row estimates), `gce/latency-report.mjs`; `.github/workflows/pool-guard.yml` and
 new `ec2/guard.mjs`; `docs/pool.md`. It consumes M5's AWS client, EC2 provider, tagged resources and image.
 
 **Does not touch:** c8g/ARM, more instance families, EC2 on-demand job placements or automatic reruns.
 
-**Proves:** Acceptance 2, 5, 6, 7 and 8. Tests pin a missing billing issue, stale reading, immutable overlapping
+**Proves:** Acceptance 2, 5, 6, 7, 8 and 11's M6 live part. Tests pin per-account billing issues and preference,
+guard legs that fail independently, a missing billing issue, stale reading, immutable overlapping
 writes (an older write lands last, then a fresh reader still chooses the newer `read_at`), pruning to the newest
 20, no refresh with a fresh stored reading across restarts, and that finalizing rows cannot change policy spend.
 Guard tests exercise every purpose, failed lists, a stopped builder awaiting CreateImage and a late VM whose
@@ -825,7 +1007,7 @@ substitute. If the federated read fails, stop M6 and escalate the access failure
 ### Real jobs and overflow (M3, M5, M6; Acceptance 2, 3 and 9)
 
 MAWS uses its own script, from a MAWS worktree at `master`, not ci-kit's checkout. Run this with EC2 disabled for
-the M3/GCE regression proof, and with fresh billing and EC2 enabled for MAWS for M6's canary.
+the M3/GCE regression proof, and with fresh billing and MAWS's provider list naming EC2 first for M6's canary.
 
     cd <absolute-MAWS-worktree>
     scripts/ci-gate.sh . --gates static,unit,probes
@@ -841,6 +1023,18 @@ ledger rows: the same demand has a refused EC2 allocation and a different GCE al
     cd /private/tmp/ci-kit-deploy
     gcloud logging read 'resource.labels.service_name="ci-kit-launcher"' --project ssfskim-ci-kit --freshness=1h --order asc --format='value(jsonPayload.message)'
     gh api repos/SSFSKIM/ci-kit-sandbox/actions/runs/<sandbox-run>/jobs --jq '.jobs[]|[.name,.conclusion,.runner_name]|@tsv'
+
+### Config transitions (M5; Acceptance 9)
+
+Use a bounded sandbox fixture with the deployed config source and its lists still naming EC2 then GCE. Keep an
+EC2 allocation live while setting top-level `enabled: false`; load the changed config and submit generic sandbox
+demand. Use the launcher log and ledger reads above to verify GCE placement, no new EC2 allocation, and continued
+EC2 observation, reconciliation, report reads and ordinary cleanup, with reservations and eligible coverage held.
+Then delete `ec2.json` for the fixture and reload: new demand still goes to GCE, the skip logs once for that load
+(and not on repeated ticks), and non-final EC2 rows stay reserved without EC2 management. Use a short guest
+deadline for any VM present during deletion; the guard has no legs without the file. Restore the file with
+`enabled: false`, observe and clean up remaining fixtures, then restore M5's sandbox configuration. A deployment
+restart alone is not this proof: the config source must see the enabled → disabled → absent transitions.
 
 ### Lifecycle and guard evidence (M5 and M6; Acceptance 4 and 5)
 
@@ -914,13 +1108,13 @@ observations in this spec's Progress and Surprises & Discoveries.
       provisioning: 'spot' | 'standard', subnet: string, disk: { type: string, sizeGB: number },
       price: { source: string, at: string, initializationUsd?: number },
     }
-    Instance = { provider, id, alloc, runner, size: number, labels: string[], state: 'pending'|'running'|'stopping'|'stopped'|'gone',
+    Instance = { provider, id, alloc, runner, repo?: string, size: number, labels: string[], state: 'pending'|'running'|'stopping'|'stopped'|'gone',
                  stateReason?: string, candidate: Candidate, createdAt: string }
     LaunchResult = { outcome: 'accepted'|'capacity'|'quota'|'denied'|'throttled'|'uncertain',
                      scope?: string, detail: string, id?: string }
     ReconcileResult = LaunchResult | { outcome: 'abandoned', detail: string }
     Provider = {
-      name: 'gce' | 'ec2',
+      name: 'gce' | 'ec2', account: string,
       candidates(config, size) : Candidate[],               // ordered for one logical size
       observe()          : Promise<{ instances: Instance[], complete: boolean, room?: object }>,
       readyImage()       : Promise<{ id: string, manifest: object } | null>,
@@ -942,12 +1136,13 @@ with the corresponding `cpus-N` label. `Instance` preserves the chosen logical s
     }
     BillingReading = { v: 1, since: string, billed_usd: number, through: string, read_at: string }
     Ec2Attempt = { zone: string, client_token: string, sent_at: string }
+    Prelaunch = { run: number, attempt: number, workflow: string, group: string } // first allocation id
 
 `readReports` returns `{ telemetry: [...], terminal?: {...} }` per allocation; a missing entry or terminal is
 unknown, not success. GCE's `ci-kit/job` exit or failure becomes `terminal`. Boot and notice objects never do.
 `BillingReading.since` is the configured start date, `through` the end of the billing interval read, and
 `read_at` the UTC timestamp of that reading. Each complete `BillingReading` is an immutable comment on the
-`ec2 credit` issue outside the rotating allocation ledger; readers choose the newest valid `read_at` for the
+`ec2 credit <account>` issue outside the rotating allocation ledger; readers choose the newest valid `read_at` for the
 configured `since`, and writers retain the newest 20. No finalize path mutates a reading.
 
 `Ec2Attempt` is persisted on the row before sending. It holds no JIT configuration, presigned URL or full launch
@@ -961,6 +1156,9 @@ Ledger v2 retains `cpus` as logical size and `reserved` as physical vCPUs, adds 
 Ledger rows and cost, and stores `job.labels` and `job.required_provider` for pre-launch shapes. V1 jobs read as requiring `any`,
 under the legacy-label assumption in Runner labels and coverage. The required provider belongs
 to demand; the provider on the allocation belongs to its VM. A generic job served on EC2 is still generic.
+M4 stores `prelaunch: Prelaunch` on every allocation serving a speculative demand, including fallback and race
+rows. `group` and the legacy read rule are defined in Ledger rows and cost; `race.of` remains the raced
+allocation's id. `reserved` counts once per non-final allocation against both budgets, not once per group.
 
 `lib/aws.mjs` exports `awsCredentials(roleArn) → Promise<{ accessKeyId, secretAccessKey, sessionToken, expiration }>`.
 It is cached and refreshed per Reaching AWS, and the EC2, S3, Cost Explorer and Service Quotas clients are built on
@@ -970,23 +1168,46 @@ The EC2 and regional clients use us-east-2; the Cost Explorer client alone uses 
 
 `pool/config/ec2.json`:
 
-    {"enabled": true, "repos": ["SSFSKIM/ci-kit-sandbox"],          // optional narrowing; absent = gce.json's repos
-     "account": "290475840169", "region": "us-east-2",
-     "placements": [{"zone": "us-east-2b", "subnet": "subnet-…",
-                     "machines": {"2": "c8a.large", "4": "c8a.xlarge", "8": "c8a.2xlarge", "16": "c8a.4xlarge"}}],
-     "disk_gb": 50, "security_group": "sg-…", "report_bucket": "ci-kit-ec2-reports-290475840169",
-     "roles": {"launcher": "arn:aws:iam::290475840169:role/ci-kit-ec2-launcher",
-               "bake": "arn:aws:iam::290475840169:role/ci-kit-ec2-bake"},
-     "credit": {"enabled": false, "since": "2026-10-23", "until": "2027-04-17", "budget_usd": 180}}
+    {"enabled": true,
+     "accounts": [
+      {"account": "290475840169", "enabled": true, "region": "us-east-2",
+       "placements": [{"zone": "us-east-2b", "subnet": "subnet-…",
+                       "machines": {"2": "c8a.large", "4": "c8a.xlarge", "8": "c8a.2xlarge", "16": "c8a.4xlarge"}}],
+       "disk_gb": 50, "security_group": "sg-…", "report_bucket": "ci-kit-ec2-reports-290475840169",
+       "roles": {"launcher": "arn:aws:iam::290475840169:role/ci-kit-ec2-launcher",
+                 "bake": "arn:aws:iam::290475840169:role/ci-kit-ec2-bake",
+                 "guard": "arn:aws:iam::290475840169:role/ci-kit-ec2-guard"},
+       "credit": {"enabled": false, "since": "2026-10-23", "until": "2027-04-17", "budget_usd": 180}}]}
+
+Each `accounts` entry is one provider instance; `account` is unique and every ARN must name it. Per-account
+`enabled` is optional and defaults to true; an instance may launch only when both it and top-level `enabled`
+are true. Disabled instances still manage existing allocations (Each repo's providers). `credit` is optional;
+an account without it is never demoted (Placement order). The `repos` key of the earlier draft is gone.
+
+`pool/config/gce.json`'s `repos` entries gain an optional ordered `providers` list (Each repo's providers):
+
+    {"repo": "SSFSKIM/MAWS",
+     "providers": [{"provider": "ec2", "account": "290475840169", "max_vcpus": 128}, {"provider": "gce"}]}
+    ProviderEntry = { provider: 'gce' | 'ec2', account?: string, max_vcpus?: number }   // positive integer
+
+Absent `providers` reads as `[{"provider": "gce"}]`. A `gce` entry's account, when given, must be `gce.json`'s
+`project`. Once per config load, the parser resolves references independently of launch eligibility and refuses
+only the reference/cap cases in Each repo's providers. Configured disabled instances remain resolved pairs;
+when `ec2.json` is absent, EC2 entries are skipped and logged once for that load, not rejected. The scheduler
+walks eligible resolved `(provider, account)` pairs; existing allocations remain managed by any configured
+instance, regardless of eligibility.
 
 The production chain is reviewed at each boundary:
 - M1 produces the measured verdict, which fills `placements`' zone order and disk configuration for M5.
 - M2 produces ledger v2 with v1 reads, `Candidate`, `Instance`, `Ec2Attempt`, the `Provider`/`ReconcileResult`
   contracts and provider-qualified keys.
 - M3 consumes M2 and produces the GCE `createProvider`, including `AllocationReports` adaptation.
-- M4 consumes M2/M3 and produces the scheduler over providers, label-aware coverage and provider-bound allocations.
-- M5 consumes M1/M4 and produces EC2's `createProvider`, bounded reconciliation, `awsCredentials`, validated
-  four-hour roles, `ec2.json`, the tagged resources and the image built through the federated bake role.
+- M4 consumes M2/M3 and produces the scheduler over providers, label-aware coverage, provider-bound allocations,
+  synchronous dual-budget admission, `Prelaunch` grouping, the EC2 accounts parser and config reloads with
+  per-repo caps and credit demotion.
+- M5 consumes M1/M4 and produces EC2's per-account `createProvider`, bounded reconciliation, `awsCredentials`,
+  validated four-hour roles, the live `ec2.json` accounts config, tagged resources and the image built through the
+  federated bake role.
 - M6 consumes M5, proves federated billing access, and produces immutable `BillingReading` comments, credit
   policy, reports and guard (including final-row cleanup), then runs acceptance.
 
@@ -999,6 +1220,16 @@ The production chain is reviewed at each boundary:
   surface and a second control plane to a launcher that runs the owner's private CI.
 
 ## Surprises & Discoveries
+
+- Observation: M3's deployed GCE provider passed the live MAWS class 1a proof with EC2 absent. Run
+  `40008135552`, attempt 1, tested MAWS master `0c86e4861` through wrapper `e081f5e69b4bf867f3b2b02728349341ed839c20`.
+  Static, probes and all four unit shards succeeded on `ci-kit-gce-*` runners. Ledger issue #48 in ci-kit-sandbox
+  recorded `v:2`, `provider:gce`, `account:ssfskim-ci-kit`, actual job ids/labels and image provenance for allocations
+  `hsfbqu5nay`, `hsfbqi7nql`, `hsfbqof83f`, `hsfbq464gc`, `hsfbqgekh0`, `hsfbqc1dr8`, all in us-west4-a.
+  Evidence: https://github.com/SSFSKIM/MAWS/actions/runs/40008135552 ; the attempt-specific jobs API and ledger
+  comments read after completion. Fresh clone `/private/tmp/ci-kit-ec2-deploy-m3` deployed merged-main `c14ac6c`;
+  revision `ci-kit-launcher-00019-pxv` served 100%, with no ERROR logs observed in its canary window.
+  Prior rollback revision was `ci-kit-launcher-00018-tpn` in us-central1; no rollback occurred.
 
 - Observation: The requested spot quota increase landed before M2: us-east-2 now grants 256 vCPUs. Preflight
   found no active EC2 pool instances or pool volumes. Cost Explorer's 2026-10-23 reading had no EC2 charges yet
@@ -1166,6 +1397,65 @@ The production chain is reviewed at each boundary:
   Rationale: at 11.46 GiB, initialization is ~84% of an EC2 job's cost. Rejected leaving the image as GCE's twin
   in content, which costs every VM the full size.
   Date/Author: 2026-10-23, CI-opt.
+
+- Decision: Each pool repo has its own ordered provider list, with optional per-instance vCPU caps, in ci-kit's
+  `gce.json` `repos` entries. A provider instance is `(provider, account)`. Absent means GCE alone, so EC2 is
+  opt-in per repo. The list replaces `ec2.json`'s `repos` narrowing. Owner's ruling 2026-10-23: "Per-project, in
+  EC2", chosen over a provider protocol for outside operators, now or after EC2, and over leaving one shared pool.
+  Rationale: M2's keys already carry `(provider, account)`, and M4 is where the walk is built, so a list per repo
+  costs little now and would mean rebuilding the walk later. Rejected: the repo declaring providers in its own
+  `.github/ci-kit.yml`, because a pull request edits that file while the account owner pays. Rejected: absent
+  means every configured provider, because enabling EC2 would silently move every repo and break Acceptance 9's
+  bar.
+  Date/Author: 2026-10-23, CI-opt.
+- Decision: Credit is a property of an account, and it only demotes. Each repo's list order is its walk; an
+  instance whose credit preference ended moves behind the repo's other spot instances. With the M6 lists (EC2,
+  then GCE) this reproduces the owner's credit-first table exactly.
+  Rationale: a global credit-first walk cannot express a repo that wants EC2 only as overflow, or never. Rejected
+  credit promoting an instance ahead of its list position, which would override the repo's stated order.
+  Date/Author: 2026-10-23, CI-opt.
+- Decision: EC2 accounts are a list in `ec2.json`. Setup, the bake's EC2 stage, the guard's matrix leg, the
+  billing issue (`ec2 credit <account>`) and federation audiences are per account. One account is configured and
+  proved live; tests use two. GCE stays one project.
+  Rationale: the owner asked for per-project providers and accounts. Writing these per account from the first
+  build is a loop; retrofitting them after deployment would change the config shape, the billing issue's identity
+  and the guard's roles in production. Rejected: entries by kind only, with accounts deferred until a second
+  account exists.
+  Date/Author: 2026-10-23, CI-opt.
+- Decision: Pinning a gate to a cloud from `.github/ci-kit.yml` is out of scope. A pinned job (hand-written labels)
+  whose repo lists no instance of that cloud stays queued and is logged once as unservable.
+  Rationale: the repo-level list delivers per-project providers; a planner key and its plan-time check are a
+  separate change. Rejected failing such jobs from the launcher, which cannot fail a queued GitHub job.
+  Date/Author: 2026-10-23, CI-opt.
+
+- Decision: Disabled EC2 instances remain valid list references and manage existing allocations; top-level and
+  optional per-account `enabled` control new allocations only. An absent file skips EC2 entries once per config
+  load and leaves non-final rows under the unknown-inventory rule. Switch off with `enabled: false`.
+  Rationale: rejected treating disabled instances as invalid, because the last-good-config fallback would keep
+  launching on them. Rejected file deletion as the off switch: it removes provider management and guard legs.
+  Date/Author: 2026-10-23, CI-opt.
+- Decision: Admission synchronously reserves both the global and repo/instance vCPU budgets before asynchronous
+  work, once per allocation, for queued, speculative, race and fallback launches alike. Refusal releases both
+  before fallback admission; uncertainty retains both, and final rows release both.
+  Rationale: rejected checking only ledger rows or checking caps after an await, which lets concurrent launches
+  oversubscribe. Rejected carrying a smaller reservation into a physically larger fallback candidate.
+  Date/Author: 2026-10-23, CI-opt.
+- Decision: Definitely refused allocations occupy no pre-launch slot. Persist `prelaunch.group`, the first
+  allocation's id, on all fallback and race descendants so one speculative demand occupies at most one slot.
+  Rationale: rejected counting each allocation, which suppresses retries and overcounts successful fallbacks.
+  The existing `race.of` names an actual raced allocation, not every descendant's demand; a group field preserves
+  that meaning and reconstructs partial batches across restarts without needing the original row.
+  Date/Author: 2026-10-23, CI-opt.
+
+- Decision: M4's Provider carries its account identity, and an observed Instance may carry its repo from cloud
+  tags so orphan rows participate in repo/instance cap accounting. Cold/full ledger reads scan open ledger
+  issues beyond the ordinary cost window to recover old non-final reservations. A budget-declined demand gets
+  one admission retry after concurrent cleanup finalizes rows, preserving GCE's same-tick budget reuse.
+  Rationale: provider kind alone cannot identify account-scoped effects, missing rows must not erase cap usage,
+  and unknown inventory must retain reservations beyond 26 hours. The retry preserves existing admission
+  opportunities without weakening synchronous acquisition of both budgets.
+  Date/Author: 2026-10-23, M4 executor and controller; design-owner confirmed consistency.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.

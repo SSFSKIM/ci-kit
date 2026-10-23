@@ -3,7 +3,7 @@
 import { randomBytes } from 'node:crypto';
 import { refusal, machineCpus, networkInterface } from '../bake/plan.mjs';
 import { workDir } from '../../pool/agent/docker.mjs';
-import { candidateKey, providerKey } from './providers/contracts.mjs';
+import { candidateKey, providerKey, requiredProvider, providerRunnerLabels, providerRunnerName } from './providers/contracts.mjs';
 import { gceCandidate, gceInstance } from './providers/gce-data.mjs';
 
 const MIN = 60_000;
@@ -24,7 +24,7 @@ export function allocationId(nowMs, random = () => randomBytes(4).readUInt32BE(0
 }
 export const allocationTime = (alloc) => (ALLOC.test(alloc ?? '') ? (parseInt(alloc.slice(0, 5), 36) + 1) * MIN : null);
 export const instanceName = (alloc) => `ci-kit-gce-${alloc}`;
-export const allocOf = (name) => /^ci-kit-gce-([0-9a-z]{10})$/.exec(name ?? '')?.[1] ?? null;
+export const allocOf = (name) => /^ci-kit-(?:gce|ec2)-([0-9a-z]{10})$/.exec(name ?? '')?.[1] ?? null;
 
 // `ci-kit-repo=<owner>--<repo>`, lowercased; a character GCE labels do not allow ('.') becomes '_'.
 export const repoLabel = (repo) => repo.toLowerCase().replace('/', '--').replace(/[^a-z0-9_-]/g, '_');
@@ -37,7 +37,9 @@ export function jobCpus(labels, machines) {
   const lower = labels.map((l) => l.toLowerCase());
   const sizes = lower.map((l) => /^cpus-(\d+)$/.exec(l)).filter(Boolean).map((m) => Number(m[1]));
   if (sizes.length !== 1 || !lower.includes('ci-kit-pool') || !machines[String(sizes[0])]) return null;
-  const allowed = new Set(runnerLabels(sizes[0]));
+  const provider = requiredProvider(lower);
+  if (provider === null) return null;
+  const allowed = new Set(providerRunnerLabels(provider === 'any' ? 'gce' : provider, sizes[0]));
   return lower.every((l) => allowed.has(l)) ? sizes[0] : null;
 }
 
@@ -121,51 +123,71 @@ export function runnersNeverOnline({ instances, runners, now, claimed = new Set(
 // row recorded it: a placement changed since must not shrink it), and while its runner is registered, not busy,
 // unclaimed and younger than idle_runner_minutes it covers a job of its size, as its VM would. Without that, the next
 // tick, or a restarted launcher, would launch again for the same job, and race again.
-export function planLaunches({ queued, instances, runners, now, cfg, complete = true, claimed = new Set(), rows = [] }) {
-  if (!complete) return { launches: [], waiting: [...queued], unservable: [] };
+export function planLaunches({ queued, instances, runners, now, cfg, complete = true, claimed = new Set(), rows = [], unknown = new Set(), admission = true }) {
+  if (!complete) return { launches: [], waiting: [...queued], unservable: [], inflight: 0 };
   const idleMs = cfg.idle_runner_minutes * MIN;
   const of = runnerLookup(runners);
-  const key = (repo, cpus) => `${repo.toLowerCase()}|${cpus}`;
-  const cover = new Map();
+  const cover = [];
+  const coveredNames = new Set();
+  const add = (repo, cpus, provider, name) => {
+    if (coveredNames.has(name)) return;
+    coveredNames.add(name);
+    cover.push({ repo, cpus, provider });
+  };
   let inflight = 0;
+  const byAlloc = new Map(rows.map((r) => [r.alloc, r]));
+  const listed = new Set();
   for (const i of instances) {
     if (DONE_STATUSES.has(i.status)) continue;
-    inflight += i.vcpus;
+    listed.add(i.alloc);
+    const row = byAlloc.get(i.alloc);
+    inflight += row?.reserved ?? i.vcpus;
     const { repo, runner: r } = of(i);
-    if (r && !r.busy && !claimed.has(i.name) && now - i.created < idleMs && !neverOnline(i, r, now, claimed)) {
-      cover.set(key(repo, i.cpus), (cover.get(key(repo, i.cpus)) ?? 0) + 1);
+    if (r && (!unknown.has(providerKey(i)) || r.status === 'online') && !r.busy && !claimed.has(i.name) && now - i.created < idleMs && !neverOnline(i, r, now, claimed)) {
+      add(repo, i.cpus, i.provider ?? 'gce', i.name);
     }
   }
-  const listed = new Set(instances.map((i) => i.alloc));
   for (const row of rows) {
-    if (listed.has(row.alloc) || !pendingAllocation(row)) continue;
+    if (listed.has(row.alloc) || row.state === 'final') continue;
     inflight += row.reserved ?? largestMachineCpus(row.cpus, cfg);
     const r = runners.get(row.repo)?.get(row.instance);
-    if (r && !r.busy && !claimed.has(row.instance) && now - Date.parse(row.at) < idleMs) cover.set(key(row.repo, row.cpus), (cover.get(key(row.repo, row.cpus)) ?? 0) + 1);
+    const eligible = unknown.has(providerKey(row)) ? r?.status === 'online' : pendingAllocation(row);
+    if (eligible && r && !r.busy && !claimed.has(row.instance) && now - Date.parse(row.at) < idleMs) {
+      add(row.repo, row.cpus, row.provider ?? 'gce', row.instance);
+    }
   }
-  const launches = [];
-  const waiting = [];
-  const unservable = [];
+  // Independent GitHub evidence remains useful even when its cloud cannot be listed (or its row write was lost).
+  for (const [repo, mine] of runners) for (const r of mine.values()) {
+    if (!r.name.startsWith('ci-kit-ec2-') || r.status !== 'online' || r.busy || claimed.has(r.name)) continue;
+    const row = rows.find((x) => x.instance === r.name);
+    if (row?.state === 'final') continue;
+    if (row ? !unknown.has(providerKey(row)) : ![...unknown].some((k) => JSON.parse(k)[0] === 'ec2')) continue;
+    const cpus = jobCpus((r.labels ?? []).map((l) => typeof l === 'string' ? l : l.name), cfg.placements[0].machines);
+    if (cpus) add(repo, cpus, 'ec2', r.name);
+  }
+  const launches = [], waiting = [], unservable = [];
   const ordered = [...queued].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at) || a.id - b.id);
+  const demands = [];
   for (const job of ordered) {
     if (!runners.has(job.repo)) continue;
-    const cpus = jobCpus(job.labels, cfg.placements[0].machines); // every placement names every size
-    if (cpus === null) {
-      unservable.push(job);
-      continue;
+    const cpus = jobCpus(job.labels, cfg.placements[0].machines);
+    if (cpus === null) unservable.push(job);
+    else demands.push({ job, repo: job.repo, cpus, required: requiredProvider(job.labels) });
+  }
+  const covered = new Set();
+  for (const constrained of [true, false]) for (const d of demands) {
+    if ((d.required !== 'any') !== constrained) continue;
+    const index = cover.findIndex((c) => c.repo?.toLowerCase() === d.repo.toLowerCase() && c.cpus === d.cpus && (d.required === 'any' || c.provider === d.required));
+    if (index !== -1) { cover.splice(index, 1); covered.add(d); }
+  }
+  for (const d of demands) {
+    if (covered.has(d)) continue;
+    const need = largestMachineCpus(d.cpus, cfg);
+    if (admission && (waiting.length || inflight + need > cfg.max_vcpus)) waiting.push(d.job);
+    else {
+      if (admission) inflight += need;
+      launches.push({ job: d.job, repo: d.repo, cpus: d.cpus });
     }
-    const k = key(job.repo, cpus);
-    if ((cover.get(k) ?? 0) > 0) {
-      cover.set(k, cover.get(k) - 1);
-      continue;
-    }
-    const need = largestMachineCpus(cpus, cfg);
-    if (waiting.length || inflight + need > cfg.max_vcpus) {
-      waiting.push(job);
-      continue;
-    }
-    inflight += need;
-    launches.push({ job, repo: job.repo, cpus });
   }
   return { launches, waiting, unservable, inflight };
 }
@@ -207,9 +229,10 @@ const familyOf = (machine) => machine.split('-')[0];
 // the attempt's machine names it), or in the older per-family form "Quota 'C3D_CPUS' exceeded. ..."; the all-regions
 // quota "... globally.".
 export function quotaScope(err, attempt) {
+  if (attempt.provider === 'ec2') return { provider: 'ec2', account: attempt.account, region: attempt.region, spot: true, vcpus: 0 };
   const message = err?.message ?? '';
   const vcpus = machineCpus(attempt.machine);
-  const region = /in region ([a-z0-9-]+)/.exec(message)?.[1] ?? attempt.placement.region;
+  const region = /in region ([a-z0-9-]+)/.exec(message)?.[1] ?? (attempt.region ?? attempt.placement?.region);
   const metric = quotaMetric(err);
   const identity = { provider: attempt.provider ?? 'gce', account: attempt.account ?? null };
   if (!metric) return { ...identity, region, family: familyOf(attempt.machine), vcpus };
@@ -226,8 +249,8 @@ export const quotaMetric = (err) => /Quota '([A-Z0-9_]+)' exceeded/.exec(err?.me
 // Whether a remembered refusal covers an attempt: in its scope, and of the same or more vCPUs.
 export const quotaBlocks = (memory, attempt) => memory.some((q) =>
   providerKey(q) === providerKey(attempt) &&
-  (!q.region || q.region === attempt.placement.region) && (!q.family || q.family === familyOf(attempt.machine)) &&
-  (!q.spot || attempt.provisioning === 'spot') && machineCpus(attempt.machine) >= q.vcpus);
+  (!q.region || q.region === (attempt.region ?? attempt.placement?.region)) && (!q.family || q.family === (attempt.family ?? familyOf(attempt.machine))) &&
+  (!q.spot || attempt.provisioning === 'spot') && (attempt.vcpus ?? machineCpus(attempt.machine)) >= q.vcpus);
 
 // Capacity refusals (ZONE_RESOURCE_POOL_EXHAUSTED*) remembered by zone, machine and provisioning for STOCKOUT_TTL_MS,
 // across a tick's launches and across ticks (the server keeps one for the process; a restart forgets it). With eight
@@ -254,6 +277,7 @@ export function stockoutMemory({ ttlMs = STOCKOUT_TTL_MS } = {}) {
 // created and trying elsewhere would not help (the operation finished with another error, or the request was refused
 // outright). 'unknown': the insert may have been accepted (a timeout, a lost response, a 5xx, a wait call that failed).
 export function insertOutcome(err) {
+  if (err?.launchResult) return ({ uncertain: 'unknown', denied: 'failed', throttled: 'failed' })[err.launchResult.outcome] ?? err.launchResult.outcome;
   const why = refusal(err);
   if (why) return why;
   if (err?.finished) return 'failed';
@@ -270,8 +294,8 @@ export const RACE_AFTER_MS = 20_000;
 // The attempts a race of the pending attempt walks (spec M6): those after it in the walk, in other zones; spot before
 // on demand as the walk has them, and within each, other regions before the pending one's.
 export function raceAttempts(list, pending) {
-  const rank = (p) => (p.provisioning === 'spot' ? 0 : 2) + (p.placement.region === pending.placement.region ? 1 : 0);
-  return list.slice(list.indexOf(pending) + 1).filter((p) => p.zone !== pending.zone).sort((a, b) => rank(a) - rank(b));
+  const rank = (p) => (p.provisioning === 'spot' ? 0 : 2) + ((p.region ?? p.placement?.region) === (pending.region ?? pending.placement?.region) ? 1 : 0);
+  return list.slice(list.indexOf(pending) + 1).filter((p) => providerKey(p) !== providerKey(pending) || p.zone !== pending.zone).sort((a, b) => rank(a) - rank(b));
 }
 
 // What a launch's row keeps of its walk (spec M6 counts), from walkPlacements' `tried`: its refusals ({kind:
@@ -296,7 +320,7 @@ export function pendingAllocation(row) {
   if (row.state !== 'launching') return false;
   const last = row.slow?.at(-1);
   if (last?.done && last.outcome !== 'created') return false;
-  return Boolean(row.race || unsettledInsert(row));
+  return Boolean(row.race || unsettledInsert(row) || (row.provider === 'ec2' && row.sent_at));
 }
 
 // A row's insert that never settled (outcome unknown, its operation's end not yet learned), or null; none once the row
@@ -398,7 +422,7 @@ export function jobInstance({ alloc, zone, machine, provisioning, placement, rep
   };
 }
 
-export const jitRequest = (alloc, cpus) => ({ name: instanceName(alloc), labels: runnerLabels(cpus), work_folder: workDir(instanceName(alloc)) });
+export const jitRequest = (alloc, cpus, provider = 'gce') => ({ name: providerRunnerName(provider, alloc), labels: providerRunnerLabels(provider, cpus), work_folder: workDir(providerRunnerName(provider, alloc)) });
 
 // The newest image of the family labelled ci-kit-ready=true, from a list: never getFromFamily, which returns the
 // newest image whether or not its smoke check passed (spec I12).
@@ -420,12 +444,12 @@ export function reviewInstances({ instances, runnersOf, served, now, cfg, report
   const idleMs = cfg.idle_runner_minutes * MIN;
   const actions = [];
   for (const i of instances) {
-    if (!isGce(i.raw)) continue;
+    if (i.raw ? !isGce(i.raw) : !i.provider) continue;
     const runners = runnersOf(i);
     const r = runners?.get(i.name) ?? null;
     const age = now - i.created;
     if (DONE_STATUSES.has(i.status)) {
-      actions.push({ instance: i, action: 'delete', end: 'done', reason: 'stopped', unregister: r !== null && !r.busy });
+      actions.push({ instance: i, action: 'delete', end: i.stateReason === 'Server.SpotInstanceTermination' ? 'preempted' : 'done', reason: 'stopped', unregister: r !== null && !r.busy });
     } else if (age > cfg.max_run_minutes * MIN + OVERAGE_GRACE_MS) {
       actions.push({ instance: i, action: 'delete', end: 'max-run', reason: 'overage', unregister: r !== null && !r.busy, alert: true });
     } else if (runners === undefined || r?.busy) {
@@ -450,7 +474,7 @@ export function reviewInstances({ instances, runnersOf, served, now, cfg, report
 export function reportable(instances, runnersOf) {
   return instances.filter((i) => {
     const runners = runnersOf(i);
-    return isGce(i.raw) && !DONE_STATUSES.has(i.status) && runners !== undefined && !runners.get(i.name)?.busy;
+    return (i.raw ? isGce(i.raw) : i.provider) && !DONE_STATUSES.has(i.status) && runners !== undefined && !runners.get(i.name)?.busy;
   });
 }
 

@@ -26,6 +26,7 @@
  * @property {string} id Cloud instance id, not the runner name.
  * @property {string} alloc
  * @property {string} runner
+ * @property {string} [repo] Repository identity from cloud tags, including for instances without a ledger row.
  * @property {number} size
  * @property {string[]} labels
  * @property {'pending'|'running'|'stopping'|'stopped'|'gone'} state
@@ -43,6 +44,7 @@
  *
  * @typedef {object} Provider
  * @property {ProviderName} name
+ * @property {string} account Identity of this configured instance, including when disabled.
  * @property {(config: object, size: number) => Candidate[]} candidates Ordered for one logical size.
  * @property {() => Promise<{instances: Instance[], complete: boolean, room?: object}>} observe
  * @property {() => Promise<{id: string, manifest: object}|null>} readyImage

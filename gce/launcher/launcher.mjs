@@ -1,8 +1,8 @@
 // The GCE launcher's reconciliation (spec §3a The launcher): one tick, with every outside effect injected so the
 // orchestration is testable. server.mjs runs ticks for Cloud Scheduler and the webhook (ticker.mjs). The decisions
 // are in logic.mjs; this file observes (Compute Engine, GitHub, the ledger), decides through logic.mjs, and acts.
-// Nothing is kept between ticks: state lives in GCE labels, the ledger and GitHub, so every tick can act as the
-// first, and two overlapping ticks (Cloud Run can briefly run two) stay correct: deletes and unregisters treat 404
+// Durable state lives in provider instances, the ledger and GitHub; refusal/outage memory is process-local.
+// Two overlapping ticks (Cloud Run can briefly run two) converge: deletes and unregisters treat 404
 // as done, ledger rows are keyed by allocation and only move forward, and an over-launch leaves idle runners that the
 // idle rule removes. Quota is the hard cap: a refusal is remembered for the rest of the tick, scoped to what ran out
 // (logic.mjs quotaScope), and later launches skip what it covers; one with nothing left to try waits in GitHub's queue.
@@ -12,14 +12,16 @@
 // An insert still unsettled RACE_AFTER_MS after it was sent is raced by a second allocation of its size in another zone
 // (spec M6), while the first keeps waiting on its own operation and is never moved; whichever VM's runner a job takes
 // first serves it, and the other is an ordinary unclaimed VM the idle rule removes.
+import { providerKey, providerRunnerName } from './providers/contracts.mjs';
+import { keyOf, providerWalk, createAdmission, schedulingView } from './scheduling.mjs';
 import { createProvider, gceWalkResult } from './providers/gce.mjs';
 import { createAlerts } from '../../pool/lib/alerts.mjs';
 import { queuedPoolJobs } from '../../pool/agent/logic.mjs';
 import { servedRepos } from './config.mjs';
 import {
-  allocationId, instanceName, repoLabel, planLaunches, runnersNeverOnline, quotaBlocks, insertOutcome, walkPlacements, stockoutMemory,
+  allocationId, repoLabel, planLaunches, runnersNeverOnline, quotaBlocks, insertOutcome, walkPlacements, stockoutMemory,
   jitRequest, reviewInstances, reviewRows, orphanRunners, reportable, claimedInstances,
-  largestMachineCpus, raceAttempts, walkRecord, unsettledInsert, quotaMetric, RACE_AFTER_MS,
+  raceAttempts, walkRecord, unsettledInsert, quotaMetric, RACE_AFTER_MS,
 } from './logic.mjs';
 import { planPrelaunches } from './prelaunch.mjs';
 import { createPreparation } from './preparation.mjs';
@@ -58,8 +60,20 @@ export class Launcher {
       const promise = new Promise((resolve) => { timer = setTimeout(resolve, ms); });
       return { promise, cancel: () => clearTimeout(timer) };
     };
+    this.providerState ??= new Map();
+    this.creditPreference ??= (account) => account.credit?.enabled !== false;
     this.provider ??= createProvider({ gce: this.gce, cfg: this.cfg, config: this.config, now: this.now, log: this.log,
       after: this.after, limits: this.limits, insertDeadlineMs: this.insertDeadlineMs });
+    this.providers = new Map((deps.providers ?? [this.provider]).filter((p) => p.name !== 'ec2' || this.ec2?.accounts.some((a) => a.account === p.account)).map((p) => [keyOf(p, this.cfg.project), p]));
+  }
+
+  providerOf(value) { return this.providers.get(keyOf(value, this.cfg.project)); }
+  known(seen, value) { return seen.inventories.get(keyOf(value, this.cfg.project))?.complete === true; }
+  partitions(seen) {
+    return [...seen.inventories].filter(([key, inventory]) => inventory.complete || JSON.parse(key)[0] === 'gce').map(([key, inventory]) => ({
+      ...seen, ...inventory, rows: seen.rows.filter((r) => keyOf(r, this.cfg.project) === key),
+      instances: seen.instances.filter((i) => keyOf(i, this.cfg.project) === key), api: this.providers.get(key),
+    })).filter((part) => part.api);
   }
 
   // One reconciliation. Throws only when Compute Engine or the ledger cannot be read (the tick then did nothing), or
@@ -80,7 +94,8 @@ export class Launcher {
     const seen = await preparation.time('observe', () => this.observe(preparation));
     // Launches start first, and the cleanup runs beside them: neither waits for the other. Launching before cleaning
     // up can only under-admit for a tick (a VM about to be deleted still counts against max_vcpus), never over-admit.
-    const done = await Promise.allSettled([this.launchAll(seen, out, deadline, preparation), this.cleanUp(seen, out)]);
+    seen.cleaning = this.cleanUp(seen, out);
+    const done = await Promise.allSettled([this.launchAll(seen, out, deadline, preparation), seen.cleaning]);
     const failed = done.find((d) => d.status === 'rejected');
     if (failed) throw failed.reason;
     await this.daily(seen);
@@ -119,15 +134,44 @@ export class Launcher {
       await preparation.time('ledger.read', () => this.ledger.read());
       return preparation.time('ledger.rows', () => this.ledger.rows());
     })();
-    const store = this.provider.observe({ rows: rowsRead, preparation });
-    // Read now so that a launch does not wait for it; a tick with nothing to launch never looks.
-    const images = this.provider.readyImage(preparation);
-    images.catch(() => {});
+    const store = Promise.all([...this.providers].map(async ([key, api]) => {
+      const ownRows = rowsRead.then((rows) => rows.filter((r) => keyOf(r, this.cfg.project) === key));
+      try {
+        const [inventory, awaitRows] = await Promise.all([api.observe({ rows: ownRows, preparation }), ownRows]);
+        return [key, { ...inventory, instances: inventory.instances.map((i) => schedulingView(i, awaitRows)), api }];
+      } catch (err) {
+        if (api.name === 'gce') throw err;
+        this.log(`inventory ${key}: ${err.message}`);
+        return [key, { instances: [], complete: false, api }];
+      }
+    }));
+    // Images are read beside inventory, separately per instance; a failed image does not stop other providers.
+    const images = new Map([...this.providers].map(([key, api]) => {
+      const image = api.readyImage(preparation).catch((err) => { this.log(`image ${key}: ${err.message}`); return null; });
+      return [key, image];
+    }));
     const reads = new Map(listed.map((repo) => [repo, this.readRepo(repo, preparation)]));
 
     // Awaited first: it is the one read whose failure fails the tick, and a rejection nobody awaits yet would end the
     // process. Every other read resolves, whatever happens to it.
-    const { rows, instances, complete, disks, builders, room } = await store;
+    const inventories = new Map(await store);
+    const rows = await rowsRead;
+    for (const r of rows) if (r.state !== 'final' && !inventories.has(keyOf(r, this.cfg.project))) inventories.set(keyOf(r, this.cfg.project), { instances: [], complete: false });
+    const unknown = new Set();
+    for (const [key, inventory] of inventories) {
+      const state = this.providerState.get(key) ?? {};
+      if (!inventory.complete) {
+        unknown.add(key);
+        state.unknownSince ??= this.now();
+        if (!state.outageLogged && this.now() - state.unknownSince >= 30 * 60_000) {
+          this.error(`inventory unknown for 30 min: ${key}; reservations remain held`);
+          state.outageLogged = true;
+        }
+      } else { delete state.unknownSince; delete state.outageLogged; }
+      this.providerState.set(key, state);
+    }
+    const instances = [...inventories.values()].flatMap((v) => v.instances);
+    const complete = inventories.get(providerKey({ provider: 'gce', account: this.cfg.project }))?.complete !== false;
     // Public repos are refused, as on the Hetzner box; a repo whose visibility cannot be read is not served this tick.
     const served = [];
     for (const [repo, read] of reads) {
@@ -150,7 +194,7 @@ export class Launcher {
     for (const [repo, mine] of listings) if (mine) runners.set(repo, mine);
     // quota: the tick's memory of quota refusals (logic.mjs quotaScope), shared by its launches; launches: the rows they
     // wrote last, which the tick's counts read.
-    const seen = { served, instances, complete, disks, builders, rows, rowOf, byLabel, runners, images, room, quota: [], launches: [] };
+    const seen = { served, instances, complete, inventories, unknown, rows, rowOf, byLabel, runners, images, quota: [], launches: [] };
 
     // A VM whose job has ended says so in ci-kit/job before its guest powers off. Read beside the jobs, it serves both
     // the cover (an ended job's VM covers nothing) and the cleanup (the VM goes without waiting for its power-off).
@@ -201,7 +245,7 @@ export class Launcher {
 
   async listRunners(repo, preparation) {
     try {
-      const mine = (await preparation.time('github.runners', () => this.gh.runners(repo), { repo })).filter((r) => r.name.startsWith('ci-kit-gce-'));
+      const mine = (await preparation.time('github.runners', () => this.gh.runners(repo), { repo })).filter((r) => /^ci-kit-(gce|ec2)-/.test(r.name));
       return new Map(mine.map((r) => [r.name, r]));
     } catch (err) {
       this.log(`runners of ${repo}: ${err.message}`);
@@ -213,13 +257,17 @@ export class Launcher {
   // a guest claim signal) is deliberately not a claim or retirement signal. M4 consumes the allocation-keyed map.
   async readReports(seen, preparation) {
     const runnersOf = (v) => seen.runners.get(this.repoOf(seen, v));
-    const allocs = reportable(seen.instances, runnersOf).map((v) => ({ alloc: v.alloc, instance: v.name, zone: v.zone }));
-    const reports = await this.provider.readReports(allocs, preparation);
-    return new Map(allocs.map((a) => [a.instance, reports.get(a.alloc)?.terminal ?? null]));
+    const result = new Map();
+    await Promise.all(this.partitions(seen).map(async (part) => {
+      const allocs = reportable(part.instances, runnersOf).map((v) => ({ ...(seen.rowOf.get(v.alloc) ?? {}), alloc: v.alloc, instance: v.name, zone: v.zone }));
+      const reports = await part.api.readReports(allocs, preparation);
+      for (const a of allocs) result.set(a.instance, reports.get(a.alloc)?.terminal ?? null);
+    }));
+    return result;
   }
 
   repoOf(seen, view) {
-    return seen.rowOf.get(view.alloc)?.repo ?? seen.byLabel.get(view.repoLabel) ?? null;
+    return seen.rowOf.get(view.alloc)?.repo ?? view.repo ?? seen.byLabel.get(view.repoLabel) ?? null;
   }
 
   runnerOf(seen, repo, name) {
@@ -276,9 +324,24 @@ export class Launcher {
   // the provider's settlement budget, and a zone not read in it, or whose read fails, waits for the next tick; the writes of what was
   // read are then all made before this returns, so no row is finalized ahead of its settlement.
   async settleInserts(seen) {
-    const rows = seen.rows.map((r) => seen.rowOf.get(r.alloc) ?? r);
-    const settled = await this.provider.reconcileLaunches(rows);
-    await Promise.all([...settled].map(([alloc, result]) => this.settleInsert(seen, alloc, result)));
+    await Promise.all(this.partitions(seen).map(async (part) => {
+      const rows = part.rows.map((r) => seen.rowOf.get(r.alloc) ?? r);
+      if (part.api.name === 'gce' && part.api.reconcileLaunches) {
+        const settled = await part.api.reconcileLaunches(rows);
+        await Promise.all([...settled].map(([alloc, result]) => this.settleInsert(seen, alloc, result)));
+      } else for (const row of rows.filter((r) => r.state === 'launching')) {
+        const inst = part.instances.find((i) => i.alloc === row.alloc);
+        if (inst) { const next = runningRow(row, inst); if (await this.write(next)) seen.rowOf.set(row.alloc, next); continue; }
+        const result = await part.api.reconcileLaunch(row);
+        if (result.outcome === 'uncertain' || result.outcome === 'accepted') continue; // accepted is recorded from inventory
+        const next = finalRow(row, { end: result.outcome === 'abandoned' ? 'abandoned' : 'refused', deleted: this.now(), diskGb: this.cfg.disk_gb });
+        if (await this.write(next)) {
+          seen.rowOf.set(row.alloc, next);
+          const runner = this.runnerOf(seen, row.repo, row.instance);
+          if (runner && !runner.busy) await this.gh.deleteRunner(row.repo, runner.id).catch((err) => this.log(`unregister ${row.instance}: ${err.message}`));
+        }
+      }
+    }));
   }
 
   async settleInsert(seen, alloc, result) {
@@ -308,7 +371,7 @@ export class Launcher {
   async cleanInstances(seen, out) {
     const served = new Set(seen.served.map(repoLabel));
     const runnersOf = (v) => seen.runners.get(this.repoOf(seen, v));
-    const actions = reviewInstances({ instances: seen.instances, runnersOf, reports: seen.reports, served, now: this.now(), cfg: this.cfg });
+    const actions = reviewInstances({ instances: seen.instances.filter((i) => i.provider === 'gce' || this.known(seen, i)), runnersOf, reports: seen.reports, served, now: this.now(), cfg: this.cfg });
     // Each retirement touches only its own VM, runner and row, so they run together: a VM waits for no other.
     await Promise.all(actions.map((a) => this.retire(seen, a, out)));
   }
@@ -333,7 +396,7 @@ export class Launcher {
       }
     }
     const had = seen.rowOf.get(v.alloc);
-    const base = runningRow(had ?? launchRow({ alloc: v.alloc, repo: repo ?? v.repoLabel, cpus: v.cpus, at: v.created, config: v.config ?? '-', egress: v.egress, account: this.cfg.project }), v);
+    const base = runningRow(had ?? launchRow({ alloc: v.alloc, repo: repo ?? v.repoLabel, cpus: v.cpus, at: v.created, config: v.config ?? '-', egress: v.egress, provider: v.provider, account: v.account ?? this.cfg.project, reserved: v.vcpus }), v);
     const job = had?.job ?? (await this.jobOf(seen, base));
     let end = a.end;
     if (had?.state === 'deleting') end = had.end;
@@ -343,7 +406,7 @@ export class Launcher {
     if (!(await this.write(deleting, { dedupe: !had }))) return; // no row, no delete: the next tick tries again
     seen.rowOf.set(v.alloc, deleting);
     try {
-      await this.provider.terminate(v);
+      await this.providerOf(v).terminate(v);
       out.deleted.push(`${v.name} (${a.reason})`);
       this.log(`deleting ${v.name} (${a.reason}, ${end})`);
     } catch (err) {
@@ -359,10 +422,14 @@ export class Launcher {
   }
 
   async settleRows(seen, out) {
-    const pending = seen.rows.filter((r) => r.state !== 'final');
+    for (const part of this.partitions(seen)) await this.settleProviderRows(part, out);
+  }
+
+  async settleProviderRows(seen, out) {
+    const pending = seen.rows.filter((r) => r.state !== 'final' && !(r.provider === 'ec2' && r.state === 'launching' && !seen.instances.some((i) => i.alloc === r.alloc)));
     const live = new Set(seen.instances.map((i) => i.alloc));
     let preempted = new Map();
-    if (seen.complete && pending.some((r) => r.state !== 'deleting' && !live.has(r.alloc))) preempted = await this.provider.preemptions();
+    if (seen.complete && pending.some((r) => r.state !== 'deleting' && !live.has(r.alloc))) preempted = (seen.api.preemptions ? await seen.api.preemptions() : new Map());
     const current = pending.map((r) => seen.rowOf.get(r.alloc) ?? r);
     const actions = reviewRows({
       rows: current,
@@ -375,7 +442,7 @@ export class Launcher {
     for (const a of actions) {
       // A VM missing from the listing is confirmed gone before its row is finalized: another launcher may have
       // created it after this tick listed instances.
-      if (a.action === 'final' && a.row.zone && (await this.provider.stillThere(a.row))) continue;
+      if (a.action === 'final' && a.row.zone && (await seen.api.stillThere?.(a.row))) continue;
       if (a.action === 'running') {
         const next = runningRow(a.row, a.instance);
         if (await this.write(next)) seen.rowOf.set(a.row.alloc, next);
@@ -399,7 +466,13 @@ export class Launcher {
   async cleanRunners(seen, out) {
     const names = new Set(seen.instances.map((i) => i.name));
     for (const [repo, runners] of seen.runners) {
-      for (const r of orphanRunners({ runners: [...runners.values()], instanceNames: names, now: this.now(), complete: seen.complete })) {
+      for (const r of orphanRunners({ runners: [...runners.values()].filter((r) => {
+        const row = [...seen.rowOf.values()].find((row) => row?.instance === r.name);
+        if (row) return this.known(seen, row) && !(row.provider === 'ec2' && row.state === 'launching');
+        const provider = r.name.startsWith('ci-kit-ec2-') ? 'ec2' : 'gce';
+        const matching = [...seen.inventories].filter(([key]) => JSON.parse(key)[0] === provider);
+        return matching.length > 0 && matching.every(([, i]) => i.complete);
+      }), instanceNames: names, now: this.now(), complete: seen.complete })) {
         try {
           await this.gh.deleteRunner(repo, r.id);
           out.unregistered.push(r.name);
@@ -412,7 +485,7 @@ export class Launcher {
   }
 
   async cleanLeftovers(seen, out) {
-    out.deleted.push(...await this.provider.cleanupOrphans(seen));
+    for (const part of this.partitions(seen)) out.deleted.push(...await part.api.cleanupOrphans(part, this.ledger));
   }
 
   // A VM that booted but whose runner never came online covers no job (logic.mjs neverOnline), and is logged at ERROR
@@ -436,38 +509,28 @@ export class Launcher {
     this.reportNeverOnline(seen);
     const plan = planLaunches({
       queued: seen.queued, instances: seen.instances, runners: seen.demand, now: this.now(), cfg: this.cfg, complete: seen.complete, claimed: seen.claimed,
-      rows: seen.rows,
+      rows: seen.rows, unknown: seen.unknown, admission: false,
     });
     for (const job of plan.unservable) this.log(`job ${job.id} in ${job.repo} cannot run on GCE: labels ${job.labels.join(',')}`);
     out.waiting = plan.waiting.length;
     const prelaunches = (inflight) => (!seen.complete ? [] : planPrelaunches({
-      runs: seen.runs, jobs: seen.jobs, rows: seen.rows, runners: seen.demand, inflight, waiting: plan.waiting.length, cfg: this.cfg,
+      runs: seen.runs, jobs: seen.jobs, rows: seen.rows, runners: seen.demand, inflight, waiting: plan.waiting.length, cfg: this.cfg, admission: false,
     }));
     const ahead = prelaunches(plan.inflight);
     if (plan.launches.length + ahead.length === 0) return;
-    const image = await preparation.time('images.wait', () => seen.images);
-    if (!image) {
-      this.log(`no ready image in family ${this.cfg.image_family}; ${plan.launches.length} job(s) wait, ${ahead.length} pre-launch(es) not made`);
-      return;
-    }
-    // A quota refusal stops no launch but the ones it covers (spec 2026-10-21, The launch queue): each launch skips
-    // what the tick's memory says is out of quota, and one with nothing left waits in GitHub's queue.
-    // The queued jobs' launches run to their end before any pre-launch starts: up to 16 launches mint and insert at
-    // once, so a pre-launch beside them could take the quota a waiting job needs (review, M5). And a tick in which any
-    // of them stayed unserved (refused, unsettled, raced, or not started by the deadline) pre-launches nothing: it has
-    // no spare quota to speculate with, and its job comes first on the next tick.
-    // A race (spec M6) starts only once every queued job's launch has made its first attempt (`firstTried`), so it never
-    // takes the quota or the vCPUs a job not yet tried needs; it reserves its own in `inflight`, which pre-launch then
-    // plans against, and the tick ends when its races have.
-    // The tick's room in each placement (room.mjs): the limits, less what every ci-kit VM listed holds, job and bake.
-    const wait = this.after(LIMITS_WAIT_MS);
-    const room = await preparation.time('limits.wait', () => Promise.race([seen.room, wait.promise.then(() => null)]));
-    wait.cancel();
+    const rooms = new Map();
+    await Promise.all([...seen.inventories].map(async ([key, inventory]) => {
+      const wait = this.after(LIMITS_WAIT_MS);
+      const room = await preparation.time('limits.wait', () => Promise.race([inventory.room ?? null, wait.promise.then(() => null)]));
+      wait.cancel();
+      rooms.set(key, room);
+    }));
     let open;
     const ctx = {
-      seen, deadline, out, image, room, preparation, inflight: plan.inflight, races: [],
+      seen, deadline, out, rooms, preparation, admission: createAdmission(seen, this.cfg), races: [], blocked: new Set(),
       untried: new Set(plan.launches), firstTried: new Promise((resolve) => { open = resolve; }),
     };
+    ctx.root = ctx;
     const opened = () => {
       ctx.opened = true;
       open();
@@ -481,12 +544,11 @@ export class Launcher {
     if (served < plan.launches.length) {
       if (ahead.length) this.log(`no pre-launch this tick: ${plan.launches.length - served} queued job(s) were not served`);
     } else {
-      const later = prelaunches(ctx.inflight);
-      ctx.inflight += later.reduce((sum, a) => sum + largestMachineCpus(a.cpus, this.cfg), 0);
+      const later = prelaunches(ctx.admission.total());
       await this.launchQueue(later, ctx);
     }
     while (ctx.races.length) await Promise.all(ctx.races.splice(0));
-    if (room) out.full = room.skipped();
+    for (const room of rooms.values()) if (room) for (const [key, value] of Object.entries(room.skipped())) out.full[key] = (out.full[key] ?? 0) + value;
   }
 
   // Launches `items` with up to PARALLEL_LAUNCHES at once, none started past the deadline. Returns how many made a VM.
@@ -501,7 +563,7 @@ export class Launcher {
           return {};
         });
         ctx.tried(item);
-        if (!result.name) continue;
+        if (!result.name) { if (item.job) ctx.out.waiting += 1; continue; }
         made += 1;
         ctx.out.launched.push(result.name);
         if (result.prelaunch) ctx.out.prelaunched.push(result.name);
@@ -520,32 +582,109 @@ export class Launcher {
   // allocation's slow insert (`race`: {of, demand}, spec M6) walks the `attempts` it was given and is never raced
   // itself. Its row keeps its walk's refusals and slow inserts (walkRecord).
   async launch(item, ctx) {
+    const admissionItem = item.admissionItem ?? item;
+    if (!item.race && ctx.root.globalWaiter && ctx.root.globalWaiter.item !== admissionItem) {
+      if (!(await ctx.root.globalWaiter.promise)) return {};
+      return this.launch(item, ctx);
+    }
+    const walk = providerWalk({ ...item, cfg: this.cfg, repoProviders: this.repoProviders, providers: this.providers, ec2: this.ec2, creditPreference: this.creditPreference });
+    if (walk.unlisted) {
+      const key = `unservable:${item.repo}:${item.job.id}`;
+      if (!this.providerState.has(key)) { this.log(`unservable: ${item.repo} lists no ${walk.unlisted}`); this.providerState.set(key, true); }
+      return {};
+    }
+    const groups = item.groups ?? walk.groups;
+    let budgetBlocked = false;
+    let globalBlocked = false;
+    for (let index = 0; index < groups.length; index += 1) {
+      if (this.now() >= ctx.deadline) break;
+      const group = groups[index];
+      const key = providerKey(group);
+      if (!this.known(ctx.seen, group)) continue;
+      const state = this.providerState.get(key) ?? {};
+      if (state.deniedUntil > this.now() || ctx.blocked?.has(key)) continue;
+      const room = ctx.rooms.get(key);
+      const attempts = group.candidates.filter((p) => !quotaBlocks(ctx.seen.quota, p) && !this.stockouts.has(p, this.now()) && (!room || room.fits(p)));
+      if (!attempts.length) {
+        for (const p of group.candidates) room?.skip(p);
+        this.log(`${item.job ? `job ${item.job.id}` : `run ${item.prelaunch.run}`} in ${item.repo} waits: every placement for its size is full, out of quota this tick, or recently stocked out on ${key}`);
+        continue;
+      }
+      const alloc = this.newAllocation(ctx.seen);
+      const reserved = ctx.admission.acquire(alloc, item.repo, { ...group, candidates: attempts });
+      if (reserved === null) {
+        budgetBlocked = true;
+        globalBlocked ||= ctx.admission.total() + Math.max(...attempts.map((p) => p.vcpus)) > this.cfg.max_vcpus;
+        continue;
+      }
+      if (ctx.root.globalWaiter?.item === admissionItem) {
+        ctx.root.globalWaiter.resolve(true);
+        ctx.root.globalWaiter = null;
+      }
+      const image = await ctx.preparation.time('images.wait', () => ctx.seen.images.get(key));
+      if (!image || this.now() >= ctx.deadline) {
+        ctx.admission.release(alloc);
+        if (!image) this.log(`no ready image in family ${this.cfg.image_family}; demand in ${item.repo} waits on ${key}`);
+        continue;
+      }
+      // The first admitted allocation identifies a speculative demand, including every later fallback and race.
+      if (item.prelaunch && !item.prelaunch.group) item.prelaunch = { ...item.prelaunch, group: alloc };
+      const result = await this.launchAllocation({ ...item, admissionItem: item.admissionItem ?? item, alloc, reserved, attempts }, { ...ctx, image, room, group, remaining: groups.slice(index + 1) });
+      if (result.name || result.held || result.raced) return result;
+    }
+    // FIFO applies to the global budget, not a repo's cap or an unavailable provider. Check this before any
+    // asynchronous wait so a younger, smaller job cannot pass an older demand that has no globally fitting walk.
+    if (globalBlocked && !item.race && !ctx.root.globalWaiter) {
+      let resolve;
+      const promise = new Promise((r) => { resolve = r; });
+      ctx.root.globalWaiter = { item: admissionItem, promise, resolve };
+    }
+    // Cleanup runs beside launches. Only demands declined by a budget wait for it, then retry admission once:
+    // a row finalized in this tick releases both debits without delaying the first launches that already fit.
+    if (budgetBlocked && !item.afterCleanup) {
+      try { await ctx.seen.cleaning; } catch (err) { ctx.root.globalWaiter?.resolve(false); throw err; }
+      return this.launch({ ...item, admissionItem, afterCleanup: true }, ctx);
+    }
+    if (ctx.root.globalWaiter?.item === admissionItem) ctx.root.globalWaiter.resolve(false);
+    return {};
+  }
+
+  newAllocation(seen) {
+    let alloc;
+    do { alloc = allocationId(this.now(), this.random); } while (seen.rowOf.has(alloc));
+    seen.rowOf.set(alloc, null);
+    return alloc;
+  }
+
+  async launchAllocation(item, ctx) {
     const { repo, cpus, job, prelaunch, race } = item;
     const { seen, deadline, out, image, preparation } = ctx;
     const purpose = job ? `job ${job.id}` : `run ${prelaunch.run}'s cpus-${cpus} pre-launch`;
-    const what = race ? `the race of ${instanceName(race.of)} for ${purpose}` : purpose;
-    const attempts = item.attempts ?? this.provider.candidates(this.cfg, cpus);
-    if (attempts.every((p) => quotaBlocks(seen.quota, p) || this.stockouts.has(p, this.now()) || (ctx.room && !ctx.room.fits(p)))) {
-      for (const p of attempts) ctx.room?.skip(p);
-      this.log(`${what} in ${repo} waits: every placement for its size is full, out of quota this tick, or recently stocked out`);
-      return {};
-    }
+    const what = race ? `the race of ${seen.rowOf.get(race.of)?.instance ?? race.of} for ${purpose}` : purpose;
+    const attempts = item.attempts;
+    const { group } = ctx;
+    const api = group.api;
     const at = this.now();
-    let alloc = allocationId(at, this.random);
-    while (seen.rowOf.has(alloc)) alloc = allocationId(at, this.random); // ids are random: never reuse one in the ledger
-    seen.rowOf.set(alloc, null);
-    const name = instanceName(alloc);
-    const reserved = item.reserved ?? largestMachineCpus(cpus, this.cfg);
-    const row = launchRow({ alloc, repo, cpus, at, config: this.config, egress: this.cfg.egress, prelaunch: race ? undefined : prelaunch, race, reserved,
-      account: this.cfg.project, image: image.id, image_commit: image.manifest['ci-kit-commit'] });
-    await preparation.time('ledger.launching', () => this.ledger.upsert(row), { repo, instance: name }); // no row, no launch
+    const alloc = item.alloc;
+    const name = providerRunnerName(group.provider, alloc);
+    const reserved = item.reserved;
+    // A proposed race changes the original walk only once this allocation has both budgets and can open its row.
+    // Its original may have settled while admission or the image was awaited; then no child is opened.
+    if (item.onAdmitted && !item.onAdmitted()) { ctx.admission.release(alloc); return {}; }
+    let row = launchRow({ alloc, repo, cpus, at, config: this.config, egress: this.cfg.egress, prelaunch, race, reserved,
+      provider: group.provider, account: group.account, image: image.id, image_commit: image.manifest['ci-kit-commit'], credit_policy: group.creditPolicy });
+    // Acquire happened synchronously before entering this function. Do not release a reservation after an
+    // ambiguous ledger failure: its row may have landed, and a later tick must count the same allocation once.
+    seen.rowOf.set(alloc, row);
+    await preparation.time('ledger.launching', () => this.ledger.upsert(row), { repo, instance: name });
     let jit;
     try {
-      jit = await preparation.time('github.jitConfig', () => this.gh.jitConfig(repo, jitRequest(alloc, cpus)), { repo, instance: name });
+      jit = await preparation.time('github.jitConfig', () => this.gh.jitConfig(repo, jitRequest(alloc, cpus, group.provider)), { repo, instance: name });
     } catch (err) {
       this.log(`jit for ${what} in ${repo} (${name}): ${err.message}`);
-      await this.write(finalRow(row, { end: 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb, egress: this.cfg.egress }));
-      return {};
+      const final = finalRow(row, { end: 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb, egress: this.cfg.egress });
+      if (await this.write(final)) { seen.rowOf.set(alloc, final); ctx.admission.release(alloc); }
+      return { held: seen.rowOf.get(alloc).state !== 'final' };
     }
     // The tick's deadline stops new attempts; an attempt already started waits for its operation up to its own
     // deadline, since giving up early saves nothing (the operation runs on) and only defers what it decides. An
@@ -555,6 +694,7 @@ export class Launcher {
     // before its operation did (unknown, and still running when reconciled) stays pending, and the launch waits, within
     // the tick, for its race to be decided (unsettled).
     let raced = false;
+    let acceptedId;
     // The writes of this row's pending inserts, each made before a race could start, in the order of its attempts: one
     // still in flight when its attempt is refused and the walk sends the next must land before the next one's, and all
     // before the walk's result.
@@ -565,10 +705,26 @@ export class Launcher {
         out.firstInsert ??= iso(this.now());
         const sent = this.now();
         const slow = race ? null : this.after(RACE_AFTER_MS);
-        const insert = this.provider.launch(row, p, jit.encoded_jit_config).then((result) => {
-          if (result.outcome !== 'accepted') throw result.error;
+        if (group.provider === 'ec2') {
+          const next = { ...row, zone: p.zone, client_token: `${alloc}-${attempts.indexOf(p) + 1}`, sent_at: iso(sent) };
+          // The preceding attempt's delayed race marker must land before these reconciliation coordinates.
+          await (marking = marking.then(async () => {
+            await this.ledger.upsert(next);
+            row = next;
+            seen.rowOf.set(alloc, row);
+          }));
+        }
+        const insert = api.launch(row, p, jit.encoded_jit_config).then((result) => {
+          if (result.outcome === 'denied') {
+            const key = providerKey(group);
+            this.providerState.set(key, { ...this.providerState.get(key), deniedUntil: this.now() + 10 * 60_000 });
+            this.error(`denied ${key}: ${result.detail}`);
+          }
+          if (result.outcome === 'throttled') ctx.blocked.add(providerKey(group));
+          if (result.outcome === 'accepted') acceptedId = result.id;
+          if (result.outcome !== 'accepted') throw Object.assign(result.error ?? new Error(result.detail), { launchResult: result });
         });
-        ctx.tried(item);
+        ctx.tried(item.admissionItem ?? item);
         let pending = true;
         let decided;
         const decision = new Promise((resolve) => { decided = resolve; });
@@ -593,7 +749,7 @@ export class Launcher {
         }
       },
       reconcile: async (p, err) => {
-        const settled = gceWalkResult(await this.provider.reconcileLaunch({ ...row, zone: p.zone, operation: err?.operation }));
+        const settled = gceWalkResult(await api.reconcileLaunch({ ...row, zone: p.zone, operation: err?.operation }));
         if (settled.outcome !== 'unknown') unsettled?.settle();
         return settled;
       },
@@ -605,7 +761,7 @@ export class Launcher {
       // tried) is given up rather than holding this launch's place while that job waits for one.
       if (result.stop === 'unknown') {
         const left = this.after(Math.max(0, deadline - this.now()));
-        await Promise.race([unsettled.decision, left.promise, unsettled.fired.then(() => (ctx.opened ? NEVER : undefined))]);
+        await Promise.race([unsettled.decision, left.promise, unsettled.fired.then(() => (ctx.root.opened ? NEVER : undefined))]);
         left.cancel();
       }
       unsettled.settle();
@@ -619,31 +775,36 @@ export class Launcher {
     if (result.placement) {
       const p = result.placement;
       const after = result.tried.length > 1 ? ` after ${tried}` : '';
-      if (race) this.log(`raced ${name} (${p.machine}, ${p.provisioning}, ${p.zone}) against ${instanceName(race.of)} for ${purpose} in ${repo}${after}`);
+      if (race) this.log(`raced ${name} (${p.machine}, ${p.provisioning}, ${p.zone}) against ${seen.rowOf.get(race.of)?.instance ?? race.of} for ${purpose} in ${repo}${after}`);
       else if (job) this.log(`launched ${name} (${p.machine}, ${p.provisioning}, ${p.zone}) for job ${job.id} in ${repo}${after}`);
       else this.log(`pre-launched ${name} (${p.machine}, ${p.provisioning}, ${p.zone}) for run ${prelaunch.run} (${prelaunch.workflow}) in ${repo}${after}`);
-      const running = runningRow(walked, { ...p, diskType: p.placement.disk_type, created: this.now() });
-      await this.write(running);
+      const running = runningRow(walked, { ...p, id: acceptedId, diskType: p.disk?.type ?? p.placement?.disk_type, created: this.now() });
+      if (await this.write(running)) seen.rowOf.set(alloc, running);
       seen.launches.push(running);
+      this.log(`placed ${name} ${group.provider}/${group.account} for ${purpose} in ${repo}`);
       return { name, prelaunch: Boolean(prelaunch) && !race };
     }
     if (result.stop === 'unknown') {
       // The row keeps the insert that never settled: until a later tick learns its end (settleInserts), the allocation
       // keeps its vCPUs and covers its job (planLaunches), since its VM may still appear.
       this.log(`${name}: insert outcome unknown (${tried}); the next ticks settle it`);
-      await this.write(walked);
+      if (await this.write(walked)) seen.rowOf.set(alloc, walked);
       seen.launches.push(walked);
-      return {};
+      return { held: true };
     }
     if (raced) this.log(`${name}: not created (${tried}); its race serves ${what}`);
     else this.log(`${name}: not created (${result.stop}: ${tried}); ${what} waits`);
+    const ended = finalRow(walked, { end: result.stop === 'exhausted' || result.stop === 'failed' ? 'refused' : 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb, egress: this.cfg.egress });
+    // Persist definite exhaustion first. A crash at unregister then leaves a final row the five-minute orphan
+    // rule can recognize, not a launching row protected as uncertain. A failed final write releases neither debit.
+    if (!(await this.write(ended))) { seen.launches.push(walked); return { held: true, raced }; }
+    seen.rowOf.set(alloc, ended);
+    ctx.admission.release(alloc);
     await this.gh.deleteRunner(repo, jit.runner.id).catch((err) => {
       if (err.status !== 404) this.log(`unregister ${name}: ${err.message}; the orphan-runner rule retries`);
     });
-    const abandoned = finalRow(walked, { end: 'abandoned', deleted: this.now(), diskGb: this.cfg.disk_gb, egress: this.cfg.egress });
-    await this.write(abandoned);
-    seen.launches.push(abandoned);
-    return {};
+    seen.launches.push(ended);
+    return { raced };
   }
 
   // The race of an insert still unsettled RACE_AFTER_MS after it was sent (spec M6): once every queued job's launch has
@@ -658,33 +819,28 @@ export class Launcher {
     if (!stillPending()) return;
     const name = row.instance;
     const next = raceAttempts(attempts, attempt).filter((p) => !quotaBlocks(ctx.seen.quota, p) && !this.stockouts.has(p, this.now()) && (!ctx.room || ctx.room.fits(p)));
-    const need = largestMachineCpus(item.cpus, this.cfg);
-    let why = null;
-    if (!next.length) why = 'no other zone left to try';
-    else if (this.now() >= ctx.deadline) why = 'the tick\'s budget is spent';
-    else if (ctx.inflight + need > this.cfg.max_vcpus) why = `max_vcpus ${this.cfg.max_vcpus} has no room for it`;
+    const groups = [...(next.length ? [{ ...ctx.group, candidates: next }] : []), ...ctx.remaining];
     const unsettled = `${name}: its insert in ${attempt.zone} is unsettled after ${RACE_AFTER_MS / 1000} s`;
-    if (why) {
-      this.log(`${unsettled}; no race (${why})`);
+    if (!groups.length || this.now() >= ctx.deadline) {
+      this.log(`${unsettled}; no race (${!groups.length ? 'no other zone left to try' : 'the tick\'s budget is spent'})`);
       return;
     }
-    // Reserved while the original's pending insert is written; without that row, a restarted launcher would not count
-    // the original, so no race starts.
-    ctx.inflight += need;
-    const marked = hold(() => this.write({ ...row, slow: [{ zone: attempt.zone, outcome: 'unknown', sent: iso(sent) }] }));
-    if (!(await marked) || !stillPending()) {
-      ctx.inflight -= need;
-      this.log(`${unsettled}; no race (${stillPending() ? 'its pending insert could not be written to the ledger' : 'it settled meanwhile'})`);
-      return;
-    }
-    start();
-    this.log(`${unsettled}; a second allocation races it`);
-    const demand = item.job ? { job: item.job.id } : { run: item.prelaunch.run, attempt: item.prelaunch.attempt };
-    const racing = {
-      repo: item.repo, cpus: item.cpus, job: item.job, prelaunch: item.prelaunch, race: { of: row.alloc, demand }, attempts: next, reserved: need,
+    const pending = { ...row, slow: [{ zone: attempt.zone, outcome: 'unknown', sent: iso(sent) }] };
+    const marked = hold(async () => { const written = await this.write(pending); if (written) ctx.seen.rowOf.set(row.alloc, pending); return written; });
+    if (!(await marked) || !stillPending()) { this.log(`${unsettled}; no race (its pending insert could not be written or settled meanwhile)`); return; }
+    let admitted = false;
+    const onAdmitted = () => {
+      if (admitted) return true; // a definitely refused child's fallback is still this race's demand
+      if (!stillPending()) return false;
+      admitted = true;
+      start();
+      return true;
     };
+    const demand = item.job ? { job: item.job.id } : { run: item.prelaunch.run, attempt: item.prelaunch.attempt };
+    const racing = { repo: item.repo, cpus: item.cpus, job: item.job, prelaunch: item.prelaunch, race: { of: row.alloc, demand }, groups, onAdmitted };
+
     ctx.races.push(this.launch(racing, ctx).then((r) => {
-      if (!r.name) return;
+      if (!r.name) { this.log(`${unsettled}; no race (no placement admitted or accepted)`); return; }
       ctx.out.launched.push(r.name);
       ctx.out.raced.push(`${r.name} for ${name}`);
     }, (err) => this.log(`race of ${name}: ${err.message}`)));
@@ -699,7 +855,7 @@ export class Launcher {
     const yesterday = day(now - 24 * 3600_000);
     try {
       if (this.ledger.hasDaily(yesterday)) return;
-      const nat = await this.provider.natOf(yesterday);
+      const nat = await this.provider.natOf?.(yesterday);
       if (await this.ledger.postDaily(dailyLine([...seen.rowOf.values()].filter(Boolean), yesterday, this.config, nat))) this.log(`ledger: daily line for ${yesterday}`);
     } catch (err) {
       this.log(`daily line: ${err.message}`);
