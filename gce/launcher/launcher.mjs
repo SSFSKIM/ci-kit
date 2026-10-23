@@ -12,20 +12,18 @@
 // An insert still unsettled RACE_AFTER_MS after it was sent is raced by a second allocation of its size in another zone
 // (spec M6), while the first keeps waiting on its own operation and is never moved; whichever VM's runner a job takes
 // first serves it, and the other is an ordinary unclaimed VM the idle rule removes.
-import { GceError } from '../../lib/gce.mjs';
+import { createProvider, gceWalkResult } from './providers/gce.mjs';
 import { createAlerts } from '../../pool/lib/alerts.mjs';
 import { queuedPoolJobs } from '../../pool/agent/logic.mjs';
-import { staleBakeInstances } from '../bake/plan.mjs';
-import { servedRepos, placementZones } from './config.mjs';
+import { servedRepos } from './config.mjs';
 import {
-  allocationId, instanceName, repoLabel, viewInstance, isGce, planLaunches, runnersNeverOnline, placements, quotaBlocks, insertOutcome, walkPlacements, stockoutMemory,
-  jobInstance, jitRequest, newestReadyImage, reviewInstances, reviewRows, orphanRunners, orphanDisks, reportable, claimedInstances,
-  largestMachineCpus, raceAttempts, walkRecord, unsettledInsert, pendingAllocation, quotaMetric, RACE_AFTER_MS,
+  allocationId, instanceName, repoLabel, planLaunches, runnersNeverOnline, quotaBlocks, insertOutcome, walkPlacements, stockoutMemory,
+  jitRequest, reviewInstances, reviewRows, orphanRunners, reportable, claimedInstances,
+  largestMachineCpus, raceAttempts, walkRecord, unsettledInsert, quotaMetric, RACE_AFTER_MS,
 } from './logic.mjs';
 import { planPrelaunches } from './prelaunch.mjs';
-import { createRoom } from './room.mjs';
 import { createPreparation } from './preparation.mjs';
-import { launchRow, runningRow, withJob, jobRecord, finalRow, dailyLine, launchCounts, natDay } from './ledger.mjs';
+import { launchRow, runningRow, withJob, jobRecord, finalRow, dailyLine, launchCounts } from './ledger.mjs';
 
 export const TICK_BUDGET_MS = 45_000;
 const INSERT_DEADLINE_MS = 40_000;
@@ -33,42 +31,16 @@ const PARALLEL_LAUNCHES = 16; // a burst launches in one round: each insert wait
 const DAILY_WITHIN_MS = 2 * 3600_000; // the 26 h ledger window holds all of yesterday only early in the day
 // Cloud NAT's samples take up to 225 s to be readable: the day's line, which reads its NAT once, waits past that.
 const DAILY_AFTER_MS = 5 * 60_000;
-const SETTLE_BUDGET_MS = 15_000; // what a tick spends learning how unsettled inserts ended; the rest wait a tick
-const SETTLE_PARALLEL = 4; // zones whose operations are read at once
-// How far an insert operation's insertTime may fall before the launcher's own send time (clocks and request latency)
-// and still be that insert's, when its link is unknown. A walk's earlier attempt in the same zone was sent at least one
-// operation earlier.
-const SEND_SKEW_MS = 2_000;
 // How long a launch waits for the placements' limits (room.mjs) when the cache must read them: the read runs beside the
 // tick's other reads and is done long before, so this only bounds a slow one, after which the walk runs without them.
 const LIMITS_WAIT_MS = 3_000;
-const NAT_GATEWAY = 'ci-kit-nat'; // each placement region's Cloud NAT (gce/deploy.sh network)
-const zoneOf = (r) => r.zone.split('/').pop();
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
 const iso = (ms) => new Date(ms).toISOString();
-// What a finished insert operation means: {outcome (insertOutcome), error}, the error worded as lib/gce.mjs words a
-// failed operation, so a quota refusal's message still names its metric and region (quotaScope, quotaMetric).
-function settledAs(op) {
-  if (!op.error?.errors?.length) return { outcome: 'created', error: null };
-  const error = new GceError(op.httpErrorStatusCode ?? 200, `gce operation ${op.name}: ${op.error.errors.map((e) => `${e.code} ${e.message ?? ''}`.trim()).join('; ')}`,
-    op.error.errors.map((e) => e.code), { accepted: true, finished: true, operation: op.selfLink ?? null });
-  return { outcome: insertOutcome(error), error };
-}
 const NEVER = new Promise(() => {});
 
-// The insert operation of an unsettled insert (a row's slow entry), among a zone's operations for its instance: by the
-// link the API gave, else the newest sent no earlier than the insert (less SEND_SKEW_MS), so a walk's earlier attempt in
-// the same zone under the same name (spot, then on demand) is never taken for it. None found: it stays unsettled.
-function operationOf(ops, instance, insert) {
-  const mine = ops.filter((o) => o.operationType === 'insert' && o.targetLink.endsWith(`/instances/${instance}`));
-  if (insert.operation) return mine.find((o) => o.selfLink === insert.operation) ?? null;
-  const after = Date.parse(insert.sent) - SEND_SKEW_MS;
-  return mine.filter((o) => Date.parse(o.insertTime) >= after).sort((a, b) => Date.parse(b.insertTime) - Date.parse(a.insertTime))[0] ?? null;
-}
-
-// deps: {gce, gh, ledger, cfg, config, poolRepos, now, log, error, random, alert, after, stockouts, limits}; error(message,
-// fields) logs at ERROR what a log-based alert watches (gce/deploy.sh alert), log otherwise. limits: the placements'
-// limits across ticks (room.mjs limitsCache: get(placements) → limits or null); none, and the walk skips nothing full.
+// deps: {provider, gh, ledger, cfg, config, poolRepos, now, log, error, random, alert, after, stockouts}. A caller may
+// supply gce/limits instead of provider to construct the same GCE adapter. error(message, fields) logs at ERROR
+// what a log-based alert watches (gce/deploy.sh alert), log otherwise.
 // cfg: the gce.json it runs, config: that file's commit; poolRepos: the repo names in pool.json (one file per repo).
 // after(ms) → {promise, cancel}: a timer, the race's (tests run it on their clock).
 export class Launcher {
@@ -86,6 +58,8 @@ export class Launcher {
       const promise = new Promise((resolve) => { timer = setTimeout(resolve, ms); });
       return { promise, cancel: () => clearTimeout(timer) };
     };
+    this.provider ??= createProvider({ gce: this.gce, cfg: this.cfg, config: this.config, now: this.now, log: this.log,
+      after: this.after, limits: this.limits, insertDeadlineMs: this.insertDeadlineMs });
   }
 
   // One reconciliation. Throws only when Compute Engine or the ledger cannot be read (the tick then did nothing), or
@@ -141,25 +115,19 @@ export class Launcher {
     }));
     // The ledger is read before the instances: a row seen running was written after its insert, so its VM is in the
     // listing that follows unless it is gone. (A row whose VM is missing is confirmed with a direct read anyway.)
-    const store = (async () => {
+    const rowsRead = (async () => {
       await preparation.time('ledger.read', () => this.ledger.read());
-      const rows = await preparation.time('ledger.rows', () => this.ledger.rows());
-      const [listing, disks, builders] = await Promise.all([
-        preparation.time('gce.listInstances', () => this.gce.listInstances('labels.ci-kit=gce')),
-        preparation.time('gce.listDisks', () => this.gce.listDisks('labels.ci-kit=gce')),
-        preparation.time('gce.builders', () => this.gce.instances('labels.ci-kit=gce-builder')),
-      ]);
-      return { rows, listing, disks: disks.items, builders };
+      return preparation.time('ledger.rows', () => this.ledger.rows());
     })();
+    const store = this.provider.observe({ rows: rowsRead, preparation });
     // Read now so that a launch does not wait for it; a tick with nothing to launch never looks.
-    const images = preparation.time('gce.images', () => this.gce.images('labels.ci-kit=gce-image'));
+    const images = this.provider.readyImage(preparation);
     images.catch(() => {});
-    const limits = this.limits ? preparation.time('limits.get', () => this.limits.get(this.cfg.placements)) : Promise.resolve(null); // never rejects
     const reads = new Map(listed.map((repo) => [repo, this.readRepo(repo, preparation)]));
 
     // Awaited first: it is the one read whose failure fails the tick, and a rejection nobody awaits yet would end the
     // process. Every other read resolves, whatever happens to it.
-    const { rows, listing, disks, builders } = await store;
+    const { rows, instances, complete, disks, builders, room } = await store;
     // Public repos are refused, as on the Hetzner box; a repo whose visibility cannot be read is not served this tick.
     const served = [];
     for (const [repo, read] of reads) {
@@ -168,18 +136,6 @@ export class Launcher {
       else if (visible === false) this.log(`refusing ${repo}: it is public, and the pool serves private repos only`);
       else this.log(`not serving ${repo} this tick: its visibility could not be read (${visible.message})`);
     }
-    const instances = listing.items.filter(isGce).map(viewInstance);
-    // A zone the listing missed may hide our VMs: nothing is admitted, and nothing is cleaned up for being absent. Ours
-    // live in the placements' zones and in the zones of the rows not yet final (a VM outlives a placement removed or
-    // rolled back from gce.json); a zone outside both holds none of ours, and its outage does not stop the pool. A
-    // live row with no zone (a launching row whose running write failed after its insert) could be anywhere: while one
-    // exists, every zone of the listing must be read whole.
-    const live = rows.filter((r) => r.state !== 'final');
-    const ours = new Set([...placementZones(this.cfg), ...live.filter((r) => r.zone).map((r) => r.zone)]);
-    const missing = [...ours].filter((z) => !listing.zones.has(z));
-    if (live.some((r) => !r.zone) && !listing.complete) missing.push('a zone (a live row names none)');
-    const complete = missing.length === 0;
-    if (!complete) this.log(`the instance listing missed ${missing.join(', ')}: no launches, and no cleanup by absence, this tick`);
     const rowOf = new Map(rows.map((r) => [r.alloc, r]));
 
     // Runners are listed for every repo something of ours belongs to: served repos, and every repo with a row in the
@@ -194,7 +150,7 @@ export class Launcher {
     for (const [repo, mine] of listings) if (mine) runners.set(repo, mine);
     // quota: the tick's memory of quota refusals (logic.mjs quotaScope), shared by its launches; launches: the rows they
     // wrote last, which the tick's counts read.
-    const seen = { served, instances, complete, disks, builders, rows, rowOf, byLabel, runners, images, limits, quota: [], launches: [] };
+    const seen = { served, instances, complete, disks, builders, rows, rowOf, byLabel, runners, images, room, quota: [], launches: [] };
 
     // A VM whose job has ended says so in ci-kit/job before its guest powers off. Read beside the jobs, it serves both
     // the cover (an ended job's VM covers nothing) and the cleanup (the VM goes without waiting for its power-off).
@@ -253,17 +209,13 @@ export class Launcher {
     }
   }
 
-  // Instance name → its ci-kit/job report (null when none), for the VMs worth reading (reportable()).
+  // The legacy decisions consume only terminal evidence, keyed by runner name. A bundle's telemetry (including
+  // a guest claim signal) is deliberately not a claim or retirement signal. M4 consumes the allocation-keyed map.
   async readReports(seen, preparation) {
     const runnersOf = (v) => seen.runners.get(this.repoOf(seen, v));
-    return new Map(await Promise.all(reportable(seen.instances, runnersOf).map(async (v) => {
-      try {
-        return [v.name, await preparation.time('gce.jobReport', () => this.gce.guestAttribute(v.zone, v.name, 'ci-kit/job'), { instance: v.name, zone: v.zone })];
-      } catch (err) {
-        if (err.status !== 404) this.log(`ci-kit/job of ${v.name}: ${err.message}`);
-        return [v.name, null];
-      }
-    })));
+    const allocs = reportable(seen.instances, runnersOf).map((v) => ({ alloc: v.alloc, instance: v.name, zone: v.zone }));
+    const reports = await this.provider.readReports(allocs, preparation);
+    return new Map(allocs.map((a) => [a.instance, reports.get(a.alloc)?.terminal ?? null]));
   }
 
   repoOf(seen, view) {
@@ -321,55 +273,23 @@ export class Launcher {
   // launcher's wait is not the operation's), and a refusal joins the row's `refused`. Until it is learned, a launching row
   // whose VM is not listed keeps its vCPUs and covers its job (planLaunches); learned refused, it is abandoned at once
   // and its runner unregistered, since no VM will come. The reads (one per zone, a few zones at once) are bounded by
-  // SETTLE_BUDGET_MS, and a zone not read in it, or whose read fails, waits for the next tick; the writes of what was
+  // the provider's settlement budget, and a zone not read in it, or whose read fails, waits for the next tick; the writes of what was
   // read are then all made before this returns, so no row is finalized ahead of its settlement.
   async settleInserts(seen) {
-    const byZone = new Map();
-    for (const observed of seen.rows) {
-      const insert = unsettledInsert(seen.rowOf.get(observed.alloc) ?? observed);
-      if (insert) byZone.set(insert.zone, [...(byZone.get(insert.zone) ?? []), observed.alloc]);
-    }
-    if (!byZone.size) return;
-    const read = new Map(); // zone → its insert operations
-    let expired = false;
-    const budget = this.after(SETTLE_BUDGET_MS);
-    const zones = [...byZone.keys()];
-    const worker = async () => {
-      while (zones.length && !expired) {
-        const zone = zones.shift();
-        const ops = await this.insertOperations(seen, zone, byZone.get(zone));
-        if (ops && !expired) read.set(zone, ops);
-      }
-    };
-    await Promise.race([
-      Promise.all(Array.from({ length: Math.min(SETTLE_PARALLEL, zones.length) }, worker)),
-      budget.promise.then(() => { expired = true; }),
-    ]);
-    budget.cancel();
-    if (expired) this.log(`unsettled inserts: not all read in ${SETTLE_BUDGET_MS / 1000} s; the rest wait for the next tick`);
-    await Promise.all([...read].flatMap(([zone, ops]) => byZone.get(zone).map((alloc) => this.settleInsert(seen, zone, alloc, ops))));
+    const rows = seen.rows.map((r) => seen.rowOf.get(r.alloc) ?? r);
+    const settled = await this.provider.reconcileLaunches(rows);
+    await Promise.all([...settled].map(([alloc, result]) => this.settleInsert(seen, alloc, result)));
   }
 
-  async insertOperations(seen, zone, allocs) {
-    const names = allocs.map((a) => (seen.rowOf.get(a) ?? seen.rows.find((r) => r.alloc === a)).instance);
-    try {
-      return await this.gce.zoneOperations(zone, `targetLink eq ".*/instances/(${names.join('|')})"`);
-    } catch (err) {
-      this.log(`insert operations in ${zone}: ${err.message}; their rows wait for the next tick`);
-      return null;
-    }
-  }
-
-  async settleInsert(seen, zone, alloc, ops) {
+  async settleInsert(seen, alloc, result) {
     const row = seen.rowOf.get(alloc) ?? seen.rows.find((r) => r.alloc === alloc);
     const insert = unsettledInsert(row);
-    if (!insert) return;
-    const op = operationOf(ops, row.instance, insert);
-    if (op?.status !== 'DONE') return;
-    const { outcome, error } = settledAs(op);
+    if (!insert || result.outcome === 'uncertain') return;
+    const zone = insert.zone;
+    const { outcome, error } = gceWalkResult(result);
     const metric = quotaMetric(error);
     const refused = outcome === 'capacity' || outcome === 'quota' ? [...(row.refused ?? []), { kind: outcome, zone, ...(metric ? { metric } : {}) }] : row.refused;
-    let next = { ...row, ...(refused ? { refused } : {}), slow: row.slow.map((s) => (s === insert ? { ...s, outcome, done: op.endTime ?? iso(this.now()) } : s)) };
+    let next = { ...row, ...(refused ? { refused } : {}), slow: row.slow.map((s) => (s === insert ? { ...s, outcome, done: result.done } : s)) };
     if (outcome !== 'created' && row.state === 'launching') {
       const runner = this.runnerOf(seen, row.repo, row.instance);
       if (runner) {
@@ -423,7 +343,7 @@ export class Launcher {
     if (!(await this.write(deleting, { dedupe: !had }))) return; // no row, no delete: the next tick tries again
     seen.rowOf.set(v.alloc, deleting);
     try {
-      await this.gce.deleteInstance(v.zone, v.name, { wait: false });
+      await this.provider.terminate(v);
       out.deleted.push(`${v.name} (${a.reason})`);
       this.log(`deleting ${v.name} (${a.reason}, ${end})`);
     } catch (err) {
@@ -442,7 +362,7 @@ export class Launcher {
     const pending = seen.rows.filter((r) => r.state !== 'final');
     const live = new Set(seen.instances.map((i) => i.alloc));
     let preempted = new Map();
-    if (seen.complete && pending.some((r) => r.state !== 'deleting' && !live.has(r.alloc))) preempted = await this.preemptions();
+    if (seen.complete && pending.some((r) => r.state !== 'deleting' && !live.has(r.alloc))) preempted = await this.provider.preemptions();
     const current = pending.map((r) => seen.rowOf.get(r.alloc) ?? r);
     const actions = reviewRows({
       rows: current,
@@ -455,7 +375,7 @@ export class Launcher {
     for (const a of actions) {
       // A VM missing from the listing is confirmed gone before its row is finalized: another launcher may have
       // created it after this tick listed instances.
-      if (a.action === 'final' && a.row.zone && (await this.stillThere(a.row))) continue;
+      if (a.action === 'final' && a.row.zone && (await this.provider.stillThere(a.row))) continue;
       if (a.action === 'running') {
         const next = runningRow(a.row, a.instance);
         if (await this.write(next)) seen.rowOf.set(a.row.alloc, next);
@@ -476,27 +396,6 @@ export class Launcher {
     }
   }
 
-  async stillThere(row) {
-    try {
-      return Boolean(await this.gce.instance(row.zone, row.instance));
-    } catch (err) {
-      this.log(`confirm ${row.instance}: ${err.message}`);
-      return true; // unknown: leave the row for the next tick
-    }
-  }
-
-  // Instance name → when GCE preempted it, from its compute.instances.preempted operations; null when that history
-  // could not be read (unavailable is not the same as empty: the rows wait for a tick that can read it).
-  async preemptions() {
-    try {
-      const ops = await this.gce.operations('operationType="compute.instances.preempted"');
-      return new Map(ops.map((op) => [op.targetLink.split('/').pop(), Date.parse(op.insertTime ?? op.endTime)]));
-    } catch (err) {
-      this.log(`preemptions unreadable, vanished VMs wait for the next tick: ${err.message}`);
-      return null;
-    }
-  }
-
   async cleanRunners(seen, out) {
     const names = new Set(seen.instances.map((i) => i.name));
     for (const [repo, runners] of seen.runners) {
@@ -513,15 +412,7 @@ export class Launcher {
   }
 
   async cleanLeftovers(seen, out) {
-    const now = this.now();
-    for (const d of orphanDisks(seen.disks, now)) {
-      await this.gce.deleteDisk(zoneOf(d), d.name, { wait: false })
-        .then(() => out.deleted.push(`disk ${d.name}`), (err) => this.log(`delete disk ${d.name}: ${err.message}`));
-    }
-    for (const b of staleBakeInstances(seen.builders, now)) {
-      await this.gce.deleteInstance(zoneOf(b), b.name, { wait: false })
-        .then(() => out.deleted.push(`${b.name} (old builder)`), (err) => this.log(`delete ${b.name}: ${err.message}`));
-    }
+    out.deleted.push(...await this.provider.cleanupOrphans(seen));
   }
 
   // A VM that booted but whose runner never came online covers no job (logic.mjs neverOnline), and is logged at ERROR
@@ -554,7 +445,7 @@ export class Launcher {
     }));
     const ahead = prelaunches(plan.inflight);
     if (plan.launches.length + ahead.length === 0) return;
-    const image = newestReadyImage(await preparation.time('images.wait', () => seen.images), this.cfg.image_family);
+    const image = await preparation.time('images.wait', () => seen.images);
     if (!image) {
       this.log(`no ready image in family ${this.cfg.image_family}; ${plan.launches.length} job(s) wait, ${ahead.length} pre-launch(es) not made`);
       return;
@@ -570,14 +461,8 @@ export class Launcher {
     // plans against, and the tick ends when its races have.
     // The tick's room in each placement (room.mjs): the limits, less what every ci-kit VM listed holds, job and bake.
     const wait = this.after(LIMITS_WAIT_MS);
-    const limits = await preparation.time('limits.wait', () => Promise.race([seen.limits, wait.promise.then(() => null)]));
+    const room = await preparation.time('limits.wait', () => Promise.race([seen.room, wait.promise.then(() => null)]));
     wait.cancel();
-    const bake = seen.builders.filter((b) => b.labels?.['ci-kit'] === 'gce-builder').map(viewInstance);
-    // An earlier insert still unsettled and unlisted holds its share as its VM would (planLaunches counts its vCPUs).
-    const listed = new Set(seen.instances.map((i) => i.alloc));
-    const pending = seen.rows.filter((r) => !listed.has(r.alloc) && pendingAllocation(r) && unsettledInsert(r)?.zone)
-      .map((r) => ({ zone: unsettledInsert(r).zone, vcpus: r.reserved ?? largestMachineCpus(r.cpus, this.cfg), egress: r.egress }));
-    const room = createRoom({ account: this.cfg.project, limits, instances: [...seen.instances, ...bake], pending, placements: this.cfg.placements, egress: this.cfg.egress });
     let open;
     const ctx = {
       seen, deadline, out, image, room, preparation, inflight: plan.inflight, races: [],
@@ -639,7 +524,7 @@ export class Launcher {
     const { seen, deadline, out, image, preparation } = ctx;
     const purpose = job ? `job ${job.id}` : `run ${prelaunch.run}'s cpus-${cpus} pre-launch`;
     const what = race ? `the race of ${instanceName(race.of)} for ${purpose}` : purpose;
-    const attempts = item.attempts ?? placements(cpus, this.cfg);
+    const attempts = item.attempts ?? this.provider.candidates(this.cfg, cpus);
     if (attempts.every((p) => quotaBlocks(seen.quota, p) || this.stockouts.has(p, this.now()) || (ctx.room && !ctx.room.fits(p)))) {
       for (const p of attempts) ctx.room?.skip(p);
       this.log(`${what} in ${repo} waits: every placement for its size is full, out of quota this tick, or recently stocked out`);
@@ -652,7 +537,7 @@ export class Launcher {
     const name = instanceName(alloc);
     const reserved = item.reserved ?? largestMachineCpus(cpus, this.cfg);
     const row = launchRow({ alloc, repo, cpus, at, config: this.config, egress: this.cfg.egress, prelaunch: race ? undefined : prelaunch, race, reserved,
-      account: this.cfg.project, image: image.selfLink, image_commit: image.labels?.['ci-kit-commit'] });
+      account: this.cfg.project, image: image.id, image_commit: image.manifest['ci-kit-commit'] });
     await preparation.time('ledger.launching', () => this.ledger.upsert(row), { repo, instance: name }); // no row, no launch
     let jit;
     try {
@@ -680,9 +565,9 @@ export class Launcher {
         out.firstInsert ??= iso(this.now());
         const sent = this.now();
         const slow = race ? null : this.after(RACE_AFTER_MS);
-        const insert = this.gce.insertInstance(p.zone, jobInstance({
-          alloc, ...p, repo, cpus, image: image.selfLink, jit: jit.encoded_jit_config, cfg: this.cfg, config: this.config,
-        }), { deadlineMs: this.insertDeadlineMs });
+        const insert = this.provider.launch(row, p, jit.encoded_jit_config).then((result) => {
+          if (result.outcome !== 'accepted') throw result.error;
+        });
         ctx.tried(item);
         let pending = true;
         let decided;
@@ -708,7 +593,7 @@ export class Launcher {
         }
       },
       reconcile: async (p, err) => {
-        const settled = await this.reconcileInsert(p.zone, name, err);
+        const settled = gceWalkResult(await this.provider.reconcileLaunch({ ...row, zone: p.zone, operation: err?.operation }));
         if (settled.outcome !== 'unknown') unsettled?.settle();
         return settled;
       },
@@ -805,41 +690,7 @@ export class Launcher {
     }, (err) => this.log(`race of ${name}: ${err.message}`)));
   }
 
-  // An insert whose outcome is unknown, settled through its zone operation before another zone is tried: the
-  // operation the error carries, else the zone's insert operation for this name; with no operation, the instance
-  // itself. Anything still undecided is 'unknown'. Resolves to {outcome, error: the settled operation's, if any}.
-  async reconcileInsert(zone, name, err) {
-    try {
-      const op = err?.operation
-        ? await this.gce.operation(err.operation)
-        : (await this.gce.zoneOperations(zone, `targetLink eq ".*/instances/${name}"`)).find((o) => o.operationType === 'insert') ?? null;
-      if (op) return op.status === 'DONE' ? settledAs(op) : { outcome: 'unknown' };
-      return { outcome: (await this.gce.instance(zone, name)) ? 'created' : 'unknown' };
-    } catch (e) {
-      this.log(`reconcile ${name}: ${e.message}`);
-      return { outcome: 'unknown' };
-    }
-  }
-
   // ── the daily line ─────────────────────────────────────────────────────────────────────────────────────────────
-
-  // The day's Cloud NAT use per region (ledger.mjs natDay), from Cloud Monitoring: three queries, each aggregated to one
-  // point per region for the day. A read that fails leaves it {unread: true}: the line says so rather than guess.
-  async natOf(dayIso) {
-    const start = `${dayIso}T00:00:00.000Z`;
-    const end = iso(Date.parse(start) + 24 * 3600_000);
-    const read = (metric, perSeriesAligner) => this.gce.timeSeries(
-      `metric.type="router.googleapis.com/nat/${metric}" AND resource.type="nat_gateway" AND resource.labels.gateway_name="${NAT_GATEWAY}"`,
-      { start, end, aggregation: { alignmentPeriod: '86400s', perSeriesAligner, crossSeriesReducer: 'REDUCE_SUM', groupByFields: 'resource.labels.region' } },
-    );
-    try {
-      const [sent, received, ports] = await Promise.all([read('sent_bytes_count', 'ALIGN_SUM'), read('received_bytes_count', 'ALIGN_SUM'), read('allocated_ports', 'ALIGN_COUNT')]);
-      return natDay({ sent, received, ports });
-    } catch (err) {
-      this.log(`NAT use of ${dayIso} unread: ${err.message}`);
-      return { unread: true };
-    }
-  }
 
   async daily(seen) {
     const now = this.now();
@@ -848,7 +699,7 @@ export class Launcher {
     const yesterday = day(now - 24 * 3600_000);
     try {
       if (this.ledger.hasDaily(yesterday)) return;
-      const nat = await this.natOf(yesterday);
+      const nat = await this.provider.natOf(yesterday);
       if (await this.ledger.postDaily(dailyLine([...seen.rowOf.values()].filter(Boolean), yesterday, this.config, nat))) this.log(`ledger: daily line for ${yesterday}`);
     } catch (err) {
       this.log(`daily line: ${err.message}`);
