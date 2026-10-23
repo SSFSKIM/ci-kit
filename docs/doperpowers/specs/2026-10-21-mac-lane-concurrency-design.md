@@ -638,7 +638,8 @@ schedule, so the procedure is CI-opt's, run with `bake.sh`'s subcommands; every 
 before it does anything and refuses otherwise. The launcher boots job clones from the VM named in
 `~/ci-kit-vm/golden`, a pointer file replaced whole by a rename and written by step 6 alone. The steps and their
 checks:
-1. **The hold.** CI-opt writes `vm-hold.<session>` (`maintenance since <time>`) through `hold.sh hold <session> maintenance`, waits until `vm-reserved` is absent
+1. **The hold.** CI-opt records whether the launcher was enabled before the window, before any disabled install,
+   for release. It writes `vm-hold.<session>` (`maintenance since <time>`) through `hold.sh hold <session> maintenance`, waits until `vm-reserved` is absent
    and `tart list` shows no `maws-vm-*` running, boots out and disables the host's instances as for a timed hold,
    and boots out the launcher's agent (`launchctl bootout gui/$(id -u)/com.ssfskim.ci-kit.vm-lane`). `bake.sh`
    reads all three before every step: the hold file, no reservation, the agent not loaded (`launchctl print`).
@@ -667,9 +668,11 @@ checks:
    `success`; then `tart rename <candidate> maws-vm-golden-<date>`, then the pointer replaced by a rename.
    Interrupted between the two, the pointer still names the old golden, which is valid, and the VM exists under its
    new name; run again, `--promote` finds the candidate under either name and finishes, so it is safe to repeat.
-7. **Release.** CI-opt bootstraps the launcher's agent, removes its hold, and brings the host's instances back. The
-   launcher's start reconciles job clones only (Recovery) and boots from the pointer's VM from then on, logging the
-   golden's name at every boot.
+7. **Release.** CI-opt restores the launcher's enabled state from before the window, recorded before any
+   `install.sh --disabled`: if it was enabled, `launchctl enable` its agent explicitly, then bootstrap it; if it
+   was disabled, leave it off. Only then remove the maintenance hold and bring back the host's instances that were
+   enabled before their hold. The launcher's start reconciles job clones only (Recovery) and boots from the
+   pointer's VM from then on, logging the golden's name at every boot.
 8. **Retire** (`bake.sh --retire <old golden>`), after the first green production job from the new golden: verifies
    the VM is stopped and is not the pointer's, then deletes. It needs no hold: nothing boots from a VM the pointer
    does not name, and Tart refuses to delete a running one.
@@ -1625,6 +1628,14 @@ hold-aware plan send them to the guest, which this spec leaves open.
   hold, with the host instances down and the launcher booted out, and only then release the booking's timed hold.
   This was the order after cua_repl's 09:30:54–09:55Z booking. **Rejected:** releasing the timed hold first, which
   would let the launcher boot a guest for a queued solo job while the host instance was still held.
+
+- 2026-10-23 (PR #105 review; the maintenance release): **Restore the launcher's pre-window state, not the
+  disabled state left by the install.** `install.sh --vm --disabled` runs `launchctl disable` on the launcher as
+  well as the host instances. Record whether it was enabled before the window and before that install. If it was,
+  release runs `launchctl enable` on `gui/$(id -u)/com.ssfskim.ci-kit.vm-lane`, then `launchctl bootstrap` with its
+  plist, then releases the maintenance hold, then brings the host instances back. This was the second refresh's
+  actual release. A launcher disabled before the window stays off. The former instruction, bootstrap only if the
+  agent is currently enabled, would leave a previously live lane offline after the handoff's disabled install.
 
 ## Surprises & Discoveries
 

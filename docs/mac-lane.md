@@ -733,13 +733,17 @@ already under way holds `vm-lane.lock` while it publishes the kit, so a step sta
 The candidate is provisioned with the kit the lane will run. In the commands, `owner` is the session's name, as for
 a timed hold, and `cand` the candidate's name `--bake` prints.
 
-**When a timed booking passes directly to maintenance, keep the lane held throughout.** Run
-`install.sh --vm --disabled` under the booking's timed hold, after its wait has confirmed no guest. Take the
-coordinator's maintenance hold and ensure the host instances are down and the launcher booted out (step 1), then
-release the booking's timed hold. Releasing the timed hold first would let the launcher boot a guest for a queued
-solo job while the host instance was still held. This order was used after cua_repl's 2026-10-23 booking.
+**When a timed booking passes directly to maintenance, keep the lane held throughout.** Note whether the launcher
+was enabled before the window, before running `install.sh --vm --disabled`: that flag disables the launcher as well
+as the host instances. Run the install under the booking's timed hold, after its wait has confirmed no guest. Take
+the coordinator's maintenance hold and ensure the host instances are down and the launcher booted out (step 1),
+then release the booking's timed hold. At maintenance release, restore the launcher's pre-window state explicitly
+(step 7), not the disabled state the install left. Releasing the timed hold first would let the launcher boot a
+guest for a queued solo job while the host instance was still held. This order was used after cua_repl's 2026-10-23
+booking.
 
-1. **The hold.** Write the marker and wait for the guest to go (`hold.sh`, which waits for no reservation and no
+1. **The hold.** Keep the launcher's pre-window enabled state for release (record it before any `--disabled`
+   install). Write the marker and wait for the guest to go (`hold.sh`, which waits for no reservation and no
    `maws-vm-*` VM running), take the host's instances down as for any hold, and boot the launcher out:
 
    ```bash
@@ -881,10 +885,19 @@ solo job while the host instance was still held. This order was used after cua_r
    #   expect: promoted: the pointer names maws-vm-golden-<id> (it named <old>); then the --retire line for <old>
    ```
 
-7. **Release**, in this order: bring the launcher back (`launchctl bootstrap gui/$(id -u)
-   ~/Library/LaunchAgents/com.ssfskim.ci-kit.vm-lane.plist`, if its agent is enabled), remove your hold
-   (`vm_hold release "$owner"`), and bring back the host's instances that were enabled. The launcher's
-   start reconciles job clones only and boots from the pointer's VM from then on, naming the golden at every boot.
+7. **Release**, in this order: if the launcher was enabled before the window, explicitly enable it and then
+   bootstrap it, even if `install.sh --disabled` left it disabled. A launcher disabled before the window stays off.
+
+   ```bash
+   # Only if the launcher was enabled before the window:
+   ssh mini 'launchctl enable gui/$(id -u)/com.ssfskim.ci-kit.vm-lane && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ssfskim.ci-kit.vm-lane.plist'
+   # After that succeeds (or with a previously disabled launcher left off):
+   vm_hold release "$owner"
+   # Bring back the host's instances that were enabled before their hold.
+   ```
+
+   The launcher's start reconciles job clones only and boots from the pointer's VM from then on, naming the golden
+   at every boot. The 2026-10-23 second refresh released in this order: enable, bootstrap, hold release, host instance.
 
 8. **Retire** the old golden after the first green production job from the new one (`vm-lane.log` names the golden at
    each boot): `bake.sh --retire <old>`. It needs no hold, and refuses the pointer's VM, a running VM, and anything
