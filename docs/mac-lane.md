@@ -727,12 +727,23 @@ step. The steps that boot a VM also refuse while any `maws-vm-*` VM runs, and un
 what it did and logs it to `vm-bake.log`; each is safe to run again: nothing is deleted without a verified stop
 first, and `--promote` finishes from either name.
 
-Run it from the installed kit, `~/ci-kit-vm/kit/vm/bake.sh`, after refreshing the kit (`install.sh`, outside the hold:
-the install refuses during maintenance, and an install already under way holds `vm-lane.lock` while it publishes the
-kit, so a step started then refuses until it is done), so the candidate is provisioned with the kit the lane will run. In the
-commands, `owner` is the session's name, as for a timed hold, and `cand` the candidate's name `--bake` prints.
+Run it from the installed kit, `~/ci-kit-vm/kit/vm/bake.sh`, after refreshing the kit (`install.sh`, before the
+maintenance hold: it refuses a maintenance-kind hold or a standing reservation, not a timed hold). An install
+already under way holds `vm-lane.lock` while it publishes the kit, so a step started then refuses until it is done.
+The candidate is provisioned with the kit the lane will run. In the commands, `owner` is the session's name, as for
+a timed hold, and `cand` the candidate's name `--bake` prints.
 
-1. **The hold.** Write the marker and wait for the guest to go (`hold.sh`, which waits for no reservation and no
+**When a timed booking passes directly to maintenance, keep the lane held throughout.** Note whether the launcher
+was enabled before the window, before running `install.sh --vm --disabled`: that flag disables the launcher as well
+as the host instances. Run the install under the booking's timed hold, after its wait has confirmed no guest. Take
+the coordinator's maintenance hold and ensure the host instances are down and the launcher booted out (step 1),
+then release the booking's timed hold. At maintenance release, restore the launcher's pre-window state explicitly
+(step 7), not the disabled state the install left. Releasing the timed hold first would let the launcher boot a
+guest for a queued solo job while the host instance was still held. This order was used after cua_repl's 2026-10-23
+booking.
+
+1. **The hold.** Keep the launcher's pre-window enabled state for release (record it before any `--disabled`
+   install). Write the marker and wait for the guest to go (`hold.sh`, which waits for no reservation and no
    `maws-vm-*` VM running), take the host's instances down as for any hold, and boot the launcher out:
 
    ```bash
@@ -778,10 +789,10 @@ commands, `owner` is the session's name, as for a timed hold, and `cand` the can
    bare-remote experiment transferred 4,740 bytes for the next depth-1 fetch from either shallow or full seeds,
    versus 4,214,714 bytes from empty (the spec's Surprises records the method).
 
-   The step prints the seed commit and its tree-plus-`.git` size. A local MAWS master sample on 2026-10-23 added
-   443,068 KiB (about 433 MiB), of which 165,788 KiB was `.git`; the next bake reports its own size. This is the
-   repository payload, not a measurement of the Tart disk's physical growth. Kickoff clears `_diag` and links the
-   build cache, not the work repository; neither the wrapper nor the guest hooks clear it. The host sweep and
+   The step prints the seed commit and its tree-plus-`.git` size. The second refresh on 2026-10-23 seeded MAWS
+   master 5a4b93b at 442,992 KiB (about 433 MiB); its trial checkout took 3 s, against 50–221 s in the unseeded
+   wave 1 jobs. This is repository payload, not a measurement of the Tart disk's physical growth. Kickoff clears
+   `_diag` and links the build cache, not the work repository; neither the wrapper nor the guest hooks clear it. The host sweep and
    janitor terminate processes, not checkout directories, and are not run as guest job hooks. No MAWS share is
    needed by a job clone: the bake alone reads it.
 
@@ -796,12 +807,14 @@ commands, `owner` is the session's name, as for a timed hold, and `cand` the can
    on the owner's 2026-10-23 ruling, does the window step. The mini's own prompts stay the human's. No script
    answers a prompt.
 
-   1. In the mini's Terminal, reached over Screen Sharing from the MacBook (never VNC into the guest, which would
-      connect to its address), run `tart run --no-clipboard --dir=maws:<checkout>:ro <cand>`. The guest logs in as
-      admin by itself. This boot drops the shared clipboard like every other boot of the lane.
-   2. In the guest's window, by clicks, open Terminal (Applications > Utilities > Terminal) and answer anything it
-      asks on first launch. Open LibreOffice from Applications, answer its first-run dialogs, and quit it from its
-      menu. Nothing is typed or pasted into the guest.
+   1. From the mini's GUI session, run `tart run --no-clipboard --dir=maws:<checkout>:ro <cand>` with its window:
+      a one-shot Aqua LaunchAgent works without typing into the mini's Terminal (the second refresh, 2026-10-23).
+      The human can also run it in the mini's Terminal over Screen Sharing from the MacBook. Never VNC into the
+      guest, which would connect to its address. The guest logs in as admin by itself; its clipboard is not shared.
+   2. Open Terminal and LibreOffice in the guest, either by clicks or through `tart exec <cand> open -a Terminal`
+      and `tart exec <cand> open -a LibreOffice` from the MacBook over ssh to the mini. Answer any first-run
+      prompts by clicks in the guest's Tart window, and quit LibreOffice from its menu. Launching an app through
+      `tart exec` does not answer its prompt. Nothing is typed or pasted into the guest.
    3. From the MacBook run:
 
       ```bash
@@ -872,10 +885,19 @@ commands, `owner` is the session's name, as for a timed hold, and `cand` the can
    #   expect: promoted: the pointer names maws-vm-golden-<id> (it named <old>); then the --retire line for <old>
    ```
 
-7. **Release**, in this order: bring the launcher back (`launchctl bootstrap gui/$(id -u)
-   ~/Library/LaunchAgents/com.ssfskim.ci-kit.vm-lane.plist`, if its agent is enabled), remove your hold
-   (`vm_hold release "$owner"`), and bring back the host's instances that were enabled. The launcher's
-   start reconciles job clones only and boots from the pointer's VM from then on, naming the golden at every boot.
+7. **Release**, in this order: if the launcher was enabled before the window, explicitly enable it and then
+   bootstrap it, even if `install.sh --disabled` left it disabled. A launcher disabled before the window stays off.
+
+   ```bash
+   # Only if the launcher was enabled before the window:
+   ssh mini 'launchctl enable gui/$(id -u)/com.ssfskim.ci-kit.vm-lane && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ssfskim.ci-kit.vm-lane.plist'
+   # After that succeeds (or with a previously disabled launcher left off):
+   vm_hold release "$owner"
+   # Bring back the host's instances that were enabled before their hold.
+   ```
+
+   The launcher's start reconciles job clones only and boots from the pointer's VM from then on, naming the golden
+   at every boot. The 2026-10-23 second refresh released in this order: enable, bootstrap, hold release, host instance.
 
 8. **Retire** the old golden after the first green production job from the new one (`vm-lane.log` names the golden at
    each boot): `bake.sh --retire <old>`. It needs no hold, and refuses the pointer's VM, a running VM, and anything

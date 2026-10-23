@@ -153,16 +153,29 @@ and by the coordinator's holds, and the design below says what is read and when.
     07:30:23–07:34:49Z on ci-kit-mac-mini-vm, display read 2560x1440 scaling:on; the guest powered itself off;
     the clone was deleted and the reservation released 07:34:59Z. 48 s from queue to start. The launcher has been
     on since 07:26Z.
-  - [x] (2026-10-23 07:24Z) Step 3's launch-cost probe 1 (results in Surprises). Probe 2 is pending.
+  - [x] (2026-10-23 07:24Z) Step 3's launch-cost probe 1 (results in Surprises).
+  - [x] (2026-10-23 09:54–10:07Z) Step 3's launch-cost probe 2: 19/19 in each of four arms, sums
+    149.1 → 119.0 → 104.9 → 98.9 s. Guest memory and the guest's file cache are ruled out; the boot burst and
+    warm-up by repetition remain (Surprises). Probe 3, with a fresh clone per arm, is agreed for the next
+    maintenance window (Decision Log, 10:12Z).
   - [x] (2026-10-23 08:44Z) Step 4 wave 1: document-app, widgets and to-human, each 3/3 green in the guest.
     `default` stays exclusive, because its build is not `e2e-build.sh <variant>`. The rest goes in later waves
     after probe 2.
   - [x] (2026-10-23) Step 4's checkout preparation: `provision.sh workrepo` seeds the runner's repository from
-    the bake's MAWS share after runner installation; depth-1 delta fetch verified locally (Surprises). The next
-    image refresh and a guest job's checkout timing remain to be measured on the mini.
+    the bake's MAWS share after runner installation; depth-1 delta fetch verified locally (Surprises).
+  - [x] (2026-10-23 10:29Z) The second refresh, first with the seeded work repository (PR #104): kit refreshed at
+    b7e2a34 at 09:54Z; `maws-vm-candidate-20261023b` baked 10:08–10:14Z; first-run 10:19–10:23Z passed without a
+    human, CI-opt answering the guest's prompt through cua. Trial MAWS run 39929879746, job 120335992684, green
+    in 4 min 13 s, checkout 3 s. Promoted to `maws-vm-golden-20261023b` at 10:29Z; maintenance released
+    10:29:34Z. The old golden awaits the first green production job from the new one before retirement. This
+    refresh does not complete step 11's rollback rehearsal.
   - [x] (2026-10-23) Step 6's preparation: CI-opt's hold scripts on the MacBook have the timed form
-    (`hold.sh hold <booking> timed` and its wait before the instances; its release first), and the wait for an idle
-    mini counts only the jobs the held runners could take (an untimed hold's lane, and the trial slot, never). The
+    (`hold.sh hold <booking> timed` and its wait before the instances; its release first when returning to service),
+    and the wait for an idle mini counts only the jobs the held runners could take (an untimed hold's lane, and
+    the trial slot, never).
+  - [x] (2026-10-23 09:30:54–09:55Z) Step 6's first live timed hold: cua_repl's booking, idle check to hold
+    in 3 s, `vm-hold.cua_repl` timed, no guest, host instance offline. It passed directly to maintenance: install
+    under the timed hold, take the maintenance hold, then release the timed hold (Decision Log). The other hold
     rehearsals remain.
 - [ ] V5 — Widen the proven-VM set; the second guest, if memory ever allows it.
 
@@ -625,7 +638,8 @@ schedule, so the procedure is CI-opt's, run with `bake.sh`'s subcommands; every 
 before it does anything and refuses otherwise. The launcher boots job clones from the VM named in
 `~/ci-kit-vm/golden`, a pointer file replaced whole by a rename and written by step 6 alone. The steps and their
 checks:
-1. **The hold.** CI-opt writes `vm-hold.<session>` (`maintenance since <time>`) through `hold.sh hold <session> maintenance`, waits until `vm-reserved` is absent
+1. **The hold.** CI-opt records whether the launcher was enabled before the window, before any disabled install,
+   for release. It writes `vm-hold.<session>` (`maintenance since <time>`) through `hold.sh hold <session> maintenance`, waits until `vm-reserved` is absent
    and `tart list` shows no `maws-vm-*` running, boots out and disables the host's instances as for a timed hold,
    and boots out the launcher's agent (`launchctl bootout gui/$(id -u)/com.ssfskim.ci-kit.vm-lane`). `bake.sh`
    reads all three before every step: the hold file, no reservation, the agent not loaded (`launchctl print`).
@@ -654,9 +668,11 @@ checks:
    `success`; then `tart rename <candidate> maws-vm-golden-<date>`, then the pointer replaced by a rename.
    Interrupted between the two, the pointer still names the old golden, which is valid, and the VM exists under its
    new name; run again, `--promote` finds the candidate under either name and finishes, so it is safe to repeat.
-7. **Release.** CI-opt bootstraps the launcher's agent, removes its hold, and brings the host's instances back. The
-   launcher's start reconciles job clones only (Recovery) and boots from the pointer's VM from then on, logging the
-   golden's name at every boot.
+7. **Release.** CI-opt restores the launcher's enabled state from before the window, recorded before any
+   `install.sh --disabled`: if it was enabled, `launchctl enable` its agent explicitly, then bootstrap it; if it
+   was disabled, leave it off. Only then remove the maintenance hold and bring back the host's instances that were
+   enabled before their hold. The launcher's start reconciles job clones only (Recovery) and boots from the
+   pointer's VM from then on, logging the golden's name at every boot.
 8. **Retire** (`bake.sh --retire <old golden>`), after the first green production job from the new golden: verifies
    the VM is stopped and is not the pointer's, then deletes. It needs no hold: nothing boots from a VM the pointer
    does not name, and Tart refuses to delete a running one.
@@ -1588,6 +1604,39 @@ hold-aware plan send them to the guest, which this spec leaves open.
     golden grows that delta, another refresh trigger. The coordinator brings the bake's share to current master;
     freshness against GitHub is still the procedure's check, not an automated fetch by the bake.
 
+- 2026-10-23 10:12Z (CI-opt and the MAWS architect; V4 step 3): **Probe 3 uses one fresh clone per arm.**
+  Probe 2 got faster on every repetition, including after purge and a memory balloon (Surprises), so another
+  sequence in one clone cannot separate the causes. In the next maintenance window, each clone runs the same
+  19 tests once, right after setup and its arm's preparation:
+  1. one throwaway launch of out/;
+  2. a wait of arm 1's seconds, without a launch (the control);
+  3. `codesign --verify --deep` and `spctl -a` over the restored Electron.app and its helpers, without a launch;
+  4. a cold r0 baseline.
+  If arm 3 closes the gap as well as arm 1, the warm-up is that verification in the job-started hook. If only arm 1
+  does, it is a launch in the hook while checkout and install run. Neither is implemented yet. **Rejected:** settling
+  before the job, which costs the same seconds it saves. The first 19-test group costs about 50 s extra; this is
+  not an eligibility change (wave 1's worst guest job was 419 s).
+- 2026-10-23 10:29Z (CI-opt; the second refresh): **Promote the seeded candidate after its green trial.**
+  `maws-vm-candidate-20261023b`, baked with PR #104's work repository, passed first-run and trial job 120335992684
+  (MAWS run 39929879746), then became `maws-vm-golden-20261023b`. The checkout took 3 s against wave 1's 50–221 s.
+  The owner's 10-23 ruling was used without a human: CI-opt answered LibreOffice's prompt through cua in the guest
+  only. Retirement still waits for the first green production job from the new golden, not merely this trial;
+  neither that job nor step 11's deliberately broken candidate and rollback is recorded as done here.
+- 2026-10-23 (CI-opt; V4 step 6): **A timed booking passes to maintenance without releasing the lane between.**
+  For a kit refresh, run `install.sh --vm --disabled` while the booking's timed hold still stands and no reservation
+  exists; the install refuses a maintenance-kind hold, not a timed one. Then take the coordinator's maintenance
+  hold, with the host instances down and the launcher booted out, and only then release the booking's timed hold.
+  This was the order after cua_repl's 09:30:54–09:55Z booking. **Rejected:** releasing the timed hold first, which
+  would let the launcher boot a guest for a queued solo job while the host instance was still held.
+
+- 2026-10-23 (PR #105 review; the maintenance release): **Restore the launcher's pre-window state, not the
+  disabled state left by the install.** `install.sh --vm --disabled` runs `launchctl disable` on the launcher as
+  well as the host instances. Record whether it was enabled before the window and before that install. If it was,
+  release runs `launchctl enable` on `gui/$(id -u)/com.ssfskim.ci-kit.vm-lane`, then `launchctl bootstrap` with its
+  plist, then releases the maintenance hold, then brings the host instances back. This was the second refresh's
+  actual release. A launcher disabled before the window stays off. The former instruction, bootstrap only if the
+  agent is currently enabled, would leave a previously live lane offline after the handoff's disabled install.
+
 ## Surprises & Discoveries
 
 - 2026-10-21, M1 (ci-kit #67), from its reviews:
@@ -1732,11 +1781,11 @@ hold-aware plan send them to the guest, which this spec leaves open.
     - b built in place, 87.6 s, 3.52 s;
     - r2 restored last, 83.8 s, 3.52 s.
 
-    So the restore is not the cost: r2, restored with cp -R, matched b. Time since boot alone is not it either:
-    r0 through x spanned 10 min with no gain. The step change came at the build, together with available memory
-    going from 43% to 61%. Spotlight indexing is already disabled in the image (`mdutil -s /`). Every restored
-    file carried com.apple.provenance, and clearing it changed nothing. V8's code cache is out as well, since every
-    launch gets a fresh userData. Probe 2 (settle, purge, a memory balloon) is to come.
+    So the restore is not the cost: r2, restored with cp -R, matched b. In this probe, r0 through x spanned 10 min
+    with no gain; the step change came at the build, together with available memory going from 43% to 61%.
+    Spotlight indexing is already disabled in the image (`mdutil -s /`). Every restored file carried
+    com.apple.provenance, and clearing it changed nothing. V8's code cache is out as well, since every launch gets
+    a fresh userData. Probe 2 below separates guest memory and the guest's file cache from that observation.
   - **Wave 1.** Host reference at 5a4b93b4c, run 39919031522. Guest runs 39919720060, 39921644971 and 39924602325
     at scratch aaa4d83db. Per job, total (checkout/setup/download/tests) in seconds:
     - document-app: host 145 (7/9/0/115); guest 302 (124/26/20/116), 375 (139/29/37/154), 297 (74/21/19/164).
@@ -1765,8 +1814,49 @@ hold-aware plan send them to the guest, which this spec leaves open.
   - **The image's added repository payload is modest.** Running the actual provision step locally against MAWS
     master ac360e484 gave 8,387 tracked files and `du -sk` of **443,068 KiB total, 165,788 KiB `.git`** (about
     433 MiB total). This sample is a different commit from wave 1, so its file count differs. This is local
-    allocated repository size, not a measurement of the guest disk's physical growth. The next bake prints its own
-    seed commit and size; production checkout time after refresh is not yet measured.
+    allocated repository size, not a measurement of the guest disk's physical growth. The second refresh below
+    records the bake's seed and size and the trial's checkout time; production checkout time is not yet measured.
+
+- 2026-10-23 09:54–10:07Z, V4 step 3, **launch-cost probe 2**: one fresh clone of
+  `maws-vm-golden-20261023`, a 4 GB guest, the same 19 `e2e/document.spec.ts` tests per arm, out/ restored from
+  the host's plain build before each arm. Every arm passed 19/19. Sums and median per-test differences from r0:
+  - r0-restored: 149.1 s, median 5.94 s; started a minute after boot, clone and install, at load1 65.7;
+  - r1-settled: 119.0 s after a 172 s settle to load1 1.76; median per-test difference −0.77 s;
+  - r2-purged: 104.9 s after `sudo purge`; median per-test difference −1.64 s;
+  - r3-ballooned: 98.9 s after a 2.5 GB Node Buffer was allocated and freed; median per-test difference −1.55 s.
+
+  Each run was faster than the one before, whatever was done between them. Purge and the balloon did not slow the
+  next run, ruling out guest memory and the guest's file cache as the launch cost. Left are the boot burst at the
+  job's start position, and warm-up by repetition that survives a guest purge: first-execution assessment of the
+  restored Electron binaries by syspolicyd/amfid, or caches a real launch warms (the host's page cache over the
+  clone's blocks, the GPU shader cache). Probe 1 above had the same broad shape, its last restored run as fast as
+  the built-in-place run. The cost to a guest job is about 50 s extra on its first 19-test group; probe 3 separates
+  the remaining causes (Decision Log).
+  - **The balloon's printed size was wrong, not its allocation.** `balloon -1536 MB` came from JS int32 overflow
+    in `length >> 20` on 2560 MB. The Buffer allocated was 2.5 GB.
+
+- 2026-10-23, **the second refresh**, first with the seeded work repository (PR #104):
+  - `install.sh --vm --disabled` at ci-kit b7e2a34 ran at 09:54Z under cua_repl's timed hold; CI-opt's maintenance
+    hold followed before that hold was released. The bake and later steps ran under maintenance.
+  - `maws-vm-candidate-20261023b` baked 10:08–10:14Z, about 6 min, lowest free space 119 GB. Its work repository
+    was at MAWS master 5a4b93b, **442,992 KiB for the tree and `.git`**.
+  - **The first-run step needed no human.** A one-shot Aqua LaunchAgent booted the candidate with its window,
+    running `tart run --no-clipboard --dir=maws:<checkout>:ro <cand>`; nothing was typed into the mini's Terminal.
+    `tart exec <cand> open -a LibreOffice` raised Gatekeeper's dialog in the guest. CI-opt clicked Open through cua
+    in the Tart window (`0181` → `01c1`) and quit LibreOffice from its menu. `open -a Terminal` raised no prompt.
+    `bake.sh --first-run` ran 10:19–10:23Z: electron-vite build 1 min 46 s, e2e:deliverables 12/12 in 1.4 min,
+    no Electron notification prompt, guest stop verified. This exercised the owner's ruling, not a scripted prompt
+    answer or an answer to a host prompt.
+  - **The seeded checkout took 3 s in the trial**, against 50–221 s in wave 1 before the seed. `bake.sh --trial`
+    took MAWS run 39929879746 (`Lane: vm-trial`, `e2e:document-app`), job 120335992684, success in 4 min 13 s:
+    checkout 3 s, setup 32 s, download-artifact 24 s, test step 179 s. The candidate was promoted to
+    `maws-vm-golden-20261023b` at 10:29Z; maintenance released 10:29:34Z. The old golden has not yet been retired.
+
+- 2026-10-23 09:30:54–09:55Z, V4 step 6, **the timed hold's first live use**: cua_repl's booking went from idle
+  check to hold in 3 s, with `vm-hold.cua_repl` timed, no guest and the host instance offline. The maintenance
+  window followed without a gap. `install.sh` refuses under a maintenance-kind hold or a standing reservation,
+  but accepts a timed hold. Installing under the timed hold, then taking maintenance before releasing it, kept
+  the lane closed throughout (Decision Log).
 
 ## Outcomes & Retrospective
 
