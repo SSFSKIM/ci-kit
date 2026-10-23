@@ -728,7 +728,7 @@ anything.
 Constraints for every milestone:
 
 - AWS is reached with the aws CLI or the AWS SDK for JavaScript v3 only (`@aws-sdk/client-ec2`, `client-sts`,
-  `client-s3`, `client-cost-explorer`, `client-service-quotas`, plus `@aws-sdk/s3-request-presigner`). No AWS MCP
+  `client-s3`, `client-cost-explorer`, `client-service-quotas`, `client-ssm`, plus `@aws-sdk/s3-request-presigner`). No AWS MCP
   servers, toolkits or agent skills.
 - Account 290475840169, EC2 region us-east-2. Cost Explorer alone uses `ce.us-east-1.amazonaws.com`, signed
   for us-east-1; its account-policy access was verified on 2026-10-23. Other EC2 regions remain out of scope.
@@ -1478,6 +1478,12 @@ The production chain is reviewed at each boundary:
   established that races activate only after admission, attempt-coordinate writes serialize with pending markers,
   and definite refusal is persisted before unregister; failed final persistence retains both debits and JIT.
   Date/Author: 2026-10-23, M4 executor and controller; reviewed through 3550a56.
+
+- Decision: Include `@aws-sdk/client-ssm` among allowed AWS SDK v3 clients for the bake's specified Canonical
+  public-parameter lookup. This fills a dependency-list omission; its permissions and behavior were already in
+  the design. Federation audiences derive from the role ARN's account, STS uses the configured regional endpoint,
+  and Cost Explorer always uses its explicit us-east-1 endpoint and signing region.
+  Date/Author: 2026-10-23, controller; M5 client-interface coordination.
 
 ## Outcomes & Retrospective
 
