@@ -452,7 +452,8 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
-# Expiry ends the main group; EXIT also finds detached Electron and anything else tied to the scratch.
+# The workload carries the absolute scratch in argv even before clone/cd. Expiry ends its main group;
+# EXIT also finds detached Electron and anything else tied to the scratch.
 /usr/bin/perl -MPOSIX=setsid -e '
   my $seconds = shift;
   my $pid = fork;
@@ -468,11 +469,11 @@ trap cleanup EXIT
   alarm 0;
   exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
 ' "$1" /bin/bash -euo pipefail -c '
-  git -c safe.directory="*" clone "/Volumes/My Shared Files/maws" "$HOME/maws-firstrun"
-  cd "$HOME/maws-firstrun"
+  git -c safe.directory="*" clone "/Volumes/My Shared Files/maws" "$1"
+  cd "$1"
   pnpm install --frozen-lockfile
   NODE_OPTIONS=--max-old-space-size=3072 pnpm e2e:deliverables
-'
+' first-run "$work"
 GUEST
 )
   say "$vm: first-run shell (at most $first_run_wait s); answer any prompt in the guest's window"
