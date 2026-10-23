@@ -37,9 +37,11 @@ measurement exists.
   contracts and proofs. M2–M6 implementation has not started on this branch.
 - [x] (2026-10-23) Round-two corrections incorporated: bounded launch reconciliation, bake permissions and
   market, role session duration, Cost Explorer's endpoint and immutable billing readings.
-- [ ] Revised spec reviewed.
-- [ ] M1: the measurement spike (completed: builder stop/spot incompatibility recorded; remaining: performance
-  and disk verdict).
+- [x] (2026-10-23 12:2xZ) Revised spec reviewed (round 2 confirmed round 1; its five findings applied). Loop stopped.
+- [x] (2026-10-23 12:37Z) M1: the measurement spike. Verdict in
+  `docs/doperpowers/specs/2026-10-23-ec2-pool-m1-verdict.md` (f5827cf, merged here); summary in Surprises &
+  Discoveries. Every spike instance, volume, AMI, snapshot and GCE VM deleted; AWS spend at most $0.735.
+- [ ] Owner's go after the M1 cost finding (asked 2026-10-23 ~12:50Z: proceed credit-first, overflow only, or stop).
 - [ ] M2: data contracts, v2 ledger with v1 reads, and provider-qualified keys; no behaviour change.
 - [ ] M3: GCE effects extracted behind the provider; no behaviour change.
 - [ ] M4: scheduling over providers, proved with a fake second provider; GCE-only behaviour unchanged.
@@ -1019,6 +1021,20 @@ The production chain is reviewed at each boundary:
   Evidence: the author verified `aws ce get-cost-and-usage` under `ci-kit-ops` succeeded on 2026-10-23.
   Cost Explorer uses `ce.us-east-1.amazonaws.com`; federated launcher-role access remains a required live proof.
 
+- Observation: M1 verdict. With plain gp3, lazy hydration makes an EC2 job 1.83x GCE C4D's end-to-end time
+  (API call to job end); a targeted prefetch 1.34x; EBS provisioned volume initialization at 200 MiB/s 0.966x
+  (1.028x with the repeated-VM unit median). c8a's warm unit shard is 0.93x C4D's. API to runner listening on c8a
+  spot is p50/p90 95.4/97.9 s (10 launches, zones a and c) against 24.5 s on GCE.
+  Evidence: `docs/doperpowers/specs/2026-10-23-ec2-pool-m1-verdict.md`, `ec2/spike/evidence/`.
+- Observation: Initialization dominates EC2's cost per job. Ohio rates: $0.0024/GiB at 100-200 MiB/s, $0.0036 at
+  201-300 MiB/s, charged on the snapshot's full data size (11.46 GiB) for every volume. A job costs ~$0.0329 gross,
+  against $0.0035-0.0067 on GCE C4D: about 5-10x. At ~100 VMs/day the $180 budget lasts ~55 days; initialization
+  alone is $2.75/day.
+  Evidence: the verdict's economics table; `aws pricing get-products` (us-east-1) for "US East (Ohio)".
+- Observation: c8a spot in us-east-2b, the cheapest zone, was refused `InsufficientInstanceCapacity` at the
+  spike's first launch; AWS suggested a and c.
+  Evidence: the verdict's launch log. Zone order c -> a -> b.
+
 ## Decision Log
 
 - Decision: Verification as in Verification above: one technical spec review plus a buildability review, a review
@@ -1109,6 +1125,17 @@ The production chain is reviewed at each boundary:
   value could regress across a restart after overlapping writes.
   Date/Author: 2026-10-23, CI-opt.
 
+- Decision: Promote M1's disk configuration: encrypted 50 GiB gp3 with EBS provisioned volume initialization at
+  200 MiB/s, zones c -> a -> b, the builder on-demand. Initialization's per-volume charge is priced into each
+  candidate and row (Ledger rows and cost).
+  Rationale: the only arm under the 1.25x threshold; 200 MiB/s is the top of the cheaper tier. Rejected plain gp3
+  (1.83x) and prefetch (1.34x), both over the threshold, and 300 MiB/s (50% higher rate for ~no gain).
+  Date/Author: 2026-10-23, CI-opt.
+- Decision: The image's written size is now a cost lever: initialization is charged per GiB of snapshot data for
+  every job VM. M5's bake reports the snapshot size, and trimming what job VMs never read is in M5's scope.
+  Rationale: at 11.46 GiB, initialization is ~84% of an EC2 job's cost. Rejected leaving the image as GCE's twin
+  in content, which costs every VM the full size.
+  Date/Author: 2026-10-23, CI-opt.
 ## Outcomes & Retrospective
 
 Pending — written at finish.
