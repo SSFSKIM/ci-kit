@@ -1,0 +1,333 @@
+{
+  "model": "Gross USD; 730h planning month; fresh job API insertion→job end. Excludes job termination, transfers, bake and snapshot amortization. Spike ceiling separately overcharges builder stopped time and adds 60s per instance; $0.10 extra allowance covers transfer/storage rounding.",
+  "rates": [
+    {
+      "kind": "init",
+      "sku": "7XB4FNQM945TNNMD",
+      "description": "$0.0024 per GB of snapshot data initialized with Provisioned Rate for Volume Initialization between 100 MiB/s - 200 MiB/s in US East (Ohio)",
+      "usd": 0.0024,
+      "unit": "GB",
+      "publicationDate": "2026-10-22T23:14:53Z"
+    },
+    {
+      "kind": "init",
+      "sku": "8DNMCHVWXV49ZUP7",
+      "description": "$0.0036 per GB of snapshot data initialized with Provisioned Rate for Volume Initialization between 201 MiB/s - 300 MiB/s in US East (Ohio)",
+      "usd": 0.0036,
+      "unit": "GB",
+      "publicationDate": "2026-10-22T23:14:53Z"
+    },
+    {
+      "kind": "compute",
+      "sku": "WKW5NUYTBWN4S8VU",
+      "description": "$0.43108 per On Demand Linux c8a.2xlarge Instance Hour",
+      "usd": 0.43108,
+      "unit": "Hrs",
+      "publicationDate": "2026-10-22T23:14:53Z"
+    },
+    {
+      "kind": "gp3",
+      "sku": "KZJJ34U6VU5DJ9CM",
+      "description": "$0.04 per provisioned MiBps-month of gp3 - US East (Ohio)",
+      "usd": 40.96,
+      "unit": "GiBps-mo",
+      "publicationDate": "2026-10-22T23:14:53Z"
+    },
+    {
+      "kind": "gp3",
+      "sku": "M6UGCCQ3CDJQAA37",
+      "description": "$0.08 per GB-month of General Purpose (gp3) provisioned storage - US East (Ohio)",
+      "usd": 0.08,
+      "unit": "GB-Mo",
+      "publicationDate": "2026-10-22T23:14:53Z"
+    },
+    {
+      "kind": "gp3",
+      "sku": "M7SNV383JPWT8MVX",
+      "description": "$0.005 per provisioned IOPS-month of gp3 - US East (Ohio)",
+      "usd": 0.005,
+      "unit": "IOPS-Mo",
+      "publicationDate": "2026-10-22T23:14:53Z"
+    },
+    {
+      "kind": "ipv4",
+      "sku": "8HFJK44D9234XNWA",
+      "description": "$0.005 per In-use public IPv4 address per hour",
+      "usd": 0.005,
+      "unit": "Hrs",
+      "publicationDate": "2026-10-16T22:43:21Z"
+    }
+  ],
+  "spot": [
+    {
+      "AvailabilityZone": "us-east-2c",
+      "AvailabilityZoneId": "use2-az3",
+      "InstanceType": "c8a.2xlarge",
+      "ProductDescription": "Linux/UNIX",
+      "SpotPrice": "0.111400",
+      "Timestamp": "2026-10-23T11:00:00+00:00"
+    },
+    {
+      "AvailabilityZone": "us-east-2a",
+      "AvailabilityZoneId": "use2-az1",
+      "InstanceType": "c8a.2xlarge",
+      "ProductDescription": "Linux/UNIX",
+      "SpotPrice": "0.133200",
+      "Timestamp": "2026-10-23T11:00:00+00:00"
+    },
+    {
+      "AvailabilityZone": "us-east-2b",
+      "AvailabilityZoneId": "use2-az2",
+      "InstanceType": "c8a.2xlarge",
+      "ProductDescription": "Linux/UNIX",
+      "SpotPrice": "0.086400",
+      "Timestamp": "2026-10-23T09:00:00+00:00"
+    }
+  ],
+  "snapshot": {
+    "id": "snap-090ce81cb8c62df6a",
+    "volumeGiB": 50,
+    "writtenBytes": 12304515072,
+    "writtenGiB": 11.45947265625
+  },
+  "jobs": [
+    {
+      "cloud": "gce",
+      "zone": "us-east5-a",
+      "seconds": 164.129,
+      "compute": 0.006035310974344602,
+      "disk": 0.0005308586377473364,
+      "ipv4": 0.00011397847222222222,
+      "perJob": 0.006680148084314161,
+      "west4AtSameDuration": 0.003464926172034372
+    },
+    {
+      "cloud": "ec2",
+      "arm": "plain",
+      "zone": "us-east-2c",
+      "seconds": 300.939,
+      "compute": 0.009312390166666669,
+      "disk": 0.00045805022831050233,
+      "ipv4": 0.0004179708333333334,
+      "initialization": 0,
+      "total": 0.010188411228310504,
+      "per100Jobs": 1.0188411228310503,
+      "budget180Days": 176.6713140708677,
+      "initializationPer100Jobs": 0,
+      "margin20FractionPer100Jobs": 0
+    },
+    {
+      "cloud": "ec2",
+      "arm": "init-300",
+      "zone": "us-east-2c",
+      "seconds": 162.676,
+      "compute": 0.005033918444444444,
+      "disk": 0.0002476042617960426,
+      "ipv4": 0.00022593888888888886,
+      "initialization": 0.0412541015625,
+      "total": 0.046761563157629374,
+      "per100Jobs": 4.676156315762937,
+      "budget180Days": 38.49315288995683,
+      "initializationPer100Jobs": 4.12541015625,
+      "margin20FractionPer100Jobs": 0.2062705078125
+    },
+    {
+      "cloud": "ec2",
+      "arm": "prefetch",
+      "zone": "us-east-2c",
+      "seconds": 219.68,
+      "compute": 0.006797875555555556,
+      "disk": 0.0003343683409436834,
+      "ipv4": 0.0003051111111111111,
+      "initialization": 0,
+      "total": 0.00743735500761035,
+      "per100Jobs": 0.743735500761035,
+      "budget180Days": 242.02152487788084,
+      "initializationPer100Jobs": 0,
+      "margin20FractionPer100Jobs": 0
+    },
+    {
+      "cloud": "ec2",
+      "arm": "init-200",
+      "zone": "us-east-2c",
+      "seconds": 158.623,
+      "compute": 0.004908500611111111,
+      "disk": 0.00024143531202435315,
+      "ipv4": 0.00022030972222222223,
+      "initialization": 0.027502734374999997,
+      "total": 0.032872980020357684,
+      "per100Jobs": 3.2872980020357683,
+      "budget180Days": 54.75621616553444,
+      "initializationPer100Jobs": 2.7502734374999998,
+      "margin20FractionPer100Jobs": 0.137513671875
+    }
+  ],
+  "spike": {
+    "instances": [
+      {
+        "id": "i-0045a99fdc0fa84fb",
+        "builder": false,
+        "seconds": 187.28199999999998,
+        "compute": 0.005795337444444444,
+        "disk": 0.0002850563165905631,
+        "ipv4": 0.00026011388888888884,
+        "initialization": 0,
+        "total": 0.006340507649923896
+      },
+      {
+        "id": "i-029d358d0f7d67987",
+        "builder": false,
+        "seconds": 973.008,
+        "compute": 0.030109192000000003,
+        "disk": 0.0014809863013698632,
+        "ipv4": 0.0013514000000000002,
+        "initialization": 0,
+        "total": 0.03294157830136987
+      },
+      {
+        "id": "i-03c2397a198e3d441",
+        "builder": false,
+        "seconds": 185.95600000000002,
+        "compute": 0.006880372000000001,
+        "disk": 0.0002830380517503805,
+        "ipv4": 0.0002582722222222222,
+        "initialization": 0,
+        "total": 0.007421682273972603
+      },
+      {
+        "id": "i-03eb7e2439a67a7cb",
+        "builder": false,
+        "seconds": 186.76600000000002,
+        "compute": 0.006910342000000002,
+        "disk": 0.0002842709284627093,
+        "ipv4": 0.00025939722222222226,
+        "initialization": 0,
+        "total": 0.007454010150684933
+      },
+      {
+        "id": "i-0501e1d8e071554ac",
+        "builder": false,
+        "seconds": 271.166,
+        "compute": 0.008391081222222221,
+        "disk": 0.00041273363774733637,
+        "ipv4": 0.00037661944444444443,
+        "initialization": 0.0412541015625,
+        "total": 0.050434535866914
+      },
+      {
+        "id": "i-05168a45c092f8a87",
+        "builder": true,
+        "seconds": 3461.204,
+        "compute": 0.4144599500888889,
+        "disk": 0.005268194824961948,
+        "ipv4": 0.004807227777777778,
+        "initialization": 0,
+        "total": 0.4245353726916286
+      },
+      {
+        "id": "i-07345f85d3bd80a08",
+        "builder": false,
+        "seconds": 185.35899999999998,
+        "compute": 0.005735831277777777,
+        "disk": 0.00028212937595129375,
+        "ipv4": 0.00025744305555555554,
+        "initialization": 0,
+        "total": 0.0062754037092846255
+      },
+      {
+        "id": "i-075e512618683f687",
+        "builder": false,
+        "seconds": 273.46799999999996,
+        "compute": 0.008462315333333333,
+        "disk": 0.0004162374429223744,
+        "ipv4": 0.00037981666666666664,
+        "initialization": 0.027502734374999997,
+        "total": 0.03676110381792237
+      },
+      {
+        "id": "i-079d7445738540b82",
+        "builder": false,
+        "seconds": 186.44,
+        "compute": 0.005769282222222222,
+        "disk": 0.0002837747336377473,
+        "ipv4": 0.00025894444444444446,
+        "initialization": 0,
+        "total": 0.006312001400304414
+      },
+      {
+        "id": "i-07ba550ab18348b09",
+        "builder": false,
+        "seconds": 168.596,
+        "compute": 0.006238052000000001,
+        "disk": 0.0002566149162861492,
+        "ipv4": 0.00023416111111111113,
+        "initialization": 0,
+        "total": 0.006728828027397261
+      },
+      {
+        "id": "i-07c2afd415f33db26",
+        "builder": false,
+        "seconds": 203.62,
+        "compute": 0.00753394,
+        "disk": 0.000309923896499239,
+        "ipv4": 0.00028280555555555557,
+        "initialization": 0,
+        "total": 0.008126669452054794
+      },
+      {
+        "id": "i-08d52addd73b490a7",
+        "builder": false,
+        "seconds": 218.75666479492187,
+        "compute": 0.00809399659741211,
+        "disk": 0.00033296296011403636,
+        "ipv4": 0.0003038287011040582,
+        "initialization": 0,
+        "total": 0.008730788258630204
+      },
+      {
+        "id": "i-099652d6707005269",
+        "builder": false,
+        "seconds": 187.298,
+        "compute": 0.0057958325555555554,
+        "disk": 0.0002850806697108067,
+        "ipv4": 0.00026013611111111115,
+        "initialization": 0,
+        "total": 0.006341049336377473
+      },
+      {
+        "id": "i-0c0205031a0cb7a48",
+        "builder": false,
+        "seconds": 325.317,
+        "compute": 0.010066753833333334,
+        "disk": 0.0004951552511415526,
+        "ipv4": 0.0004518291666666667,
+        "initialization": 0,
+        "total": 0.011013738251141554
+      },
+      {
+        "id": "i-0e45a371b5e9682df",
+        "builder": false,
+        "seconds": 169.812,
+        "compute": 0.0062830440000000015,
+        "disk": 0.00025846575342465756,
+        "ipv4": 0.00023585000000000001,
+        "initialization": 0,
+        "total": 0.006777359753424659
+      },
+      {
+        "id": "i-0f4fa75335c9c0db1",
+        "builder": false,
+        "seconds": 223.04366479492188,
+        "compute": 0.006901962293931749,
+        "disk": 0.0003394880742692875,
+        "ipv4": 0.00030978286777072483,
+        "initialization": 0,
+        "total": 0.007551233235971761
+      }
+    ],
+    "snapshotCeiling": 0.0006765283696980237,
+    "allowance": 0.1,
+    "totalCeiling": 0.7344223905467009,
+    "cleaned": "2026-10-23T12:36:53Z"
+  }
+}
