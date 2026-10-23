@@ -958,6 +958,34 @@ test('timing: the tick reports its first insert, and a row its job\'s run, workf
   assert.deepEqual([final.state, final.running, final.job.started], ['final', row.running, row.job.started]);
 });
 
+test('timing: a slow first insert is attributable to observation, the launching row and JIT calls', async () => {
+  const { w, make } = setup();
+  const launcher = make({ limits: { get: async () => null } });
+  const job = w.sim.queue(SBX, L(4));
+  const list = w.gce.listInstances;
+  w.gce.listInstances = async (...args) => { w.advance(6_000); return list(...args); };
+  w.hooks.commentWrite = () => { w.advance(250); };
+  const jit = w.github.jitConfig;
+  w.github.jitConfig = async (...args) => { w.advance(500); return jit(...args); };
+  const out = await launcher.tick();
+  const instance = out.launched[0];
+  assert.equal(out.launched.length, 1);
+  assert.equal(out.firstInsert, new Date(T0 + 6_750).toISOString());
+  const call = (name) => out.preparation.find((c) => c.call === name);
+  assert.deepEqual(call('gce.listInstances'), { call: 'gce.listInstances', started: new Date(T0).toISOString(), ms: 6_000 });
+  assert.equal(call('observe').ms, 6_000);
+  assert.deepEqual(call('ledger.launching'), { call: 'ledger.launching', repo: SBX, instance, started: new Date(T0 + 6_000).toISOString(), ms: 250 });
+  assert.deepEqual(call('github.jitConfig'), { call: 'github.jitConfig', repo: SBX, instance, started: new Date(T0 + 6_250).toISOString(), ms: 500 });
+  assert.deepEqual([call('github.listJobs').repo, call('github.listJobs').run], [SBX, job.run_id]);
+  for (const name of ['ledger.read', 'ledger.rows', 'gce.listDisks', 'gce.builders', 'gce.images', 'github.getRepo', 'github.runners', 'github.runs.queued', 'github.runs.in_progress', 'images.wait', 'limits.get', 'limits.wait']) {
+    assert.ok(call(name), `${name} is timed, even when fast`);
+  }
+  const next = await launcher.tick();
+  assert.notEqual(next.preparation, out.preparation, 'each tick owns its timings');
+  assert.equal(next.preparation.some((c) => c.call === 'github.jitConfig'), false, 'no stale launch timings on a quiet tick');
+  assert.equal(next.preparation.find((c) => c.call === 'gce.jobReport').instance, instance, 'guest reports identify their VM');
+});
+
 test('timing: a job no tick saw running is found when its VM is retired, with its times', async () => {
   const { w, launcher } = setup();
   const job = w.sim.queue(SBX, L(2), { name: 'probes' });

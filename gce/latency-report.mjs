@@ -44,12 +44,15 @@ export function stages({ rows, ticks }) {
 }
 
 // The launcher's `tick:` log entries (Cloud Logging's JSON) → ticks. A line from before M3 has no `started`: the
-// tick began its `ms` before the line was written.
+// tick began its `ms` before the line was written. New lines also carry preparation's call spans (started, ms,
+// call, and repo/run/instance where relevant; ms: null while still in flight). Keep them for per-tick attribution,
+// without counting parallel reads as additive stages or changing the latency samples.
 export const ticksOf = (entries) => entries
   .map((e) => {
     const end = Date.parse(e.timestamp);
     const p = e.jsonPayload ?? {};
-    return { start: p.started ? Date.parse(p.started) : end - p.ms, end, firstInsert: p.firstInsert ? Date.parse(p.firstInsert) : null };
+    return { start: p.started ? Date.parse(p.started) : end - p.ms, end, firstInsert: p.firstInsert ? Date.parse(p.firstInsert) : null,
+      ...(p.preparation ? { preparation: p.preparation } : {}) };
   })
   .filter((k) => Number.isFinite(k.start))
   .sort((a, b) => a.start - b.start);
@@ -128,7 +131,7 @@ const LAUNCHER_LOG = (from, to) => [
 function readTicks(project, from, to) {
   const out = execFileSync('gcloud', [
     'logging', 'read', LAUNCHER_LOG(from, to), `--project=${project}`, '--order=asc',
-    '--format=json(timestamp,jsonPayload.ms,jsonPayload.started,jsonPayload.firstInsert)',
+    '--format=json(timestamp,jsonPayload.ms,jsonPayload.started,jsonPayload.firstInsert,jsonPayload.preparation)',
   ], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
   return ticksOf(JSON.parse(out || '[]'));
 }
