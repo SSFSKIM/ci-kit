@@ -1005,7 +1005,7 @@ A successful `deploy.sh bake` only deploys the producer. Execute it and wait; `u
     cd /private/tmp/ci-kit-deploy
     gcloud secrets list --project ssfskim-ci-kit --format='value(name)'
     gcloud run services describe ci-kit-launcher --region us-central1 --project ssfskim-ci-kit --format='yaml(spec.template.spec.containers[0].env)'
-    gcloud logging read 'resource.labels.service_name="ci-kit-launcher" AND jsonPayload.message:"aws: assumed"' --project ssfskim-ci-kit --limit 3 --format='value(jsonPayload.message)'
+    gcloud logging read 'resource.labels.service_name="ci-kit-launcher" AND (jsonPayload.message:"aws: assumed" OR textPayload:"aws: assumed")' --project ssfskim-ci-kit --limit 3 --format='value(jsonPayload.message,textPayload)'
     # expect: no AWS credential secret or key environment variable; "aws: assumed <role> until <time>"
     AWS_PROFILE=ci-kit-ops AWS_REGION=us-east-2 aws ec2 describe-images --image-ids <ami-id> --query 'Images[0].Tags'
     gcloud compute images describe <gce-image-name> --project ssfskim-ci-kit --format='json(labels)'
@@ -1058,7 +1058,7 @@ refusal tests remain the deterministic proof. For a fallback, inspect one tick's
 ledger rows: the same demand has a refused EC2 allocation and a different GCE allocation and registration.
 
     cd /private/tmp/ci-kit-deploy
-    gcloud logging read 'resource.labels.service_name="ci-kit-launcher"' --project ssfskim-ci-kit --freshness=1h --order asc --format='value(jsonPayload.message)'
+    gcloud logging read 'resource.labels.service_name="ci-kit-launcher"' --project ssfskim-ci-kit --freshness=1h --order asc --format='value(jsonPayload.message,textPayload)'
     gh api repos/SSFSKIM/ci-kit-sandbox/actions/runs/<sandbox-run>/jobs --jq '.jobs[]|[.name,.conclusion,.runner_name]|@tsv'
 
 ### Config transitions (M5; Acceptance 9)
@@ -1125,7 +1125,7 @@ and reading after the proof; do not replace production billing with invented amo
 flag and date ends, overlapping writers and a missing issue.
 
     cd /private/tmp/ci-kit-deploy
-    gcloud logging read 'resource.labels.service_name="ci-kit-launcher" AND jsonPayload.message:"credit preference off:"' --project ssfskim-ci-kit --freshness=1h --format='value(jsonPayload.message)'
+    gcloud logging read 'resource.labels.service_name="ci-kit-launcher" AND (jsonPayload.message:"credit preference off:" OR textPayload:"credit preference off:")' --project ssfskim-ci-kit --freshness=1h --format='value(jsonPayload.message,textPayload)'
     # expect for the respective fixtures: "credit preference off: budget"; "credit preference off: stale billing"
     node gce/cost-report.mjs --since <ISO>
     node gce/latency-report.mjs --since <ISO>
@@ -1260,6 +1260,12 @@ The production chain is reviewed at each boundary:
   surface and a second control plane to a launcher that runs the owner's private CI.
 
 ## Surprises & Discoveries
+
+- Observation: Cloud Run promotes message-only structured records into `textPayload`; richer tick records retain
+  `jsonPayload.message`. Evidence queries now match/print both. Revision `ci-kit-launcher-00021-qth` logged
+  federated launcher-role assumption at 2026-10-23T20:59:04Z in textPayload, with four-hour expiry. M5's deployed
+  GCE canary `40023372535` passed all six pool jobs; the combined bake `ci-kit-bake-v2jm5` is running, not yet proof
+  of either new image. Friction tracked in ci-kit #68.
 
 - Observation: M5 setup created the report bucket, GitHub OIDC provider, four roles and isolated FIS template
   `EXTArbeHnuTzYMimN`; a second setup run reported nothing to change. The initial expected-allow Canonical
