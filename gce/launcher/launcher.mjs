@@ -583,7 +583,10 @@ export class Launcher {
   // itself. Its row keeps its walk's refusals and slow inserts (walkRecord).
   async launch(item, ctx) {
     const admissionItem = item.admissionItem ?? item;
-    if (!item.race && ctx.root.globalWaiter && ctx.root.globalWaiter !== admissionItem) return {};
+    if (!item.race && ctx.root.globalWaiter && ctx.root.globalWaiter.item !== admissionItem) {
+      if (!(await ctx.root.globalWaiter.promise)) return {};
+      return this.launch(item, ctx);
+    }
     const walk = providerWalk({ ...item, cfg: this.cfg, repoProviders: this.repoProviders, providers: this.providers, ec2: this.ec2, creditPreference: this.creditPreference });
     if (walk.unlisted) {
       const key = `unservable:${item.repo}:${item.job.id}`;
@@ -614,6 +617,10 @@ export class Launcher {
         globalBlocked ||= ctx.admission.total() + Math.max(...attempts.map((p) => p.vcpus)) > this.cfg.max_vcpus;
         continue;
       }
+      if (ctx.root.globalWaiter?.item === admissionItem) {
+        ctx.root.globalWaiter.resolve(true);
+        ctx.root.globalWaiter = null;
+      }
       const image = await ctx.preparation.time('images.wait', () => ctx.seen.images.get(key));
       if (!image || this.now() >= ctx.deadline) {
         ctx.admission.release(alloc);
@@ -627,13 +634,18 @@ export class Launcher {
     }
     // FIFO applies to the global budget, not a repo's cap or an unavailable provider. Check this before any
     // asynchronous wait so a younger, smaller job cannot pass an older demand that has no globally fitting walk.
-    if (globalBlocked && !item.race) ctx.root.globalWaiter ??= admissionItem;
+    if (globalBlocked && !item.race && !ctx.root.globalWaiter) {
+      let resolve;
+      const promise = new Promise((r) => { resolve = r; });
+      ctx.root.globalWaiter = { item: admissionItem, promise, resolve };
+    }
     // Cleanup runs beside launches. Only demands declined by a budget wait for it, then retry admission once:
     // a row finalized in this tick releases both debits without delaying the first launches that already fit.
     if (budgetBlocked && !item.afterCleanup) {
-      await ctx.seen.cleaning;
-      return this.launch({ ...item, admissionItem: item.admissionItem ?? item, afterCleanup: true }, ctx);
+      try { await ctx.seen.cleaning; } catch (err) { ctx.root.globalWaiter?.resolve(false); throw err; }
+      return this.launch({ ...item, admissionItem, afterCleanup: true }, ctx);
     }
+    if (ctx.root.globalWaiter?.item === admissionItem) ctx.root.globalWaiter.resolve(false);
     return {};
   }
 
