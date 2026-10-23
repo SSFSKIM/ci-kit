@@ -55,7 +55,8 @@ measurement exists.
   (`docs/doperpowers/specs/2026-10-21-pool-placement-latency-design.md`, Decision Log). "Credit first" is a
   policy switch, not a price signal.
 - **AWS first at any price.** The credit makes AWS spot preferable. It never puts AWS on-demand (~$0.43/h for
-  c8a.2xlarge) ahead of GCE spot, and EC2 on-demand stays off.
+  c8a.2xlarge) ahead of GCE spot, and EC2 on-demand job candidates stay off. Only the bake builder uses
+  on-demand, so it can stop for CreateImage (The image and parity).
 - **A stored AWS secret.** The launcher reaches AWS through federation of its Google identity. No AWS access key
   sits in Secret Manager, in the image or in any config. Secret Manager writes are the owner's alone, and this work
   needs none.
@@ -738,7 +739,7 @@ permits it.
 `ledger.mjs` already aggregates row estimates), `gce/latency-report.mjs`; `.github/workflows/pool-guard.yml` and
 new `ec2/guard.mjs`; `docs/pool.md`. It consumes M5's AWS client, EC2 provider, tagged resources and image.
 
-**Does not touch:** c8g/ARM, more instance families, EC2 on-demand or automatic reruns.
+**Does not touch:** c8g/ARM, more instance families, EC2 on-demand job placements or automatic reruns.
 
 **Proves:** Acceptance 2, 5, 6, 7 and 8. Tests pin a missing billing issue, stale reading, immutable overlapping
 writes (an older write lands last, then a fresh reader still chooses the newer `read_at`), pruning to the newest
