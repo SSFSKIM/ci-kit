@@ -16,6 +16,8 @@
 #   runner <version> <sha256> <machine>  the runner at install.sh's pin in ~/actions-runner-maws, its .env and .path
 #                                        (env below), and ~/ci-kit -> the kit share, which keeps a space out of the
 #                                        hook paths
+#   workrepo                             a shallow master from the read-only maws share in the runner's work folder,
+#                                        with GitHub as origin: checkout reuses its objects and fetches only the delta
 #   env <machine>                        the runner's .env and .path alone
 #   helpers                              cursor-park and window-list compiled into ~/ci-kit-helpers (the kit share is
 #                                        read-only, and the guest's hooks look there)
@@ -32,6 +34,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 source "$here/guest/guest.sh"
 # The PATH the runner gives every job and hook (.path): Node 22 first, then Homebrew's tools, then the system's.
 runner_path=/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+# The registration's work folder. A fresh bake has no .runner yet; workrepo uses this same setting until it does.
+runner_work=_work
 export PATH=$runner_path NONINTERACTIVE=1 HOMEBREW_NO_ENV_HINTS=1 COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 fail() {
   echo "provision: $*" >&2
@@ -201,6 +205,34 @@ case $step in
     write_env "${3:-}"
     say "runner $version in $vm_runner"
     ;;
+  workrepo)
+    [[ -d $vm_runner ]] || fail "no runner at $vm_runner"
+    # .runner is JSON (possibly with a BOM). Honor its workFolder when provision is repeated on a configured runner;
+    # normal bakes precede registration, whose --work uses runner_work below. No identity is made or kept here.
+    work=$(python3 -I -c '
+import json, os, sys
+runner, default = sys.argv[1:]
+config = os.path.join(runner, ".runner")
+work = default
+if os.path.exists(config):
+    with open(config, encoding="utf-8-sig") as f:
+        work = json.load(f).get("workFolder")
+if not isinstance(work, str) or not work.strip():
+    sys.exit("invalid runner workFolder")
+print(os.path.join(runner, work))' "$vm_runner" "$runner_work") || fail 'cannot read the runner workFolder'
+    repo=$work/MAWS/MAWS
+    # --no-local goes through upload-pack: --depth is honored, with no hardlinks, alternates or source config copied.
+    # A single master tip is enough for the next --depth=1 fetch to negotiate its existing tree; full history buys
+    # no transfer saving. Never copy the host's working tree (edits, dependencies, auth or locks).
+    git -c safe.directory='*' -C "$vm_shares/maws" rev-parse --verify refs/heads/master >/dev/null || fail 'the maws share has no master'
+    rm -rf "$repo"
+    mkdir -p "${repo%/*}"
+    git -c safe.directory='*' clone --quiet --no-local --depth=1 --single-branch --branch master --no-tags "$vm_shares/maws" "$repo"
+    # checkout v7's prepareExistingDirectory requires .git and this exact origin (no .git suffix), then detaches,
+    # deletes local branches and runs clean -ffdx / reset --hard HEAD. A fresh clone satisfies those checks.
+    git -C "$repo" remote set-url origin https://github.com/SSFSKIM/MAWS
+    say "MAWS work repository $repo: master $(git -C "$repo" rev-parse --short HEAD), $(du -sk "$repo" | awk '{print $1}') KiB (tree and .git)"
+    ;;
   env)
     write_env "${1:-}"
     ;;
@@ -226,7 +258,7 @@ case $step in
     cp .env .env.bake && cp .path .path.bake
     status=0
     env -i HOME="$HOME" USER="${USER:-admin}" PATH="$runner_path" LANG=en_US.UTF-8 ACTIONS_RUNNER_INPUT_TOKEN="$token" \
-      ./config.sh --unattended --url "$url" --name "$name" --labels "$labels" --no-default-labels --work _work --replace ||
+      ./config.sh --unattended --url "$url" --name "$name" --labels "$labels" --no-default-labels --work "$runner_work" --replace ||
       status=$?
     token=''
     mv -f .env.bake .env && mv -f .path.bake .path
@@ -240,6 +272,6 @@ case $step in
     say "$name registered with $labels; its identity is in the identity-$slot share, and none is left in $vm_runner"
     ;;
   *)
-    fail "unknown step '${step}' (check, disk, display, node, store, libreoffice, runner, env, helpers, register)"
+    fail "unknown step '${step}' (check, disk, display, node, store, libreoffice, runner, workrepo, env, helpers, register)"
     ;;
 esac

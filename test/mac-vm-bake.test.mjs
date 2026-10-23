@@ -331,7 +331,8 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.deepEqual(text(join(f.vms, CANDIDATE, 'run.args')).trim().split('\n'), ['--no-graphics', '--no-clipboard', `--dir=kit:${mac}:ro`, `--dir=maws:${f.maws}:ro`, CANDIDATE]);
     const script = '/bin/bash /Volumes/My Shared Files/kit/vm/provision.sh';
     assert.deepEqual(f.exec(CANDIDATE), [`${script} check`, `${script} disk 60`, `${script} display`, `${script} node 11.23.0`, `${script} store`, `${script} libreoffice`,
-      `${script} runner ${installPin('RUNNER_VERSION')} ${installPin('RUNNER_SHA256')} mini-vm`, `${script} helpers`]);
+      `${script} runner ${installPin('RUNNER_VERSION')} ${installPin('RUNNER_SHA256')} mini-vm`, `${script} workrepo`, `${script} helpers`]);
+    assert.match(result.stdout, /the seeded MAWS work repository \(workrepo\)/);
     // Its end verified before the step reports done: a stop, then Tart's list.
     const calls = f.calls();
     assert.ok(calls.indexOf(`stop ${CANDIDATE} --timeout 5`) > calls.lastIndexOf(`exec ${CANDIDATE} ${script} helpers`), calls.join('\n'));
@@ -1026,6 +1027,83 @@ describe('the bake\'s provisioning in the guest (provision.sh)', macOnly, () => 
     const flag = (name) => writeFileSync(join(home, name), '');
     return { home, shares, runner, env, run, flag, displayCalls: () => lines('displayplacer.calls'), diskCalls: () => lines('diskutil.calls') };
   }
+
+  const git = (cwd, ...args) => {
+    const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', env: { ...process.env,
+      GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 'Bake test', GIT_AUTHOR_EMAIL: 'bake@example.invalid',
+      GIT_COMMITTER_NAME: 'Bake test', GIT_COMMITTER_EMAIL: 'bake@example.invalid' } });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  const mawsShare = (g) => {
+    const source = join(g.shares, 'maws');
+    mkdirSync(source);
+    git(source, 'init', '-b', 'master');
+    writeFileSync(join(source, 'tracked'), 'first\n');
+    git(source, 'add', '.');
+    git(source, 'commit', '-qm', 'first');
+    writeFileSync(join(source, 'tracked'), 'master\n');
+    git(source, 'commit', '-qam', 'master');
+    // Neither the host's credentials/config nor its dirty or ignored files belong in the image.
+    git(source, 'config', 'http.https://github.com/.extraheader', 'AUTHORIZATION: host-secret');
+    git(source, 'config', 'core.hooksPath', '/host/hooks');
+    writeFileSync(join(source, 'tracked'), 'host edits\n');
+    writeFileSync(join(source, 'untracked'), 'host scratch\n');
+    return source;
+  };
+
+  for (const configured of [null, 'custom work', 'absolute']) {
+    test(`workrepo: a self-contained shallow master in the runner's ${configured ?? 'default'} work folder survives checkout v7's preparation and a repeat bake`, () => {
+      const g = guest();
+      const source = mawsShare(g);
+      const work = configured === 'absolute' ? join(g.home, 'absolute work') : configured ?? '_work';
+      if (configured) writeFileSync(join(g.runner, '.runner'), `﻿${JSON.stringify({ workFolder: work })}`);
+      const repo = join(configured === 'absolute' ? work : join(g.runner, work), 'MAWS/MAWS');
+      const result = g.run(['workrepo']);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.match(result.stdout, /MAWS work repository.*master.*KiB/);
+      assert.equal(git(repo, 'rev-parse', 'HEAD'), git(source, 'rev-parse', 'master'));
+      assert.equal(git(repo, 'rev-list', '--count', 'HEAD'), '1');
+      assert.equal(git(repo, 'rev-parse', '--is-shallow-repository'), 'true');
+      assert.equal(text(join(repo, 'tracked')), 'master\n');
+      assert.equal(existsSync(join(repo, 'untracked')), false);
+      assert.equal(git(repo, 'status', '--porcelain'), '');
+      assert.ok(statSync(join(repo, '.git')).isDirectory());
+      assert.equal(git(repo, 'config', '--local', '--get', 'remote.origin.url'), 'https://github.com/SSFSKIM/MAWS');
+      assert.doesNotMatch(text(join(repo, '.git/config')), /host-secret|extraheader|hooksPath|shares|file:/);
+      assert.equal(existsSync(join(repo, '.git/objects/info/alternates')), false);
+      for (const lock of ['index.lock', 'shallow.lock', 'config.lock']) assert.equal(existsSync(join(repo, '.git', lock)), false);
+      // checkout v7 detaches, removes local branches, then cleans and resets. Keep the repository, not just its tree.
+      const objectDir = statSync(join(repo, '.git/objects')).ino;
+      git(repo, 'checkout', '--detach');
+      git(repo, 'branch', '-D', 'master');
+      git(repo, 'submodule', 'status');
+      git(repo, 'clean', '-ffdx');
+      git(repo, 'reset', '--hard', 'HEAD');
+      assert.equal(git(repo, 'rev-parse', 'HEAD'), git(source, 'rev-parse', 'master'));
+      assert.equal(statSync(join(repo, '.git/objects')).ino, objectDir);
+      writeFileSync(join(repo, 'job-leftover'), 'gone on rebake\n');
+      assert.equal(g.run(['workrepo']).status, 0);
+      assert.equal(existsSync(join(repo, 'job-leftover')), false);
+      // With the bake-only share gone, reset and fsck still need nothing from the host.
+      rmSync(source, { recursive: true });
+      git(repo, 'reset', '--hard', 'HEAD');
+      git(repo, 'fsck', '--full');
+      assert.equal(text(join(repo, 'tracked')), 'master\n');
+    });
+  }
+
+  test('workrepo: a missing master or invalid runner work-folder configuration fails the bake', () => {
+    const g = guest();
+    const source = mawsShare(g);
+    git(source, 'branch', '-m', 'other');
+    assert.notEqual(g.run(['workrepo']).status, 0);
+    git(source, 'branch', '-m', 'master');
+    writeFileSync(join(g.runner, '.runner'), JSON.stringify({ workFolder: '' }));
+    const result = g.run(['workrepo']);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /workFolder/);
+  });
 
   test('display: the guest\'s mode set to 2560x1440 with scaling on through displayplacer, and read back; set already, nothing is set', () => {
     const g = guest();
