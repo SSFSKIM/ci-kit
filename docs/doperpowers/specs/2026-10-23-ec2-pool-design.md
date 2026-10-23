@@ -1456,6 +1456,17 @@ The production chain is reviewed at each boundary:
   opportunities without weakening synchronous acquisition of both budgets.
   Date/Author: 2026-10-23, M4 executor and controller; design-owner confirmed consistency.
 
+- Decision: The M4 config source returns `{cfg, config, poolRepos, ec2, repoProviders}`; `config` retains its
+  GCE-config-commit meaning and `ec2: null` denotes confirmed absence. Resolved repo references are separate
+  from `cfg.repos`. Launcher receives `providers`, `ec2`, `repoProviders`, process-shared `providerState` and the
+  pure policy input `creditPreference(account)`. Configured disabled instances remain in `providers`.
+  The scheduler persists the exact `zone`, `client_token` and `sent_at` before calling an EC2 provider; M5 consumes
+  these coordinates and never replays a request. M5 adds the promoted initialization rate to the accounts schema.
+  Rationale: keep runtime wiring and durable launch ownership explicit at the M4/M5 boundary. Review additionally
+  established that races activate only after admission, attempt-coordinate writes serialize with pending markers,
+  and definite refusal is persisted before unregister; failed final persistence retains both debits and JIT.
+  Date/Author: 2026-10-23, M4 executor and controller; reviewed through 3550a56.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
