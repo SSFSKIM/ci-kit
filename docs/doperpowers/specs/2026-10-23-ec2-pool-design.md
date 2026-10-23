@@ -441,7 +441,8 @@ The roles:
     dedicated bucket so a missing object returns 404 rather than an indistinguishable 403 (also granted to bake);
   - `ce:GetCostAndUsage`.
 - `ci-kit-ec2-bake`: read and terminate rights for pool builders, plus `RunInstances` for Canonical-owned AMIs
-  (`099720109477`) or this account's pool-tagged AMIs, with `ci-kit-purpose=builder` required on instance and
+  (image conditions `ec2:Owner=amazon` AND `aws:ResourceAccount=099720109477`) or this account's pool-tagged
+  AMIs (its own numeric `ec2:Owner` condition), with `ci-kit-purpose=builder` required on instance and
   volume resources. It cannot launch job or smoke instances, even from an owned pool image. Smoke and real-job
   launches use `ci-kit-ec2-launcher`, which cannot use a Canonical AMI. The bake role also has `CreateImage`,
   `CreateTags` on images and snapshots, `DeregisterImage`, `DeleteSnapshot` and `DescribeSnapshots` on the pool's
@@ -471,8 +472,10 @@ from the entry's. In that account, it sets up:
   and the FIS experiment template for Acceptance 6;
 - GitHub's OIDC provider (`token.actions.githubusercontent.com`), for the guard.
 
-Setup validates these launch-purpose/image restrictions on existing roles, as it validates MaxSessionDuration;
-policy drift is reported, not silently mutated. It also proves the federated launcher's billing access before
+Setup validates these launch-purpose/image restrictions on existing roles, as it validates MaxSessionDuration.
+Default setup refuses policy drift without mutation. An explicit `--update-policies` mode prints each current
+versus desired role-policy diff and applies policy changes only in that mode; trust, duration and role identity
+validation are not bypassed. It also proves the federated launcher's billing access before
 M6 enables preference (The billing reading). The runtime roles get no IAM rights.
 
 ### The EC2 job VM
@@ -1027,7 +1030,9 @@ code, not the CLI's nonzero status, since both authorized and unauthorized dry-r
 - bake + owned pool AMI + smoke: `UnauthorizedOperation`;
 - launcher + Canonical AMI + job: `UnauthorizedOperation`;
 - launcher + Canonical AMI + smoke: `UnauthorizedOperation`;
-- launcher + owned pool AMI + smoke: `DryRunOperation`.
+- launcher + owned pool AMI + smoke: `DryRunOperation`;
+- bake + Amazon-owned non-Canonical AMI (for example Amazon Linux 2023 from its public SSM parameter) + builder:
+  `UnauthorizedOperation`, proving the `amazon` alias did not widen image ownership.
 
 The builder/smoke guard deadline protections are unchanged by which role launched the VM.
 
@@ -1255,6 +1260,17 @@ The production chain is reviewed at each boundary:
   surface and a second control plane to a launcher that runs the owner's private CI.
 
 ## Surprises & Discoveries
+
+- Observation: M5 setup created the report bucket, GitHub OIDC provider, four roles and isolated FIS template
+  `EXTArbeHnuTzYMimN`; a second setup run reported nothing to change. The initial expected-allow Canonical
+  builder dry-run nevertheless failed: decoded AMI authorization context had `ec2:Owner=amazon` while its actual
+  numeric owner was `099720109477`. No VM or launcher revision was created during this check.
+  A nonmutating operator-session experiment intersected existing permissions with image conditions
+  `ec2:Owner=amazon` AND `aws:ResourceAccount=099720109477`: Canonical `ami-0fc53b217ec1ad816` returned
+  `DryRunOperation`, Amazon Linux `ami-053ef5d7ebe355f4a` returned `UnauthorizedOperation`. No credentials were
+  persisted. This proves condition evaluation, not the still-required Google-federated role proof after repair.
+  Evidence: 2026-10-23 live dry-runs; AWS IAM global condition-key documentation lists RunInstances as supported
+  for ResourceAccount. Runtime/deploy work remains paused until the explicit policy repair lands.
 
 - Observation: M4's deployed scheduler preserves the GCE-only live path. MAWS run `40015186704`, attempt 1,
   tested master `0c86e4861` through wrapper `d69ecff5812793000cc31a9c72531a9185482d34`; static, probes and all four
@@ -1549,6 +1565,16 @@ The production chain is reviewed at each boundary:
   builder clears. Add injected-artifact coverage and rerun the full gate before merge; no additional review
   round is required for that bounded correction. Only the non-200 initialization metadata finding is deferred.
   Date/Author: 2026-10-23, design-owner ruling after M5 review.
+
+- Decision: Canonical image authorization uses `ec2:Owner=amazon` AND
+  `aws:ResourceAccount=099720109477`; owned pool images retain the existing numeric-owner/tag restrictions.
+  Add an explicit diff-printing setup policy-update mode, keeping default setup fail-closed, and add a
+  non-Canonical Amazon-image negative dry-run. The design owner approved this path after the live condition
+  experiment proved both allowed and refused cases without IAM mutation.
+  Rationale: EC2's Owner condition aliases trusted partner AMIs to amazon; it is not always their numeric account.
+  Rejected amazon alone (admits all aliased partners), per-AMI ImageID pins (IAM churn on every Canonical release),
+  and additional launch-template infrastructure when the numeric ResourceAccount condition is supported.
+  Date/Author: 2026-10-23, design owner and controller; live evidence above.
 
 ## Outcomes & Retrospective
 

@@ -1,5 +1,6 @@
 // Setup's AWS CLI boundary takes service, operation and the operation's JSON input. Existing resources are
-// validated, never repaired in place: a mismatch needs an explicit operator decision.
+// validated by default. Explicit policy repair replaces only ci-kit-pool after validating the role's identity,
+// trust, duration and other policy attachments; it logs the replacement and verifies the resulting permissions.
 import { isDeepStrictEqual } from 'node:util';
 
 const VERSION = '2012-10-17';
@@ -23,8 +24,9 @@ function canonical(value) {
   if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(k => [k, canonical(value[k])]));
   return value;
 }
+const matches = (actual, expected) => isDeepStrictEqual(canonical(actual), canonical(expected));
 function equal(actual, expected, label) {
-  if (!isDeepStrictEqual(canonical(actual), canonical(expected))) throw new Error(`setup: ${label} mismatch; existing resource left unchanged`);
+  if (!matches(actual, expected)) throw new Error(`setup: ${label} mismatch; existing resource left unchanged`);
 }
 
 export function identityClaims(token, account) {
@@ -82,7 +84,9 @@ export function buildRoles(config, claims) {
     // RunInstances evaluates image and created-resource contexts independently. An image has no RequestTag
     // key. Builder-only here plus pool-image-only launcher smoke enforces Canonical => builder at IAM itself.
     bake: role('bake', googleTrust, [reads, ...cleanup, ...launch(['builder']), ...reports,
-      regional('ec2:RunInstances', arn('image'), { 'ec2:Owner': '099720109477' }),
+      // Public Canonical AMIs use the amazon owner alias. Bind it to Canonical's numeric resource account,
+      // rather than granting every publisher that shares that alias (verified with positive/negative DryRuns).
+      regional('ec2:RunInstances', arn('image'), { 'ec2:Owner': 'amazon', 'aws:ResourceAccount': '099720109477' }),
       regional(['ec2:StopInstances', 'ec2:CreateImage'], arn('instance'), { ...pooled, 'ec2:ResourceTag/ci-kit-purpose': 'builder' }),
       regional('ec2:CreateImage', [arn('image'), arn('snapshot')], { 'aws:RequestTag/ci-kit-pool': 'ec2' }),
       regional('ec2:CreateTags', [arn('image'), arn('snapshot')], { 'ec2:CreateAction': 'CreateImage', 'aws:RequestTag/ci-kit-pool': 'ec2' }),
@@ -113,7 +117,7 @@ export function fisTemplate(config) {
   };
 }
 
-export async function ensureRole(aws, expected, log = console.log) {
+export async function ensureRole(aws, expected, log = console.log, { updatePolicies = false } = {}) {
   const RoleName = expected.name;
   const existing = await missing(() => aws('iam', 'get-role', { RoleName }));
   if (existing) {
@@ -123,8 +127,17 @@ export async function ensureRole(aws, expected, log = console.log) {
     if (existing.Role.PermissionsBoundary) throw new Error(`setup: ${RoleName} unexpected permissions boundary; left unchanged`);
     equal((await aws('iam', 'list-attached-role-policies', { RoleName })).AttachedPolicies, [], `${RoleName} attached policies`);
     equal((await aws('iam', 'list-role-policies', { RoleName })).PolicyNames, ['ci-kit-pool'], `${RoleName} inline policy names`);
-    equal(parseDocument((await aws('iam', 'get-role-policy', { RoleName, PolicyName: 'ci-kit-pool' })).PolicyDocument), expected.policy, `${RoleName} permissions`);
-    return false;
+    const policyInput = { RoleName, PolicyName: 'ci-kit-pool' };
+    const current = parseDocument((await aws('iam', 'get-role-policy', policyInput)).PolicyDocument);
+    if (matches(current, expected.policy)) return false;
+    if (!updatePolicies) equal(current, expected.policy, `${RoleName} permissions`);
+    const diffLines = (value, prefix) => JSON.stringify(value, null, 2).split('\n').map(line => prefix + line).join('\n');
+    log(`setup: policy replacement\n--- ${RoleName}/ci-kit-pool (current)\n+++ ${RoleName}/ci-kit-pool (desired)\n${diffLines(current, '-')}\n${diffLines(expected.policy, '+')}`);
+    await aws('iam', 'put-role-policy', { ...policyInput, PolicyDocument: JSON.stringify(expected.policy) });
+    const applied = parseDocument((await aws('iam', 'get-role-policy', policyInput)).PolicyDocument);
+    if (!matches(applied, expected.policy)) throw new Error(`setup: ${RoleName} permissions readback mismatch after update; inspect the live policy`);
+    log(`setup: updated ${RoleName}/ci-kit-pool and verified permissions`);
+    return true;
   }
   await aws('iam', 'create-role', { RoleName, AssumeRolePolicyDocument: JSON.stringify(expected.trust), MaxSessionDuration: expected.duration, Tags: TAGS });
   await aws('iam', 'put-role-policy', { RoleName, PolicyName: 'ci-kit-pool', PolicyDocument: JSON.stringify(expected.policy) });
@@ -132,7 +145,7 @@ export async function ensureRole(aws, expected, log = console.log) {
   return true;
 }
 
-export async function setupAccount({ config, claims, aws, log = console.log }) {
+export async function setupAccount({ config, claims, aws, log = console.log, updatePolicies = false }) {
   validateConfig(config);
   const who = await aws('sts', 'get-caller-identity', {});
   if (who.Account !== config.account) throw new Error(`setup: operator account mismatch: expected ${config.account}, got ${who.Account}`);
@@ -185,7 +198,7 @@ export async function setupAccount({ config, claims, aws, log = console.log }) {
     await create('iam', 'create-open-id-connect-provider', { Url: 'https://token.actions.githubusercontent.com', ClientIDList: ['sts.amazonaws.com'], Tags: TAGS }, 'GitHub OIDC provider');
   }
   const roles = buildRoles(config, claims);
-  for (const role of Object.values(roles)) changed = (await ensureRole(aws, role, log)) || changed;
+  for (const role of Object.values(roles)) changed = (await ensureRole(aws, role, log, { updatePolicies })) || changed;
   const desired = fisTemplate(config);
   const templates = (await aws('fis', 'list-experiment-templates', {})).experimentTemplates.filter(t => t.tags?.['ci-kit-pool'] === 'ec2' && t.tags?.['ci-kit-purpose'] === 'fis-fixture');
   if (templates.length > 1) throw new Error('setup: multiple pool FIS templates; select one explicitly before setup');
