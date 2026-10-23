@@ -426,17 +426,19 @@ session limit would reject production's four-hour request, so a shorter proof is
 The roles:
 
 - `ci-kit-ec2-launcher`, the runtime launcher. It can:
-  - `ec2:RunInstances`, with the AMI, subnets, security group and instance profile restricted to the pool's own, and
-    a request tag `ci-kit-pool=ec2` required;
+  - `ec2:RunInstances`, with the AMI owned by this account and pool-tagged, subnets and security group restricted
+    to the pool's own, no instance profile, and request tags `ci-kit-pool=ec2` plus
+    `ci-kit-purpose=job|smoke` on instance and volume resources;
   - `ec2:CreateTags`, only with `ec2:CreateAction=RunInstances`;
   - `ec2:TerminateInstances` and `ec2:DeleteVolume`, on resources tagged `ci-kit-pool=ec2` only;
   - read with `ec2:Describe*` (instances, images, instance types, type offerings, zones, spot price history, volumes)
     and `servicequotas:GetServiceQuota`, region us-east-2;
   - `s3:PutObject` and `s3:GetObject` on the report bucket's `reports/` prefix;
   - `ce:GetCostAndUsage`.
-- `ci-kit-ec2-bake`: the launcher's pool-AMI launch, read and terminate rights for builder and smoke instances,
-  plus `RunInstances` for AMIs owned by Canonical (`099720109477`) only when the request has
-  `ci-kit-purpose=builder`. The launcher role stays limited to pool AMIs. The bake role also has `CreateImage`,
+- `ci-kit-ec2-bake`: read and terminate rights for pool builders, plus `RunInstances` for Canonical-owned AMIs
+  (`099720109477`) or this account's pool-tagged AMIs, with `ci-kit-purpose=builder` required on instance and
+  volume resources. It cannot launch job or smoke instances, even from an owned pool image. Smoke and real-job
+  launches use `ci-kit-ec2-launcher`, which cannot use a Canonical AMI. The bake role also has `CreateImage`,
   `CreateTags` on images and snapshots, `DeregisterImage`, `DeleteSnapshot` and `DescribeSnapshots` on the pool's
   tagged images and snapshots.
 - `ci-kit-ec2-guard` is trusted by GitHub's OIDC provider instead (The guard).
@@ -464,8 +466,9 @@ from the entry's. In that account, it sets up:
   and the FIS experiment template for Acceptance 6;
 - GitHub's OIDC provider (`token.actions.githubusercontent.com`), for the guard.
 
-Setup also proves the federated launcher's billing access before M6 enables preference (The billing reading).
-The runtime roles get no IAM rights.
+Setup validates these launch-purpose/image restrictions on existing roles, as it validates MaxSessionDuration;
+policy drift is reported, not silently mutated. It also proves the federated launcher's billing access before
+M6 enables preference (The billing reading). The runtime roles get no IAM rights.
 
 ### The EC2 job VM
 
@@ -626,8 +629,9 @@ The EC2 bake:
 2. runs the provider-neutral preparation (`pool/bake/prepare.sh` and the warm step), with the builder's EC2-specific
    steps in their own script beside `gce/bake/builder.sh`;
 3. after the builder stops, runs `CreateImage`, tags the AMI unready, and terminates the builder;
-4. runs the smoke suite (`gce/vm/smoke.sh`, made provider-neutral where it reads metadata) on a VM from the new AMI;
-5. runs one real job on ci-kit-sandbox;
+4. through the federated launcher role, runs the smoke suite (`gce/vm/smoke.sh`, made provider-neutral where it
+   reads metadata) on a smoke VM from the new AMI;
+5. through the same launcher role, runs one real job on ci-kit-sandbox;
 6. only then tags the AMI `ci-kit-ready=true`.
 
 M1 found that one-time spot with interruption behaviour `terminate` rejects
@@ -893,7 +897,8 @@ EC2's `createProvider`, `awsCredentials`, the AMI and config for M6.
 **Decisions owned here:** the EC2 provider observes only pool-tagged instances. A test double of the EC2 API,
 in the style of `test/gce/fake-gce.mjs`, exercises the launch failure table and the report contract. Purpose and
 deadline tags are applied now, before M6's guard consumes them. User-data obeys the defined shape and 16 KB limit.
-Setup creates and validates 14400-second launcher/bake roles and the builder-only Canonical AMI permission.
+Setup creates and validates 14400-second launcher/bake roles and the IAM-enforced purpose split: bake launches
+builders only (Canonical or owned pool AMIs); launcher launches jobs/smokes only (owned pool AMIs).
 The Cost Explorer client uses its explicit endpoint and signing region, not the EC2 client's region. Setup runs
 per account and refuses a profile whose account differs from the entry's. The bake's EC2 stage runs per account.
 Provider construction, federation audiences and credential caches are per account. Parser and provider tests
@@ -903,7 +908,8 @@ use two accounts, while the live proof uses one.
 
 **Proves:** Acceptance 1, the recovery tests in 3, 4 and 10, and Acceptance 11's M5 live part. The live on-demand Canonical builder launch uses
 the federated bake role,
-with a 14400-second session. Tests pin setup's report of an existing role-duration mismatch without mutation;
+with a 14400-second session. Live RunInstances dry-runs prove allowed/refused image-purpose combinations below.
+Tests pin setup's report of existing role-duration or launch-policy mismatch without mutation;
 restart after a request that never arrived (abandoned at 10 min, reservation released and JIT removed);
 restart after an accepted request whose response was lost (found by tag/token, row running); no secret request
 persistence, replay or token reuse in another zone/provider; registration retained through the reconciliation
@@ -1003,6 +1009,18 @@ An operator-launched builder is not this proof.
     AWS_PROFILE=ci-kit-ops aws iam get-role --role-name ci-kit-ec2-launcher --query 'Role.MaxSessionDuration'
     AWS_PROFILE=ci-kit-ops aws iam get-role --role-name ci-kit-ec2-bake --query 'Role.MaxSessionDuration'
     # expect: 14400 for each; setup reports a differing existing value without silently changing it
+
+M5 also runs negative authorization proofs through each federated role using the exact otherwise-valid launch
+inputs with `RunInstances --dry-run` (or SDK `DryRun: true`); dry-run creates no resources. Record the AWS error
+code, not the CLI's nonzero status, since both authorized and unauthorized dry-runs return errors:
+
+- bake + Canonical AMI + builder: `DryRunOperation`;
+- bake + owned pool AMI + smoke: `UnauthorizedOperation`;
+- launcher + Canonical AMI + job: `UnauthorizedOperation`;
+- launcher + Canonical AMI + smoke: `UnauthorizedOperation`;
+- launcher + owned pool AMI + smoke: `DryRunOperation`.
+
+The builder/smoke guard deadline protections are unchanged by which role launched the VM.
 
 Before M6 enables preference, run setup's billing proof through the federated launcher credentials, with a
 14400-second STS request and Cost Explorer signing for us-east-1. The proof makes `GetCostAndUsage` for the
@@ -1493,6 +1511,16 @@ The production chain is reviewed at each boundary:
   Rationale: per-account config already owns role identity, and the guest has no required separate claim signal.
   This removes stale single-account deployment wording without changing the report contract or claim semantics.
   Date/Author: 2026-10-23, M5 executor and controller.
+
+- Decision: Enforce Canonical-only-as-builder with the existing two AWS roles: bake can launch builders only
+  from Canonical or owned pool AMIs; launcher can launch jobs/smokes only from owned pool AMIs. Smoke launches
+  therefore use launcher credentials. Setup validates these policies on existing roles, and M5 proves allowed
+  and refused combinations with zero-resource RunInstances dry-runs. Guard deadlines are unchanged.
+  Rationale: RunInstances authorizes AMIs and new instances/volumes separately: image conditions expose Owner
+  but not request purpose tags, while instance/volume conditions expose request tags. Rejected one bake role
+  with Canonical/builder coupling enforced only in code (not IAM), and a third builder-only role (extra setup
+  for the same enforcement). Official authorization reference: https://servicereference.us-east-1.amazonaws.com/v1/ec2/ec2.json.
+  Date/Author: 2026-10-23, design-owner confirmation relayed to M5 executor and controller.
 
 ## Outcomes & Retrospective
 
