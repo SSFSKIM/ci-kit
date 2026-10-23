@@ -1108,13 +1108,13 @@ observations in this spec's Progress and Surprises & Discoveries.
       provisioning: 'spot' | 'standard', subnet: string, disk: { type: string, sizeGB: number },
       price: { source: string, at: string, initializationUsd?: number },
     }
-    Instance = { provider, id, alloc, runner, size: number, labels: string[], state: 'pending'|'running'|'stopping'|'stopped'|'gone',
+    Instance = { provider, id, alloc, runner, repo?: string, size: number, labels: string[], state: 'pending'|'running'|'stopping'|'stopped'|'gone',
                  stateReason?: string, candidate: Candidate, createdAt: string }
     LaunchResult = { outcome: 'accepted'|'capacity'|'quota'|'denied'|'throttled'|'uncertain',
                      scope?: string, detail: string, id?: string }
     ReconcileResult = LaunchResult | { outcome: 'abandoned', detail: string }
     Provider = {
-      name: 'gce' | 'ec2',
+      name: 'gce' | 'ec2', account: string,
       candidates(config, size) : Candidate[],               // ordered for one logical size
       observe()          : Promise<{ instances: Instance[], complete: boolean, room?: object }>,
       readyImage()       : Promise<{ id: string, manifest: object } | null>,
@@ -1446,6 +1446,15 @@ The production chain is reviewed at each boundary:
   The existing `race.of` names an actual raced allocation, not every descendant's demand; a group field preserves
   that meaning and reconstructs partial batches across restarts without needing the original row.
   Date/Author: 2026-10-23, CI-opt.
+
+- Decision: M4's Provider carries its account identity, and an observed Instance may carry its repo from cloud
+  tags so orphan rows participate in repo/instance cap accounting. Cold/full ledger reads scan open ledger
+  issues beyond the ordinary cost window to recover old non-final reservations. A budget-declined demand gets
+  one admission retry after concurrent cleanup finalizes rows, preserving GCE's same-tick budget reuse.
+  Rationale: provider kind alone cannot identify account-scoped effects, missing rows must not erase cap usage,
+  and unknown inventory must retain reservations beyond 26 hours. The retry preserves existing admission
+  opportunities without weakening synchronous acquisition of both budgets.
+  Date/Author: 2026-10-23, M4 executor and controller; design-owner confirmed consistency.
 
 ## Outcomes & Retrospective
 
