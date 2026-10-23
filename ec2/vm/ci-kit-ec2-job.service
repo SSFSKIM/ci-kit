@@ -1,0 +1,18 @@
+[Unit]
+Description=ci-kit EC2 one-job guest
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+# No Requires=docker: a failed Docker start must still run the guest's failure reporter.
+SuccessAction=poweroff-immediate
+FailureAction=poweroff-immediate
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/node /opt/ci-kit/ec2/vm/job.mjs
+ExecStopPost=/usr/local/bin/node /opt/ci-kit/ec2/vm/job.mjs --finalize
+TimeoutStopSec=40s
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

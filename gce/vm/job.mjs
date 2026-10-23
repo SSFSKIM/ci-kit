@@ -4,17 +4,12 @@
 // metadata, or, on the bake's smoke VM, the smoke check. The result goes to a guest attribute (ci-kit/job=exit:<code>,
 // or ci-kit/smoke=ok|failed:<check>); the unit powers the VM off when this exits, however it exits.
 // The JIT config reaches the container only through the docker CLI's environment, never a command line or a log.
-import { execFile, spawn } from 'node:child_process';
-import { promisify } from 'node:util';
 import { readFileSync } from 'node:fs';
-import { mkdir, chown } from 'node:fs/promises';
 import { availableParallelism } from 'node:os';
-import { workDir } from '../../pool/agent/docker.mjs';
-import { jobRunArgs, vmMode, smokeVerdict, METADATA_BLOCK } from './run.mjs';
+import { prepareContainer, docker } from '../../pool/vm/container.mjs';
+import { jobRunArgs, vmMode, smokeVerdict } from './run.mjs';
 
-const sh = promisify(execFile);
 const MD = 'http://169.254.169.254/computeMetadata/v1/instance';
-const RUNNER_UID = 1001;
 const log = (...a) => console.log(`ci-kit gce job (up ${readFileSync('/proc/uptime', 'utf8').split(' ')[0]} s):`, ...a);
 
 async function meta(path) {
@@ -38,30 +33,6 @@ async function report(key, value) {
   }
 }
 
-async function blockMetadata() {
-  for (const rule of METADATA_BLOCK) {
-    try {
-      await sh('iptables', ['-C', ...rule]);
-    } catch {
-      await sh('iptables', ['-I', ...rule]);
-    }
-  }
-}
-
-// Runs docker with the given arguments and environment; resolves to its exit code and, when asked, its stdout.
-function docker(args, { env = {}, capture = false } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn('docker', args, { env: { ...process.env, ...env }, stdio: ['ignore', capture ? 'pipe' : 'inherit', 'inherit'] });
-    let out = '';
-    child.stdout?.on('data', (d) => {
-      out += d;
-      process.stdout.write(d);
-    });
-    child.on('error', reject);
-    child.on('close', (code) => resolve({ code: code ?? 1, out }));
-  });
-}
-
 async function main() {
   const name = await meta('name');
   const mode = vmMode({ jit: await meta('attributes/ci-kit-jit'), smoke: await meta('attributes/ci-kit-smoke') });
@@ -71,10 +42,7 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  await blockMetadata();
-  const work = workDir(name);
-  await mkdir(work, { recursive: true });
-  await chown(work, RUNNER_UID, RUNNER_UID);
+  await prepareContainer(name);
   const cpus = availableParallelism();
 
   if (mode.kind === 'smoke') {
