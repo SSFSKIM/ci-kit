@@ -28,7 +28,8 @@
 #   size; under 4096 is refused at once, the base image's minimum being 4 GiB); a run with the installed kit
 #   (CI_KIT_VM_KIT, ~/ci-kit-vm/kit) and the MAWS checkout (--maws, CI_KIT_VM_MAWS, ~/Developer/GitHub/MAWS) shared
 #   read-only; provision.sh's steps through `tart exec` (the APFS container grown into
-#   the larger disk and the display mode set first, each verified in the guest), the free space read after each
+#   the larger disk, indexing and the measured background services turned off, then the display mode set, each
+#   verified in the guest before the installs), the free space read after each
 #   (the lowest is printed, which the first refresh records; under CI_KIT_VM_DISK_FLOOR GB, 5, the bake stops); the
 #   verified stop. It then prints the first-run window step: clicks by the human, or CI-opt through cua in the guest;
 #   the shell part from the MacBook through --first-run. No script answers a prompt.
@@ -323,6 +324,8 @@ do_bake() {
   in_guest 600 'the base (check)' /bin/bash "$provision" check
   disk_follow
   in_guest 1800 "the disk grown to $guest_disk GB (disk)" /bin/bash "$provision" disk "$guest_disk"
+  disk_follow
+  in_guest 600 'indexing and measured background services off (quiet)' /bin/bash "$provision" quiet
   disk_follow
   in_guest 900 'the display at 2560x1440, scaling on (display)' /bin/bash "$provision" display
   disk_follow
