@@ -36,7 +36,9 @@
 #   LibreOffice's quarantine absent or user-approved (the window step first). Through tart exec, a scratch clone of
 #   the share at ~/maws-firstrun, pnpm install, then e2e:deliverables with a 3 GB heap, on the runner's PATH, streamed.
 #   A guest-side deadline ends the shell work after CI_KIT_VM_FIRST_RUN_WAIT s (1200); the scratch clone is removed
-#   on success, failure or expiry. Failure leaves the guest running for inspection; success asks it to shut down
+#   on success, failure or expiry. Every run first stops scratch processes (argv or cwd, detached Electron included)
+#   and removes leftovers from a cancelled exec (which can kill the EXIT cleanup shell). Failure leaves the guest
+#   running; success asks it to shut down
 #   (sudo -n /sbin/shutdown), then verifies its stop. This step never boots a VM.
 # - --register: boots the candidate or golden named, registers through config.sh each identity whose slot lacks one,
 #   in this order: the production slot (~/ci-kit-vm/vm/identity: ci-kit-mac-<machine>-vm, labels ci-kit-mac-solo and
@@ -353,8 +355,9 @@ Screen Sharing from the MacBook (never VNC into the guest), with the maintenance
      answer it in the guest's window as the mini's own setting has it (System Settings > Notifications > Electron
      on the mini). Answer any other prompt the group raises the same way. No script answers a prompt.
      On success the scratch clone is removed and the guest shuts down, its stop verified; on failure it stays up
-     for inspection. Keep the maintenance hold until the procedure is done.
-Then: bake.sh --register $name (first refresh only, tokens on stdin), bake.sh --trial $name, bake.sh --promote $name.
+     for inspection. Rerun --first-run until it passes; it cleans any interrupted run first and shuts the guest
+     down itself only after a pass. Keep the maintenance hold until the procedure is done.
+Only after --first-run passes and the stop is verified: bake.sh --register $name (first refresh only, tokens on stdin), bake.sh --trial $name, bake.sh --promote $name.
 EOF
 }
 
@@ -370,7 +373,8 @@ do_first_run() {
   tart_answers "$vm" || refuse "$vm: its guest agent does not answer; wait for the guest to log in and retry --first-run"
   run_vm=$vm
   # Unlike in_guest, a failure here must leave the window open. Bound the work in the guest too: killing a host
-  # tart exec does not end what it started there. The outer guest shell owns cleanup, outside the timed group.
+  # tart exec can kill the cleanup shell without ending its detached workload. Every retry cleans the scratch
+  # processes and directory first; normal exits and the guest deadline clean them too.
   script=$(cat <<'GUEST'
 set -euo pipefail
 refuse() { printf 'refused: %s\n' "$*" >&2; exit 1; }
@@ -390,9 +394,65 @@ PATH=$(cat "$HOME/actions-runner-maws/.path") || refuse "the runner's PATH canno
 [[ -n $PATH ]] || refuse "the runner's PATH is empty"
 export PATH
 work=$HOME/maws-firstrun
-[[ ! -e $work && ! -L $work ]] || refuse "$work exists; move it aside before retrying --first-run"
-trap 'cd "$HOME"; rm -rf "$work"' EXIT
-# A process group contains install, the build and Electron; expiry kills that group, not the cleanup shell.
+# This path belongs only to first-run in a candidate. A cancelled exec can skip EXIT, leaving it and Electron.
+# Electron normally names its binary under node_modules here; pnpm and shells can name only tools elsewhere,
+# so match cwd too. Do not traverse node_modules with lsof +D: the cwd table is enough.
+stop_scratch() {
+  /usr/bin/perl -MTime::HiRes=time,sleep -e '
+    my $work = shift;
+    sub matching {
+      my (%parent, %cmd, %live, %skip, %found);
+      open my $ps, "-|", "/bin/ps", "-axww", "-o", "pid=,ppid=,stat=,command=" or die "ps: $!";
+      while (<$ps>) {
+        next unless /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/;
+        $parent{$1} = $2; $cmd{$1} = $4; $live{$1} = $3 !~ /^Z/;
+      }
+      close $ps or die "first-run: cannot read processes\n";
+      # This scanner carries the scratch path in argv; never select it or the exec that owns it.
+      for (my $pid = $$; $pid && !$skip{$pid}++; $pid = $parent{$pid} // 0) {}
+      for my $pid (keys %cmd) { $found{$pid} = 1 if index($cmd{$pid}, $work) >= 0; }
+      open my $ls, "-|", "/usr/sbin/lsof", "-a", "-u", $<, "-d", "cwd", "-Fpn" or die "lsof: $!";
+      my $pid;
+      while (<$ls>) {
+        chomp;
+        if (/^p(\d+)$/) { $pid = $1; }
+        elsif (/^n(.*)$/ && defined $pid && ($1 eq $work || index($1, "$work/") == 0)) { $found{$pid} = 1; }
+      }
+      close $ls or die "first-run: cannot read process working directories\n";
+      return grep { $live{$_} && !$skip{$_} } keys %found;
+    }
+    sub wait_gone {
+      my $until = time + 5;
+      while (time < $until && grep { kill 0, $_ } @_) { sleep 0.1; }
+    }
+    my @pids = matching();
+    exit 0 unless @pids;
+    print "first-run: stopping scratch processes @pids\n";
+    kill "TERM", @pids;
+    wait_gone(@pids);
+    @pids = matching();
+    my $until = time + 5;
+    while (@pids && time < $until) {
+      print "first-run: killing scratch stragglers @pids\n";
+      kill "KILL", @pids;
+      sleep 0.1;
+      @pids = matching();
+    }
+    die "first-run: scratch processes still run: @pids\n" if @pids;
+  ' "$work"
+}
+printf 'first-run: cleaning owned scratch %s and any previous run\n' "$work"
+stop_scratch
+rm -rf "$work"
+cleanup() {
+  local status=$?
+  trap - EXIT
+  cd "$HOME"
+  stop_scratch && rm -rf "$work" || exit 1
+  exit "$status"
+}
+trap cleanup EXIT
+# Expiry ends the main group; EXIT also finds detached Electron and anything else tied to the scratch.
 /usr/bin/perl -MPOSIX=setsid -e '
   my $seconds = shift;
   my $pid = fork;

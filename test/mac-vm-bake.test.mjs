@@ -477,7 +477,14 @@ function firstRunFixture() {
   executable(join(guest, 'bin/xattr'), `if [[ $1 == -p ]]; then cat "$HOME/quarantine"; else [[ ! -f $HOME/quarantine ]] || echo com.apple.quarantine; fi`);
   executable(join(guest, 'bin/git'), `printf 'git %s\\n' "$*" >> "$HOME/commands"
 [[ $1 == -c && $2 == 'safe.directory=*' && $3 == clone && $4 == "$HOME/share" && $5 == "$HOME/maws-firstrun" ]] || exit 64
-mkdir "$5"`);
+mkdir "$5" || exit 1
+if [[ -e $HOME/detach-group ]]; then
+  cat > "$5/detached-child" <<'CHILD'
+trap '' TERM
+echo $$ > "$HOME/detached.pid"
+while :; do sleep 1; done
+CHILD
+fi`);
   executable(join(guest, 'runner-bin/pnpm'), `printf 'pnpm %s NODE_OPTIONS=%s PATH=%s\\n' "$*" "\${NODE_OPTIONS-unset}" "$PATH" >> "$HOME/commands"
 [[ -d $HOME/maws-firstrun ]] || exit 64
 if [[ $1 == install ]]; then
@@ -485,6 +492,10 @@ if [[ $1 == install ]]; then
   [[ ! -e $HOME/fail-install ]] || exit 17
 else
   [[ $1 == e2e:deliverables && \${NODE_OPTIONS:-} == --max-old-space-size=3072 ]] || exit 64
+  if [[ -e $HOME/detach-group ]]; then
+    /usr/bin/perl -MPOSIX=setsid -e 'setsid() or die; exec "/bin/bash", @ARGV' "$HOME/maws-firstrun/detached-child" </dev/null >/dev/null 2>&1 &
+    until [[ -s $HOME/detached.pid ]]; do sleep 0.05; done
+  fi
   echo 'deliverables: running'
   if [[ -e $HOME/pause-group ]]; then
     touch "$HOME/group-started"
@@ -571,6 +582,52 @@ describe('the first-run shell (bake.sh --first-run)', macOnly, () => {
     assert.equal(existsSync(join(f.guest, 'maws-firstrun')), false);
     assert.equal(f.state(CANDIDATE), 'running');
     assert.ok(!f.calls().some((call) => /sudo|^stop /.test(call)));
+  });
+
+  test('a deadline kills a detached Electron-shaped child before removing the clone', () => {
+    const f = firstRunFixture();
+    writeFileSync(join(f.guest, 'detach-group'), '');
+    writeFileSync(join(f.guest, 'pause-group'), '');
+    let pid;
+    try {
+      const result = f.run(['--first-run', CANDIDATE], { extra: { CI_KIT_VM_FIRST_RUN_WAIT: '1' } });
+      pid = Number(text(join(f.guest, 'detached.pid')));
+      assert.ok(pid > 0, 'the group started its detached child');
+      assert.notEqual(result.status, 0, result.stdout + result.stderr);
+      assert.equal(spawnSync('/bin/ps', ['-p', String(pid), '-o', 'stat='], { encoding: 'utf8' }).stdout.trim().replace(/^Z.*/, ''), '', 'detached child is gone, even though it ignored TERM');
+      assert.equal(existsSync(join(f.guest, 'maws-firstrun')), false, result.stdout + result.stderr);
+      assert.equal(f.state(CANDIDATE), 'running');
+    } finally {
+      if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch {} }
+    }
+  });
+
+  test('a rerun removes the previous scratch and kills both argv and cwd-only survivors before cloning', async () => {
+    const f = firstRunFixture();
+    const work = join(f.guest, 'maws-firstrun');
+    mkdirSync(work);
+    writeFileSync(join(work, 'leftover'), 'old run');
+    const byArgv = spawn('/bin/bash', ['-c', 'trap "" TERM; echo ready; while :; do sleep 1; done', `${work}/old-electron`], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    const byCwd = spawn('/bin/sleep', ['600'], { cwd: work, detached: true, stdio: 'ignore' });
+    children.add(byArgv); children.add(byCwd);
+    const argvExit = once(byArgv, 'exit');
+    const cwdExit = once(byCwd, 'exit');
+    await once(byArgv.stdout, 'data');
+    try {
+      const run = f.start(['--first-run', CANDIDATE]);
+      assert.equal(await run.exited, 0, run.output());
+      assert.notEqual(byArgv.exitCode === null && byArgv.signalCode === null, true, 'argv survivor stopped');
+      assert.notEqual(byCwd.exitCode === null && byCwd.signalCode === null, true, 'cwd-only survivor stopped');
+      await Promise.all([argvExit, cwdExit]);
+      assert.match(run.output(), /cleaning.*scratch.*previous run/);
+      assert.match(f.commands(), /pnpm e2e:deliverables/);
+      assert.equal(existsSync(work), false);
+    } finally {
+      for (const child of [byArgv, byCwd]) {
+        try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+        children.delete(child);
+      }
+    }
   });
 
   test('no quarantine attribute is allowed; a failed verified stop is not reported as success', () => {

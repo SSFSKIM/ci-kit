@@ -798,10 +798,14 @@ commands, `owner` is the session's name, as for a timed hold, and `cand` the can
    `~/maws-firstrun` as a scratch clone of the share, runs `pnpm install --frozen-lockfile`, then runs
    `NODE_OPTIONS=--max-old-space-size=3072 pnpm e2e:deliverables`, streaming its output. In the 4 GB guest the first
    attempt exited 134 in electron-vite's build; with that heap it passed 12/12. The shell work has a 20 min bound
-   (`CI_KIT_VM_FIRST_RUN_WAIT`, seconds), and removes the clone on success, failure or expiry. A failure leaves the
-   guest up for inspection and returns non-zero; fix the cause and rerun `--first-run`. On success it runs
-   `sudo -n /sbin/shutdown -h now` and verifies the stop: under `tart exec`, sudo's PATH has no `/sbin`, so the full
-   path is needed. `--register` and `--trial` refuse a candidate still running.
+   (`CI_KIT_VM_FIRST_RUN_WAIT`, seconds). At the start, and on success, failure or expiry, it stops processes whose
+   arguments or working directory name the scratch, including detached Electron, and removes the clone. It gives
+   them 5 s after TERM, then kills stragglers and verifies they are gone. This scratch belongs only to the first-run
+   step in a candidate. A cancelled `tart exec` can kill the cleanup shell; the next run cleans its leftovers first.
+   A failure leaves the guest up for inspection and returns non-zero. Fix the cause and rerun `--first-run` until it
+   passes. Only then does it shut the guest down itself, with `sudo -n /sbin/shutdown -h now`, and verify the stop:
+   under `tart exec`, sudo's PATH has no `/sbin`, so the full path is needed. Run `--register` only after that pass
+   and verified stop. `--register` and `--trial` refuse a candidate still running.
 
 4. **Registration**, once per identity, not per refresh (the first refresh, or after a slot's identity is removed):
    `--register` boots the candidate (or the golden), runs the runner's `config.sh --unattended --no-default-labels`
