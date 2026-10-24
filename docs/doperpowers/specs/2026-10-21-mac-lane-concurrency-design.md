@@ -205,7 +205,9 @@ and by the coordinator's holds, and the design below says what is read and when.
     a second on `e2e:document-app` passed (run 40113715486); promoted to `maws-vm-golden-20261024a`.
     `maws-vm-golden-20261023d` retired 17:16:04Z after the first green production job from 20261024a (run
     40112861862, job 120928539099, `e2e:transcript`).
-  - [ ] Step 4 wave 2b: `presentations` and `dashboard` three times on 20261024a.
+  - [x] (2026-10-24 17:05–18:47Z) Step 4 wave 2b on 20261024a: `dashboard` 3/3 green, its longest job 5.4 min
+    (1.30x the host's); `presentations` 2/3, a hang in a non-export test in run 1 (Surprises); the MAWS architect
+    judges it against the test's host history.
   - [ ] Step 4 wave 3 (browser, browser-comment, delivery). The host tools MAWS's groups run were checked against
     the image first (2026-10-24, the Poppler gap's lesson, Decision Log): no other gap.
 - [ ] V5 — Widen the proven-VM set; the second guest, if memory ever allows it.
@@ -1992,6 +1994,17 @@ hold-aware plan send them to the guest, which this spec leaves open.
     job 120925987036): Poppler worked, and 18 of 19 passed, but design's capture limit failed the record
     (Decision Log), and `--promote` refuses a failed record. A second trial on `e2e:document-app` (run
     40113715486, job 120931846734) passed and promoted.
+
+- 2026-10-24 17:05–18:47Z, V4 step 4 **wave 2b** on `maws-vm-golden-20261024a` (scratch 6a15a356e, `Lane: vm`; runs
+  40114501885, 40120234172, 40121336786, one after another and interleaved with production guest jobs):
+  - `dashboard`: 5.4, 5.2 and 4.6 min, all green, against the host reference's 4.2 min; no repeat of wave 2's hang.
+  - `presentations`: green in runs 2 and 3 (4.7 min each, against the host's 3.1). In run 1, 37 passed and
+    `presentations.spec.ts:965` (an svg's stylesheet and ids) ran to its 180 s test timeout with no other error:
+    not an export case, and green in all three wave-2 guest runs on the old image.
+  - **Both guests whose halt stalled ran a hung test just before** (wave 2's `dashboard` close hang, this run's
+    timeout), and the stall sample shows no job process left, so a hang in the guest's graphics stack may sit under
+    both. ci-kit #130 bounds the halt's cost to the 60 s power-off wait either way.
+  - The Poppler exports passed in every run.
 
 ## Outcomes & Retrospective
 
