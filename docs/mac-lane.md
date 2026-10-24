@@ -506,7 +506,7 @@ into per machine (`install.sh --vm`), and a Mac without it has none of what foll
 |---|---|
 | Launcher | `mac/vm/lane.sh`, the program of the LaunchAgent `com.ssfskim.ci-kit.vm-lane` (RunAtLoad, KeepAlive, Aqua session only, `ProcessType` Interactive), run from the installed kit. It is the only automated way a guest starts: it reads the queue every 15 s, decides admission, boots a job clone, follows it through its one job and deletes it. Its header has the lifecycle, the boot rule, the guard and every input. |
 | Installed kit | `~/ci-kit-vm/kit`, a copy of `mac/` that `install.sh` publishes with the hooks' staged swap, so the checkout can move on. Every clone is shown it read-only, so a hook change needs no image refresh. |
-| Golden image | the local Tart VM `~/ci-kit-vm/golden` names (`maws-vm-golden-<id>`): the macOS 27 base (`ghcr.io/cirruslabs/macos-golden-gate-base`) with Node 22, pnpm, the warm store, LibreOffice, the runner, its seeded MAWS work repository and the compiled helpers baked in. It is never run for a job; only the [maintenance procedure](#the-vm-lanes-maintenance) makes or replaces it. |
+| Golden image | the local Tart VM `~/ci-kit-vm/golden` names (`maws-vm-golden-<id>`): the macOS 27 base (`ghcr.io/cirruslabs/macos-golden-gate-base`) with Node 22, pnpm, the warm store, LibreOffice, Poppler, the runner, its seeded MAWS work repository and the compiled helpers baked in. It is never run for a job; only the [maintenance procedure](#the-vm-lanes-maintenance) makes or replaces it. |
 | Job clone | `maws-vm-job-vm-<time>`, an APFS copy of the golden image (seconds; it holds only what the job writes), run with `tart run --no-graphics --no-clipboard` (its pasteboard is never the host's) and four directory shares: the kit and the slot's identity read-only, its `out/` and `cache/` read-write. |
 | Slot | `~/ci-kit-vm/vm/`: `identity/` (the runner's `.runner`, `.credentials`, `.credentials_rsaparams`, copied into each clone and never baked), `out/` (what the guest writes back: its markers, `_diag`, its hooks log), `cache/` (MAWS's e2e build cache). The trial slot, `~/ci-kit-vm/vm-trial/`, is the same for a candidate's trial and serves nothing else. |
 | In the guest | `mac/vm/guest/`: `kickoff.sh` (run by `tart exec`, which is gRPC to the Tart guest agent, never the guest's address) makes the clone the slot's runner and starts `wrapper.sh`, which runs `run.sh --once`, writes the `out/` markers (its header is the protocol), answers the idle stop and powers the guest off; `hooks/` is the guest's start and end, cut down: the display and dialog check, Terminal in front, the posture line with `vm=` and `clone=`, no sweep, no alert, no `gh`. |
@@ -768,7 +768,8 @@ booking.
    Spotlight indexing and the measured background services turned off (`quiet`, below); the display set to
    2560x1440 with scaling on through `displayplacer` and read back, since `tart set --display` does not reach the
    guest's mode; Node 22 and the checkout's pnpm
-   through corepack; the warm store from a scratch clone; LibreOffice; the runner at `install.sh`'s pin in
+   through corepack; the warm store from a scratch clone; LibreOffice; Poppler (the PDF readers MAWS's export groups
+   call at `/opt/homebrew/bin`); the runner at `install.sh`'s pin in
    `~/actions-runner-maws`, its `.env` naming the hooks through `~/ci-kit` → the kit share, `CI_KIT_MACHINE=mini-vm`,
    `CI_KIT_VM_GUEST=1` and `LANG=en_US.UTF-8`, and its `.path`; the seeded MAWS work repository (`workrepo`, below);
    the compiled helpers in `~/ci-kit-helpers/`), and verifies its stop. `--memory` is the guest's size in MB, 4096 by
@@ -1162,7 +1163,7 @@ defaults -currentHost write com.apple.screensaver idleTime -int 0
 
 ```bash
 host=<host> name=<name>
-ssh $host '/opt/homebrew/bin/brew install node corepack git gh python jq'
+ssh $host '/opt/homebrew/bin/brew install node corepack git gh python jq poppler'
 ssh $host '/opt/homebrew/bin/brew install --cask google-chrome libreoffice betterdisplay'
 ssh $host 'curl -fsSL https://claude.ai/install.sh | bash'
 ssh $host 'git clone https://github.com/SSFSKIM/ci-kit ~/Developer/GitHub/ci-kit'
@@ -1178,6 +1179,7 @@ ssh $host 'GH_TOKEN=$(cat ~/.config/ci-kit/alert-token) /opt/homebrew/bin/gh iss
 - `corepack` is its own formula: Homebrew's `node` (26) ships without it, and `--check` requires it. The mini's comes
   from a Node.js package in `/usr/local`.
 - Google Chrome because MAWS's desk-web e2e drives the installed Chrome on a Mac; LibreOffice for the document groups;
+  Poppler because MAWS's export groups read their PDFs with its `pdfinfo`, `pdftoppm`, `pdftotext` and `pdffonts`;
   BetterDisplay for the display (step 3).
 - Claude Code's native installer puts `claude` in `~/.local/bin`. Only MAWS's live groups launch the engine; class 1
   does not.

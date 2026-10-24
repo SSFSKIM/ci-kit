@@ -335,6 +335,8 @@ do_bake() {
   disk_follow
   in_guest "$provision_wait" 'LibreOffice (libreoffice)' /bin/bash "$provision" libreoffice
   disk_follow
+  in_guest "$provision_wait" 'Poppler (poppler)' /bin/bash "$provision" poppler
+  disk_follow
   in_guest 900 "the runner $version (runner)" /bin/bash "$provision" runner "$version" "$sha" "$machine-vm"
   disk_follow
   in_guest "$provision_wait" 'the seeded MAWS work repository (workrepo)' /bin/bash "$provision" workrepo

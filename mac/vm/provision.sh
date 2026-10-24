@@ -15,6 +15,8 @@
 #   store                                the pnpm store and Electron's download cache warmed: a scratch clone of the
 #                                        read-only maws share, `pnpm install --frozen-lockfile`, then the clone removed
 #   libreoffice                          LibreOffice (cask), for the document groups
+#   poppler                              Poppler's pdfinfo, pdftoppm, pdftotext and pdffonts in /opt/homebrew/bin, where
+#                                        MAWS's export groups read the PDFs they make (design, presentations, dashboard)
 #   runner <version> <sha256> <machine>  the runner at install.sh's pin in ~/actions-runner-maws, its .env and .path
 #                                        (env below), and ~/ci-kit -> the kit share, which keeps a space out of the
 #                                        hook paths
@@ -262,6 +264,13 @@ sys.exit(0 if valid else 1)' <<<"$indexing" || fail "Spotlight indexing is not v
     [[ -d /Applications/LibreOffice.app ]] || brew install --cask libreoffice
     [[ -x /Applications/LibreOffice.app/Contents/MacOS/soffice ]] || fail 'LibreOffice did not install'
     say 'LibreOffice installed'
+    ;;
+  poppler)
+    brew list poppler >/dev/null 2>&1 || brew install poppler
+    for tool in pdfinfo pdftoppm pdftotext pdffonts; do
+      [[ -x /opt/homebrew/bin/$tool ]] || fail "Poppler's $tool did not install"
+    done
+    say "Poppler installed ($(/opt/homebrew/bin/pdfinfo -v 2>&1 | head -1))"
     ;;
   runner)
     version=${1:-} sha=${2:-}
