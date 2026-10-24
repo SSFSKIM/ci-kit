@@ -56,11 +56,13 @@ export async function removeImage(ec2, image) {
   for (const SnapshotId of snapshots) await ec2.send(new DeleteSnapshotCommand({ SnapshotId }));
 }
 
-export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token, gh, script, sleep, now = Date.now, log = () => {} }) {
+// promote:false retains a smoke/job-passed candidate without selecting it for production or pruning other images.
+// The ordinary unready-image guard still expires that candidate after one day.
+export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token, gh, script, sleep, promote = true, now = Date.now, log = () => {} }) {
   const run = `${runId}-${cfg.account}`;
   const prefix = `reports/bake-${run}`;
   const ec2 = aws.ec2;
-  let image, ready = false, runner, runnerName, checkRun;
+  let image, checked = false, runner, runnerName, checkRun;
   const pool = { 'ci-kit-pool': 'ec2', 'ci-kit-run': run };
   const wait = async (label, timeout, fn) => {
     const start = now();
@@ -172,9 +174,9 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
       if (outcome.done && !outcome.ok) throw new Error(`real sandbox job failed: ${outcome.reason}`);
       return outcome.ok;
     });
-    await ec2.send(new CreateTagsCommand({Resources:[image],Tags:tags({'ci-kit-ready':'true'})}));
-    ready = true;
-    log(`${cfg.account}: ${image} ready, real sandbox job ${dispatched.html_url}`);
+    if (promote) await ec2.send(new CreateTagsCommand({Resources:[image],Tags:tags({'ci-kit-ready':'true'})}));
+    checked = true;
+    log(`${cfg.account}: ${image} ${promote ? 'ready' : 'candidate (unready)'}, real sandbox job ${dispatched.html_url}`);
     return {image,manifest:actual,snapshotGiB,initializationUsd,check:dispatched.html_url};
   } finally {
     if (checkRun) await cleanupStep('run',async () => { if ((await gh.getRun(CHECK.repo,checkRun)).status !== 'completed') await gh.cancelRun(CHECK.repo,checkRun); });
@@ -190,7 +192,7 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
     await cleanupStep('images and snapshots',async () => {
       const all = await list(ec2,DescribeImagesCommand,{Owners:['self'],Filters:filters({'ci-kit-pool':'ec2'})},'Images');
       // Tag lookup also recovers a CreateImage response lost in transit.
-      const doomed = new Map([...(!ready ? all.filter((i) => owned(i,run)) : []),...imagesToPrune(all,now())].map((i) => [i.ImageId,i]));
+      const doomed = new Map([...(!checked ? all.filter((i) => owned(i,run)) : []),...(promote ? imagesToPrune(all,now()) : [])].map((i) => [i.ImageId,i]));
       for (const i of doomed.values()) { await removeImage(ec2,i); log(`${cfg.account}: removed ${i.ImageId} and its snapshots`); }
     });
   }

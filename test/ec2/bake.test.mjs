@@ -71,7 +71,7 @@ test('provider stages share one resolution, including after a provider fails', a
 });
 
 // Fake only the external SDK boundary; the bake performs its own polling, promotion and cleanup.
-async function ec2Fixture({ smoke = 'ok', job = 'success', warmResult = warm, lostLaunch = false, refuseFirstSmoke = false, reportMissing = false, snapshotBytes = 12 * 2**30 } = {}) {
+async function ec2Fixture({ smoke = 'ok', job = 'success', warmResult = warm, lostLaunch = false, refuseFirstSmoke = false, reportMissing = false, snapshotBytes = 12 * 2**30, promote = true, otherImages = [] } = {}) {
   const api = await import('../../ec2/bake/bake.mjs');
   const calls = [], instances = [], images = [];
   const tags = (x) => Object.fromEntries((x.Tags ?? []).map((t) => [t.Key,t.Value]));
@@ -88,7 +88,7 @@ async function ec2Fixture({ smoke = 'ok', job = 'success', warmResult = warm, lo
     }
     if (name === 'DescribeInstancesCommand') return { Reservations: [{ Instances: input.InstanceIds ? instances.filter((i) => input.InstanceIds.includes(i.InstanceId)) : instances }] };
     if (name === 'CreateImageCommand') { images.push({ ImageId: 'ami-new', State:'available', CreationDate:'2026-10-23T12:00:00Z', Tags: input.TagSpecifications[0].Tags, BlockDeviceMappings:[{DeviceName:'/dev/sda1',Ebs:{SnapshotId:'snap-new'}}] }); return {ImageId:'ami-new'}; }
-    if (name === 'DescribeImagesCommand') return { Images: images };
+    if (name === 'DescribeImagesCommand') return { Images: input.ImageIds ? images.filter(i => input.ImageIds.includes(i.ImageId)) : [...images, ...otherImages] };
     if (name === 'DescribeSnapshotsCommand') return {Snapshots:[{SnapshotId:'snap-new',State:'completed',FullSnapshotSizeInBytes: snapshotBytes,VolumeSize:50}]};
     if (name === 'GetObjectCommand') {
       if (reportMissing && input.Key.includes('smoke/exit')) throw Object.assign(Error('missing'),{name:'NoSuchKey'});
@@ -110,7 +110,7 @@ async function ec2Fixture({ smoke = 'ok', job = 'success', warmResult = warm, lo
   };
   const cfg = {account:'123456789012',region:'us-east-2',disk_gb:50,initialization_mibps:200,security_group:'sg-pool',report_bucket:'reports',placements:[{zone:'us-east-2c',subnet:'subnet-c'},{zone:'us-east-2a',subnet:'subnet-a'},{zone:'us-east-2b',subnet:'subnet-b'}]};
   let time = 0;
-  const run = () => api.runEc2Bake(aws, { runtimeAws:{ec2:{send:(c)=>send(c,'launcher')}}, cfg, manifest:base, runId:'20261023-120000-abcd',token:'warm-token',gh,script:'#!/bin/bash\n__MANIFEST__\n__TOKEN__\n__REPORT__\n__KIT_SHA__',now:()=>time,sleep:async (ms)=>{time+=ms;} });
+  const run = () => api.runEc2Bake(aws, { runtimeAws:{ec2:{send:(c)=>send(c,'launcher')}}, cfg, manifest:base, promote, runId:'20261023-120000-abcd',token:'warm-token',gh,script:'#!/bin/bash\n__MANIFEST__\n__TOKEN__\n__REPORT__\n__KIT_SHA__',now:()=>time,sleep:async (ms)=>{time+=ms;} });
   return {run,calls,images,tags};
 }
 
@@ -138,6 +138,29 @@ test('EC2 bake stops an on-demand Canonical builder, proves smoke and real job, 
   assert.equal(f.tags(f.images[0])['ci-kit-snapshot-gib'],'12');
   assert.equal(result.initializationUsd,0.0288);
   assert.deepEqual(result.manifest,{...base,warm});
+});
+
+test('candidate bake passes both proofs but cannot change production image selection or retention', async () => {
+  const otherImages = ['2026-10-10', '2026-10-20', '2026-10-22'].map((CreationDate, n) => ({
+    ImageId: `ami-production-${n}`, CreationDate,
+    Tags: [{ Key: 'ci-kit-pool', Value: 'ec2' }, { Key: 'ci-kit-ready', Value: 'true' }],
+    BlockDeviceMappings: [{ Ebs: { SnapshotId: `snap-production-${n}` } }],
+  }));
+  const f = await ec2Fixture({ promote: false, otherImages });
+  const result = await f.run();
+  assert.equal(result.image, 'ami-new');
+  assert.equal(result.check, 'https://job');
+  assert.equal(f.calls.filter(([n]) => n === 'RunInstancesCommand').length, 3);
+  assert.equal(f.tags(f.images[0])['ci-kit-ready'], 'false');
+  assert.ok(!f.calls.some(([n]) => ['DeregisterImageCommand', 'DeleteSnapshotCommand'].includes(n)));
+});
+
+test('failed candidate is removed rather than retained for promotion', async () => {
+  const f = await ec2Fixture({ promote: false, job: 'failure' });
+  await assert.rejects(f.run(), /real sandbox job failed/);
+  assert.equal(f.tags(f.images[0])['ci-kit-ready'], 'false');
+  assert.ok(f.calls.some(([n, v]) => n === 'DeregisterImageCommand' && v.ImageId === 'ami-new'));
+  assert.ok(f.calls.some(([n, v]) => n === 'DeleteSnapshotCommand' && v.SnapshotId === 'snap-new'));
 });
 
 for (const failure of [{smoke:'failed:metadata'}, {job:'failure'}, {warmResult:{...warm,'pnpm-fetch':{ok:false}}}]) test(`EC2 failed proof leaves image unready and deletes its snapshots: ${JSON.stringify(failure)}`, async () => {
