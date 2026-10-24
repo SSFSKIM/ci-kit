@@ -330,7 +330,7 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.ok(f.calls().findIndex((call) => call.startsWith(`set ${CANDIDATE} `)) < f.calls().findIndex((call) => call.startsWith('run ')), f.calls().join('\n'));
     assert.deepEqual(text(join(f.vms, CANDIDATE, 'run.args')).trim().split('\n'), ['--no-graphics', '--no-clipboard', `--dir=kit:${mac}:ro`, `--dir=maws:${f.maws}:ro`, CANDIDATE]);
     const script = '/bin/bash /Volumes/My Shared Files/kit/vm/provision.sh';
-    assert.deepEqual(f.exec(CANDIDATE), [`${script} check`, `${script} disk 60`, `${script} quiet`, `${script} display`, `${script} node 11.23.0`, `${script} store`, `${script} libreoffice`,
+    assert.deepEqual(f.exec(CANDIDATE), [`${script} check`, `${script} disk 60`, `${script} quiet`, `${script} display`, `${script} node 11.23.0`, `${script} store`, `${script} libreoffice`, `${script} poppler`,
       `${script} runner ${installPin('RUNNER_VERSION')} ${installPin('RUNNER_SHA256')} mini-vm`, `${script} workrepo`, `${script} helpers`]);
     assert.match(result.stdout, /the seeded MAWS work repository \(workrepo\)/);
     // Its end verified before the step reports done: a stop, then Tart's list.
