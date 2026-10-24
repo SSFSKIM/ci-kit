@@ -934,6 +934,11 @@ Before first enabling credit preference, run the explicit `ec2/setup.sh --billin
 launcher role. An operator-profile billing success is not that proof. Failure blocks activation. M6's prepared
 config must not reach main/deployment before M5's live image, lifecycle and config-transition acceptance is complete.
 Merging provider/credit config onto main changes the launcher's reload input; it is itself an activation step.
+Roll out in two stages: first merge/deploy the M6 implementation with production credit still disabled, then
+verify the new runtime and its durable billing reading. Only then merge a separate activation-config change
+for the repo lists and `credit.enabled`. The old M5 runtime does not consult durable billing, so merging both
+stages before deployment would briefly bypass the new policy. If the new runtime has missing/stale readings,
+activation still leaves EC2 as overflow until a valid fresh reading permits preference.
 
 Account `290475840169` has a $180 preference budget against $200 credit, `since: 2026-10-23` (including the
 spike and bake) and `until: 2027-04-17` (inclusive UTC). While its credit preference is on, its repo-list place
