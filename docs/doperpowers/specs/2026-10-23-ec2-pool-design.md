@@ -494,8 +494,14 @@ from the entry's. In that account, it sets up:
 Setup validates these launch-purpose/image restrictions on existing roles, as it validates MaxSessionDuration.
 Default setup refuses policy drift without mutation. An explicit `--update-policies` mode prints each current
 versus desired role-policy diff and applies policy changes only in that mode; trust, duration and role identity
-validation are not bypassed. It also proves the federated launcher's billing access before
-M6 enables preference (The billing reading). The runtime roles get no IAM rights.
+validation are not bypassed. A separate explicit `--repair-trust` mode prints current/desired trust documents,
+updates only setup-managed roles trusting GitHub, and rereads to verify. Other role properties and permissions
+remain validated; `--update-policies` still refuses trust drift. Setup derives the exact main-branch subject from
+the repo's OIDC customization and owner/repo IDs: immutable mode uses
+`repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:refs/heads/main`, legacy mode omits IDs. Unsupported custom
+claim templates are refused. The GitHub issuer and sts.amazonaws.com audience stay unchanged, without wildcards.
+It also proves the federated launcher's billing access before M6 enables preference (The billing reading).
+The runtime roles get no IAM rights.
 
 ### The EC2 job VM
 
@@ -609,9 +615,12 @@ runner rule, extended to `ci-kit-ec2-*`; it acts only on known inventory and nev
 
 **Pre-send EC2 rows are not ambiguous submitted requests.** A crash after the initial row write, or a failed
 coordinate write, can leave a launching row without attempt coordinates. First look for an instance carrying
-its `ci-kit-alloc` tag and adopt one if found. If successful observation finds none, abandon immediately: the
-persist-before-send ordering establishes that no request was sent. Finalize durably before releasing either
-reservation and remove the JIT registration by name. Failed/unknown observation still holds the row.
+its `ci-kit-alloc` tag and adopt one if found. If successful observation finds none, abandon when the initial
+row is ten minutes old. A fresh row may belong to another still-active launcher minting JIT; the grace prevents
+reclaiming that writer's reservation. The writer also refuses RunInstances once its row is eight minutes old,
+checking at the send boundary after request preparation, so a stalled writer cannot send after recovery's age
+threshold. Finalize durably before releasing either reservation and remove the JIT registration by name.
+Failed/unknown observation still holds the row.
 
 **Uncertain EC2 launches resolve without replay.** The row holds `zone`, `client_token` and `sent_at` before
 `RunInstances` is sent. It never holds the launch request: that request contains the JIT configuration and
@@ -752,7 +761,9 @@ The guard is an EC2 job in `.github/workflows/pool-guard.yml` on `ubuntu-latest`
 one matrix leg per account in `ec2.json`, including disabled accounts. An absent file yields no EC2 legs.
 One account's failure does not stop another account's leg. Each leg
 assumes that account's `ci-kit-ec2-guard` through GitHub's OIDC, trusted only for
-`repo:SSFSKIM/ci-kit:ref:refs/heads/main`. It lists pool resources and the ledger, then applies predicates by
+the exact main-branch subject derived by setup. For this repo's observed immutable mode it is
+`repo:SSFSKIM@145154405/ci-kit@1421334468:ref:refs/heads/main`; setup does not hardcode these IDs. It lists pool
+resources and the ledger, then applies predicates by
 purpose, not one broad “stopped pool VM” rule:
 
 - Any live instance or volume past its deadline is reaped (terminate its instance before deleting its volume).
@@ -1220,7 +1231,7 @@ observations in this spec's Progress and Surprises & Discoveries.
     }
     Instance = { provider, id, alloc, runner, repo?: string, size: number, labels: string[], state: 'pending'|'running'|'stopping'|'stopped'|'gone',
                  stateReason?: string, candidate: Candidate, createdAt: string }
-    LaunchResult = { outcome: 'accepted'|'capacity'|'quota'|'denied'|'throttled'|'uncertain',
+    LaunchResult = { outcome: 'accepted'|'capacity'|'quota'|'denied'|'throttled'|'uncertain'|'abandoned',
                      scope?: string, detail: string, id?: string }
     ReconcileResult = (LaunchResult & { instance?: Instance }) | { outcome: 'abandoned', detail: string }
     Provider = {
@@ -1334,12 +1345,28 @@ The production chain is reviewed at each boundary:
 
 ## Surprises & Discoveries
 
+- Observation: Guard run `40083424878` at 2026-10-24T09:48Z failed STS in its EC2 leg before any fixture was
+  launched; the Hetzner and account-matrix legs passed. GitHub's repo OIDC endpoint returned immutable mode
+  with prefix `repo:SSFSKIM@145154405/ci-kit@1421334468`, while AWS required the legacy name-only subject.
+  GitHub's [OIDC reference](https://docs.github.com/actions/reference/openid-connect-reference) documents this
+  default for repositories created after July 15, 2026; ci-kit was created October 15. All 19 account role trusts
+  were inventoried: only `ci-kit-ec2-guard` trusts GitHub; launcher/bake/spike trust Google and FIS trusts its
+  service. No trust mutation has yet occurred. Explicit derived-subject repair and green guard proof are pending.
+
+- Observation: Installed `@smithy/node-http-handler` 4.12.1 treats `requestTimeout` as a warning unless
+  `throwOnRequestTimeout:true` is set. Thus lib/aws.mjs's nominal 30-second STS/shared-client deadlines did not
+  enforce the assumed send/abandon safety margin. The bounded fix enables rejection and tests real loopback
+  timeouts: a possibly delivered RunInstances request remains uncertain with tag/token recovery and no replay;
+  an STS refresh timeout must produce no EC2 HTTP send. Remediation/deployment remain pending.
+
 - Observation: Whole-initiative high review found a permanent reservation leak for an EC2 initial launching row
   without attempt coordinates. The provider returned uncertain before any bounded recovery; scheduler cleanup
   excluded it and protected its JIT registration. A focused reproduction held an eight-vCPU reservation for
   48 hours and blocked a sixteen-vCPU GCE demand under a sixteen-vCPU global ceiling. This P1 predates M6,
   including rollback revision 00021-qth. The owner chose fix-forward, held activation/new EC2 fixtures, and
-  required immediate tag-lookup/adopt-or-abandon recovery plus crash/write-failure/cold-restart regressions.
+  required immediate tag lookup/adoption and bounded pre-send abandonment plus crash/write-failure/cold-restart
+  regressions. Subsequent overlap analysis set abandonment at row age ten minutes, with an eight-minute send
+  cutoff: another live launcher can still be minting JIT for a fresh row.
   Production had no non-final EC2 rows at 2026-10-24T09:40:51Z. Finding remediation remains pending.
 
 - Observation: Rebake `ci-kit-bake-295d5` succeeded at 2026-10-24T08:26:15Z using the post-cloud-final cleanup
@@ -1812,13 +1839,33 @@ The production chain is reviewed at each boundary:
 
 - Decision: Fix the whole-review P1 forward before activation; do not roll back to an older revision with the
   same pre-send leak, and launch no new EC2 fixtures until the fix is deployed. A coordinate-free launching
-  row gets an allocation-tag lookup first: adopt an instance if present, otherwise abandon immediately after
-  successful absence observation, durably releasing both reservations and removing JIT by name. Submitted
-  requests retain their separate ten-minute uncertainty window and never replay.
-  Rationale: persistence ordering proves the coordinate-free state was never sent, so a ten-minute wait adds no
-  safety. The tag lookup covers the defensive case that ordering should exclude. Rejected rollback because
-  this defect predates M6. Same high reviewer rechecks only the bounded fix delta; activation waits for closure.
+  row gets an immediate allocation-tag lookup/adoption. With known absence, abandon at its own ten-minute age,
+  durably releasing both reservations and removing JIT by name. Refuse any send after row age eight minutes,
+  checking after asynchronous request preparation. Submitted requests retain their separate ten-minute
+  uncertainty window from sent_at and never replay.
+  Rationale: another launcher may see a fresh initial row while its writer still mints JIT; immediate abandonment
+  could race that live writer. The grace avoids that overlap, and the earlier send cutoff fences a writer stalled
+  beyond it. Tick budget is 45 seconds, GitHub HTTP calls 20 seconds, and Cloud Run request timeout 300 seconds;
+  ten minutes is conservative rather than a new distributed-lock design. Rejected immediate abandonment after
+  discovering this overlap; rejected rollback because the leak predates M6. Same high reviewer rechecks only
+  the bounded fix delta; activation waits for closure.
   Date/Author: 2026-10-24, design-owner ruling after whole-initiative review.
+
+- Decision: Derive guard OIDC subject from GitHub's current default-subject mode and repo/owner IDs. Support
+  immutable and legacy defaults, refuse unknown claim templates, and repair via separate `--repair-trust` that
+  diffs, updates and rereads only GitHub-trusting setup-managed roles. Keep exact issuer/audience/main ref.
+  Rationale: GitHub's immutable default changed after the legacy trust assumption; hardcoded names/IDs or
+  reverting GitHub configuration would conceal the integration requirement. Rejected wildcard trust and using
+  `--update-policies` to bypass its existing trust-drift refusal. Actual inventory identifies guard as the sole
+  affected role; launcher, bake, spike and FIS remain unchanged. Green guard execution is required before activation.
+  Date/Author: 2026-10-24, design-owner ruling after live guard failure.
+
+- Decision: Enforce intended AWS request timeouts with Smithy's explicit throwOnRequestTimeout option. A
+  post-send RunInstances timeout remains uncertain, never refused or replayed; failed STS refresh sends no EC2
+  request. Local eight-minute send-age expiration uses existing abandoned, not denied/account cooldown.
+  Rationale: warning-only timeouts cannot support the two-minute send/abandon margin, and a local allocation
+  deadline says nothing about IAM eligibility. Real SDK loopback tests must demonstrate both boundaries.
+  Date/Author: 2026-10-24, design-owner direction and controller.
 
 ## Outcomes & Retrospective
 
