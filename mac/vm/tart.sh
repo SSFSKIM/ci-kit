@@ -112,9 +112,9 @@ tart_kickoff() { # <name> <slot> <seconds>
   tart_call "$3" exec "$1" "$tart_guest_kit/vm/guest/kickoff.sh" "$2" "$1"
 }
 # The four directory shares a clone is given (guest/guest.sh), mounted in the guest under /Volumes/My Shared
-# Files/<name>: the kit and the slot's identity read-only, its out/ and cache read-write.
-tart_shares() { # <kit dir> <slot dir>
-  printf '%s\n' "--dir=kit:$1:ro" "--dir=identity:$2/identity:ro" "--dir=out:$2/out" "--dir=cache:$2/cache"
+# Files/<name>: the kit and this clone's JIT directory read-only, the slot's out/ and cache read-write.
+tart_shares() { # <kit dir> <slot dir> <clone>
+  printf '%s\n' "--dir=kit:$1:ro" "--dir=jit:$2/jit/$3:ro" "--dir=out:$2/out" "--dir=cache:$2/cache"
 }
 # `tart run --no-graphics --no-clipboard` of a VM, detached in a session of its own: it outlives its caller, which is
 # how a guest keeps running through a launcher's death, and nothing of the caller's (its output, its locks, its process
@@ -139,4 +139,15 @@ tart_wait_answer() { # <name> <seconds> <tart run pid>
     sleep 2
   done
   return 1
+}
+
+# The same host login as gh_read (no job or alert token). No credential crosses argv or stdout.
+jit_mint() { # <repo> <machine> <slot dir> <slot> <clone>
+  bounded 20 python3 -I "$here/jit.py" mint "$@" 7>&- 8>&-
+}
+jit_retire() { # <slot dir> <clone>, only after the verified end; local revocation, no API wait
+  bounded 5 python3 -I "$here/jit.py" retire "$@" 7>&- 8>&-
+}
+jit_reap() { # <slot dirs...>: one nonsecret pending registration, best-effort remote cleanup
+  bounded 20 python3 -I "$here/jit.py" reap "$@" 7>&- 8>&-
 }

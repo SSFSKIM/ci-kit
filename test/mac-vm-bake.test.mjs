@@ -153,6 +153,10 @@ printf '%s\\0' "$@" "GH_TOKEN=\${GH_TOKEN-unset}" >> "$g/calls"; printf '\\0' >>
 [[ $1 == api ]] || exit 0
 [[ ! -e $g/fail ]] || { echo 'gh: HTTP 502: Bad Gateway' >&2; exit 1; }
 case $2 in
+  */generate-jitconfig)
+    cat > "$g/jit-request.json"
+    echo '{"runner":{"id":71,"name":"fixture","os":"unknown","status":"offline","busy":false,"labels":[]},"encoded_jit_config":"fixture-trial-jit"}' ;;
+  */actions/runners/71) exit 0 ;;
   */actions/runs/*/attempts/*/jobs\\?*)
     rest=\${2#*/runs/}; run=\${rest%%/*}; rest=\${rest#*/attempts/}; attempt=\${rest%%/*}; page=\${2##*page=}
     file=$g/jobs-$run-$attempt.json
@@ -252,7 +256,7 @@ const trialClone = (f) => f.names().find((name) => name.startsWith('maws-vm-tria
 
 describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...macOnly }, () => {
   // The hold: every step but --retire refuses without it, before it calls Tart at all.
-  const steps = [['--bake'], ['--first-run', CANDIDATE], ['--register', CANDIDATE], ['--trial', CANDIDATE], ['--promote', CANDIDATE]];
+  const steps = [['--bake'], ['--first-run', CANDIDATE], ['--trial', CANDIDATE], ['--promote', CANDIDATE]];
   test('every step but --retire refuses outside the maintenance hold, and calls Tart for nothing', async () => {
     const cases = [
       ['no hold', (f) => rmSync(join(f.logs, 'vm-hold.ci-opt')), /refused: no maintenance hold/],
@@ -306,7 +310,7 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
   });
 
   test('the reserve: under CI_KIT_VM_DISK_RESERVE free, no bake, no registration and no trial; the figure is printed', () => {
-    for (const args of [['--bake'], ['--register', CANDIDATE], ['--trial', CANDIDATE]]) {
+    for (const args of [['--bake'], ['--trial', CANDIDATE]]) {
       const f = fixture({ disk: 39.5 });
       f.vm(CANDIDATE);
       f.identity('vm-trial');
@@ -439,50 +443,16 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.deepEqual(f.exec(CANDIDATE).length, 1, 'stopped after the first step');
   });
 
-  test('--register: both identities, each token through the exec\'s stdin and never an argument, the files moved to their slots', () => {
+  test('--register is retired without booting or touching persistent identities', () => {
     const f = fixture();
-    f.vm(CANDIDATE);
-    const result = f.run(['--register', CANDIDATE], { input: 'token-for-vm\ntoken-for-trial\n' });
-    assert.equal(result.status, 0, result.stdout + result.stderr);
-    for (const [slot, name, labels] of [['vm', 'ci-kit-mac-mini-vm', 'ci-kit-mac-solo,ci-kit-mac-vm'], ['vm-trial', 'ci-kit-mac-mini-vm-trial', 'ci-kit-mac-vm-trial']]) {
-      for (const file of identities) {
-        const path = join(f.vmHome, slot, 'identity', file);
-        assert.equal(text(path), `${name} ${labels} ${file}\n`, `${slot} ${file}`);
-        assert.equal(statSync(path).mode & 0o777, 0o600, `${slot} ${file}`);
-      }
-    }
-    assert.equal(text(join(f.home, 'tart/tokens')), 'vm token-for-vm\nvm-trial token-for-trial\n');
-    assert.ok(!f.calls().some((call) => call.includes('token-for')), 'no token in any argument list');
-    assert.ok(!f.log().includes('token-for'), 'no token in the log');
-    assert.deepEqual(f.exec(CANDIDATE), [
-      '/bin/bash /Volumes/My Shared Files/kit/vm/provision.sh register vm ci-kit-mac-mini-vm ci-kit-mac-solo,ci-kit-mac-vm https://github.com/SSFSKIM/MAWS',
-      '/bin/bash /Volumes/My Shared Files/kit/vm/provision.sh register vm-trial ci-kit-mac-mini-vm-trial ci-kit-mac-vm-trial https://github.com/SSFSKIM/MAWS',
-    ]);
-    assert.deepEqual(text(join(f.vms, CANDIDATE, 'run.args')).trim().split('\n'), ['--no-graphics', '--no-clipboard', `--dir=kit:${mac}:ro`,
-      `--dir=identity-vm:${f.vmHome}/vm/identity`, `--dir=identity-vm-trial:${f.vmHome}/vm-trial/identity`, CANDIDATE]);
-    assert.equal(f.state(CANDIDATE), 'stopped');
-    // Both registered: nothing left to do.
-    assert.match(f.run(['--register', CANDIDATE], { input: 'x\n' }).stderr, /refused: both slots hold an identity already/);
-  });
-
-  test('--register: a slot that holds its identity is skipped, so one token serves the other; too few tokens refuse before any boot', () => {
-    const f = fixture();
-    f.vm(GOLDEN);
-    f.identity('vm');
-    const before = text(join(f.vmHome, 'vm/identity/.credentials'));
-    const result = f.run(['--register', GOLDEN], { input: 'only-token\n' });
-    assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.equal(text(join(f.home, 'tart/tokens')), 'vm-trial only-token\n');
-    assert.equal(text(join(f.vmHome, 'vm/identity/.credentials')), before, 'the production identity is untouched');
-    const g = fixture();
-    g.vm(CANDIDATE);
-    const short = g.run(['--register', CANDIDATE], { input: 'one-token\n' });
-    assert.equal(short.status, 1);
-    assert.match(short.stderr, /2 registration token\(s\) needed on stdin, one a line \(for vm vm-trial\); fewer were given/);
-    assert.ok(!g.calls().some((call) => call.startsWith('run')), 'no boot');
-    g.vm('maws-vm-job-vm-20261022T090000Z', 'running');
-    assert.match(g.run(['--register', CANDIDATE], { input: 'a\nb\n' }).stderr, /refused: a VM of the lane runs: maws-vm-job-vm-20261022T090000Z/);
-    assert.match(g.run(['--register', 'macos-base'], { input: 'a\nb\n' }).stderr, /usage|bake\.sh --register/);
+    f.identity('vm'); f.identity('vm-trial');
+    const result = f.run(['--register', CANDIDATE], { input: 'unused-token\n' });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /--register is retired/);
+    assert.deepEqual(f.calls(), []);
+    assert.equal(text(join(f.vmHome, 'vm/identity/.runner')), 'vm .runner\n');
+    assert.equal(text(join(f.vmHome, 'vm-trial/identity/.runner')), 'vm-trial .runner\n');
+    assert.ok(!f.log().includes('unused-token'));
   });
 
 });
@@ -735,10 +705,10 @@ describe('the trial (bake.sh --trial)', macOnly, () => {
     assert.ok(f.calls().some((call) => call.startsWith(`stop ${clone} `)));
     assert.equal(existsSync(join(record.out, 'stop-request')), false, 'no wrapper can answer an idle stop');
     assert.equal(text(join(record.out, 'unfit')), 'the display mode cannot be read\n');
-    assert.deepEqual(f.ghCalls(), [], 'no job result to fetch');
+    assert.ok(!f.ghCalls().some((call) => call[1]?.includes('/jobs?')), 'no job result to fetch');
   });
 
-  test('--trial: a clone of the candidate under the trial slot\'s identity, never the production one; the job read through gh; the record binds candidate, run, job and success', async () => {
+  test('--trial: a clone of the candidate with its own JIT registration, never the production one; the job read through gh; the record binds candidate, run, job and success', async () => {
     const f = fixture();
     f.vm(CANDIDATE);
     f.identity('vm');
@@ -747,9 +717,13 @@ describe('the trial (bake.sh --trial)', macOnly, () => {
     await f.until(() => trialClone(f) && existsSync(join(f.vms, trialClone(f), 'kicked')), 'the trial clone kicked off');
     const clone = trialClone(f);
     assert.match(clone, /^maws-vm-trial-\d{8}T\d{6}Z$/);
+    assert.deepEqual(JSON.parse(text(join(f.home, 'gh/jit-request.json'))), {
+      name: `ci-kit-mac-mini-${clone}`, runner_group_id: 1, labels: ['ci-kit-mac-vm-trial'], work_folder: '_work',
+    });
+    assert.equal(statSync(join(f.vmHome, 'vm-trial/jit', clone, 'config')).mode & 0o777, 0o600);
     assert.equal(text(join(f.vms, clone, 'source')).trim(), CANDIDATE);
     const args = text(join(f.vms, clone, 'run.args')).trim().split('\n');
-    assert.deepEqual(args, ['--no-graphics', '--no-clipboard', `--dir=kit:${mac}:ro`, `--dir=identity:${f.vmHome}/vm-trial/identity:ro`,
+    assert.deepEqual(args, ['--no-graphics', '--no-clipboard', `--dir=kit:${mac}:ro`, `--dir=jit:${f.vmHome}/vm-trial/jit/${clone}:ro`,
       `--dir=out:${f.vmHome}/vm-trial/out`, `--dir=cache:${f.vmHome}/vm-trial/cache`, clone]);
     assert.ok(!args.some((arg) => arg.includes(`${f.vmHome}/vm/`)), 'nothing of the production slot is shown');
     assert.deepEqual(text(join(f.vms, clone, 'kicked')).trim().split('\n'), ['/Users/admin/ci-kit/vm/guest/kickoff.sh', 'vm-trial', clone]);
@@ -760,8 +734,8 @@ describe('the trial (bake.sh --trial)', macOnly, () => {
     const started = iso();
     f.jobs(7, 2, [
       { id: 4241, runner_name: 'ci-kit-mac-mini', status: 'completed', conclusion: 'failure', started_at: started },
-      { id: 4242, runner_name: 'ci-kit-mac-mini-vm-trial', status: 'completed', conclusion: 'success', started_at: started },
-      { id: 4100, runner_name: 'ci-kit-mac-mini-vm-trial', status: 'completed', conclusion: 'failure', started_at: '2026-10-21T09:00:00Z' },
+      { id: 4242, runner_name: `ci-kit-mac-mini-${clone}`, status: 'completed', conclusion: 'success', started_at: started },
+      { id: 4100, runner_name: `ci-kit-mac-mini-${clone}`, status: 'completed', conclusion: 'failure', started_at: '2026-10-21T09:00:00Z' },
     ]);
     await f.until(() => /out\/job: run=7/.test(f.log()), 'the job seen');
     f.mark('done', '0');
@@ -778,6 +752,9 @@ describe('the trial (bake.sh --trial)', macOnly, () => {
     assert.match(text(join(f.vmHome, 'trials', CANDIDATE)), /^trial of maws-vm-candidate-20261022: run 7 job 4242 success\n/);
     // Its end verified, then deleted; out/ kept beside the record, an empty one for the next trial.
     assert.equal(existsSync(join(f.vms, clone)), false);
+    assert.ok(!existsSync(join(f.vmHome, 'vm-trial/jit', clone)));
+    assert.ok(f.ghCalls().some((call) => call.includes('DELETE') && call[1].endsWith('/71')));
+    assert.ok(!f.log().includes('fixture-trial-jit'));
     assert.ok(existsSync(join(record.out, 'job')));
     assert.deepEqual(readdirSync(f.trialOut), []);
     assert.equal(f.state(CANDIDATE), 'stopped');
@@ -824,7 +801,7 @@ describe('the trial (bake.sh --trial)', macOnly, () => {
     const trial = f.start(['--trial', CANDIDATE]);
     await f.until(() => trialClone(f) && existsSync(join(f.vms, trialClone(f), 'kicked')), 'the trial clone kicked off');
     const clone = trialClone(f);
-    f.jobs(9, 1, [{ id: 5151, runner_name: 'ci-kit-mac-mini-vm-trial', status: 'completed', conclusion: 'failure', started_at: iso() }]);
+    f.jobs(9, 1, [{ id: 5151, runner_name: `ci-kit-mac-mini-${clone}`, status: 'completed', conclusion: 'failure', started_at: iso() }]);
     f.mark('assigned', 'job=abc at=2026-10-22T09:11:00Z by=diag');
     f.mark('job', 'run=9 attempt=1 job=e2e repository=SSFSKIM/MAWS at=2026-10-22T09:11:30Z');
     assert.equal(await trial.exited, 0, trial.output());
@@ -835,10 +812,9 @@ describe('the trial (bake.sh --trial)', macOnly, () => {
     assert.match(f.run(['--promote', CANDIDATE]).stderr, /refused: the trial job 5151 concluded failure, not success/);
   });
 
-  test('--trial: refused without the trial identity, for a running or missing candidate, and a kickoff that fails is recorded with no job', () => {
+  test('--trial: refused for a running or missing candidate, and a kickoff that fails is recorded with no job', () => {
     const f = fixture();
     f.vm(CANDIDATE);
-    assert.match(f.run(['--trial', CANDIDATE]).stderr, /refused: the trial slot has no identity .*: bake\.sh --register first/);
     f.identity('vm-trial');
     assert.match(f.run(['--trial', 'maws-vm-candidate-none']).stderr, /refused: no VM named maws-vm-candidate-none/);
     f.vm(CANDIDATE, 'running');

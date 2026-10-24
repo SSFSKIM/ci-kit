@@ -1,21 +1,20 @@
 #!/bin/bash
 # The VM lane's maintenance procedure (docs/mac-lane.md, "The VM lane's maintenance"): the coordinator's script for the
-# steps that make, register, try, promote and retire the lane's images. The launcher (lane.sh) never runs any of them,
+# steps that make, try, promote and retire the lane's images. The launcher (lane.sh) never runs any of them,
 # and they never run beside it.
 #
 #   bake.sh --bake [--memory <MB>] [--maws <checkout>] [--name maws-vm-candidate-<id>]
 #   bake.sh --first-run <candidate>            shell part of the first-run step; the candidate must be running
-#   bake.sh --register <candidate or golden>     one registration token a line on stdin, per identity still missing
 #   bake.sh --trial <candidate>
 #   bake.sh --promote <candidate>
 #   bake.sh --retire <VM>
 #
-# THE HOLD. --bake, --first-run, --register, --trial and --promote check it before anything else and refuse without it: a
+# THE HOLD. --bake, --first-run, --trial and --promote check it before anything else and refuse without it: a
 # vm-hold.<owner> in ~/Library/Logs/ci-kit whose first line starts "maintenance" (CI-opt writes it through
 # `vm/hold.sh hold <owner> maintenance`, under desktop.lock: `maintenance since <time>`), no vm-reserved (a job clone may run while it stands), and the launcher's agent com.ssfskim.ci-kit.vm-lane
 # not loaded (launchctl print), with no launcher holding vm-lane.lock. Each then holds vm-lane.lock itself for its run,
 # so a launcher started out of order waits for the step instead of recovering beside it. Those that boot a VM (--bake,
-# --register, --trial) also refuse while any maws-vm-* VM runs, and with less than CI_KIT_VM_DISK_RESERVE GB (40) free
+# --trial) also refuse while any maws-vm-* VM runs, and with less than CI_KIT_VM_DISK_RESERVE GB (40) free
 # on the volume of ~/.tart. --retire needs no hold: nothing boots from a VM the golden pointer does not name, and a
 # running one is never deleted.
 #
@@ -41,14 +40,9 @@
 #   and removes leftovers from a cancelled exec (which can kill the EXIT cleanup shell). Failure leaves the guest
 #   running; success asks it to shut down
 #   (sudo -n /sbin/shutdown), then verifies its stop. This step never boots a VM.
-# - --register: boots the candidate or golden named, registers through config.sh each identity whose slot lacks one,
-#   in this order: the production slot (~/ci-kit-vm/vm/identity: ci-kit-mac-<machine>-vm, labels ci-kit-mac-solo and
-#   ci-kit-mac-vm) and the trial slot (~/ci-kit-vm/vm-trial/identity: ci-kit-mac-<machine>-vm-trial, the one label
-#   ci-kit-mac-vm-trial), both --no-default-labels. Each takes the next token line on stdin, handed to the guest on the
-#   exec's stdin (never an argument on either side); every token is read before the boot. The identity's three files
-#   land in the slot (mode 600) and leave the image; then the verified stop.
+# - --register is retired: lane and trial clones mint their own JIT registration with the host user's gh login.
 # - --trial: a clone of the candidate, maws-vm-trial-<time>, booted and kicked off as the launcher boots a job clone,
-#   but with the trial slot's shares (its identity, out/ and cache) and kickoff.sh's slot vm-trial, so its runner
+#   but with the trial slot's shares (its clone's JIT config, out/ and cache) and kickoff.sh's slot vm-trial, so its runner
 #   carries ci-kit-mac-vm-trial alone and can take only a trial commit's job (`Lane: vm-trial`). It follows out/ until
 #   the guest powers itself off: a clone with no job assigned within CI_KIT_VM_TRIAL_IDLE s (1800) is asked to stop
 #   through the wrapper's idle handshake (CI_KIT_VM_STOP_ANSWER s, 180, for its answer); one assigned is given
@@ -137,7 +131,6 @@ lane_lock=$ci_kit_logs/vm-lane.lock
 reserved_file=$ci_kit_logs/vm-reserved
 guest_shares='/Volumes/My Shared Files'
 provision="$guest_shares/kit/vm/provision.sh"
-identity_files='.runner .credentials .credentials_rsaparams'
 markers='listening session-conflict assigned job refused stop-request stop-refused stop-raced stopped done unfit'
 vm_name_re='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 # The guest's disk in GB, set while the candidate is stopped (tart set --disk-size) and taken into its APFS container by
@@ -499,52 +492,16 @@ GUEST
 }
 
 do_register() {
-  local vm=${1:-} machine slot name labels token tokens=() needed=() i file
-  [[ $# -eq 1 && $vm =~ ^maws-vm-(candidate|golden)-[A-Za-z0-9._-]+$ ]] || usage
-  machine=$(machine_name) || exit 1
-  hold_check
-  reserve_check
-  none_running
-  stopped_vm "$vm"
-  for slot in vm vm-trial; do
-    for file in $identity_files; do
-      [[ -f $vm_home/$slot/identity/$file ]] || { needed+=("$slot"); break; }
-    done
-  done
-  ((${#needed[@]} > 0)) || refuse "both slots hold an identity already; remove a slot's identity/ to register it again"
-  [[ ! -t 0 ]] || die "pipe one registration token a line on stdin, ${#needed[@]} of them (gh api -X POST repos/$repo/actions/runners/registration-token --jq .token)"
-  for slot in "${needed[@]}"; do
-    IFS= read -r token || true
-    [[ -n $token ]] || die "${#needed[@]} registration token(s) needed on stdin, one a line (for ${needed[*]}); fewer were given"
-    tokens+=("$token")
-  done
-  [[ -f $kit/vm/provision.sh ]] || refuse "no installed kit at $kit (mac/install.sh --vm)"
-  for slot in vm vm-trial; do mkdir -p "$vm_home/$slot/identity" && chmod 700 "$vm_home/$slot/identity"; done
-  say "registering ${needed[*]} in $vm"
-  boot_vm "$vm" "--dir=kit:$kit:ro" "--dir=identity-vm:$vm_home/vm/identity" "--dir=identity-vm-trial:$vm_home/vm-trial/identity"
-  for ((i = 0; i < ${#needed[@]}; i++)); do
-    slot=${needed[i]}
-    if [[ $slot == vm ]]; then
-      name=ci-kit-mac-$machine-vm labels=ci-kit-mac-solo,ci-kit-mac-vm
-    else
-      name=ci-kit-mac-$machine-vm-trial labels=ci-kit-mac-vm-trial
-    fi
-    for file in $identity_files; do rm -f "$vm_home/$slot/identity/$file"; done
-    say "$vm: registering $name with $labels (--no-default-labels) for the slot $slot"
-    if ! printf '%s\n' "${tokens[i]}" | tart_call 300 exec -i "$vm" /bin/bash "$provision" register "$slot" "$name" "$labels" \
-      "https://github.com/$repo" >>"$bake_log" 2>&1; then
-      end_vm
-      die "$vm: the registration of $name failed (see $bake_log)"
-    fi
-    tokens[i]=''
-    for file in $identity_files; do
-      [[ -f $vm_home/$slot/identity/$file ]] || { end_vm; die "$name: $file did not reach $vm_home/$slot/identity"; }
-      chmod 600 "$vm_home/$slot/identity/$file"
-    done
-    say "$name registered; its identity is in $vm_home/$slot/identity"
-  done
-  end_vm || die "the identities are registered, but the stop of $vm is not verified"
-  say "registered: ${needed[*]}; $vm holds no identity, stopped"
+  refuse '--register is retired: each job/trial clone mints JIT with the existing host gh login; no registration token or persistent identity is needed'
+}
+
+# A trial failure after mint still revokes its registration when the VM is verified
+# ended. A killed maintenance process leaves its private record for --retire or the
+# next trial; neither can remove a running clone's registration.
+trial_jit_cleanup() {
+  [[ -n ${trial:-} ]] || return 0
+  tart_ended "$trial" || return 1
+  jit_retire "$vm_home/vm-trial" "$trial"
 }
 
 # The trial's job, through gh: j_id, j_conclusion; false with j_why.
@@ -662,16 +619,17 @@ write_record() { # <summary>, from the trial's fields
 
 do_trial() {
   candidate=${1:-}
-  local machine runner since kick file vms
+  local machine runner since kick entry vms
   [[ $# -eq 1 && $candidate =~ ^maws-vm-candidate-[A-Za-z0-9._-]+$ ]] || usage
   machine=$(machine_name) || exit 1
-  runner=ci-kit-mac-$machine-vm-trial
   hold_check
   reserve_check
   none_running
   stopped_vm "$candidate"
-  for file in $identity_files; do
-    [[ -f $vm_home/vm-trial/identity/$file ]] || refuse "the trial slot has no identity ($vm_home/vm-trial/identity lacks $file): bake.sh --register first"
+  for entry in "$vm_home/vm-trial"/jit/maws-vm-trial-*; do
+    [[ -d $entry ]] || continue
+    tart_ended "${entry##*/}" || refuse "${entry##*/}: $tart_why"
+    jit_retire "$vm_home/vm-trial" "${entry##*/}" || die 'the previous trial JIT config could not be revoked'
   done
   [[ -f $kit/vm/guest/kickoff.sh ]] || refuse "no installed kit at $kit (mac/install.sh --vm)"
   t_out=$vm_home/vm-trial/out
@@ -682,12 +640,15 @@ do_trial() {
   fi
   mkdir -p "$t_out" || die "$t_out cannot be made"
   trial=maws-vm-trial-$(stamp)
+  runner=ci-kit-mac-$machine-$trial
+  trap 'trial_jit_cleanup || say "trial JIT cleanup pending; use --retire $trial after its verified stop"' EXIT
+  jit_mint "$repo" "$machine" "$vm_home/vm-trial" vm-trial "$trial" || die 'no boot: trial JIT mint failed'
   since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   t_run='' t_attempt='' t_why='' t_kept='' j_id='' j_conclusion=''
-  say "trying $candidate: $trial under the trial slot's identity ($runner, ci-kit-mac-vm-trial alone)"
+  say "trying $candidate: $trial with its own JIT registration ($runner, ci-kit-mac-vm-trial alone)"
   tart_clone "$candidate" "$trial" >/dev/null 2>&1 || die "tart clone $candidate $trial failed"
   # shellcheck disable=SC2046 # one option a line, no space in any
-  boot_vm "$trial" $(tart_shares "$kit" "$vm_home/vm-trial")
+  boot_vm "$trial" $(tart_shares "$kit" "$vm_home/vm-trial" "$trial")
   say "$trial: kickoff.sh vm-trial $trial"
   if kick=$(tart_kickoff "$trial" vm-trial "$kickoff_bound" 2>&1); then
     say "$trial: $(tail -1 <<<"$kick")"
@@ -700,6 +661,9 @@ do_trial() {
   fi
   say "$trial: $t_end"
   end_vm || die "$trial's end is not verified; no record is written, and it is left for the verified stop by hand"
+  trial_jit_cleanup || die "local JIT cleanup failed; --retire $trial retries it"
+  jit_reap "$vm_home/vm-trial" || say 'registration cleanup pending; the lane or the next maintenance step retries it'
+  trap - EXIT
   vms=$(tart_vms) || die "Tart cannot list its VMs; $trial is stopped but not deleted"
   if [[ -n $(tart_state_in "$vms" "$trial") ]]; then
     tart_delete "$trial" >/dev/null 2>&1 || die "tart delete $trial failed; it is stopped, and --retire $trial deletes it"
@@ -791,6 +755,11 @@ do_retire() {
   esac
   [[ $vm != "$pointed" ]] || refuse "$vm is the golden image the pointer names; promote another first"
   tart_list=$(tart_vms) || refuse 'Tart cannot list its VMs'
+  if [[ $vm == maws-vm-trial-* ]]; then
+    tart_ended "$vm" || refuse "$vm is not verified ended: $tart_why"
+    jit_retire "$vm_home/vm-trial" "$vm" || die "local JIT cleanup failed for $vm"
+    jit_reap "$vm_home/vm-trial" || say 'registration cleanup pending; the lane retries it'
+  fi
   if [[ -z $(tart_state_in "$tart_list" "$vm") ]]; then
     say "retired already: $vm is not among Tart's VMs"
     return 0

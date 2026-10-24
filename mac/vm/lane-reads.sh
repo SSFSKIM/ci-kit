@@ -11,7 +11,7 @@
 # - queue_read and wants_guest: the queued jobs a guest can take, read with the machine user's own gh login, and
 #   whether the host's exclusive instance takes a solo one first (runner-state.py, by the kernel's paths).
 # - mode_admits, holds_read, in_pause_window, parts_ready: the mode, the coordinator's holds, the pause windows, and
-#   the lane's parts (Tart's golden image the pointer names, the slot's identity, the kit).
+#   the lane's parts (Tart's golden image the pointer names, the kit).
 # shellcheck disable=SC2034,SC2154 # a library of lane.sh's: it reads the launcher's inputs and sets what it reads
 memory_read() { # m_pressure, m_available (%), m_swap (MB); false when the read fails. Each read joins swap's history.
   local text swap i keep_at=() keep_mb=()
@@ -218,15 +218,11 @@ in_pause_window() { # whether now is inside one of CI_KIT_VM_PAUSE_WINDOWS (UTC)
 
 # The lane's parts, from one Tart list: g_name the golden image the pointer names; false with parts_why.
 parts_ready() { # <tart_vms output>
-  local file
   g_name=''
   if [[ ! -r $golden_pointer ]]; then parts_why="no golden pointer at $golden_pointer"; return 1; fi
   IFS= read -r g_name <"$golden_pointer" 2>/dev/null || true
   g_name=${g_name%%[[:space:]]*}
   if [[ ! $g_name =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then parts_why="the golden pointer $golden_pointer names no VM"; return 1; fi
   if [[ -z $(tart_state_in "$1" "$g_name") ]]; then parts_why="the golden image $g_name is not among Tart's VMs"; return 1; fi
-  for file in $identity_files; do
-    [[ -f $slot_dir/identity/$file ]] || { parts_why="the slot's identity lacks $file ($slot_dir/identity)"; return 1; }
-  done
   [[ -f $kit/vm/guest/kickoff.sh ]] || { parts_why="no kit at $kit"; return 1; }
 }

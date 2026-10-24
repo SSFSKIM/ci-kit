@@ -67,14 +67,14 @@ const stamp = (at) => `[${at} `;
 // and on SIGINT logs Ctrl-C, takes a job first when ctl/race exists (an acceptance racing the stop), and exits 0.
 // path: the runner's .path, as the image's runner install writes it (null: none). mode: the guest's display mode as
 // displayplacer reads it ("<res> <scaling>", null: the read fails), which the image's bake sets.
-function guest({ identity = true, display = '2560x1440@2x', displayStatus = 0, worker = false, path = '/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin', mode = '2560x1440 on' } = {}) {
+function guest({ jit = true, display = '2560x1440@2x', displayStatus = 0, worker = false, path = '/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin', mode = '2560x1440 on' } = {}) {
   const home = mkdtempSync(join(root, 'guest-'));
   const bin = join(home, 'bin');
   const shares = join(home, 'shares');
   const runner = join(home, 'actions-runner-maws');
   const ctl = join(home, 'ctl');
-  for (const dir of [bin, ctl, join(shares, 'out'), join(shares, 'identity'), join(shares, 'cache'), join(runner, 'bin')]) mkdirSync(dir, { recursive: true });
-  if (identity) for (const file of ['.runner', '.credentials', '.credentials_rsaparams']) writeFileSync(join(shares, 'identity', file), `${file} of ci-kit-mac-mini-vm\n`);
+  for (const dir of [bin, ctl, join(shares, 'out'), join(shares, 'jit'), join(shares, 'cache'), join(runner, 'bin')]) mkdirSync(dir, { recursive: true });
+  if (jit) writeFileSync(join(shares, 'jit/config'), 'fixture-jit-input', { mode: 0o600 });
   writeFileSync(join(ctl, 'commands'), '');
   if (path !== null) writeFileSync(join(runner, '.path'), `${path}\n`);
   executable(join(runner, 'run.sh'), `printf '%s\\n' "$*" >> '${ctl}/run.args'
@@ -82,6 +82,9 @@ function guest({ identity = true, display = '2560x1440@2x', displayStatus = 0, w
 exit $?`);
   executable(join(runner, 'bin/Runner.Listener'), `ctl='${ctl}'
 runner=$(cd "$(dirname "$0")/.." && pwd)
+[[ $ACTIONS_RUNNER_INPUT_JITCONFIG == fixture-jit-input ]] || exit 65
+unset ACTIONS_RUNNER_INPUT_JITCONFIG
+for file in .runner .credentials .credentials_rsaparams; do echo "JIT $file" > "$runner/$file"; done
 env | grep '^CI_KIT_VM_\\(SLOT\\|CLONE\\)=' | sort > "$ctl/listener.env"
 printf '%s\\n' "$PATH" > "$ctl/listener.path"
 echo $$ > "$ctl/listener.pid"
@@ -229,7 +232,7 @@ test('a diag log that opens but cannot be read is unreadable, never a clean end'
   assert.equal(run.stdout, 'listening 2026-10-21T12:00:05Z\nunreadable\n');
 });
 
-test('kickoff: the identity copied, the cache linked, the runner started once under the wrapper, which outlives the exec', async () => {
+test('kickoff: JIT supplied privately, the cache linked, the one-job runner started under the wrapper, which outlives the exec', async () => {
   const vm = guest();
   // What the image left: a cache directory of its own, and a diag log of its registration.
   mkdirSync(join(vm.home, 'Library/Caches/maws-e2e-build/stale'), { recursive: true });
@@ -239,15 +242,16 @@ test('kickoff: the identity copied, the cache linked, the runner started once un
   assert.equal(kick.status, 0, kick.stderr);
   assert.ok(kick.elapsed < 10_000, `kickoff returned after ${kick.elapsed} ms`);
   assert.ok(kick.wrapper, kick.stdout);
-  for (const file of ['.runner', '.credentials', '.credentials_rsaparams']) {
-    assert.equal(readFileSync(join(vm.runner, file), 'utf8'), `${file} of ci-kit-mac-mini-vm\n`);
-    assert.equal(statSync(join(vm.runner, file)).mode & 0o777, 0o600);
-  }
   const link = join(vm.home, 'Library/Caches/maws-e2e-build');
   assert.ok(lstatSync(link).isSymbolicLink());
   assert.equal(readlinkSync(link), join(vm.shares, 'cache'));
   await until(() => existsSync(join(vm.ctl, 'listener.pid')), 'the listener');
-  assert.equal(readFileSync(join(vm.ctl, 'run.args'), 'utf8'), '--once\n');
+  for (const file of ['.runner', '.credentials', '.credentials_rsaparams']) {
+    assert.equal(readFileSync(join(vm.runner, file), 'utf8'), `JIT ${file}\n`);
+    assert.equal(statSync(join(vm.runner, file)).mode & 0o777, 0o600);
+  }
+
+  assert.equal(readFileSync(join(vm.ctl, 'run.args'), 'utf8'), '\n');
   assert.equal(readFileSync(join(vm.ctl, 'listener.env'), 'utf8'), 'CI_KIT_VM_CLONE=maws-vm-job-20261021-1\nCI_KIT_VM_SLOT=vm\n');
   // The wrapper is a session of its own, so nothing the exec's end does to its process group reaches it, and it holds
   // none of the exec's output: kickoff's spawnSync returned while the runner runs.
@@ -307,11 +311,11 @@ for (const [what, mode, why] of [
   });
 }
 
-test('kickoff refuses, starting nothing, without the identity or with an out/ that is not empty', () => {
-  const missing = guest({ identity: false });
+test('kickoff refuses, starting nothing, without JIT or with an out/ that is not empty', () => {
+  const missing = guest({ jit: false });
   const run = missing.kickoff();
   assert.equal(run.status, 1);
-  assert.match(run.stderr, /^kickoff: the identity share lacks \.runner/m);
+  assert.match(run.stderr, /^kickoff: the clone has no JIT config/m);
   assert.equal(existsSync(join(missing.ctl, 'run.args')), false);
   const used = guest();
   writeFileSync(join(used.shares, 'out/done'), '0\n');
