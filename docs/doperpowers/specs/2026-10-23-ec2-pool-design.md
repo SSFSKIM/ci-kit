@@ -89,8 +89,11 @@ measurement exists.
   AWS amount is not the resource-based execution estimate. Whole-initiative high review found a P1 pre-send
   reservation leak, present before M6 too. Fix-forward is in progress; activation and new EC2 fixtures are held.
   At 09:40:51Z no non-final EC2 rows existed. No rollback: revision 00021-qth contains the same leak.
-  Live guard run 40083424878 also exposed GitHub immutable-subject trust mismatch; explicit trust repair is an
-  independent pending fix. Read-only mixed-cloud cost/latency CLI proofs passed. Activation waits for both fixes.
+  Live guard run 40083424878 exposed GitHub immutable-subject trust mismatch. PR #121/37f31fb and the
+  audited trust-only repair resolved it; guard run 40085360749 passed through real GitHub federation. All 19
+  role trusts were compared: only guard changed, and repair rerun was a no-op. Read-only mixed-cloud cost/latency
+  CLI proofs passed. PR #120/2fabf04 resolved the reviewed pre-send leak in code; a shared absolute-deadline
+  follow-up remains required before redeploy/activation because SDK header timers do not bound response bodies.
 
 ## What it must not be
 
@@ -1353,13 +1356,20 @@ The production chain is reviewed at each boundary:
   GitHub's [OIDC reference](https://docs.github.com/actions/reference/openid-connect-reference) documents this
   default for repositories created after July 15, 2026; ci-kit was created October 15. All 19 account role trusts
   were inventoried: only `ci-kit-ec2-guard` trusts GitHub; launcher/bake/spike trust Google and FIS trusts its
-  service. No trust mutation has yet occurred. Explicit derived-subject repair and green guard proof are pending.
+  service. PR #121/37f31fb passed exact-head gate 40085009875 and high review. Fresh-main `--repair-trust`
+  printed/applied the exact immutable subject; rerun reported nothing to change. All-role comparison proved only
+  guard changed. Guard run 40085360749 then passed all legs, assuming the guard role at 10:18:29Z for one hour.
+  This integration friction is resolved; no wildcard trust or GitHub-setting change was used.
 
 - Observation: Installed `@smithy/node-http-handler` 4.12.1 treats `requestTimeout` as a warning unless
   `throwOnRequestTimeout:true` is set. Thus lib/aws.mjs's nominal 30-second STS/shared-client deadlines did not
   enforce the assumed send/abandon safety margin. The bounded fix enables rejection and tests real loopback
   timeouts: a possibly delivered RunInstances request remains uncertain with tag/token recovery and no replay;
-  an STS refresh timeout must produce no EC2 HTTP send. Remediation/deployment remain pending.
+  an STS refresh timeout must produce no EC2 HTTP send. Further real-SDK testing found that even the throwing
+  header timer is cleared when headers arrive: a stalled XML body with a 100 ms request timeout continued until
+  an independent 1000 ms abort stopped it at 1005 ms. A shared absolute deadline must therefore cover every
+  runtime client's send, including response consumption, and the guard's separately constructed clients.
+  Header-timeout correction is merged in #120; this absolute-deadline follow-up and redeployment remain pending.
 
 - Observation: Whole-initiative high review found a permanent reservation leak for an EC2 initial launching row
   without attempt coordinates. The provider returned uncertain before any bounded recovery; scheduler cleanup
@@ -1862,11 +1872,14 @@ The production chain is reviewed at each boundary:
   affected role; launcher, bake, spike and FIS remain unchanged. Green guard execution is required before activation.
   Date/Author: 2026-10-24, design-owner ruling after live guard failure.
 
-- Decision: Enforce intended AWS request timeouts with Smithy's explicit throwOnRequestTimeout option. A
-  post-send RunInstances timeout remains uncertain, never refused or replayed; failed STS refresh sends no EC2
-  request. Local eight-minute send-age expiration uses existing abandoned, not denied/account cooldown.
-  Rationale: warning-only timeouts cannot support the two-minute send/abandon margin, and a local allocation
-  deadline says nothing about IAM eligibility. Real SDK loopback tests must demonstrate both boundaries.
+- Decision: Enforce intended AWS request timeouts with Smithy's explicit throwOnRequestTimeout option and
+  one shared absolute send deadline in lib/aws.mjs for EC2, S3, SSM, CE, Quotas and STS, reused by the guard's
+  separate constructors. Preserve caller cancellation. A post-send RunInstances timeout remains uncertain,
+  never refused or replayed; failed STS refresh sends no EC2 request. Other timed-out calls use their existing
+  error paths. Local eight-minute send-age expiration uses existing abandoned, not denied/account cooldown.
+  Rationale: warning-only or headers-only timeouts cannot support the two-minute send/abandon margin; a shared
+  boundary avoids missing the next added command. A local allocation deadline says nothing about IAM eligibility.
+  Real SDK body-stall tests must cover STS, RunInstances and Describe, and every created client carries the deadline.
   Date/Author: 2026-10-24, design-owner direction and controller.
 
 ## Outcomes & Retrospective
