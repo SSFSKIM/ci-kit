@@ -485,8 +485,9 @@ export function reportable(instances, runnersOf) {
 // runnerKnown(row): whether the row's repo's runners were listed; runnerOf(row): its runner, or null.
 // preempted: Set of instance names with a compute.instances.preempted operation, or null when that history could
 // not be read: a vanished VM is then not classified this tick. complete: false when the instance listing missed a
-// zone; then no row is finalized for its VM's absence.
-export function reviewRows({ rows, instances, runnerKnown, runnerOf, preempted, now, cfg, complete = true }) {
+// zone; then no row is finalized for its VM's absence. reports: terminal-only evidence by runner name;
+// EC2 may read it after the VM is gone, while GCE retains its existing observation-based classification.
+export function reviewRows({ rows, instances, runnerKnown, runnerOf, preempted, now, cfg, complete = true, reports = new Map() }) {
   const byAlloc = new Map(instances.map((i) => [i.alloc, i]));
   const actions = [];
   for (const row of rows) {
@@ -509,7 +510,12 @@ export function reviewRows({ rows, instances, runnerKnown, runnerOf, preempted, 
       // The run limit counts from the VM's recorded creation; the id's time rounds up and would call a VM deleted
       // at its limit an orphan.
       const created = row.created ? Date.parse(row.created) : launched;
-      actions.push({ row, action: 'final', end: now - created >= cfg.max_run_minutes * MIN ? 'max-run' : 'orphan' });
+      const terminal = row.provider === 'ec2' ? reports.get(row.instance) : null;
+      // EC2 terminal evidence survives shutdown. "done" means ended, not successful; an explicit guest
+      // deadline is run-limit evidence even with a shorter guest limit. Proven preemption above wins.
+      const end = terminal?.kind === 'terminal' ? (terminal.value === 'failed:deadline' ? 'max-run' : 'done') :
+        now - created >= cfg.max_run_minutes * MIN ? 'max-run' : 'orphan';
+      actions.push({ row, action: 'final', end });
     } else if (now - launched >= ABANDON_MS && runnerKnown(row) && !runnerOf(row)) {
       actions.push({ row, action: 'final', end: 'abandoned' });
     }
