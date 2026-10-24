@@ -106,3 +106,26 @@ test('initialization charges accrue for failed and idle boots, not refused alloc
   const refused = finalRow({ ...launchRow({ ...f.row, provider: 'ec2', account: account.account, at: start, config: 'abc' }), price: c.price, disk_gb: 50 }, { end: 'refused', deleted: start + 10_000, diskGb: 50 });
   assert.equal(refused.dollars, null);
 });
+
+const orphanVolume = VolumeId => ({ VolumeId, State: 'available', Attachments: [], CreateTime: new Date(start - 11 * 60_000),
+  Tags: [{ Key: 'ci-kit-pool', Value: 'ec2' }, { Key: 'ci-kit-purpose', Value: 'job' }] });
+
+test('orphan cleanup treats a concurrently deleted volume as complete and continues with the next volume', async () => {
+  const f = fixture();
+  f.handlers.DeleteVolume = ({ VolumeId }) => {
+    if (VolumeId === 'vol-already-gone') throw Object.assign(new Error('concurrent auto-deletion'), { name: 'InvalidVolume.NotFound' });
+    return {};
+  };
+  assert.deepEqual(await f.provider.cleanupOrphans({ complete: true, volumes: [orphanVolume('vol-already-gone'), orphanVolume('vol-next')] }),
+    ['volume vol-already-gone', 'volume vol-next']);
+  assert.deepEqual(f.calls.filter(([name]) => name === 'DeleteVolume').map(([, input]) => input.VolumeId), ['vol-already-gone', 'vol-next']);
+});
+
+for (const name of ['UnauthorizedOperation', 'Error']) {
+  test(`orphan cleanup still propagates ${name} rather than treating arbitrary failures as missing volumes`, async () => {
+    const f = fixture();
+    const error = Object.assign(new Error('InvalidVolume.NotFound'), { name });
+    f.handlers.DeleteVolume = () => { throw error; };
+    await assert.rejects(f.provider.cleanupOrphans({ complete: true, volumes: [orphanVolume('vol-failed')] }), e => e === error);
+  });
+}

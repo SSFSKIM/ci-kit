@@ -1,6 +1,6 @@
 // One configured EC2 account. No JIT or signed report URL is retained; recovery observes durable allocation identity and attempt coordinates.
 import { DescribeInstancesCommand, DescribeImagesCommand, DescribeInstanceTypesCommand, DescribeAvailabilityZonesCommand,
-  DescribeSpotPriceHistoryCommand, RunInstancesCommand, TerminateInstancesCommand, DescribeVolumesCommand, DeleteVolumeCommand } from '@aws-sdk/client-ec2';
+  DescribeSpotPriceHistoryCommand, DescribeSpotInstanceRequestsCommand, RunInstancesCommand, TerminateInstancesCommand, DescribeVolumesCommand, DeleteVolumeCommand } from '@aws-sdk/client-ec2';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { providerRunnerLabels, providerRunnerName } from './contracts.mjs';
 import { tagMap, poolJob, live, priceOf, launchResult, jobRequest, viewInstance, iso } from './ec2-data.mjs';
@@ -10,6 +10,8 @@ const allInstances = (pages) => pages.flatMap((p) => (p.Reservations ?? []).flat
 const hasAttempt = row => Boolean(row.zone && row.client_token && Number.isFinite(Date.parse(row.sent_at)));
 const RECOVERY_GRACE_MS = 10 * 60_000;
 const SEND_WINDOW_MS = 8 * 60_000; // leave two minutes for bounded SDK auth/request work before presend recovery
+// Price/capacity codes are documented Spot status; by-experiment is pinned by the live FIS response fixture.
+const SPOT_PREEMPTION_CODES = new Set(['instance-terminated-by-experiment', 'instance-terminated-by-price', 'instance-terminated-no-capacity']);
 
 export function createProvider({ aws, account, cfg, now = Date.now, log = () => {} }) {
   let types = new Map(), zones = new Map(), prices = new Map(), image = null, imageRead;
@@ -130,9 +132,19 @@ export function createProvider({ aws, account, cfg, now = Date.now, log = () => 
     },
     async preemptions() {
       try {
-        const gone = allInstances(await pages(DescribeInstancesCommand, { Filters: [...pool(), filter('instance-state-name', 'terminated', 'shutting-down')] }));
-        return new Map(gone.filter((i) => poolJob(i) && i.StateReason?.Code === 'Server.SpotInstanceTermination')
-          .map((i) => [providerRunnerName('ec2', tagMap(i)['ci-kit-alloc']), transitionTime(i) ?? now()]));
+        const gone = allInstances(await pages(DescribeInstancesCommand, { Filters: [...pool(), filter('instance-state-name', 'terminated', 'shutting-down')] }))
+          .filter(i => poolJob(i) && !live(i));
+        const ids = [...new Set(gone.filter(i => i.StateReason?.Code !== 'Server.SpotInstanceTermination')
+          .map(i => i.SpotInstanceRequestId).filter(Boolean))];
+        const requests = ids.length ? (await pages(DescribeSpotInstanceRequestsCommand, { SpotInstanceRequestIds: ids }))
+          .flatMap(p => p.SpotInstanceRequests ?? []) : [];
+        const byRequest = new Map(requests.map(r => [r.SpotInstanceRequestId, r]));
+        // Status.UpdateTime can be the notice time, not termination. Preserve transition/observation bounds.
+        return new Map(gone.filter(i => {
+          if (i.StateReason?.Code === 'Server.SpotInstanceTermination') return true;
+          const request = byRequest.get(i.SpotInstanceRequestId);
+          return request?.InstanceId === i.InstanceId && SPOT_PREEMPTION_CODES.has(request?.Status?.Code);
+        }).map(i => [providerRunnerName('ec2', tagMap(i)['ci-kit-alloc']), transitionTime(i) ?? now()]));
       } catch (err) { log(`ec2 ${account.account}: preemptions unavailable (${err.name})`); return null; }
     },
     async readReports(allocs) {
@@ -159,7 +171,10 @@ export function createProvider({ aws, account, cfg, now = Date.now, log = () => 
       for (const volume of inventory.volumes ?? []) {
         const t = tagMap(volume);
         if (t['ci-kit-pool'] !== 'ec2' || t['ci-kit-purpose'] !== 'job' || volume.State !== 'available' || volume.Attachments?.length || now() - Date.parse(volume.CreateTime) < 10 * 60_000) continue;
-        await aws.ec2.send(new DeleteVolumeCommand({ VolumeId: volume.VolumeId })); removed.push(`volume ${volume.VolumeId}`);
+        await aws.ec2.send(new DeleteVolumeCommand({ VolumeId: volume.VolumeId })).catch(err => {
+          if (err.name !== 'InvalidVolume.NotFound') throw err; // concurrent shutdown/guard already removed it
+        });
+        removed.push(`volume ${volume.VolumeId}`);
       }
       return removed;
     },

@@ -380,3 +380,25 @@ test('failed deregistration retains snapshot protection, including snapshots old
   assert.equal(await f.run(), 1);
   assert.equal(f.mutations().filter(c => c.name === 'DeleteSnapshotCommand').length, 0);
 });
+
+test('DeleteVolume losing a race with auto-deletion is successful cleanup, not a failed guard leg', async () => {
+  const f = fixture({ volumes: [volume('already-gone', 'job'), volume('next', 'job')], pages: {
+    DeleteVolumeCommand: ({ VolumeId }) => {
+      if (VolumeId === 'already-gone') throw Object.assign(new Error('auto-deleted'), { name: 'InvalidVolume.NotFound' });
+      return {};
+    },
+  } });
+  assert.equal(await f.run(), 0);
+  assert.deepEqual(deletedVolumes(f), ['already-gone', 'next']);
+  assert.deepEqual(f.errors, []);
+});
+
+for (const name of ['UnauthorizedOperation', 'Error']) {
+  test(`DeleteVolume ${name} remains a guard failure even if its message contains a missing-volume code`, async () => {
+    const f = fixture({ volumes: [volume('failed', 'job')], pages: {
+      DeleteVolumeCommand: () => { throw Object.assign(new Error('InvalidVolume.NotFound'), { name }); },
+    } });
+    assert.equal(await f.run(), 1);
+    assert.equal(f.errors.length, 1);
+  });
+}

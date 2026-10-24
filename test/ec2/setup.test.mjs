@@ -386,3 +386,12 @@ test('CLI accepts explicit policy repair before reading config and cannot treat 
   assert.match(result.stderr, /ENOENT/);
   assert.doesNotMatch(result.stderr, /Unknown option/);
 });
+
+test('Spot interruption status is readable only by the launcher in the configured EC2 region', () => {
+  const roles = buildRoles(config, claims, guardSubject);
+  const action = 'ec2:DescribeSpotInstanceRequests';
+  assert.equal(allowed(roles.launcher.policy, action, '*', ctx()), true);
+  assert.equal(allowed(roles.launcher.policy, action, '*', ctx({ 'aws:RequestedRegion': 'us-east-1' })), false);
+  assert.equal(allowed(roles.launcher.policy, action, '*', {}), false);
+  for (const name of ['bake', 'guard', 'fis']) assert.equal(allowed(roles[name].policy, action, '*', ctx()), false, name);
+});

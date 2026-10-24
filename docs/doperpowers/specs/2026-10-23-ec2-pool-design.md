@@ -87,13 +87,19 @@ measurement exists.
   00022-9h8 serves credit-disabled code; MAWS GCE canary 40082699042 passed all six pool jobs. Durable billing
   issue #51 holds reading 0.19423134 USD, read_at 2026-10-24T09:37:12.999Z, through 2026-10-25. This lagged
   AWS amount is not the resource-based execution estimate. Whole-initiative high review found a P1 pre-send
-  reservation leak, present before M6 too. Fix-forward is in progress; activation and new EC2 fixtures are held.
-  At 09:40:51Z no non-final EC2 rows existed. No rollback: revision 00021-qth contains the same leak.
+  reservation leak, present before M6 too. Reviewed PRs #120/#122 fixed bounded pre-send recovery and absolute
+  SDK deadlines; fresh-main revision 00023-sb6 serves 0e8a805. GCE canary 40086890035 passed all six jobs.
+  No rollback was needed; the earlier revisions contained the same leak.
   Live guard run 40083424878 exposed GitHub immutable-subject trust mismatch. PR #121/37f31fb and the
   audited trust-only repair resolved it; guard run 40085360749 passed through real GitHub federation. All 19
   role trusts were compared: only guard changed, and repair rerun was a no-op. Read-only mixed-cloud cost/latency
-  CLI proofs passed. PR #120/2fabf04 resolved the reviewed pre-send leak in code; a shared absolute-deadline
-  follow-up remains required before redeploy/activation because SDK header timers do not bound response bodies.
+  CLI proofs passed. PR #123/b3eec68 activated credit-first at 10:50:34Z; runtime logged on one second later.
+  MAWS canary 40087574181 passed all six jobs on EC2. The owner accepted the late-final/orphan/stopped-builder
+  guard proofs and the single quota burst 40087892049 (17/17 jobs, real AWS quota refusal and GCE fallback).
+  Live budget demotion #124/a83ec70 produced the budget log and GCE job 40090068292 while the existing EC2
+  fixture stayed running/busy; #125/e4610be restored 180, with credit on observed at 11:32:13Z. FIS-specific
+  outcome correction and idempotent volume deletion are reviewed but not yet deployed; one FIS rerun, post-fix
+  stale harness, final sweep/interruption tally and retrospective remain.
 
 ## What it must not be
 
@@ -577,9 +583,14 @@ Presigned URLs need no credentials on the VM, and no instance profile is reachab
 alternative was a write-only instance profile. It lost because it puts AWS credentials on every job VM for no
 added function. A missing terminal report is **unknown**, never success; telemetry is not a substitute.
 
-**Interruptions.** A notice is reported by the guest. An instance that vanishes with state reason
-`Server.SpotInstanceTermination`, with or without a notice, is finalized `preempted` with the job its runner held,
-as on GCE (`docs/pool.md`, Preemption).
+**Interruptions.** A notice alone is never preemption evidence or a retirement signal. For an already-gone
+instance, authoritative evidence is `StateReason.Code=Server.SpotInstanceTermination` or its correlated Spot
+request status in `{instance-terminated-by-experiment, instance-terminated-by-price, instance-terminated-no-capacity}`.
+The price/no-capacity codes are [documented by AWS](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/spot-request-status.html);
+by-experiment was observed live on `sir-f2a7mf7g`, not in that document. Every other code, including by-user,
+is non-preemption. This evidence takes priority over a guest exit report and finalizes `preempted` with the actual
+job, as on GCE. Use observed disappearance as the termination-time bound, not Spot `Status.UpdateTime`, which
+can be stamped at the notice two minutes earlier. A failed required status read leaves history unknown.
 
 ### Provider-bound allocations
 
@@ -782,6 +793,9 @@ purpose, not one broad “stopped pool VM” rule:
 - Snapshot deletion is retriable even after AMI deregistration removes its mapping. Independently rediscover
   completed, pool-tagged snapshots older than 24 hours and delete only those unreferenced by any surviving owned
   AMI, including untagged, disabled and deprecated images. Both image and snapshot inventories must be complete.
+
+Deleting an eligible volume that concurrently disappeared is idempotent: exact `InvalidVolume.NotFound` is
+already-deleted success in both guard and launcher cleanup; other errors retain their existing failure behavior.
 
 It never acts without the pool tag, or on what a failed list would have covered. For example, a failed ledger
 read cannot establish “no row,” and a failed instance list cannot establish that a volume is orphaned. It names
@@ -1191,7 +1205,11 @@ take a job, and the guard must reap the VM within one period. Clean up the fixtu
 ### Interruption, credit and reports (M6; Acceptance 6, 7 and 8)
 
 Target one running sandbox job with the FIS template created by setup, then read the GitHub job and ledger.
-A notice without terminal evidence is not a cleanup signal; the actual interruption ends the row `preempted`.
+A notice without terminal evidence is not a cleanup signal. Record both the gone instance's StateReason and its
+Spot request's status code under Interruptions; preemption outranks a competing terminal report. Do not use
+Spot UpdateTime as termination time. GitHub may take about ten minutes after VM loss to mark the job failure;
+record that conclusion and attempt count without starting a rerun. After the observed FIS classification fix,
+perform one isolated FIS rerun on the corrected runtime, retaining the first final row `m6fvma20ae` unchanged.
 
     cd /private/tmp/ci-kit-deploy
     AWS_PROFILE=ci-kit-ops AWS_REGION=us-east-2 aws fis start-experiment --experiment-template-id <id>
@@ -1349,6 +1367,32 @@ The production chain is reviewed at each boundary:
   surface and a second control plane to a launcher that runs the owner's private CI.
 
 ## Surprises & Discoveries
+
+- Observation: FIS request `sir-f2a7mf7g` reported `instance-terminated-by-experiment`, while its instance
+  `i-04e073caf4c22aac6` reported `Client.UserInitiatedShutdown`. Notice was 10:52:33Z for termination at
+  10:54:33Z; guest terminal `failed:unit` arrived 10:54:36Z. The old StateReason-only classifier finalized
+  `m6fvma20ae` as done. GitHub job 120853330589/run 40087506118 became failure at 11:04:36Z, attempt 1,
+  with no rerun. Spot UpdateTime was notice-time, not a termination bound. The first final row stays immutable.
+  A separate genuine capacity reclamation of budget fixture `m6bvmav4m5`/`i-0c4f0b8b97eb4434a` at 11:17:00Z
+  supplied `Server.SpotInstanceTermination` and `sir-nrh7manh` status `instance-terminated-no-capacity`; its
+  UpdateTime was 11:14:57Z. Existing runtime correctly recorded preempted/interrupted-free. The replacement
+  budget fixture used another configured zone; the final report will separate real reclamations from FIS and
+  count allocations/created VMs by zone and machine type rather than infer a stable rate from this short window.
+
+- Observation: Guard run 40088100440 reaped the busy, rowless orphan at 11:00:21Z, 15m34s after launch, and
+  protected the stopped builder. It nevertheless exited nonzero when two eligible volumes disappeared between
+  inventory and DeleteVolume; the launcher logged the same false tick failure once. Empty allocation-volume
+  sweeps and explicit builder termination before its deadline established cleanup. Exact missing-volume deletion
+  is now an idempotent-success correction, not a change to cleanup eligibility.
+
+- Observation: The single 17-job burst 40087892049 passed all jobs: 12 EC2 VMs and 6 GCE VMs (five used plus
+  one idle loser), with four refused EC2 allocations. CloudTrail event 11bce955-94e9-4872-ba41-6337dc0f1fc7
+  ties `Client.MaxSpotInstanceCountExceeded` to `hsg2830hf5-1`; that row is refused/quota. The same tick's log
+  records demand 120854439380 refused at 10:56:40.591Z and placed on fresh GCE `hsg28ru0v6` at 10:56:52.033Z.
+  GitHub's fungible labels assigned that runner actual job 120854439475, correctly reflected in its row.
+  Three other attempts hit RequestLimitExceeded and followed the throttled refusal path. All allocations finalized;
+  caps were never changed (global 386), no MAWS GCE placement appeared in the burst window, and no larger or
+  repeated burst was run. The owner accepted this quota proof; throttle spill remains ci-kit #108 entry 3.
 
 - Observation: Guard run `40083424878` at 2026-10-24T09:48Z failed STS in its EC2 leg before any fixture was
   launched; the Hetzner and account-matrix legs passed. GitHub's repo OIDC endpoint returned immutable mode
@@ -1881,6 +1925,19 @@ The production chain is reviewed at each boundary:
   boundary avoids missing the next added command. A local allocation deadline says nothing about IAM eligibility.
   Real SDK body-stall tests must cover STS, RunInstances and Describe, and every created client carries the deadline.
   Date/Author: 2026-10-24, design-owner direction and controller.
+
+- Decision: Expand authoritative gone-instance preemption evidence to the exact three Spot codes in Design,
+  correlated by both Spot-request and instance IDs, with launcher-only regional DescribeSpotInstanceRequests
+  permission. Notify the owner with the exact statement before applying the reviewed policy. Keep credit-first
+  on while fixing forward: the wrong done classification overstates compute spend, changes no job outcome and
+  starts no rerun. Preserve the first FIS final row, deploy reviewed main and run one isolated FIS retest.
+  Rationale: FIS uses a client-initiated instance reason plus an explicit experiment Spot status. Rejected treating
+  every Client.UserInitiatedShutdown as preemption (our own shutdowns share it), and matching FIS fixture tags
+  (a proof-only path blind to production). Drop unverified capacity-oversubscribed; retain only observed experiment
+  and documented price/no-capacity codes. Natural reclamation m6bvmav4m5 corroborates the latter and the rule
+  against Spot UpdateTime. Also treat exact DeleteVolume InvalidVolume.NotFound as already deleted, preserving
+  other failures. These are observed lifecycle corrections, not a new cleanup policy.
+  Date/Author: 2026-10-24, design-owner ruling after live FIS, reclamation and cleanup evidence.
 
 ## Outcomes & Retrospective
 
