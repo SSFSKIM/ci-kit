@@ -92,6 +92,12 @@ export function buildRoles(config, claims, guardSubject) {
       regional(['ec2:StopInstances', 'ec2:CreateImage'], arn('instance'), { ...pooled, 'ec2:ResourceTag/ci-kit-purpose': 'builder' }),
       regional('ec2:CreateImage', [arn('image'), arn('snapshot')], { 'aws:RequestTag/ci-kit-pool': 'ec2' }),
       regional('ec2:CreateTags', [arn('image'), arn('snapshot')], { 'ec2:CreateAction': 'CreateImage', 'aws:RequestTag/ci-kit-pool': 'ec2' }),
+      // Sparse bakes snapshot the builder's clean second disk, not its written-and-deleted root blocks.
+      regional('ec2:CreateSnapshot', arn('volume'), { ...pooled, 'ec2:ResourceTag/ci-kit-purpose': 'builder' }),
+      regional('ec2:CreateSnapshot', arn('snapshot'), { 'aws:RequestTag/ci-kit-pool': 'ec2' }),
+      regional('ec2:RegisterImage', arn('image'), { 'aws:RequestTag/ci-kit-pool': 'ec2' }),
+      regional('ec2:RegisterImage', arn('snapshot'), { ...pooled, 'ec2:Owner': account }),
+      regional('ec2:CreateTags', [arn('image'), arn('snapshot')], { 'ec2:CreateAction': ['CreateSnapshot', 'RegisterImage'], 'aws:RequestTag/ci-kit-pool': 'ec2' }),
       regional('ec2:CreateTags', [arn('image'), arn('snapshot')], pooled), ...imageCleanup,
       statement('ssm:GetParameter', `arn:aws:ssm:${REGION}::parameter/aws/service/canonical/ubuntu/*`, regionCondition()),
     ], 14400),

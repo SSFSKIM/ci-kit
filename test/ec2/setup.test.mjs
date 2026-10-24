@@ -58,6 +58,39 @@ test('launcher cannot launch foreign images or untagged resources; bake Canonica
   assert.equal(allowed(launcher, 'ec2:DescribeInstances', '*', ctx({ 'aws:RequestedRegion': 'us-east-1' })), false);
 });
 
+test('only bake can snapshot builder volumes and register images from owned pool snapshots', () => {
+  const roles = buildRoles(config, claims, guardSubject);
+  const bake = roles.bake.policy;
+  const volume = arn('volume', 'vol-copy');
+  const snapshot = arn('snapshot', 'snap-copy');
+  const image = arn('image', 'ami-copy');
+  const builder = ctx({ 'ec2:ResourceTag/ci-kit-pool': 'ec2', 'ec2:ResourceTag/ci-kit-purpose': 'builder' });
+  const created = ctx({ 'aws:RequestTag/ci-kit-pool': 'ec2' });
+  const ownedSnapshot = ctx({ 'ec2:ResourceTag/ci-kit-pool': 'ec2', 'ec2:Owner': config.account });
+  assert.equal(allowed(bake, 'ec2:CreateSnapshot', volume, builder), true);
+  assert.equal(allowed(bake, 'ec2:CreateSnapshot', snapshot, created), true);
+  assert.equal(allowed(bake, 'ec2:RegisterImage', image, created), true);
+  assert.equal(allowed(bake, 'ec2:RegisterImage', snapshot, ownedSnapshot), true);
+  for (const context of [ctx(), ctx({ 'ec2:ResourceTag/ci-kit-pool': 'ec2' }), { ...builder, 'ec2:ResourceTag/ci-kit-purpose': 'job' }, { ...builder, 'aws:RequestedRegion': 'us-west-2' }]) {
+    assert.equal(allowed(bake, 'ec2:CreateSnapshot', volume, context), false);
+  }
+  assert.equal(allowed(bake, 'ec2:CreateSnapshot', snapshot, ctx()), false);
+  assert.equal(allowed(bake, 'ec2:RegisterImage', image, ctx()), false);
+  assert.equal(allowed(bake, 'ec2:RegisterImage', snapshot, { ...ownedSnapshot, 'ec2:Owner': '999999999999' }), false);
+  assert.equal(allowed(bake, 'ec2:RegisterImage', snapshot, ctx({ 'ec2:Owner': config.account })), false);
+  for (const [action, resource] of [['CreateSnapshot', snapshot], ['RegisterImage', image]]) {
+    assert.equal(allowed(bake, 'ec2:CreateTags', resource, { ...created, 'ec2:CreateAction': action }), true);
+    assert.equal(allowed(bake, 'ec2:CreateTags', resource, created), false);
+  }
+  for (const role of [roles.launcher, roles.guard, roles.fis]) {
+    assert.equal(allowed(role.policy, 'ec2:CreateSnapshot', volume, builder), false);
+    assert.equal(allowed(role.policy, 'ec2:RegisterImage', image, created), false);
+  }
+  for (const action of ['ec2:AttachVolume', 'ec2:DetachVolume', 'ec2:CreateVolume']) {
+    assert.equal(allowed(bake, action, volume, { ...builder, ...created }), false);
+  }
+});
+
 test('report readers can distinguish missing reports without reading or listing another bucket', () => {
   const roles = buildRoles(config, claims, guardSubject);
   for (const role of [roles.launcher, roles.bake]) {
