@@ -193,14 +193,16 @@ case $step in
     mdutil=${CI_KIT_VM_MDUTIL:-/usr/bin/mdutil}
     "${CI_KIT_VM_SUDO:-/usr/bin/sudo}" -n "$mdutil" -a -i off || fail 'cannot turn Spotlight indexing off'
     indexing=$("$mdutil" -a -s) || fail 'cannot read Spotlight indexing (mdutil -a -s)'
-    # Check every reported volume, not just the first disabled line, and require the three volumes the base reports.
-    # Empty, partial or unfamiliar output cannot certify the image; a new base's layout needs a deliberate check.
+    # Check every reported volume, not just the first disabled line, and require the system and data volumes. mdutil
+    # reports only mounted volumes: the first bake (10-23) read / and /System/Volumes/Data alone, while probe 4's booted
+    # clone of a golden also listed /System/Volumes/Preboot. So Preboot, like any other volume, must read disabled when
+    # it is reported but is not required. Empty, partial or unfamiliar output cannot certify the image.
     python3 -I -c '
 import sys
 lines = [line.strip() for line in sys.stdin if line.strip()]
 volumes = lines[::2]
 valid = (len(lines) % 2 == 0
-         and {"/:", "/System/Volumes/Data:", "/System/Volumes/Preboot:"} <= set(volumes)
+         and {"/:", "/System/Volumes/Data:"} <= set(volumes)
          and all(volume.startswith("/") and volume.endswith(":") for volume in volumes)
          and all(status == "Indexing disabled." for status in lines[1::2]))
 sys.exit(0 if valid else 1)' <<<"$indexing" || fail "Spotlight indexing is not verified disabled on every volume: $indexing"
