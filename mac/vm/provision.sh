@@ -17,6 +17,10 @@
 #   libreoffice                          LibreOffice (cask), for the document groups
 #   poppler                              Poppler's pdfinfo, pdftoppm, pdftotext and pdffonts in /opt/homebrew/bin, where
 #                                        MAWS's export groups read the PDFs they make (design, presentations, dashboard)
+#   engine <version>                     Claude Code at <version> (bake.sh passes the host's own), through Anthropic's
+#                                        native installer: ~/.local/bin/claude, its link into
+#                                        ~/.local/share/claude/versions/<version>, which is where MAWS finds the
+#                                        installed engine (connectors-direct and delivery launch it with no login)
 #   runner <version> <sha256> <machine>  the runner at install.sh's pin in ~/actions-runner-maws, its .env and .path
 #                                        (env below), and ~/ci-kit -> the kit share, which keeps a space out of the
 #                                        hook paths
@@ -272,6 +276,18 @@ sys.exit(0 if valid else 1)' <<<"$indexing" || fail "Spotlight indexing is not v
     done
     say "Poppler installed ($(/opt/homebrew/bin/pdfinfo -v 2>&1 | head -1))"
     ;;
+  engine)
+    # Anthropic's documented installer (code.claude.com/docs/en/setup, "Install a specific version") checks the binary
+    # against its release's manifest; MAWS resolves ~/.local/bin/claude (e2e/support/p1-live.ts, installedEngine).
+    [[ ${1:-} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "engine takes Claude Code's version (got '${1:-}')"
+    engine=$HOME/.local/bin/claude
+    engine_version() { "$engine" --version 2>/dev/null | sed -n 's/^\([0-9][0-9.]*\) (Claude Code)$/\1/p'; }
+    [[ $(engine_version) == "$1" ]] || curl -fsSL https://claude.ai/install.sh | bash -s "$1"
+    [[ $(engine_version) == "$1" ]] || fail "Claude Code at $engine is '$(engine_version)', not $1"
+    [[ $(readlink "$engine") == "$HOME/.local/share/claude/versions/$1" ]] ||
+      fail "$engine is not the native installer's link to version $1 ($(readlink "$engine" || echo 'not a link'))"
+    say "Claude Code $1 at $engine"
+    ;;
   runner)
     version=${1:-} sha=${2:-}
     [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && $sha =~ ^[0-9a-f]{64}$ ]] || fail 'runner takes <version> <sha256> <machine>'
@@ -353,6 +369,6 @@ print(os.path.join(runner, work))' "$vm_runner" "$runner_work") || fail 'cannot 
     say "$name registered with $labels; its identity is in the identity-$slot share, and none is left in $vm_runner"
     ;;
   *)
-    fail "unknown step '${step}' (check, disk, quiet, display, node, store, libreoffice, runner, workrepo, env, helpers, register)"
+    fail "unknown step '${step}' (check, disk, quiet, display, node, store, libreoffice, poppler, engine, runner, workrepo, env, helpers, register)"
     ;;
 esac

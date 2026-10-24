@@ -213,7 +213,8 @@ and by the coordinator's holds, and the design below says what is read and when.
     (1.30x the host's); `presentations` 2/3, a hang in a non-export test in run 1 (Surprises); the MAWS architect
     judges it against the test's host history.
   - [ ] Step 4 wave 3 (browser, browser-comment, delivery). The host tools MAWS's groups run were checked against
-    the image first (2026-10-24, the Poppler gap's lesson, Decision Log): no other gap.
+    the image first (2026-10-24, the Poppler gap's lesson, Decision Log): no other gap. That check missed a
+    home-relative one, the engine at `~/.local/bin/claude` (Decision Log, 2026-10-24 23:5xZ).
 - [ ] V5 — Widen the proven-VM set; the second guest, if memory ever allows it.
 
 ## Design
@@ -1749,6 +1750,18 @@ hold-aware plan send them to the guest, which this spec leaves open.
   that a failed remote DELETE is housekeeping, not admission: once the clone is verified gone and the config
   revoked, the offline registration is harmless. Keep its nonsecret record and retry on later loops, with a log
   line, without holding the reservation or boot admission.
+- 2026-10-24 23:5xZ (CI-opt; V4 step 4 wave 3): **The image carries Claude Code at the host's version.** Pass 1 of
+  wave 3 failed all 11 run tests of `connectors-direct` and `delivery`'s Notion test on `lstat
+  /Users/admin/.local/bin` ENOENT: MAWS's connector probe launches the installed engine with no login, resolving
+  `~/.local/bin/claude` (`e2e/support/p1-live.ts`, `installedEngine`), and the host has one from its user's own
+  install. The audit before wave 3 read the binaries spawned by literal name or path constant; this one is joined
+  from `homedir()`, a home-relative path that audit could not see. ci-kit PR_NUMBER adds `provision.sh engine
+  <version>` after Poppler, through Anthropic's native installer (which checks the binary against its release's
+  manifest), and bake.sh passes the host user's own version, so on the bake's day the guest launches what the host's
+  jobs launch. Between bakes the guest's engine falls behind the host's auto-updating one. **Rejected:** an install
+  in every guest job from MAWS's workflow (a download per job, and a MAWS change for an image gap); Homebrew's cask
+  (it links `/opt/homebrew/bin/claude`, not the installer's link MAWS resolves); `latest` at bake time (a version
+  the host may not run yet).
 
 ## Surprises & Discoveries
 
