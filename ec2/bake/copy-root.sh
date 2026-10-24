@@ -2,6 +2,7 @@
 # Copy a frozen ext4 partition by its allocation bitmap, not by walking linked inodes.
 set -euo pipefail
 export LC_ALL=C
+writer=${BASH_SOURCE[0]%/*}/write-sparse.sh
 source=$1 target=$2 source_mount=$3
 phase=copy-root-setup phase_started=$SECONDS
 . "${BASH_SOURCE[0]%/*}/compact-state.sh"
@@ -56,10 +57,16 @@ fsfreeze -f "$source_mount"
 # Capture every regular file at the same frozen point as the block copy, including caches/layers.
 compact_phase source-inventory
 inventory "$work/source" "$work/source.sha256" source
-# /run is tmpfs: the default logfile on root would deadlock. Bound the copy so failure can thaw root.
 compact_phase root-copy
-timeout --kill-after=10s 8m partclone.ext4 --dev-to-dev --ignore_fschk --quiet \
-  --logfile "$work/partclone.log" --source "$loop" --output "$target"
+# Stdout dev-to-dev mode is a raw stream: partclone emits zeros for unallocated runs and the tail.
+# Skip every all-zero output block, including allocated zero inode tables, on the blank destination.
+# Bound both processes together and preserve either failure so cleanup can thaw root.
+# shellcheck disable=SC2016
+timeout --kill-after=10s 8m bash -c '
+  set -euo pipefail
+  partclone.ext4 --dev-to-dev --ignore_fschk --quiet --logfile "$2" --source "$1" --output - |
+    bash "$3" "$4"
+' copy "$loop" "$work/partclone.log" "$writer" "$target"
 compact_phase root-recovery
 fsfreeze -u "$source_mount"
 frozen=0

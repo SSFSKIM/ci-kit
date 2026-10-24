@@ -35,7 +35,11 @@ umount() { echo "CALL umount $*" >&3; READONLY=0; export READONLY; }
 rmdir() { command rmdir "$@"; case "$CASE" in cleanup-failure|copy-timeout-cleanup-failure) return 29;; esac; }
 udevadm() { :; }
 sgdisk() { echo "CALL sgdisk $*"; if [[ "$*" == *'-v'* ]]; then [ "$CASE" != disk-verify-failure ] || return 13; echo 'No problems found.'; fi; }
-dd() { echo "CALL dd $*"; [ "$CASE" != boot-copy-failure ] || return 23; }
+dd() {
+  echo "CALL dd $*" >&3
+  [ "$CASE" != boot-copy-failure ] || return 23
+  if [[ "$*" != *'if='* ]]; then cat > /dev/null; [ "$CASE" != writer-failure ] || return 7; fi
+}
 sync() { :; }
 mktemp() { echo "CALL mktemp $*" >&2; command mktemp -d "\${TMPDIR:-/tmp}/copy-fixture.XXXXXX"; }
 losetup() {
@@ -57,10 +61,11 @@ find() {
 }
 fsfreeze() { echo "CALL fsfreeze $*" >&3; if [ "$1" = -f ]; then FROZEN=1; else FROZEN=0; fi; export FROZEN; }
 partclone.ext4() {
-  echo "CALL partclone.ext4 $*"
+  echo "CALL partclone.ext4 $*" >&3
   [ "\${FROZEN:-0}" = 1 ] || return 2
   if [ "$CASE" = timed-copy ]; then node -e 'setTimeout(() => {}, 1100)'; fi
   case "$CASE" in copy-failure) return 1;; copy-timeout|copy-timeout-cleanup-failure) return 124;; esac
+  printf raw-stream
 }
 timeout() {
   if [[ "$*" == *' find '* ]]; then
@@ -74,7 +79,7 @@ timeout() {
 e2image() { echo "CALL e2image $*"; }
 e2fsck() { echo "CALL e2fsck $*"; [ "$CASE" != corrupt ] || return 4; }
 # Run the real nested Bash processes, with only their Linux command boundary replaced.
-export -f find mount umount rmdir mktemp losetup sync fsfreeze timeout partclone.ext4 e2fsck
+export -f find mount umount rmdir mktemp losetup sync fsfreeze timeout partclone.ext4 e2fsck dd
 . "$1"
 `;
 const script = new URL('../../ec2/bake/compact.sh', import.meta.url).pathname;
@@ -104,6 +109,7 @@ for (const [scenario, phase, exit_status] of [
   ['hash-failure', 'source-inventory', 1],
   ['source-timeout', 'source-inventory', 124],
   ['copy-failure', 'root-copy', 1],
+  ['writer-failure', 'root-copy', 7],
   ['copy-timeout', 'root-copy', 124],
   ['recovery-failure', 'root-recovery', 1],
   ['target-hash-failure', 'target-inventory', 26],
@@ -162,7 +168,7 @@ test('successful compaction records every completed phase and actual elapsed cop
   assert.ok(result.trace.find(entry => entry.phase === 'compact').elapsed_seconds >= 1);
   const timeouts = (result.stderr + result.stdout).match(/CALL timeout --kill-after=10s 5m bash/g) ?? [];
   assert.equal(timeouts.length, 2, 'both inventories receive the measured-cold 300-second bound');
-  assert.match(result.stdout, /CALL timeout --kill-after=10s 8m partclone/);
+  assert.match(result.stdout, /CALL timeout --kill-after=10s 8m bash/);
 });
 
 test('copy preserves all allocated blocks, recovers normally, then verifies without repairing corruption', () => {
@@ -177,7 +183,8 @@ test('copy preserves all allocated blocks, recovers normally, then verifies with
   assert.ok(copy, r.stdout);
   assert.match(copy, /--dev-to-dev/);
   assert.match(copy, /--source \/dev\/loop7/);
-  assert.match(copy, /--output \/dev\/nvme1n1p1/);
+  assert.match(copy, /--output -$/);
+  assert.ok(lines.some(line => /^CALL dd of=\/dev\/nvme1n1p1 /.test(line) && line.includes('conv=sparse,fsync')), 'root bytes must pass through the zero-aware writer');
   assert.match(r.stderr, /CALL mktemp -d \/run\//, 'runtime files must live on tmpfs while root is frozen');
   assert.match(copy, /--logfile .*\/partclone.log/);
   assert.doesNotMatch(copy, /--force|--rescue|--skip_write_error/);
@@ -194,7 +201,7 @@ test('copy preserves all allocated blocks, recovers normally, then verifies with
   assert.match(r.stderr, /CALL inventory frozen=0 readonly=1/);
   assert.ok(at('losetup --detach /dev/loop7') > at('fsfreeze -u /'));
   assert.ok(at('sgdisk -v /dev/nvme1n1') >= 0);
-  for (const part of [14, 15, 16]) assert.ok(lines.some(line => line.startsWith('CALL dd ') && line.includes(`if=/dev/nvme0n1p${part} of=/dev/nvme1n1p${part}`)));
+  for (const part of [14, 15, 16]) assert.ok(lines.some(line => line.startsWith('CALL dd ') && line.includes(`if=/dev/nvme0n1p${part} of=/dev/nvme1n1p${part}`) && line.includes('conv=sparse,fsync')), 'boot partitions must also skip zero writes');
   assert.ok(!lines.some(line => line.startsWith('CALL dd ') && /if=\/dev\/nvme0n1p1(?:\s|$)/.test(line)), 'raw copying the root would preserve deleted blocks');
 });
 
@@ -204,7 +211,7 @@ for (const scenario of ['size', 'occupied', 'mounted', 'ambiguous']) test(`refus
   assert.doesNotMatch(r.stdout, /CALL (?:sgdisk|dd|partclone|e2image|fsfreeze)/);
 });
 
-for (const scenario of ['copy-failure', 'copy-timeout']) test(`${scenario} still thaws the source, releases the alias, and fails the bake`, () => {
+for (const scenario of ['copy-failure', 'copy-timeout', 'writer-failure']) test(`${scenario} still thaws the source, releases the alias, and fails the bake`, () => {
   const r = run(scenario);
   assert.notEqual(r.status, 0);
   assert.match(r.stdout, /CALL partclone.ext4 /);

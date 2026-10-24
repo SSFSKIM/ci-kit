@@ -151,6 +151,11 @@ dd if="$target" of="$work/freed-after" bs=4096 skip="$free_block" count=1 status
 cmp -s "$work/freed-after" "$work/zero"
 echo 'GREEN: coherent file/ELF bytes and execution, fragmented orphan recovery, links/mode/xattr preserved; freed block stayed zero'
 
+# Zero-skipping requires a blank destination; the earlier e2image baseline is not one.
+losetup --detach "$baseline"
+rm "$work/baseline.img"
+truncate -s 128M "$work/baseline.img"
+baseline=$(losetup --find --show "$work/baseline.img")
 # A linked inode with a corrupt link count is not orphan recovery. Never silently repair it.
 kill "$holder"
 wait "$holder" 2>/dev/null || true

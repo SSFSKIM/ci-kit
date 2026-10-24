@@ -1574,6 +1574,18 @@ The production chain is reviewed at each boundary:
 
 ## Decision Log
 
+- Decision: Follow #132 with zero-aware writes onto the same blank destination, preserving filesystem and
+  partition geometry. Partclone's raw stdout mode emits allocated data plus zero-filled free runs and tail;
+  GNU `dd` with 512-KiB full input blocks and `conv=sparse,fsync` seeks over all-zero output blocks, including
+  allocated zero inode tables. Use the same writer for BIOS/EFI/boot partitions. Bound the entire root pipeline
+  and propagate either producer or writer failure; retain direct backing I/O, complete frozen-source/target
+  byte comparison, normal orphan recovery, fsck, smoke and the real sandbox job. No IAM or guest check-interface
+  change is needed. Inode density and filesystem packing remain outside this follow-up.
+  Rationale: #132's measured remaining footprint is dominated by inode tables and whole boot copying, not
+  scattered-file granularity. Never writing a zero block on a blank disk preserves its bytes; zero-filling an
+  existing disk would instead increase snapshot data. Candidate savings still require an AWS size reading.
+  Date/Author: 2026-10-24, CI-opt and zero-aware-write executor.
+
 - Decision: Preserve bounded compaction phase, exit status and timing in the builder's existing S3 report,
   on failure and success, rather than relying on a terminated instance's serial console. Keep diagnostic
   handoffs in `/run`, retain the first failing phase through cleanup, and never reflect raw commands, paths,

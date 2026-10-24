@@ -39,7 +39,7 @@ udevadm settle
 # Preserve the legacy boot code too, without overwriting the replicated GPT's protective MBR partition table.
 dd if="$source" of="$target" bs=446 count=1 conv=notrunc status=none
 for part in 14 15 16; do
-  dd if="${source}p${part}" of="${target}p${part}" bs=4M conv=fsync status=none
+  bash "$bake_dir/write-sparse.sh" "${target}p${part}" "${source}p${part}"
 done
 
 compact_phase copy-root-setup
