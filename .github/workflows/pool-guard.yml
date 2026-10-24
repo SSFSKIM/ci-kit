@@ -1,4 +1,5 @@
-# The pool's guard (spec §3 Guard): the backstop, every 10 minutes. GitHub's cron can run late; the main path is
+# Independent backstops: Hetzner every 10 minutes; EC2 every 15 minutes, including disabled accounts.
+# GitHub's cron can run late; the main path is
 # ensure and the agent. Scheduled workflows run from the default branch only. GitHub registers the schedule when
 # this file changes there; after M5's merge (2026-10-16) no scheduled run came for over 85 minutes, and a commit
 # that touches this file is the documented way to make GitHub register it again.
@@ -6,6 +7,7 @@ name: pool-guard
 on:
   schedule:
     - cron: '*/10 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 permissions:
   contents: read
@@ -14,6 +16,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   guard:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '*/10 * * * *'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -31,3 +34,51 @@ jobs:
           CI_KIT_APP_ID: ${{ secrets.CI_KIT_APP_ID }}
           CI_KIT_APP_KEY: ${{ secrets.CI_KIT_APP_KEY }}
         run: node pool/guard.mjs
+
+  ec2-accounts:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '*/15 * * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      accounts: ${{ steps.accounts.outputs.accounts }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - run: npm ci --omit=dev --no-audit --no-fund --loglevel=error
+      - id: accounts
+        run: |
+          accounts="$(node ec2/guard.mjs --matrix)"
+          echo "accounts=$accounts" >> "$GITHUB_OUTPUT"
+
+  ec2-guard:
+    needs: ec2-accounts
+    if: needs.ec2-accounts.outputs.accounts != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        account: ${{ fromJSON(needs.ec2-accounts.outputs.accounts) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - run: npm ci --omit=dev --no-audit --no-fund --loglevel=error
+      - name: Guard EC2 account
+        env:
+          CI_KIT_APP_ID: ${{ secrets.CI_KIT_APP_ID }}
+          CI_KIT_APP_KEY: ${{ secrets.CI_KIT_APP_KEY }}
+          GUARD_ACCOUNT: ${{ matrix.account }}
+        run: node ec2/guard.mjs --account "$GUARD_ACCOUNT"
