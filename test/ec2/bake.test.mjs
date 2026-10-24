@@ -338,8 +338,9 @@ curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat >> "$TEST_ROOT/report.j
     await writeFile(join(root,'etc/ci-kit/bake-manifest.json'),'{}');
     assert.throws(()=>run(finalizer));
     assert.equal(await present('poweroff'),true);
-    assert.equal(await present('report.jsonl'),false);
-    assert.match(await readFile(join(root,'curl-calls'),'utf8'),/failed:image-check/);
+    assert.deepEqual(JSON.parse(await readFile(join(root,'report.jsonl'),'utf8')), {
+      value:'failed:image',diagnostic:{reason:'manifest-incomplete',path:'/etc/ci-kit/bake-manifest.json'},
+    });
     assert.equal(await present('run/ci-kit-bake'),false);
   } finally { await rm(root,{recursive:true,force:true}); }
 });
