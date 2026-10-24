@@ -688,7 +688,9 @@ is rewritten. New fields:
 
 An EC2 VM can disappear between observations after uploading its terminal report. Before finalizing an absent
 or terminated allocation as orphan, read its terminal report by allocation; independently established preemption
-keeps priority. Unknown provider inventory still holds the row and reservation, and already-final rows stay final.
+keeps priority. Explicit `failed:deadline` uses existing `max-run`; other terminal reports retain `done`'s
+existing meaning of ended, not necessarily succeeded. Unknown provider inventory still holds the row and
+reservation, and already-final rows stay final.
 
 Provider exhaustion gains the final end reason `refused`; existing reasons keep their meanings. An uncertain
 EC2 attempt that remains absent at its ten-minute reconciliation limit uses the existing `abandoned` reason.
@@ -1092,10 +1094,17 @@ the M3/GCE regression proof, and with fresh billing and MAWS's provider list nam
     # expect: static, unit shards and probes success; ci-kit-gce-* in M3, ci-kit-ec2-* in M6
 
 For M5, queue sandbox jobs labelled `ci-kit-ec2` to prove that provider before credit accounting is enabled.
-In M6, a generic sandbox burst exceeding EC2's quota proves same-tick fallback with preference on; do not
-exceed the live-test cap in Plan of Work. If the current quota prevents that live scenario, M4's fake-provider
-refusal tests remain the deterministic proof. For a fallback, inspect one tick's log and the corresponding
-ledger rows: the same demand has a refused EC2 allocation and a different GCE allocation and registration.
+After M6 activation, run one bounded burst of 17 generic sandbox jobs requesting 16 vCPUs each, holding for
+three minutes with a hard job timeout plus margin, to exceed the 256-vCPU Spot quota. Tag every fixture VM.
+If a sandbox EC2 cap or the global ceiling binds, raise only those in a small titled config PR and restore them
+in a second PR immediately afterward; record both merge times and never raise MAWS's caps. Record any MAWS
+jobs that meet the full quota and fall back to GCE. Cancel residual holding jobs and sweep fixture tags afterward.
+Inspect one tick's log and the corresponding ledger rows: the same demand has a refused EC2 allocation with
+AWS's real quota error and a different GCE allocation/registration; record instance and refusal counts. If AWS
+returns capacity refusal before quota, retain that live fallback evidence and explicitly mark quota-code mapping
+unproven live, supported by M4 tests. Do not run a second/larger burst. A per-repo-cap proof is not a substitute.
+The expected incremental cost is below $2; filling quota only for this bounded proof satisfies the preamble's
+limit on unnecessary fixtures.
 
     cd /private/tmp/ci-kit-deploy
     gcloud logging read 'resource.labels.service_name="ci-kit-launcher"' --project ssfskim-ci-kit --freshness=1h --order asc --format='value(jsonPayload.message,textPayload)'
@@ -1770,6 +1779,15 @@ The production chain is reviewed at each boundary:
   no non-final EC2 rows. Of the orphans, one was deliberately unadopted idle cleanup, one the absent-config
   deadline fixture, and one a successful scheduler job. Baseline recorded 2026-10-24T09:18:41Z.
   Date/Author: 2026-10-24, design-owner scope ruling and controller.
+
+- Decision: The live overflow proof remains required after activation: one 17-job, 16-vCPU, three-minute-hold
+  burst with bounded job timeouts, fixture tags and cleanup. Raise only a binding sandbox/global cap through
+  titled temporary/restoration PRs, never MAWS caps. Record same-tick real refusal/fallback allocation evidence.
+  Rationale: M4 fakes cannot establish AWS's actual quota error mapping. The preamble disallows unnecessary
+  quota-filling, not the minimum fleet this proof requires; expected cost below $2 is not grounds to omit it.
+  Rejected replacing it with a three-job per-repo-cap test. Capacity refusal before quota is valid fallback
+  evidence but leaves real quota mapping unproven; do not enlarge or repeat the burst.
+  Date/Author: 2026-10-24, design-owner ruling and controller.
 
 ## Outcomes & Retrospective
 
