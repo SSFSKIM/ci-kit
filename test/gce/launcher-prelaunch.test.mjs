@@ -214,3 +214,30 @@ test('a tick in which a queued job stayed unserved pre-launches nothing: it has 
   assert.deepEqual(inserts, ['ssfskim--ci-kit-sandbox 16'], 'the gate\'s insert, refused for quota; no pre-launch tried');
   assert.ok(!w.gh.comments.some((c) => parseRow(c.body)?.prelaunch), 'no pre-launch row');
 });
+
+for (const [message, expected] of [['Pool-Demand: 4x2', [4, 4]], ['Pool-Demand: none', []], ['Pool-Demand: bad', [2, 8, 8, 8, 8, 16]]]) {
+  test(`the tick reads head_commit.message from the runs listing: ${message}`, async () => {
+    const { w, launcher } = setup();
+    const plan = startRun(w);
+    w.gh.runs.find((r) => r.id === plan.run_id).head_commit = { message };
+    await launcher.tick();
+    assert.deepEqual(sizes(forRun(w, plan.run_id)), expected);
+  });
+}
+
+test('a new run reuses idle online VMs from an ended run, without covering its queued jobs twice', async () => {
+  const { w, launcher } = setup({ history: { repo: SBX, gates: [['small', 4], ['small', 4]] } });
+  const old = startRun(w);
+  await launcher.tick();
+  for (const i of w.g.instances) w.sim.boot(SBX, i.name);
+  old.status = 'completed';
+  w.gh.runs.find((r) => r.id === old.run_id).status = 'completed';
+  // One of the two existing runners is already needed by a queued job. Only the other is spare.
+  w.sim.queue(SBX, L(4));
+  const next = startRun(w);
+  w.gh.runs.find((r) => r.id === next.run_id).head_commit = { message: 'Pool-Demand: 4x2' };
+  const tick = await launcher.tick();
+  assert.equal(tick.prelaunched.length, 1);
+  assert.equal(forRun(w, next.run_id).length, 1);
+  assert.deepEqual((await launcher.tick()).launched, [], 'own allocation plus spare inventory cover the next tick too');
+});

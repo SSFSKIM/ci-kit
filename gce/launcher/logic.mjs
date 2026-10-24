@@ -132,7 +132,7 @@ export function planLaunches({ queued, instances, runners, now, cfg, complete = 
   const add = (repo, cpus, provider, name) => {
     if (coveredNames.has(name)) return;
     coveredNames.add(name);
-    cover.push({ repo, cpus, provider });
+    cover.push({ repo, cpus, provider, name });
   };
   let inflight = 0;
   const byAlloc = new Map(rows.map((r) => [r.alloc, r]));
@@ -189,7 +189,8 @@ export function planLaunches({ queued, instances, runners, now, cfg, complete = 
       launches.push({ job: d.job, repo: d.repo, cpus: d.cpus });
     }
   }
-  return { launches, waiting, unservable, inflight };
+  // Keep the unused cover's identity: speculative demand may reuse only what queued jobs did not reserve.
+  return { launches, waiting, unservable, inflight, spare: cover };
 }
 
 export const largestMachineCpus = (cpus, cfg) => Math.max(...cfg.placements.map((p) => machineCpus(p.machines[cpus])));

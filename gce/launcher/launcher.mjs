@@ -217,7 +217,7 @@ export class Launcher {
   }
 
   // A repo's GitHub reads, started together: whether it is private, and its runners, then its queued and running runs
-  // ({repo, id, path, attempt}) and their jobs, each with its run's workflow path. Runners are read first: a job taken
+  // ({repo, id, path, attempt, message}) and their jobs, each with its run's workflow path. Runners are read first: a job taken
   // between the two reads then shows as not queued, never as double demand. The queued runs are listed before the
   // running ones, so a run that starts between the two listings is in the second (listed at once, each could miss it),
   // and a run in both is read once. A failed read resolves to null (visible: to the error), logged.
@@ -234,7 +234,7 @@ export class Launcher {
           const jobs = await preparation.time('github.listJobs', () => this.gh.listJobs(repo, run.id), { repo, run: run.id });
           return jobs.map((j) => ({ ...j, repo, workflow: run.path }));
         }));
-        return { jobs: lists.flat(), runs: runs.map((run) => ({ repo, id: run.id, path: run.path, attempt: run.run_attempt ?? 1 })) };
+        return { jobs: lists.flat(), runs: runs.map((run) => ({ repo, id: run.id, path: run.path, attempt: run.run_attempt ?? 1, message: run.head_commit?.message })) };
       } catch (err) {
         this.log(`jobs of ${repo}: ${err.message}`);
         return null;
@@ -526,7 +526,7 @@ export class Launcher {
     for (const job of plan.unservable) this.log(`job ${job.id} in ${job.repo} cannot run on GCE: labels ${job.labels.join(',')}`);
     out.waiting = plan.waiting.length;
     const prelaunches = (inflight) => (!seen.complete ? [] : planPrelaunches({
-      runs: seen.runs, jobs: seen.jobs, rows: seen.rows, runners: seen.demand, inflight, waiting: plan.waiting.length, cfg: this.cfg, admission: false,
+      runs: seen.runs, jobs: seen.jobs, rows: seen.rows, runners: seen.demand, inflight, waiting: plan.waiting.length, cfg: this.cfg, admission: false, spare: plan.spare,
     }));
     const ahead = prelaunches(plan.inflight);
     if (plan.launches.length + ahead.length === 0) return;
