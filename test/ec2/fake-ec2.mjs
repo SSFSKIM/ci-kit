@@ -24,7 +24,7 @@ export function fixture() {
   const aws = { ec2: { send }, s3: { send }, presignPut: async ({ key }) => `https://example.com/${key}?signature=secret` };
   const make = (cfg = account) => createProvider({ aws, account: cfg, cfg: { max_run_minutes: 120 }, now: () => time, log: (line) => logs.push(line) });
   const provider = make();
-  const row = { alloc: 'alloc1', repo: 'SSFSKIM/ci-kit-sandbox', cpus: 8, image: image.ImageId, zone: 'us-east-2c', client_token: 'alloc1-1', sent_at: new Date(start).toISOString() };
+  const row = { alloc: 'alloc1', at: new Date(start).toISOString(), repo: 'SSFSKIM/ci-kit-sandbox', cpus: 8, image: image.ImageId, zone: 'us-east-2c', client_token: 'alloc1-1', sent_at: new Date(start).toISOString() };
   return { aws, calls, logs, handlers, instances, objects, provider, make, row, advance: (ms) => { time += ms; } };
 }
 export async function prepared(f) { await f.provider.observe(); await f.provider.readyImage(); return f.provider.candidates(account, 8)[0]; }
