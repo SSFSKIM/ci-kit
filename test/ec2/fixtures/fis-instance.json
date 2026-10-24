@@ -1,0 +1,64 @@
+{
+    "Reservations": [
+        {
+            "Instances": [
+                {
+                    "InstanceId": "i-04e073caf4c22aac6",
+                    "State": {
+                        "Code": 48,
+                        "Name": "terminated"
+                    },
+                    "StateReason": {
+                        "Code": "Client.UserInitiatedShutdown",
+                        "Message": "Client.UserInitiatedShutdown: User initiated shutdown"
+                    },
+                    "StateTransitionReason": "User initiated (2026-10-24 10:54:36 GMT)",
+                    "SpotInstanceRequestId": "sir-f2a7mf7g",
+                    "LaunchTime": "2026-10-24T10:50:10+00:00",
+                    "Tags": [
+                        {
+                            "Key": "ci-kit-disk-gb",
+                            "Value": "50"
+                        },
+                        {
+                            "Key": "ci-kit-price",
+                            "Value": "{\"source\":\"ec2-spot\",\"at\":\"2026-10-24T10:00:00.000Z\",\"computeHourlyUsd\":0.0201,\"diskGiBMonthlyUsd\":0.08,\"ipv4HourlyUsd\":0.005,\"initializationUsd\":0.027483984375}"
+                        },
+                        {
+                            "Key": "ci-kit-cpus",
+                            "Value": "2"
+                        },
+                        {
+                            "Key": "ci-kit-fis-fixture",
+                            "Value": "true"
+                        },
+                        {
+                            "Key": "ci-kit-fixture",
+                            "Value": "m6-fis"
+                        },
+                        {
+                            "Key": "ci-kit-repo",
+                            "Value": "SSFSKIM--ci-kit-sandbox"
+                        },
+                        {
+                            "Key": "ci-kit-deadline",
+                            "Value": "2026-10-24T11:35:09.392Z"
+                        },
+                        {
+                            "Key": "ci-kit-alloc",
+                            "Value": "m6fvma20ae"
+                        },
+                        {
+                            "Key": "ci-kit-pool",
+                            "Value": "ec2"
+                        },
+                        {
+                            "Key": "ci-kit-purpose",
+                            "Value": "job"
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

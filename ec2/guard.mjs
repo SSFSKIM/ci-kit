@@ -163,7 +163,10 @@ export async function runEc2Guard({ ec2, gh, ledger, account, now = Date.now, lo
       continue;
     }
     if (!expired(current, at) && !(instances !== null && tagsOf(current)['ci-kit-purpose'] === 'job')) continue;
-    await act(`delete volume ${v.VolumeId}: ${overdue ? 'deadline' : 'unattached job'}`, () => ec2.send(new DeleteVolumeCommand({ VolumeId: v.VolumeId })));
+    await act(`delete volume ${v.VolumeId}: ${overdue ? 'deadline' : 'unattached job'}`, () =>
+      ec2.send(new DeleteVolumeCommand({ VolumeId: v.VolumeId })).catch(err => {
+        if (err.name !== 'InvalidVolume.NotFound') throw err; // another cleanup path won the deletion race
+      }));
   }
   if (images !== null && snapshots !== null) {
     const doomed = imagesToPrune(images, at);
