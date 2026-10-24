@@ -14,6 +14,6 @@
       "bake": "arn:aws:iam::290475840169:role/ci-kit-ec2-bake",
       "guard": "arn:aws:iam::290475840169:role/ci-kit-ec2-guard"
     },
-    "credit": {"enabled": true, "since": "2026-10-23", "until": "2027-04-17", "budget_usd": 180}
+    "credit": {"enabled": true, "since": "2026-10-23", "until": "2027-04-17", "budget_usd": 0.1}
   }]
 }
