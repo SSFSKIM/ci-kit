@@ -73,6 +73,25 @@ test('builder self-check failure reaches the controller with the same safe reaso
   assert.ok(!unsafe.includes('jit-private') && !unsafe.includes('signature='), unsafe);
 });
 
+test('controller exposes compact phase and numeric exit status but rejects forged compact report fields', async () => {
+  const secret = 'jit-private https://report.example/x?signature=private artifact-contents';
+  const message = await failedBake({ value: 'failed:compact', diagnostic: {
+    reason: 'compact-failed', phase: 'root-copy', exit_status: 124, path: secret, command: secret, stderr: secret, url: secret,
+  }, extra: secret, compact: { elapsed_seconds: secret, exit_status: secret, phases: { [secret]: secret } } }, { builder: true });
+  assert.equal(message, 'builder failed: failed:compact {"reason":"compact-failed","phase":"root-copy","exit_status":124}');
+  for (const diagnostic of [
+    { reason: 'compact-failed', phase: secret, exit_status: 1 },
+    { reason: 'compact-failed', phase: ['root-copy'], exit_status: 1 },
+    { reason: 'compact-failed', phase: 'root-copy', exit_status: secret },
+    { reason: 'compact-failed', phase: 'root-copy', exit_status: '124' },
+    { reason: 'compact-failed', phase: 'root-copy', exit_status: 256 },
+    { reason: secret, phase: 'root-copy', exit_status: 1 },
+  ]) {
+    assert.equal(await failedBake({ value: 'failed:compact', diagnostic, stderr: secret }, { builder: true }),
+      'builder failed: failed:compact {"reason":"unexpected"}');
+  }
+});
+
 test('malformed report JSON fails without reflecting its body in the bake error', async () => {
   const message = await failedBake('jit-private https://report.example/x?signature=private', { raw: true });
   assert.match(message, /invalid smoke\/exit report JSON/);

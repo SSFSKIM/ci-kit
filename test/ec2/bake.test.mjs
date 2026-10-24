@@ -358,7 +358,7 @@ test('builder finalizes only after cloud-final late writes, and the resulting di
 apt-get() { :; }; git() { :; }; docker() { :; }; journalctl() { :; }; fstrim() { :; }; sync() { :; }
 cloud-init() { :; }
 systemctl() { printf '%s\\n' "$*" >> "$TEST_ROOT/systemctl"; }
-poweroff() { echo poweroff >> "$TEST_ROOT/poweroff"; }
+poweroff() { cat "$TEST_ROOT/report.jsonl" > "$TEST_ROOT/report-at-poweroff" 2>/dev/null || :; echo poweroff >> "$TEST_ROOT/poweroff"; }
 curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat >> "$TEST_ROOT/report.jsonl"; else printf '%s\\n' "$*" >> "$TEST_ROOT/curl-calls"; fi; }
 . "$1"
 `;
@@ -377,6 +377,9 @@ curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat >> "$TEST_ROOT/report.j
     assert.match(calls,/--no-block start ci-kit-bake-finalize.service/,'synchronous start would deadlock against the running cloud-final');
     const unit=await readFile(join(root,'run/systemd/system/ci-kit-bake-finalize.service'),'utf8');
     assert.match(unit,/^After=.*\bcloud-final.service\b/m,'the enqueued service must wait for the complete final stage');
+    const unitSeconds = Number(/^TimeoutStartSec=(\d+)min$/m.exec(unit)?.[1]) * 60;
+    assert.ok(unitSeconds >= 2 * 300 + 480 + 120, 'two cold inventories and the block copy need a two-minute recovery/check budget');
+    assert.ok(unitSeconds < 30 * 60, 'the finalizer must remain inside the controller builder deadline');
     // Canonical 26.2 status_wrapper writes these after scripts-user; atomic_helper recreates data/.
     await mkdir(join(root,'var/lib/cloud/data'),{recursive:true});
     await writeFile(join(root,'var/lib/cloud/data/status.json'),'late status');
@@ -386,13 +389,22 @@ curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat >> "$TEST_ROOT/report.j
     const finalizer=join(root,'opt/ci-kit/ec2/bake/finalize.sh');
     await mkdir(join(root,'opt/ci-kit/ec2/bake'),{recursive:true});
     const compact = join(root,'opt/ci-kit/ec2/bake/compact.sh');
-    await writeFile(compact, '#!/bin/bash\necho compact >> "$TEST_ROOT/compacted"\n');
+    await writeFile(compact, `#!/bin/bash
+printf '%s\\n' 'source-inventory 47 0' 'root-copy 114 0' 'target-inventory 135 0' 'compact 360 0' > "$CI_KIT_COMPACT_TRACE"
+echo compact >> "$TEST_ROOT/compacted"
+`);
     await writeFile(finalizer,relocate(await readFile(new URL('../../ec2/bake/finalize.sh',import.meta.url),'utf8')));
     run(finalizer);
     await checkImage(root);
     const report=JSON.parse(await readFile(join(root,'report.jsonl'),'utf8'));
     assert.equal(report.value,'ok');
     assert.deepEqual(report.manifest,{...base,warm});
+    assert.deepEqual(report.compact,{elapsed_seconds:360,exit_status:0,phases:{
+      'source-inventory':{elapsed_seconds:47,exit_status:0,bound_seconds:300},
+      'root-copy':{elapsed_seconds:114,exit_status:0,bound_seconds:480},
+      'target-inventory':{elapsed_seconds:135,exit_status:0,bound_seconds:300},
+    }});
+    assert.deepEqual(JSON.parse(await readFile(join(root,'report-at-poweroff'),'utf8')),report);
     assert.equal(await present('poweroff'),true);
     assert.equal(await present('run/ci-kit-bake'),false,'finalizer removes its temporary report capability');
     assert.equal(await present('compacted'),true,'success must follow verified sparse copy');
@@ -418,15 +430,47 @@ curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat >> "$TEST_ROOT/report.j
     });
     assert.equal(await present('run/ci-kit-bake'),false);
 
-    // Copy/verification failure must report failure, even though the source image passed sanitation.
-    for (const p of ['report.jsonl','poweroff','curl-calls']) await rm(join(root,p),{force:true});
-    await mkdir(join(root,'run/ci-kit-bake'),{recursive:true});
-    await writeFile(join(root,'run/ci-kit-bake/report-url'),'https://reports.invalid/builder');
-    await writeFile(join(root,'etc/ci-kit/bake-manifest.json'),JSON.stringify({...base,warm}));
-    await writeFile(compact, '#!/bin/bash\nexit 7\n');
-    assert.throws(()=>run(finalizer));
-    assert.equal(await present('report.jsonl'),false);
-    assert.match(await readFile(join(root,'curl-calls'),'utf8'),/failed:compact/);
-    assert.equal(await present('poweroff'),true);
+    // A missing handoff retains the shell status. A valid inner phase wins; forged data cannot leak.
+    const fallback = { reason:'compact-failed',phase:'compact',exit_status:7 };
+    const secret = 'secret https://reports.invalid/?signature=private';
+    const partialTrace = 'copy-root-setup 1 0\nsource-inventory 47 0\nroot-copy 480 124\ncopy-root-cleanup 3 0\ncopy-root-setup 533 7\ncompact 533 0\nprivate-phase 1 1\n';
+    for (const [handoff, diagnostic, trace = partialTrace] of [
+      [null, fallback],
+      [JSON.stringify({reason:'compact-failed',phase:'root-copy',exit_status:124,stderr:secret,url:secret}),
+        {reason:'compact-failed',phase:'root-copy',exit_status:124}],
+      [JSON.stringify({reason:'compact-failed',phase:secret,exit_status:7}), fallback],
+      [JSON.stringify({reason:'compact-failed',phase:'root-copy',exit_status:secret}), fallback],
+      [secret, fallback],
+      [null, fallback, null],
+      [JSON.stringify({reason:'compact-failed',phase:'root-copy',exit_status:124}),
+        {reason:'compact-failed',phase:'root-copy',exit_status:124}, 'root-copy 99999 124\ncompact 99999 0\n'],
+    ]) {
+      for (const p of ['report.jsonl','poweroff','curl-calls']) await rm(join(root,p),{force:true});
+      await mkdir(join(root,'run/ci-kit-bake'),{recursive:true});
+      await writeFile(join(root,'run/ci-kit-bake/report-url'),'https://reports.invalid/builder');
+      await writeFile(join(root,'etc/ci-kit/bake-manifest.json'),JSON.stringify({...base,warm}));
+      const writeHandoff = handoff === null ? '' : `printf '%s' '${handoff}' > "$CI_KIT_COMPACT_DIAGNOSTIC"\n`;
+      const writeTrace = trace === null ? '' : `printf '%s' '${trace}' > "$CI_KIT_COMPACT_TRACE"\n`;
+      await writeFile(compact, `#!/bin/bash\n${writeHandoff}${writeTrace}exit 7\n`);
+      assert.throws(()=>run(finalizer), error => error.status === 7);
+      const actual = JSON.parse(await readFile(join(root,'report.jsonl'),'utf8'));
+      const {compact:timings,...failure} = actual;
+      assert.deepEqual(failure,{value:'failed:compact',diagnostic});
+      if (trace === partialTrace) assert.deepEqual(timings,{elapsed_seconds:533,exit_status:7,phases:{
+        'copy-root-setup':{elapsed_seconds:1,exit_status:0},
+        'source-inventory':{elapsed_seconds:47,exit_status:0,bound_seconds:300},
+        'root-copy':{elapsed_seconds:480,exit_status:124,bound_seconds:480},
+        'copy-root-cleanup':{elapsed_seconds:3,exit_status:0},
+      }});
+      else {
+        assert.deepEqual(Object.keys(timings),['elapsed_seconds','exit_status','phases']);
+        assert.ok(Number.isInteger(timings.elapsed_seconds) && timings.elapsed_seconds >= 0);
+        assert.equal(timings.exit_status,7); assert.deepEqual(timings.phases,{});
+      }
+      assert.deepEqual(JSON.parse(await readFile(join(root,'report-at-poweroff'),'utf8')),actual,
+        'the diagnostic and timings must be uploaded before shutdown');
+      assert.equal(await present('poweroff'),true);
+      assert.equal(await present('run/ci-kit-bake'),false,'failure removes its tmpfs handoff');
+    }
   } finally { await rm(root,{recursive:true,force:true}); }
 });
