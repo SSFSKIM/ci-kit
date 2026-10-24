@@ -9,6 +9,7 @@ import {
   TerminateInstancesCommand, DeleteVolumeCommand, DeregisterImageCommand, DeleteSnapshotCommand,
 } from '@aws-sdk/client-ec2';
 import { createGitHub } from '../lib/github.mjs';
+import { withAwsDeadline } from '../lib/aws.mjs';
 import { createAppTokens } from '../lib/github-app.mjs';
 import { parseEc2Config } from '../gce/launcher/config.mjs';
 import { rowsOf } from '../gce/launcher/ledger.mjs';
@@ -57,9 +58,9 @@ export async function createGuardAws(cfg, { env = process.env, fetchImpl = fetch
   try { identity = await res.json(); } catch { throw new Error('guard: invalid GitHub OIDC response'); }
   if (typeof identity.value !== 'string' || !identity.value.trim()) throw new Error('guard: GitHub OIDC returned no token');
   const ownedSts = !sts;
-  sts ??= new STSClient({ region: REGION, endpoint: `https://sts.${REGION}.amazonaws.com`, maxAttempts: 1,
+  sts ??= withAwsDeadline(new STSClient({ region: REGION, endpoint: `https://sts.${REGION}.amazonaws.com`, maxAttempts: 1,
     credentials: async () => { throw new Error('guard: signed STS operations are not supported'); },
-    requestHandler: { requestTimeout: TIMEOUT_MS, connectionTimeout: 5000 } });
+    requestHandler: { requestTimeout: TIMEOUT_MS, connectionTimeout: 5000 } }));
   let c;
   try {
     ({ Credentials: c } = await sts.send(new AssumeRoleWithWebIdentityCommand({
@@ -72,8 +73,8 @@ export async function createGuardAws(cfg, { env = process.env, fetchImpl = fetch
   }
   const credentials = { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken, expiration };
   log(`guard: assumed ${roleArn} until ${expiration.toISOString()}`);
-  return { ec2: new EC2Client({ region: REGION, credentials, maxAttempts: 2,
-    requestHandler: { requestTimeout: TIMEOUT_MS, connectionTimeout: 5000 } }) };
+  return { ec2: withAwsDeadline(new EC2Client({ region: REGION, credentials, maxAttempts: 2,
+    requestHandler: { requestTimeout: TIMEOUT_MS, connectionTimeout: 5000 } })) };
 }
 
 async function list(ec2, Command, input, field) {

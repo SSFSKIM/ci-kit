@@ -1,7 +1,8 @@
 // Setup's AWS CLI boundary takes service, operation and the operation's JSON input. Existing resources are
-// validated by default. Explicit policy repair replaces only ci-kit-pool after validating the role's identity,
-// trust, duration and other policy attachments; it logs the replacement and verifies the resulting permissions.
+// validated by default. Permission repair replaces only ci-kit-pool; separate trust repair visits only existing
+// managed GitHub roles. Both validate the unchanged role surfaces, log a diff and verify the applied document.
 import { isDeepStrictEqual } from 'node:util';
+import { validateGuardSubject } from './github-oidc.mjs';
 
 const VERSION = '2012-10-17';
 const TAGS = [{ Key: 'ci-kit-pool', Value: 'ec2' }];
@@ -46,8 +47,9 @@ function validateConfig(config) {
   }
 }
 
-export function buildRoles(config, claims) {
+export function buildRoles(config, claims, guardSubject) {
   validateConfig(config);
+  validateGuardSubject(guardSubject);
   if (claims.aud !== `https://ci-kit/${config.account}/ec2` || !claims.sub || !claims.azp) throw new Error('setup: Google identity claims mismatch');
   const { account, security_group: sg, report_bucket: bucket } = config;
   if (!sg) throw new Error('setup: security group must be resolved before building policies');
@@ -95,7 +97,7 @@ export function buildRoles(config, claims) {
     ], 14400),
     guard: role('guard', document([{
       Effect: 'Allow', Principal: { Federated: `arn:aws:iam::${account}:oidc-provider/token.actions.githubusercontent.com` }, Action: 'sts:AssumeRoleWithWebIdentity',
-      Condition: { StringEquals: { 'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com', 'token.actions.githubusercontent.com:sub': 'repo:SSFSKIM/ci-kit:ref:refs/heads/main' } },
+      Condition: { StringEquals: { 'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com', 'token.actions.githubusercontent.com:sub': guardSubject } },
     }]), [reads, ...cleanup, ...imageCleanup]),
     fis: role('fis', document([{
       Effect: 'Allow', Principal: { Service: 'fis.amazonaws.com' }, Action: 'sts:AssumeRole',
@@ -117,39 +119,78 @@ export function fisTemplate(config) {
   };
 }
 
-export async function ensureRole(aws, expected, log = console.log, { updatePolicies = false } = {}) {
+const diffLines = (value, prefix) => JSON.stringify(value, null, 2).split('\n').map(line => prefix + line).join('\n');
+function logDiff(log, kind, label, current, desired) {
+  log(`setup: ${kind} replacement\n--- ${label} (current)\n+++ ${label} (desired)\n${diffLines(current, '-')}\n${diffLines(desired, '+')}`);
+}
+function githubRole(expected) {
+  const account = /^arn:aws:iam::(\d{12}):role\/ci-kit-ec2-guard$/.exec(expected.arn)?.[1];
+  const principal = { Federated: `arn:aws:iam::${account}:oidc-provider/token.actions.githubusercontent.com` };
+  return account && expected.name === 'ci-kit-ec2-guard' && expected.trust.Statement.length === 1
+    && matches(expected.trust.Statement[0].Principal, principal) ? principal : null;
+}
+function repairModes(updatePolicies, repairTrust) {
+  if (updatePolicies && repairTrust) throw new Error('setup: choose separate --repair-trust or --update-policies invocations');
+}
+
+export async function ensureRole(aws, expected, log = console.log, { updatePolicies = false, repairTrust = false } = {}) {
+  repairModes(updatePolicies, repairTrust);
   const RoleName = expected.name;
   const existing = await missing(() => aws('iam', 'get-role', { RoleName }));
   if (existing) {
     equal(existing.Role.Arn, expected.arn, `${RoleName} ARN`);
     equal(existing.Role.MaxSessionDuration, expected.duration, `${RoleName} MaxSessionDuration`);
-    equal(parseDocument(existing.Role.AssumeRolePolicyDocument), expected.trust, `${RoleName} trust`);
+    const currentTrust = parseDocument(existing.Role.AssumeRolePolicyDocument);
+    const principal = repairTrust && githubRole(expected);
+    const statements = [currentTrust.Statement ?? []].flat();
+    const canRepair = principal && statements.length > 0 && statements.every(s => matches(s.Principal, principal));
+    if (!canRepair) equal(currentTrust, expected.trust, `${RoleName} trust`);
     if (existing.Role.PermissionsBoundary) throw new Error(`setup: ${RoleName} unexpected permissions boundary; left unchanged`);
     equal((await aws('iam', 'list-attached-role-policies', { RoleName })).AttachedPolicies, [], `${RoleName} attached policies`);
     equal((await aws('iam', 'list-role-policies', { RoleName })).PolicyNames, ['ci-kit-pool'], `${RoleName} inline policy names`);
     const policyInput = { RoleName, PolicyName: 'ci-kit-pool' };
     const current = parseDocument((await aws('iam', 'get-role-policy', policyInput)).PolicyDocument);
+    if (repairTrust) {
+      // Trust repair is not permission reconciliation. All other role checks must pass before its sole write.
+      equal(current, expected.policy, `${RoleName} permissions`);
+      if (matches(currentTrust, expected.trust)) return false;
+      logDiff(log, 'trust', `${RoleName}/trust`, currentTrust, expected.trust);
+      await aws('iam', 'update-assume-role-policy', { RoleName, PolicyDocument: JSON.stringify(expected.trust) });
+      const applied = (await aws('iam', 'get-role', { RoleName })).Role;
+      if (!matches(parseDocument(applied.AssumeRolePolicyDocument), expected.trust)) throw new Error(`setup: ${RoleName} trust readback mismatch after repair`);
+      log(`setup: updated ${RoleName} and verified trust`);
+      return true;
+    }
     if (matches(current, expected.policy)) return false;
     if (!updatePolicies) equal(current, expected.policy, `${RoleName} permissions`);
-    const diffLines = (value, prefix) => JSON.stringify(value, null, 2).split('\n').map(line => prefix + line).join('\n');
-    log(`setup: policy replacement\n--- ${RoleName}/ci-kit-pool (current)\n+++ ${RoleName}/ci-kit-pool (desired)\n${diffLines(current, '-')}\n${diffLines(expected.policy, '+')}`);
+    logDiff(log, 'policy', `${RoleName}/ci-kit-pool`, current, expected.policy);
     await aws('iam', 'put-role-policy', { ...policyInput, PolicyDocument: JSON.stringify(expected.policy) });
     const applied = parseDocument((await aws('iam', 'get-role-policy', policyInput)).PolicyDocument);
     if (!matches(applied, expected.policy)) throw new Error(`setup: ${RoleName} permissions readback mismatch after update; inspect the live policy`);
     log(`setup: updated ${RoleName}/ci-kit-pool and verified permissions`);
     return true;
   }
+  if (repairTrust) throw new Error(`setup: trust repair requires existing role ${RoleName}`);
   await aws('iam', 'create-role', { RoleName, AssumeRolePolicyDocument: JSON.stringify(expected.trust), MaxSessionDuration: expected.duration, Tags: TAGS });
   await aws('iam', 'put-role-policy', { RoleName, PolicyName: 'ci-kit-pool', PolicyDocument: JSON.stringify(expected.policy) });
   log(`setup: created ${RoleName}`);
   return true;
 }
 
-export async function setupAccount({ config, claims, aws, log = console.log, updatePolicies = false }) {
+export async function setupAccount({ config, claims, guardSubject, aws, log = console.log, updatePolicies = false, repairTrust = false }) {
+  repairModes(updatePolicies, repairTrust);
   validateConfig(config);
+  validateGuardSubject(guardSubject);
   const who = await aws('sts', 'get-caller-identity', {});
   if (who.Account !== config.account) throw new Error(`setup: operator account mismatch: expected ${config.account}, got ${who.Account}`);
   let changed = false;
+  if (repairTrust) {
+    // Separate path: never create bucket/network/OIDC/FIS resources or visit unrelated account roles.
+    const roles = Object.values(buildRoles(config, claims, guardSubject)).filter(githubRole);
+    for (const role of roles) changed = (await ensureRole(aws, role, log, { repairTrust: true })) || changed;
+    if (!changed) log('setup: nothing to change');
+    return { config, changed };
+  }
   const create = async (service, operation, input, label) => {
     const result = await aws(service, operation, input); changed = true; log(`setup: created ${label}`); return result;
   };
@@ -197,7 +238,7 @@ export async function setupAccount({ config, claims, aws, log = console.log, upd
   } else {
     await create('iam', 'create-open-id-connect-provider', { Url: 'https://token.actions.githubusercontent.com', ClientIDList: ['sts.amazonaws.com'], Tags: TAGS }, 'GitHub OIDC provider');
   }
-  const roles = buildRoles(config, claims);
+  const roles = buildRoles(config, claims, guardSubject);
   for (const role of Object.values(roles)) changed = (await ensureRole(aws, role, log, { updatePolicies })) || changed;
   const desired = fisTemplate(config);
   const templates = (await aws('fis', 'list-experiment-templates', {})).experimentTemplates.filter(t => t.tags?.['ci-kit-pool'] === 'ec2' && t.tags?.['ci-kit-purpose'] === 'fis-fixture');

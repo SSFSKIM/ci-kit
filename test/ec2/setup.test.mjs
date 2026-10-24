@@ -13,6 +13,7 @@ const config = {
   placements: [{ subnet: 'subnet-pool', zone: 'us-east-2c' }],
   roles: Object.fromEntries(['launcher', 'bake', 'guard'].map(name => [name, `arn:aws:iam::290475840169:role/ci-kit-ec2-${name}`])),
 };
+const guardSubject = 'repo:SSFSKIM/ci-kit:ref:refs/heads/main';
 const claims = { sub: '1234567890', azp: '1234567890', aud: 'https://ci-kit/290475840169/ec2' };
 const missing = () => Object.assign(new Error('missing'), { code: 'NoSuchEntity' });
 const glob = (pattern, value) => new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*')}$`).test(value);
@@ -30,7 +31,7 @@ const arn = (kind, id = '*') => `arn:aws:ec2:us-east-2:${['image','snapshot'].in
 const ctx = (more = {}) => ({ 'aws:RequestedRegion': 'us-east-2', ...more });
 
 test('launcher cannot launch foreign images or untagged resources; bake Canonical permission cannot launch jobs or smoke', () => {
-  const roles = buildRoles(config, claims);
+  const roles = buildRoles(config, claims, guardSubject);
   const launcher = roles.launcher.policy, bake = roles.bake.policy;
   const imageContext = ctx({ 'ec2:Owner': config.account, 'ec2:ResourceTag/ci-kit-pool': 'ec2' });
   assert.equal(allowed(launcher, 'ec2:RunInstances', arn('image', 'ami-pool'), imageContext), true);
@@ -58,7 +59,7 @@ test('launcher cannot launch foreign images or untagged resources; bake Canonica
 });
 
 test('report readers can distinguish missing reports without reading or listing another bucket', () => {
-  const roles = buildRoles(config, claims);
+  const roles = buildRoles(config, claims, guardSubject);
   for (const role of [roles.launcher, roles.bake]) {
     assert.equal(allowed(role.policy, 's3:ListBucket', `arn:aws:s3:::${config.report_bucket}`), true);
     assert.equal(allowed(role.policy, 's3:ListBucket', 'arn:aws:s3:::another-bucket'), false);
@@ -67,7 +68,7 @@ test('report readers can distinguish missing reports without reading or listing 
 });
 
 test('image creation requires tagged builder and tagged outputs; guard cannot launch; FIS targets only isolated sandbox fixtures', () => {
-  const roles = buildRoles(config, claims);
+  const roles = buildRoles(config, claims, guardSubject);
   const pool = ctx({ 'ec2:ResourceTag/ci-kit-pool': 'ec2', 'ec2:ResourceTag/ci-kit-purpose': 'builder' });
   assert.equal(allowed(roles.bake.policy, 'ec2:CreateImage', arn('instance'), pool), true);
   assert.equal(allowed(roles.bake.policy, 'ec2:CreateImage', arn('instance'), ctx()), false);
@@ -90,7 +91,7 @@ test('image creation requires tagged builder and tagged outputs; guard cannot la
 });
 
 test('trust binds observed Google azp/sub and account audience, GitHub main, and FIS source account', () => {
-  const roles = buildRoles(config, claims);
+  const roles = buildRoles(config, claims, guardSubject);
   assert.deepEqual(roles.launcher.trust.Statement[0].Condition.StringEquals, {
     'accounts.google.com:sub': claims.sub, 'accounts.google.com:aud': claims.azp, 'accounts.google.com:oaud': claims.aud,
   });
@@ -104,7 +105,7 @@ test('trust binds observed Google azp/sub and account audience, GitHub main, and
 });
 
 test('existing role duration, trust or policy drift fails without any mutation', async () => {
-  const expected = buildRoles(config, claims).launcher;
+  const expected = buildRoles(config, claims, guardSubject).launcher;
   for (const drift of ['duration', 'trust', 'policy', 'attached']) {
     const calls = [];
     const aws = async (service, operation) => {
@@ -121,7 +122,7 @@ test('existing role duration, trust or policy drift fails without any mutation',
 });
 
 test('role creation sets four-hour maximum and re-run validates without mutating', async () => {
-  const expected = buildRoles(config, claims).launcher;
+  const expected = buildRoles(config, claims, guardSubject).launcher;
   let stored, policy;
   const changes = [];
   const aws = async (_, operation, input) => {
@@ -141,7 +142,7 @@ test('role creation sets four-hour maximum and re-run validates without mutating
 
 test('operator profile account mismatch stops before any resource read or change', async () => {
   const calls = [];
-  await assert.rejects(setupAccount({ config, claims, aws: async (s, op) => {
+  await assert.rejects(setupAccount({ config, claims, guardSubject, aws: async (s, op) => {
     calls.push(`${s} ${op}`); return { Account: '111122223333' };
   } }), /account.*mismatch/);
   assert.deepEqual(calls, ['sts get-caller-identity']);
@@ -149,7 +150,7 @@ test('operator profile account mismatch stops before any resource read or change
 
 test('permission denied fetching an existing role is not misread as missing', async () => {
   const calls = [];
-  await assert.rejects(ensureRole(async (_, op) => { calls.push(op); throw Object.assign(new Error('denied'), { code: 'AccessDenied' }); }, buildRoles(config, claims).launcher), /denied/);
+  await assert.rejects(ensureRole(async (_, op) => { calls.push(op); throw Object.assign(new Error('denied'), { code: 'AccessDenied' }); }, buildRoles(config, claims, guardSubject).launcher), /denied/);
   assert.deepEqual(calls, ['get-role']);
 });
 
@@ -190,7 +191,7 @@ function accountFixture() {
 
 test('account setup creates missing resources then validates an unchanged second run; drift is not silently repaired', async () => {
   const f = accountFixture(), logs = [];
-  const input = { config: { ...config, security_group: undefined }, claims, aws: f.aws, log: line => logs.push(line) };
+  const input = { config: { ...config, security_group: undefined }, claims, guardSubject, aws: f.aws, log: line => logs.push(line) };
   const created = await setupAccount(input);
   assert.equal(created.config.security_group, 'sg-pool');
   assert.equal(created.changed, true);
@@ -210,7 +211,7 @@ test('account setup creates missing resources then validates an unchanged second
 
 test('setup refuses unsafe existing ingress and templates that can target the ordinary pool', async () => {
   const f = accountFixture();
-  const input = { config: { ...config, security_group: undefined }, claims, aws: f.aws, log: () => {} };
+  const input = { config: { ...config, security_group: undefined }, claims, guardSubject, aws: f.aws, log: () => {} };
   const { config: resolved } = await setupAccount(input);
   const count = f.mutations.length;
   f.state.sg.IpPermissions = [{ IpProtocol: '-1', IpRanges: [{ CidrIp: '0.0.0.0/0' }] }];
@@ -263,7 +264,7 @@ for (const script of ['setup-cli.mjs', 'setup-proof.mjs', 'setup.sh']) {
 
 
 test('Canonical alias must match its numeric owner; another amazon-owned AMI and absent ownership fail closed', () => {
-  const { bake, launcher } = buildRoles(config, claims);
+  const { bake, launcher } = buildRoles(config, claims, guardSubject);
   const canonical = ctx({ 'ec2:Owner': 'amazon', 'aws:ResourceAccount': '099720109477' });
   // The controller established this global key with live positive/negative DryRuns. Decoded legacy
   // authorization context spells it aws:Account, not literally aws:ResourceAccount.
@@ -276,7 +277,7 @@ test('Canonical alias must match its numeric owner; another amazon-owned AMI and
 });
 
 function roleFixture() {
-  const expected = buildRoles(config, claims).bake;
+  const expected = buildRoles(config, claims, guardSubject).bake;
   const state = {
     role: { Arn: expected.arn, MaxSessionDuration: expected.duration, AssumeRolePolicyDocument: structuredClone(expected.trust) },
     policy: structuredClone(expected.policy), attached: [], names: ['ci-kit-pool'],
@@ -365,7 +366,7 @@ test('policy update fails if the readback does not match the intended permission
 
 test('account setup forwards explicit policy repair and reports an unchanged next run', async () => {
   const f = accountFixture(), logs = [];
-  const input = { config: { ...config, security_group: undefined }, claims, aws: f.aws, log: line => logs.push(line) };
+  const input = { config: { ...config, security_group: undefined }, claims, guardSubject, aws: f.aws, log: line => logs.push(line) };
   const { config: resolved } = await setupAccount(input);
   f.state.policies.get('ci-kit-ec2-bake').Statement[0].Action = ['ec2:DescribeInstances'];
   const count = f.mutations.length;
