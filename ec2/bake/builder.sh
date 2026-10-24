@@ -27,7 +27,7 @@ apt-get purge -y snapd
 rm -rf /snap /var/snap /var/lib/snapd /var/cache/snapd
 printf 'Package: snapd\nPin: release *\nPin-Priority: -10\n' > /etc/apt/preferences.d/ci-kit-no-snapd
 apt-get update
-apt-get install -y --no-install-recommends docker.io git jq curl xz-utils ca-certificates iptables gdisk
+apt-get install -y --no-install-recommends docker.io git jq curl xz-utils ca-certificates iptables gdisk partclone
 systemctl enable docker
 step=kit
 git clone --quiet https://github.com/SSFSKIM/ci-kit.git /opt/ci-kit

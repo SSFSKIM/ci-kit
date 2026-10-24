@@ -1574,8 +1574,10 @@ The production chain is reviewed at each boundary:
 ## Decision Log
 
 - Decision: Compact EC2 snapshot allocation without removing any job-visible file. The builder gets a blank,
-  equal-sized encrypted disk; after its existing image checks, copy allocated ext4 root blocks with `e2image`
-  from a frozen source, preserve GPT/boot data, and verify the copied filesystem before snapshot/registration.
+  equal-sized encrypted disk; after its existing image checks, copy bitmap-allocated ext4 root blocks with
+  `partclone` through a read-only loop alias of the frozen source. Preserve GPT/boot data, mount/unmount only
+  the destination for normal kernel journal/orphan recovery, then require `e2fsck -fn` before registration.
+  The alias is created before freezing, logs live in `/run`, and a bounded copy always thaws on failure.
   Keep shared preparation, GCE, and the manifest schema unchanged. A candidate bake passes both smoke and the
   real sandbox check but retains `ci-kit-ready=false` and does not prune production images; promotion belongs
   to the controller. Its ci-kit commit records the actual branch, while the other eight manifest labels retain
@@ -1588,6 +1590,14 @@ The production chain is reviewed at each boundary:
   toolchain, host Node installation, or container layer is removed. IAM prerequisite #131/81fe86b adds only
   the five owner-reviewed regional, tagged snapshot/registration statements to the bake role; merged-main
   setup applied them, with federated allowed/denied dry-runs for both APIs. Candidate size/boot proof follows.
+  Review/live correction: `e2image` skips zero-link orphan inode extents while copying allocation bitmaps;
+  the fragmented-orphan reproduction omitted extent block 6183 and still failed fsck after normal recovery.
+  The first real builder also blocked inside e2image while root was frozen; its exact blocked syscall is unknown.
+  The replacement passed actual frozen-root copy/GPT/fsck, fragmented-orphan recovery, retained file/link/mode/
+  xattr checks, linked-inode corruption rejection, and timeout thaw/alias cleanup on an isolated Linux guest.
+  Partclone 0.3.27 adds only its own host package (2145 KiB installed), no new dependencies; gdisk was already
+  present. Jobs do not mount these host tools. Free blocks are skipped with `lseek`, not zero writes
+  ([source](https://github.com/Thomas-Tsai/partclone/blob/0.3.27/src/partclone.c#L1836)).
   Date/Author: 2026-10-24, CI-opt and image-trim executor.
 
 - Decision: M3 preserves GCE's existing walker via a provider outcome adapter that retains original GCE error

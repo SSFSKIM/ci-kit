@@ -19,10 +19,19 @@ async function failedBake(report, { raw = false, builder = false } = {}) {
     if (name === 'RunInstancesCommand') return { Instances: [{ InstanceId: command.input.InstanceInitiatedShutdownBehavior === 'stop' ? 'i-builder' : 'i-smoke' }] };
     if (name === 'DescribeInstancesCommand') return { Reservations: [{ Instances: (command.input.InstanceIds ?? []).map(InstanceId => ({
       InstanceId, Tags: tagList, State: { Name: InstanceId === 'i-builder' ? 'stopped' : 'terminated' },
+      BlockDeviceMappings: [{ DeviceName: '/dev/sda1', Ebs: { VolumeId: 'vol-source' } },
+        ...(InstanceId === 'i-builder' ? [{ DeviceName: '/dev/sdf', Ebs: { VolumeId: 'vol-target' } }] : [])],
     })) }] };
-    if (name === 'CreateImageCommand') return { ImageId: image.ImageId };
-    if (name === 'DescribeImagesCommand') return { Images: [image] };
-    if (name === 'DescribeSnapshotsCommand') return { Snapshots: [{ SnapshotId: 'snap-built', FullSnapshotSizeInBytes: 2 ** 30 }] };
+    if (name === 'CreateSnapshotCommand') {
+      assert.equal(command.input.VolumeId, 'vol-target', 'only the compacted disk is snapshotted');
+      return { SnapshotId: 'snap-built' };
+    }
+    if (name === 'RegisterImageCommand') return { ImageId: image.ImageId };
+    if (name === 'DescribeImagesCommand') return { Images: command.input.ImageIds?.includes('ami-canonical')
+      ? [{ ImageId: 'ami-canonical', Architecture: 'x86_64', VirtualizationType: 'hvm', RootDeviceName: '/dev/sda1',
+        BootMode: 'uefi-preferred', EnaSupport: true, ImdsSupport: 'v2.0' }] : [image] };
+    if (name === 'DescribeSnapshotsCommand') return { Snapshots: [{ SnapshotId: 'snap-built', State: 'completed',
+      Tags: tagList, FullSnapshotSizeInBytes: 2 ** 30 }] };
     if (['CreateTagsCommand', 'TerminateInstancesCommand', 'DeregisterImageCommand', 'DeleteSnapshotCommand'].includes(name)) return {};
     throw new Error(`unexpected API ${name}`);
   } };
@@ -37,8 +46,14 @@ async function failedBake(report, { raw = false, builder = false } = {}) {
     script: '#!/bin/bash\ntrue', sleep: async () => {}, now: () => Date.parse('2026-10-24T00:00:00Z') }); }
   catch (caught) { error = caught; }
   assert.ok(error, 'reported failure must reject the bake');
-  if (builder) assert.ok(!seen.includes('CreateImageCommand'), 'failed self-check prevents image creation');
-  else assert.ok(seen.includes('DeregisterImageCommand'), 'failed image cleanup is preserved');
+  if (builder) {
+    assert.ok(!seen.includes('CreateSnapshotCommand'), 'failed self-check prevents snapshot creation');
+    assert.ok(!seen.includes('RegisterImageCommand'), 'failed self-check prevents image registration');
+  } else {
+    assert.ok(seen.includes('RegisterImageCommand'), 'diagnostic tests reach the smoke boundary');
+    assert.ok(seen.includes('DeregisterImageCommand'), 'failed image cleanup is preserved');
+    assert.ok(seen.includes('DeleteSnapshotCommand'), 'failed snapshot cleanup is preserved');
+  }
   return error.message;
 }
 

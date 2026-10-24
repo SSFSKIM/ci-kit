@@ -3,6 +3,7 @@
 # The builder supplies exactly two equal-sized disks. The destination becomes the AMI's only root disk.
 set -euo pipefail
 export LC_ALL=C
+bake_dir=${BASH_SOURCE[0]%/*}
 root=$(readlink -f "$(findmnt -nro SOURCE /)")
 source=/dev/$(lsblk -nro PKNAME "$root")
 read -r target extra <<< "$(lsblk -dnpro NAME,TYPE | awk -v source="$source" '$2 == "disk" && $1 != source {printf "%s ", $1}')"
@@ -25,19 +26,7 @@ for part in 14 15 16; do
   dd if="${source}p${part}" of="${target}p${part}" bs=4M conv=fsync status=none
 done
 
-# Keep the frozen interval free of writes to root (including journal output). /run is tmpfs.
-# e2image -a includes file data; -r seeks over unallocated blocks; -f permits the frozen mounted source.
-frozen=0
-thaw() { if [ "$frozen" = 1 ]; then fsfreeze -u /; fi; }
-trap thaw EXIT
-trap 'exit 143' TERM INT
-sync
-frozen=1
-fsfreeze -f /
-e2image -ra -f "$root" "${target}p1"
-fsfreeze -u /
-frozen=0
+bash "$bake_dir/copy-root.sh" "$root" "${target}p1" /
 sync
 sgdisk -v "$target"
-e2fsck -fn "${target}p1"
 echo 'compact: partition table and copied root verified'
