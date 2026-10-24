@@ -67,8 +67,11 @@ measurement exists.
 - [ ] M5: the EC2 provider, its image and its one-time setup, serving ci-kit-sandbox.
   Code reviewed approved through be1dd1a; full gate 40018176821 green at 12c6cdd (successor is whitespace only).
   Initialization metadata for non-200 rates is deferred to ci-kit #108 entry 2. Required image-residue smoke
-  assertions fixed in 116bab4: injected-artifact RED/GREEN, focused guest tests 41/41. Final PR-head gate,
-  setup, deployment, bake and all live M5 proofs remain outstanding.
+  assertions fixed in 116bab4: injected-artifact RED/GREEN, focused guest tests 41/41. PR #111 and IAM correction
+  #112 merged with exact-head gates green; setup/idempotence, repaired federated Canonical/other-owner dry-runs,
+  deployed federation and GCE canaries passed. Combined bake ci-kit-bake-v2jm5 failed EC2 smoke `failed:image`
+  after its GCE image passed. Cleanup left zero EC2 instances/volumes/AMIs/snapshots. Safe diagnostics and the
+  cleanup/check cause are being corrected before rebake; EC2 image/runtime/lifecycle/transition proofs remain.
 - [ ] M6: credit preference, reports, guard, the MAWS canary and acceptance.
 
 ## What it must not be
@@ -1261,6 +1264,21 @@ The production chain is reviewed at each boundary:
 
 ## Surprises & Discoveries
 
+- Observation: Combined bake `ci-kit-bake-v2jm5` failed at 2026-10-23T21:48:46Z. GCE image
+  `ci-kit-runner-20261023-210242-du0p-215f283b` passed and remains in service; MAWS run `40027775933` proved
+  all six jobs on it. EC2 AMI `ami-00c6296487b7d3cd9` had 11.4 GiB written snapshot data, but smoke instance
+  `i-03df5a82aee06a9d5` reported `failed:image` before its container started. The guest catch discarded the
+  thrown reason. Builder report contains a complete manifest with all warm steps successful; recovered console
+  shows cloud-final still active during builder shutdown after cleanup, but does not identify the retained path.
+  Do not equate that lifecycle hypothesis with the original smoke's proven cause. All failed EC2 resources were
+  cleaned: a 2026-10-24 federated sweep found zero nonterminated instances, volumes, own AMIs and own snapshots.
+  Evidence: execution status, S3 reports under `reports/bake-20261023-210242-du0p-290475840169/`, and recovered
+  console files in `/private/tmp/ci-kit-ec2-proof-tools/`. Conservative cumulative AWS spend is about $0.90.
+- Observation: The finite progress monitor expired one minute before this bake failed; its expiry notification
+  arrived only when the coordinator resumed the handed-back executor 9.5 hours later. There was no compute leak,
+  but the investigation stalled. The next bake gets a full-lifetime `gcloud ... execute --wait` background
+  completion watcher; finite monitors are supplementary progress only. Friction recorded in ci-kit #68.
+
 - Observation: Cloud Run promotes message-only structured records into `textPayload`; richer tick records retain
   `jsonPayload.message`. Evidence queries now match/print both. Revision `ci-kit-launcher-00021-qth` logged
   federated launcher-role assumption at 2026-10-23T20:59:04Z in textPayload, with four-hour expiry. M5's deployed
@@ -1276,7 +1294,8 @@ The production chain is reviewed at each boundary:
   `DryRunOperation`, Amazon Linux `ami-053ef5d7ebe355f4a` returned `UnauthorizedOperation`. No credentials were
   persisted. This proves condition evaluation, not the still-required Google-federated role proof after repair.
   Evidence: 2026-10-23 live dry-runs; AWS IAM global condition-key documentation lists RunInstances as supported
-  for ResourceAccount. Runtime/deploy work remains paused until the explicit policy repair lands.
+  for ResourceAccount. Runtime/deploy work was paused until the explicit policy repair landed in PR #112;
+  the repaired Google-federated role subsequently passed both positive and negative dry-runs.
 
 - Observation: M4's deployed scheduler preserves the GCE-only live path. MAWS run `40015186704`, attempt 1,
   tested master `0c86e4861` through wrapper `d69ecff5812793000cc31a9c72531a9185482d34`; static, probes and all four
@@ -1581,6 +1600,14 @@ The production chain is reviewed at each boundary:
   Rejected amazon alone (admits all aliased partners), per-AMI ImageID pins (IAM churn on every Canonical release),
   and additional launch-template infrastructure when the numeric ResourceAccount condition is supported.
   Date/Author: 2026-10-23, design owner and controller; live evidence above.
+
+- Decision: Preserve a safe, bounded diagnostic reason alongside a guest failure stage and propagate it through
+  the bake controller's terminal error. Do not log JIT data, signed URLs, arbitrary user-data or sensitive file
+  contents. Fix demonstrated cleanup/check failures without weakening the stated image-residue guarantee;
+  distinguish a reproduced lifecycle flaw from the original run's unknown exact artifact.
+  Rationale: stage-only failures hide which invariant blocked image promotion; a rebake must produce actionable
+  evidence rather than repeat an opaque failure. Full-lifetime completion observation is required for rebakes.
+  Date/Author: 2026-10-24, design-owner direction and controller.
 
 ## Outcomes & Retrospective
 
