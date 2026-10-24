@@ -96,8 +96,8 @@ and by the coordinator's holds, and the design below says what is read and when.
 
 - 2026-10-24: Implemented clone-scoped JIT registration using the mini's existing `gh` login, including trial
   clones, private config transport, teardown/restart cleanup, and credential-boundary tests. The live MacBook probe
-  minted and deleted MAWS runner 3290: only the requested probe label, no macOS/ARM64 labels. Awaiting the PR's
-  final-HEAD CI gate; reviewer-high found no material findings, and deployment and merge remain CI-opt's work.
+  minted and deleted MAWS runner 3290: only the requested probe label, no macOS/ARM64 labels. Reviewer-high found
+  no material findings; PR #135 records the final-HEAD CI gate. Deployment and merge remain CI-opt's work.
 
 - [x] (2026-10-21 09:5xZ) Read-only audit of every MAWS Mac group (local:
   `~/Developer/ci-analysis/mac-concurrency-audit.md` on the MacBook; MAWS is private, so this spec carries its
