@@ -1609,6 +1609,20 @@ The production chain is reviewed at each boundary:
   evidence rather than repeat an opaque failure. Full-lifetime completion observation is required for rebakes.
   Date/Author: 2026-10-24, design-owner direction and controller.
 
+- Decision: EC2 builder preparation queues a nonblocking runtime-only oneshot ordered after
+  `cloud-final.service`, then returns. That finalizer removes builder state/logs/credentials, runs the existing
+  strict host image check, reports success only after it passes, and powers off. Preparation/finalizer failures
+  still report failure and power off; runtime report capabilities are removed before the image check.
+  Guest and bake-controller diagnostics use a bounded reason/path/code vocabulary rather than raw exception
+  messages or report contents. This preserves actionable failure causes without reflecting secrets.
+  Rationale: cloud-init 26.2 `status_wrapper` writes status/result after the userdata/module functor returns;
+  `atomic_helper` recreates the deleted parent directory. In-userdata cleanup therefore cannot establish the
+  final filesystem invariant. A behavioral late-writer test fails the old ordering and passes the finalizer;
+  this proves the structural flaw, not which artifact caused the destroyed first AMI's failure.
+  Sources: https://github.com/canonical/cloud-init/blob/26.2/cloudinit/cmd/main.py#L1008 and
+  https://github.com/canonical/cloud-init/blob/26.2/cloudinit/atomic_helper.py#L65.
+  Date/Author: 2026-10-24, M5 executor and controller; live rebake still required.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
