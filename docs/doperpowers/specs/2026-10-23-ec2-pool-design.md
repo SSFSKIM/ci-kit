@@ -1378,6 +1378,26 @@ The production chain is reviewed at each boundary:
 
 ## Surprises & Discoveries
 
+- Observation (2026-10-24): **A new EBS volume is not a zero-reading device.** AWS guarantees logically empty
+  blocks that are either zeroed or cryptographically pseudorandom, not zero-valued reads
+  ([data security](https://docs.aws.amazon.com/ebs/latest/userguide/data-protection.html#data-security)).
+  An attempted `partclone` raw stream through `dd conv=sparse` failed full-tree comparison before imaging.
+  Replay `zero-stage-repro-20261024-mvmzfujr-290475840169` used a fresh encrypted 50-GiB target
+  `vol-0668ba6b0a5270905`, whose AWS `SnapshotId` was empty. All 12 sampled 512-KiB chunks corresponding
+  to allocated all-zero source data already read nonzero on the target **before root copying**. All remained
+  nonzero immediately after copying and after filesystem recovery; each sampled chunk's first 4-KiB hash
+  was identical at all three stages. Five files differed (host, toolcache and container Node executables plus
+  an apt cache). An earlier replay mapped all 320 printed differing-block samples to actual sparse seeks;
+  all were zero on the source and nonzero on the target. The sampled target hashes matched none of the
+  scanned source blocks in the five files, so misplaced stream data was not the observed mechanism.
+  The zero-backed loop tests had passed because they supplied a stronger precondition than EBS provides.
+  Allocated zero bytes must be written. Only filesystem-bitmap-free blocks may remain unwritten; do not
+  reinterpret inode-table initialization flags to rescue the rejected optimization. Production's direct-device
+  partclone path already writes every allocated run verbatim, including zeros
+  ([0.3.27 source, lines 970–1003](https://github.com/Thomas-Tsai/partclone/blob/0.3.27/src/main.c#L970)).
+  The rejected candidate/replays made no AMI or snapshot; final tag reads found their instances terminated
+  and no volumes, snapshots or images. This does not establish the cause of the earlier `r29cc` failure.
+
 - Observation: FIS request `sir-f2a7mf7g` reported `instance-terminated-by-experiment`, while its instance
   `i-04e073caf4c22aac6` reported `Client.UserInitiatedShutdown`. Notice was 10:52:33Z for termination at
   10:54:33Z; guest terminal `failed:unit` arrived 10:54:36Z. The old StateReason-only classifier finalized
@@ -1573,6 +1593,24 @@ The production chain is reviewed at each boundary:
   Evidence: the verdict's launch log. Zone order c -> a -> b.
 
 ## Decision Log
+
+- Decision: Abandon allocated-zero skipping after the EBS pre-copy probe above disproved its precondition.
+  Preserve the production root copier: write every bitmap-allocated block, including zeros, and skip only
+  blocks marked free. Keep BIOS p14's whole-partition copy. The safe remaining cut is allocation-bitmap
+  copying of unmounted EFI p15 (FAT) and `/boot` p16 (ext4), with read-only filesystem checks and complete
+  independent source/target regular-file inventories, coherent reads and existing root/boot acceptance.
+  No inode-density, packing, inode-table-flag reinterpretation, encryption or IAM change is included.
+  Rationale: [AWS's empty-volume contract](https://docs.aws.amazon.com/ebs/latest/userguide/data-protection.html#data-security)
+  permits pseudorandom unwritten bytes; the replay observed them before copying. The saved source metadata
+  measures p16 at 233728 blocks of 4096 bytes, with 196305 free: 153284608 bytes allocated versus 957350400
+  total, or 0.748844 GiB of free space. EFI is 111149056 bytes with earlier measured live data 6399488 bytes,
+  giving roughly another 0.097556 GiB before FAT metadata. The combined estimate of about 0.846 GiB before
+  512-KiB snapshot rounding clears the owner's 0.3-GiB threshold; actual savings still require a candidate.
+  Production bake `ci-kit-bake-h2mtl` from `09f04c3` is ready as `ami-0e6ab11b8a334c7f0`:
+  9.96142578125 GiB, $0.023907421875 initialization. Its S3 source/copy/target times were 47/157/135 seconds
+  against 300/480/300-second bounds, leaving 165 seconds for the target inventory. On owner instruction,
+  previous candidate `ami-0dff29fca329bcd8e` and `snap-0432ff5f76a192157` were deleted and verified absent.
+  Date/Author: 2026-10-24, CI-opt and boot-compaction executor; owner's explicit fallback decision.
 
 - Decision: Preserve bounded compaction phase, exit status and timing in the builder's existing S3 report,
   on failure and success, rather than relying on a terminated instance's serial console. Keep diagnostic
@@ -2141,3 +2179,46 @@ was read. The owner selected **zero-aware writes onto the blank destination, wit
 follow-up PR. Investigate those allocated zero tables and whole boot copies before inode-density changes or packing:
 scattered-file packing alone has only about 0.155 GiB of apparent headroom here. Preserve full-tree byte comparison,
 fsck and real-job acceptance in that follow-up. No such additional cut is included in #132.
+
+### 2026-10-24 safe boot-block follow-up acceptance
+
+The allocated-zero experiment described above is rejected, not shipped. The accepted replacement copies only
+filesystem-allocated EFI and `/boot` blocks; the production root copier and BIOS p14 copy are unchanged.
+`copy-boot.sh` uses backing-direct read-only source aliases, read-only FAT/ext4 checks, and independent full
+regular-file inventories on source and target. Every allocated block is written even when its bytes are zero.
+`dosfstools` supplies the FAT checker; shared preparation and GCE remain untouched.
+
+The actual Canonical fixture confirmed EFI allocation at 15871 × 512 = 8125952 bytes (including FAT metadata),
+and ext4 boot allocation at 37423 × 4096 = 153284608 bytes. Their bitmap-free space totals about 0.844767 GiB
+before EBS's 512-KiB rounding. The nonzero-target FAT/ext4 regressions preserved allocated-zero files and all
+regular-file bytes/UUIDs while leaving a known free block or cluster unchanged. Actual EBS fixture
+`i-06a483798f969a47b` then passed boot checks, root comparison (74341 files), fsck/GPT and phase tracing;
+boot copying took 10 seconds and total compact 160 seconds. It terminated with zero remaining volumes.
+
+Candidate `ami-01f28403ee71b4d17`, built from `43b158dbb758f786e9f7b2b73a5475d2ae7c4d99`, passed its unchanged
+root byte/fsck checks, the new boot checks, common smoke (`i-092057f91a7ed9455`, `exit:0`, `smoke:ok`), and
+[real sandbox bake-check 40142927849](https://github.com/SSFSKIM/ci-kit-sandbox/actions/runs/40142927849)
+(job 121018251356 on `ci-kit-bake-boot-candidate-20261024-mvn0hm2h-290475840169`). It remains **unready**.
+All eight non-commit fields match ready GCE `ci-kit-runner-20261024-212102-62mp-09f04c32`; the ninth truthfully
+records the candidate's code commit. No production configuration or ready tag was changed.
+
+| AWS completed snapshot measurement | Current production | Boot-only candidate |
+|---|---:|---:|
+| AMI | ami-0e6ab11b8a334c7f0 | ami-01f28403ee71b4d17 |
+| Snapshot | snap-0be4f9ae73a7dab6c | snap-0d25e4896a954095c |
+| FullSnapshotSizeInBytes | 10695999488 | 9794748416 |
+| GiB | 9.96142578125 | 9.1220703125 |
+| Initialization at $0.0024/GiB | $0.023907421875 | $0.02189296875 |
+
+Measured savings are **0.83935546875 GiB / 8.4261% / $0.002014453125 per initialized VM** versus current
+production, about **$0.705/day at 350 VMs**. Relative to the original 11.45166015625-GiB image, both safe cuts
+save 2.32958984375 GiB (20.3428%) and $0.005591015625/VM. These are initialization-only savings, not total bill
+or remaining-credit estimates. Candidate S3 timings were boot 15s, source inventory 48/300s, root copy 158/480s,
+target inventory 135/300s (165s margin), total 357s; every phase exited zero.
+
+Independent registered medium review found no material findings. Focused compaction tests passed 45 cases,
+bake/diagnostic tests 29; the code head's full remote gate
+[40141320128](https://github.com/SSFSKIM/ci-kit/actions/runs/40141320128) passed. Final AWS tag sweeps found
+zero active/stopped/shutting-down experiment instances, zero volumes and zero registered fixture runners.
+Only the handed-over unready candidate and its completed snapshot remain. Its normal one-day unready guard
+can expire it after 2026-10-25T23:28:04Z; the controller owns merge, production bake and candidate disposal.
