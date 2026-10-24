@@ -270,3 +270,76 @@ test('GCE stage refuses an absent manifest before launching a builder',async()=>
   const {runBake}=await import('../../gce/bake/bake.mjs');
   await assert.rejects(runBake({}, {sha,runId:'test'}),/manifest/);
 });
+
+test('builder finalizes only after cloud-final late writes, and the resulting disk passes the unchanged host smoke', async () => {
+  const {readFile,writeFile,mkdtemp,mkdir,symlink,rm,access} = await import('node:fs/promises');
+  const {tmpdir} = await import('node:os');
+  const {join} = await import('node:path');
+  const {execFileSync} = await import('node:child_process');
+  const {fillEc2Builder} = await import('../../ec2/bake/bake.mjs');
+  const {checkImage} = await import('../../ec2/vm/job.mjs');
+  const root = await mkdtemp(join(tmpdir(),'ci-kit-finalize-'));
+  const present = async (p) => access(join(root,p)).then(()=>true,()=>false);
+  // Relocate the real shell's filesystem operations; cloud tools are stubbed, not its cleanup commands.
+  const relocate = (s) => s.replace(/\/(etc|opt|var|root|run|tmp|snap)(?=\/|\s|$)/g,`${root}/$1`).replace('await checkImage();','await checkImage(process.env.TEST_ROOT);');
+  const driver = `set -euo pipefail
+apt-get() { :; }; git() { :; }; docker() { :; }; journalctl() { :; }; fstrim() { :; }; sync() { :; }
+cloud-init() { :; }
+systemctl() { printf '%s\\n' "$*" >> "$TEST_ROOT/systemctl"; }
+poweroff() { echo poweroff >> "$TEST_ROOT/poweroff"; }
+curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat >> "$TEST_ROOT/report.jsonl"; else printf '%s\\n' "$*" >> "$TEST_ROOT/curl-calls"; fi; }
+. "$1"
+`;
+  const run = (file) => execFileSync('bash',['-c',driver,'fixture',file],{env:{...process.env,TEST_ROOT:root},encoding:'utf8'});
+  try {
+    for (const p of ['etc/apt/preferences.d','etc/systemd/system','etc/netplan','etc/cloud','var/log','var/lib/ci-kit','opt/ci-kit/pool/bake','opt/ci-kit/ec2','run/systemd/system','tmp']) await mkdir(join(root,p),{recursive:true});
+    await symlink(new URL('../../ec2/vm',import.meta.url).pathname,join(root,'opt/ci-kit/ec2/vm'));
+    await writeFile(join(root,'opt/ci-kit/pool/bake/prepare.sh'),'WARM_OK=1\n');
+    const template=await readFile(new URL('../../ec2/bake/builder.sh',import.meta.url),'utf8');
+    const builder=join(root,'builder.sh');
+    await writeFile(builder,relocate(fillEc2Builder(template,{manifest:{...base,warm},token:'fixture-token',report:'https://reports.invalid/builder'})));
+    run(builder);
+    assert.equal(await present('report.jsonl'),false,'userdata must not report success before cloud-final exits');
+    assert.equal(await present('poweroff'),false,'userdata must return, not interrupt cloud-final');
+    const calls=await readFile(join(root,'systemctl'),'utf8');
+    assert.match(calls,/--no-block start ci-kit-bake-finalize.service/,'synchronous start would deadlock against the running cloud-final');
+    const unit=await readFile(join(root,'run/systemd/system/ci-kit-bake-finalize.service'),'utf8');
+    assert.match(unit,/^After=.*\bcloud-final.service\b/m,'the enqueued service must wait for the complete final stage');
+    // Canonical 26.2 status_wrapper writes these after scripts-user; atomic_helper recreates data/.
+    await mkdir(join(root,'var/lib/cloud/data'),{recursive:true});
+    await writeFile(join(root,'var/lib/cloud/data/status.json'),'late status');
+    await writeFile(join(root,'var/lib/cloud/data/result.json'),'late result');
+    await writeFile(join(root,'var/log/cloud-init.log'),'late final-message log');
+    await assert.rejects(checkImage(root),/cloud-init/);
+    const finalizer=join(root,'opt/ci-kit/ec2/bake/finalize.sh');
+    await mkdir(join(root,'opt/ci-kit/ec2/bake'),{recursive:true});
+    await writeFile(finalizer,relocate(await readFile(new URL('../../ec2/bake/finalize.sh',import.meta.url),'utf8')));
+    run(finalizer);
+    await checkImage(root);
+    const report=JSON.parse(await readFile(join(root,'report.jsonl'),'utf8'));
+    assert.equal(report.value,'ok');
+    assert.deepEqual(report.manifest,{...base,warm});
+    assert.equal(await present('poweroff'),true);
+    assert.equal(await present('run/ci-kit-bake'),false,'finalizer removes its temporary report capability');
+
+    // A failed preparation must still power off and report, never enqueue a success finalizer.
+    for (const p of ['report.jsonl','poweroff','systemctl','curl-calls']) await rm(join(root,p),{force:true});
+    await writeFile(join(root,'opt/ci-kit/pool/bake/prepare.sh'),'WARM_OK=0\n');
+    assert.throws(()=>run(builder));
+    assert.equal(await present('poweroff'),true);
+    assert.equal(await present('report.jsonl'),false);
+    assert.match(await readFile(join(root,'curl-calls'),'utf8'),/failed:warm-check/);
+    assert.doesNotMatch(await readFile(join(root,'systemctl'),'utf8'),/start ci-kit-bake-finalize/);
+
+    // The finalizer's self-check is authoritative: a bad manifest cannot produce ok, even with clean state.
+    for (const p of ['report.jsonl','poweroff','curl-calls']) await rm(join(root,p),{force:true});
+    await mkdir(join(root,'run/ci-kit-bake'),{recursive:true});
+    await writeFile(join(root,'run/ci-kit-bake/report-url'),'https://reports.invalid/builder');
+    await writeFile(join(root,'etc/ci-kit/bake-manifest.json'),'{}');
+    assert.throws(()=>run(finalizer));
+    assert.equal(await present('poweroff'),true);
+    assert.equal(await present('report.jsonl'),false);
+    assert.match(await readFile(join(root,'curl-calls'),'utf8'),/failed:image-check/);
+    assert.equal(await present('run/ci-kit-bake'),false);
+  } finally { await rm(root,{recursive:true,force:true}); }
+});
