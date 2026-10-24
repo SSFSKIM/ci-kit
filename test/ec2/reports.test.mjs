@@ -80,3 +80,18 @@ test('mixed-cloud daily lines name each provider instance, keep EC2 regions inta
   assert.doesNotMatch(unpriced, /\$0\.00/);
   assert.match(unpriced, /projected month unpriced/);
 });
+
+test('mixed-cloud prelaunch subtotals retain unknown costs rather than reporting free unclaimed VMs', () => {
+  const unpriced = { ...row('unclaimed', 'ec2', '111111111111', null), job: undefined, prelaunch: { run: 1, attempt: 1 } };
+  const daily = dailyLine([rows[0], unpriced], day, 'commit');
+  assert.deepEqual(daily.prelaunched, { vms: 1, unclaimed: 1, unclaimedDollars: null, unclaimedUnpriced: 1 });
+  const text = renderDaily(daily);
+  assert.match(text, /Pre-launched: 1 VMs, 1 unclaimed \(unpriced\)/);
+  assert.doesNotMatch(text, /unclaimed \(\$0/);
+  const priced = { ...unpriced, alloc: 'priced', dollars: .2 };
+  const mixed = dailyLine([rows[0], unpriced, priced], day, 'commit');
+  assert.deepEqual(mixed.prelaunched, { vms: 2, unclaimed: 2, unclaimedDollars: .2, unclaimedUnpriced: 1 });
+  assert.match(renderDaily(mixed), /2 unclaimed \(\$0\.2000 \+ 1 unpriced\)/);
+  const knownZero = dailyLine([rows[0], { ...priced, dollars: 0 }], day, 'commit');
+  assert.match(renderDaily(knownZero), /1 unclaimed \(\$0\.0000\)/, 'known zero is not an unknown rate');
+});

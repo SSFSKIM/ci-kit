@@ -1017,6 +1017,10 @@ The guard logs every action and only touches pool-tagged resources:
   waiting for CreateImage. A job's deadline is max-run plus fifteen minutes; builders get two hours, smoke thirty minutes.
 - Unready AMIs older than a day and ready generations beyond the newest two are deregistered with their tagged
   snapshots deleted. Retained images protect shared snapshots. Image retention never uses VM deadlines.
+- A completed, pool-tagged snapshot older than one day with no surviving owned-image reference is also removed.
+  This retries residue after AMI deregistration succeeded but snapshot deletion failed. Both image and snapshot
+  inventories must be complete; all owned images (including non-pool, disabled and deprecated images) protect
+  their references. Pending snapshots, young snapshots and unknown ages do not establish orphans.
 
 Failed ledger/instance lists cannot establish absent rows/orphan volumes. Independent known inventories still
 permit their own deadline/retention cleanup. A still-attached volume after termination is deferred rather than

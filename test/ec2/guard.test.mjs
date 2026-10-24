@@ -181,7 +181,7 @@ test('partial paginated inventories are discarded if any later page fails', asyn
   assert.deepEqual(f.mutations(), []);
 });
 
-test('pool inventories are paged and every list is constrained by pool tags and ownership where supported', async () => {
+test('inventories are paged; image references cover all owned images while cleanup resources stay pool-tagged', async () => {
   const f = fixture({ pages: {
     DescribeInstancesCommand: ({ NextToken }) => NextToken ? { Reservations: [{ Instances: [instance('page-two', 'job', { state: 'stopped' })] }] } : { Reservations: [], NextToken: 'next' },
     DescribeVolumesCommand: ({ NextToken }) => NextToken ? { Volumes: [volume('vol-page-two', 'job')] } : { Volumes: [], NextToken: 'next' },
@@ -192,11 +192,11 @@ test('pool inventories are paged and every list is constrained by pool tags and 
   assert.deepEqual(terminatedIds(f), ['page-two']);
   assert.deepEqual(deletedVolumes(f), ['vol-page-two']);
   assert.ok(f.mutations().some((c) => c.input.SnapshotId === 'snap-old-unready'));
-  for (const name of ['DescribeInstancesCommand', 'DescribeVolumesCommand', 'DescribeImagesCommand', 'DescribeSnapshotsCommand']) {
+  for (const name of ['DescribeInstancesCommand', 'DescribeVolumesCommand', 'DescribeSnapshotsCommand']) {
     const input = f.calls.find((c) => c.name === name).input;
     assert.deepEqual(input.Filters, [{ Name: 'tag:ci-kit-pool', Values: ['ec2'] }]);
   }
-  assert.deepEqual(f.calls.find((c) => c.name === 'DescribeImagesCommand').input.Owners, ['self']);
+  assert.deepEqual(f.calls.find((c) => c.name === 'DescribeImagesCommand').input, { Owners: ['self'], IncludeDeprecated: true, IncludeDisabled: true });
   assert.deepEqual(f.calls.find((c) => c.name === 'DescribeSnapshotsCommand').input.OwnerIds, ['self']);
 });
 
@@ -320,4 +320,63 @@ test('OIDC/authentication errors cannot fall back to ambient AWS keys or Google 
   await assert.rejects(createGuardAws(cfg, { ...options, fetchImpl: async () => new Response('sensitive body', { status: 403 }) }), /HTTP 403/);
   await assert.rejects(createGuardAws(cfg, { ...options, fetchImpl: async () => Response.json({}), sts: { async send() { throw new Error('must not assume'); } } }), /OIDC/);
   await assert.rejects(createGuardAws(cfg, { ...options, fetchImpl: async () => Response.json({ value: 'token' }), sts: { async send() { return { Credentials: {} }; } } }), /session/);
+});
+
+const snapshot = (id, age = 1441, extra = {}) => ({
+  SnapshotId: id, OwnerId: account, State: 'completed', StartTime: new Date(now - age * minute), Tags: tags('builder'), ...extra,
+});
+
+test('a failed snapshot deletion is rediscovered on the next pass after its AMI mapping is gone', async () => {
+  const images = [image('expired', 1500, false)], snapshots = [snapshot('snap-expired')];
+  let firstDelete = true;
+  const f = fixture({ images, snapshots, pages: {
+    DeregisterImageCommand: ({ ImageId }) => { images.splice(images.findIndex(i => i.ImageId === ImageId), 1); return {}; },
+    DeleteSnapshotCommand: ({ SnapshotId }) => {
+      if (firstDelete) { firstDelete = false; throw new Error('temporary snapshot failure'); }
+      snapshots.splice(snapshots.findIndex(s => s.SnapshotId === SnapshotId), 1); return {};
+    },
+  } });
+  assert.equal(await f.run(), 1);
+  assert.equal(images.length, 0);
+  assert.equal(snapshots.length, 1);
+  assert.equal(await f.run(), 0);
+  assert.equal(snapshots.length, 0, 'a fresh guard snapshot must find residue without a persisted AMI mapping');
+  assert.equal(f.mutations().filter(c => c.name === 'DeleteSnapshotCommand').length, 2);
+  assert.match(f.logs.join('\n'), /snap-expired.*orphan snapshot/);
+});
+
+test('orphan cleanup protects young, pending, unknown-age, untagged and image-referenced snapshots', async () => {
+  const images = [image('retained', 100, true, ['snap-ready']),
+    { ...image('inflight', 10, false, ['snap-inflight']), State: 'pending' },
+    { ...image('not-pool', 2000, false, ['snap-other-image']), Tags: [] }];
+  const snapshots = [snapshot('snap-orphan'), snapshot('snap-young', 1439), snapshot('snap-boundary', 1440),
+    snapshot('snap-pending', 1500, { State: 'pending' }), snapshot('snap-no-time', 1500, { StartTime: undefined }),
+    snapshot('snap-foreign', 1500, { Tags: [] }), snapshot('snap-ready'), snapshot('snap-inflight'), snapshot('snap-other-image')];
+  const f = fixture({ images, snapshots });
+  assert.equal(await f.run(), 0);
+  assert.deepEqual(f.mutations(), [{ name: 'DeleteSnapshotCommand', input: { SnapshotId: 'snap-orphan' } }]);
+});
+
+test('untagged retained AMIs protect snapshots even when a doomed pool AMI shares them', async () => {
+  const f = fixture({ images: [image('doomed', 1500, false, ['snap-shared']),
+    { ...image('foreign-retained', 2000, false, ['snap-shared']), Tags: [] }], snapshots: [snapshot('snap-shared')] });
+  assert.equal(await f.run(), 0);
+  assert.deepEqual(f.mutations(), [{ name: 'DeregisterImageCommand', input: { ImageId: 'doomed' } }]);
+});
+
+for (const listing of ['DescribeImagesCommand', 'DescribeSnapshotsCommand']) {
+  test(`orphan snapshots survive a failed later page of ${listing}`, async () => {
+    const f = fixture({ snapshots: [snapshot('snap-orphan')], pages: { [listing]: ({ NextToken }) => {
+      if (NextToken) throw new Error('incomplete inventory');
+      return { Images: [], Snapshots: [snapshot('snap-orphan')], NextToken: 'page2' };
+    } } });
+    assert.equal(await f.run(), 1);
+    assert.deepEqual(f.mutations(), []);
+  });
+}
+
+test('failed deregistration retains snapshot protection, including snapshots old enough for orphan cleanup', async () => {
+  const f = fixture({ images: [image('failed', 1500, false)], snapshots: [snapshot('snap-failed')], fail: { DeregisterImageCommand: true } });
+  assert.equal(await f.run(), 1);
+  assert.equal(f.mutations().filter(c => c.name === 'DeleteSnapshotCommand').length, 0);
 });

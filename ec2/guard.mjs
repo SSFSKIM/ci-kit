@@ -104,7 +104,9 @@ export async function runEc2Guard({ ec2, gh, ledger, account, now = Date.now, lo
   const [instances, volumes, images, snapshots, rows] = await Promise.all([
     read('list instances', async () => (await list(ec2, DescribeInstancesCommand, { Filters: POOL_FILTER }, 'Reservations')).flatMap((r) => r.Instances ?? []).filter(pooled)),
     read('list volumes', async () => (await list(ec2, DescribeVolumesCommand, { Filters: POOL_FILTER }, 'Volumes')).filter(pooled)),
-    read('list images', async () => (await list(ec2, DescribeImagesCommand, { Owners: ['self'], Filters: POOL_FILTER }, 'Images')).filter(pooled)),
+    // All owned image references protect snapshots, including non-pool and disabled/deprecated images.
+    // The mutation policy below still selects only pool-tagged AMIs.
+    read('list images', () => list(ec2, DescribeImagesCommand, { Owners: ['self'], IncludeDeprecated: true, IncludeDisabled: true }, 'Images')),
     read('list snapshots', async () => (await list(ec2, DescribeSnapshotsCommand, { OwnerIds: ['self'], Filters: POOL_FILTER }, 'Snapshots')).filter(pooled)),
     read('read ledger', () => readGuardRows(gh, ledger)),
   ]);
@@ -168,13 +170,18 @@ export async function runEc2Guard({ ec2, gh, ledger, account, now = Date.now, lo
     for (const i of doomed) {
       if (await act(`deregister image ${i.ImageId}: image retention`, () => ec2.send(new DeregisterImageCommand({ ImageId: i.ImageId })))) removed.add(i.ImageId);
     }
-    // Only pool-tagged snapshots referenced by successfully removed images may be deleted. A retained image
-    // (or one whose deregistration failed) protects shared snapshots; image lifetimes never use VM deadlines.
+    // A retained/in-flight image (or failed deregistration) protects shared snapshots, even when the image
+    // is not pool-tagged. Both inventories must be complete before absence can establish an orphan.
     const protectedIds = new Set(images.filter((i) => !removed.has(i.ImageId)).flatMap(snapshotsOf));
-    const taggedIds = new Set(snapshots.map((s) => s.SnapshotId));
-    const deleteIds = new Set(doomed.filter((i) => removed.has(i.ImageId)).flatMap(snapshotsOf));
-    for (const id of deleteIds) {
-      if (taggedIds.has(id) && !protectedIds.has(id)) await act(`delete snapshot ${id}: image retention`, () => ec2.send(new DeleteSnapshotCommand({ SnapshotId: id })));
+    const removedIds = new Set(doomed.filter((i) => removed.has(i.ImageId)).flatMap(snapshotsOf));
+    for (const [id, snapshot] of new Map(snapshots.map(s => [s.SnapshotId, s]))) {
+      if (protectedIds.has(id)) continue;
+      // A failed deletion must remain discoverable after deregistration has erased the AMI mapping.
+      // A full day (the unready-image retention window) protects newly-created bake snapshots; incomplete
+      // snapshots and unknown ages never establish an orphan. VM deadlines do not govern image artifacts.
+      const orphan = snapshot.State === 'completed' && at - new Date(snapshot.StartTime ?? NaN).getTime() > 86400_000;
+      const reason = removedIds.has(id) ? 'image retention' : orphan ? 'orphan snapshot older than one day' : null;
+      if (reason) await act(`delete snapshot ${id}: ${reason}`, () => ec2.send(new DeleteSnapshotCommand({ SnapshotId: id })));
     }
   }
   return failed;
