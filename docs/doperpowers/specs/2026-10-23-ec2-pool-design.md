@@ -1574,6 +1574,25 @@ The production chain is reviewed at each boundary:
 
 ## Decision Log
 
+- Decision: Preserve bounded compaction phase, exit status and timing in the builder's existing S3 report,
+  on failure and success, rather than relying on a terminated instance's serial console. Keep diagnostic
+  handoffs in `/run`, retain the first failing phase through cleanup, and never reflect raw commands, paths,
+  logs or arbitrary report properties. Increase each inventory timeout from 3 to 5 minutes and the finalizer
+  unit from 15 to 20 minutes; the two inventory bounds plus the 8-minute copy leave 2 minutes for the
+  remaining work. No integrity gate, IAM policy, guest acceptance interface, or GCE behavior changes.
+  Rationale: merged-main production bake `ci-kit-bake-r29cc` failed on builder `i-041883b43554c763c`
+  with only `failed:compact`; latest and previous console reads were empty after termination, so the original
+  cause is unknown. An exact-manifest replay on the same Canonical AMI and merged code passed compaction:
+  source inventory 47s/180s, bitmap copy 114s/480s, target inventory 135s/180s, all 167557 regular-file
+  hashes equal, read-only fsck and GPT validation passed. The cold target inventory had only 45 seconds
+  of headroom, motivating a 300-second bound (2.2 times that observed duration), not a claim that the
+  original failure was a timeout. The prior 74340-file figure was a smaller 3.1-GB regression fixture,
+  not a comparable old bake count; no increase is attributed to the changed MAWS lock without evidence.
+  Replay `compact-repro-20261024-mvmvk613-290475840169` intentionally stopped before image creation;
+  readback confirmed its builder terminated and zero tagged volumes, snapshots or images. The failed
+  production run likewise left no resources. Candidate `ami-0dff29fca329bcd8e` remains unready and retained.
+  Date/Author: 2026-10-24, CI-opt and image-trim executor.
+
 - Decision: Compact EC2 snapshot allocation without removing any job-visible file. The builder gets a blank,
   equal-sized encrypted disk; after its existing image checks, copy bitmap-allocated ext4 root blocks with
   `partclone` through a read-only loop alias with verified direct backing-device I/O. Inventory every regular

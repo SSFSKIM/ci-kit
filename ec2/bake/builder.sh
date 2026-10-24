@@ -79,7 +79,7 @@ FailureAction=poweroff
 [Service]
 Type=oneshot
 ExecStart=/bin/bash /opt/ci-kit/ec2/bake/finalize.sh
-TimeoutStartSec=15min
+TimeoutStartSec=20min
 TimeoutStopSec=30s
 # Root is frozen during the sparse copy: no journal writes on its output path.
 StandardOutput=console

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatDiagnostic } from '../../ec2/vm/diagnostics.mjs';
+import { formatDiagnostic, formatCompactTrace } from '../../ec2/vm/diagnostics.mjs';
 
 test('serialized image diagnostics retain known reasons, fixed paths and filesystem codes', () => {
   const cases = [
@@ -21,6 +21,57 @@ test('serialized image diagnostics retain known reasons, fixed paths and filesys
     assert.equal(formatDiagnostic(JSON.parse(JSON.stringify(value))), expected);
     assert.ok(formatDiagnostic(value).length < 160);
   }
+});
+
+test('compact diagnostics retain only a finite phase and numeric shell failure status', () => {
+  for (const phase of ['compact', 'disk-validation', 'boot-copy', 'copy-root-setup', 'source-inventory',
+    'root-copy', 'root-recovery', 'target-inventory', 'root-comparison', 'root-fsck', 'copy-root-cleanup', 'disk-verification']) {
+    assert.equal(formatDiagnostic({ reason: 'compact-failed', phase, exit_status: 124, path: 'secret', command: 'secret',
+      stderr: 'secret', url: 'https://reports.example/?signature=secret' }),
+    JSON.stringify({ reason: 'compact-failed', phase, exit_status: 124 }));
+  }
+  assert.equal(formatDiagnostic({ reason: 'compact-failed', phase: 'root-fsck', exit_status: 255 }),
+    '{"reason":"compact-failed","phase":"root-fsck","exit_status":255}');
+});
+
+test('forged compact phases or exit statuses never become log text', () => {
+  const secret = 'secret https://reports.example/?signature=secret';
+  const cases = [
+    { phase: secret, exit_status: 1 }, { phase: ['root-copy'], exit_status: 1 },
+    { phase: 'toString', exit_status: 1 }, { phase: 'root-copy' },
+    ...[0, -1, 256, 1.5, '124', [124], null, NaN, Infinity, secret].map(exit_status => ({ phase: 'root-copy', exit_status })),
+  ];
+  for (const fields of cases) assert.equal(formatDiagnostic({ reason: 'compact-failed', ...fields }), '{"reason":"unexpected"}');
+  assert.equal(formatDiagnostic({ reason: 'filesystem', path: '/var/log', phase: secret, exit_status: secret }),
+    '{"reason":"filesystem","path":"/var/log"}');
+});
+
+test('compact timing trace retains only finite phases, bounded numbers and the enforced timeout budgets', () => {
+  const secret = 'jit-private https://reports.invalid/?signature=secret';
+  const input = { elapsed_seconds: 360, exit_status: 0, command: secret, phases: {
+    'source-inventory': { elapsed_seconds: 47, exit_status: 0, bound_seconds: 300, stderr: secret },
+    'root-copy': { elapsed_seconds: 114, exit_status: 0 },
+    'target-inventory': { elapsed_seconds: 135, exit_status: 0 },
+    [secret]: { elapsed_seconds: 1, exit_status: 0 },
+  }, toJSON() { throw Error('never serialize the input'); } };
+  assert.equal(formatCompactTrace(input), JSON.stringify({ elapsed_seconds: 360, exit_status: 0, phases: {
+    'source-inventory': { elapsed_seconds: 47, exit_status: 0, bound_seconds: 300 },
+    'root-copy': { elapsed_seconds: 114, exit_status: 0, bound_seconds: 480 },
+    'target-inventory': { elapsed_seconds: 135, exit_status: 0, bound_seconds: 300 },
+  } }));
+  assert.equal(formatCompactTrace({ elapsed_seconds: 86400, exit_status: 255, phases: {} }),
+    '{"elapsed_seconds":86400,"exit_status":255,"phases":{}}');
+});
+
+test('forged timing types, oversized numbers and altered timeout budgets cannot cross the report boundary', () => {
+  const valid = { elapsed_seconds: 1, exit_status: 0, phases: {} };
+  const cases = [null, [], 'secret', { ...valid, phases: [] }, { ...valid, phases: null },
+    ...[-1, 86401, 1.5, '47', NaN, Infinity].map(elapsed_seconds => ({ ...valid, elapsed_seconds })),
+    ...[-1, 256, 1.5, '124', NaN, Infinity].map(exit_status => ({ ...valid, exit_status })),
+    ...[null, [], {elapsed_seconds:1,exit_status:'124'}, {elapsed_seconds:1,exit_status:0,bound_seconds:180},
+      {elapsed_seconds:1,exit_status:0,bound_seconds:'secret'}].map(value => ({ ...valid, phases: {'source-inventory':value} })),
+  ];
+  for (const input of cases) assert.equal(formatCompactTrace(input), '{"reason":"unexpected"}');
 });
 
 test('absent or forged serialized fields cannot escape the controlled diagnostic vocabulary', () => {
