@@ -1,4 +1,4 @@
-// One configured EC2 account. No JIT or signed report URL is retained; recovery observes persisted coordinates only.
+// One configured EC2 account. No JIT or signed report URL is retained; recovery observes durable allocation identity and attempt coordinates.
 import { DescribeInstancesCommand, DescribeImagesCommand, DescribeInstanceTypesCommand, DescribeAvailabilityZonesCommand,
   DescribeSpotPriceHistoryCommand, RunInstancesCommand, TerminateInstancesCommand, DescribeVolumesCommand, DeleteVolumeCommand } from '@aws-sdk/client-ec2';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
@@ -7,6 +7,9 @@ import { tagMap, poolJob, live, priceOf, launchResult, jobRequest, viewInstance,
 const filter = (Name, ...Values) => ({ Name, Values });
 const pool = () => [filter('tag:ci-kit-pool', 'ec2'), filter('tag:ci-kit-purpose', 'job')];
 const allInstances = (pages) => pages.flatMap((p) => (p.Reservations ?? []).flatMap((r) => r.Instances ?? []));
+const hasAttempt = row => Boolean(row.zone && row.client_token && Number.isFinite(Date.parse(row.sent_at)));
+const RECOVERY_GRACE_MS = 10 * 60_000;
+const SEND_WINDOW_MS = 8 * 60_000; // leave two minutes for bounded SDK auth/request work before presend recovery
 
 export function createProvider({ aws, account, cfg, now = Date.now, log = () => {} }) {
   let types = new Map(), zones = new Map(), prices = new Map(), image = null, imageRead;
@@ -29,7 +32,12 @@ export function createProvider({ aws, account, cfg, now = Date.now, log = () => 
         snapshotGiB: Number.isFinite(snapshot) ? snapshot : undefined, initializationMiBps: account.initialization_mibps }) };
   };
   const find = async (row) => {
-    if (!row.zone || !row.client_token || !row.sent_at) return null;
+    if (!hasAttempt(row)) {
+      // The initial ledger write precedes JIT and attempt coordinates. Still look for its allocation
+      // defensively: a discovered VM is adopted, never abandoned just because those coordinates are absent.
+      return allInstances(await pages(DescribeInstancesCommand, { Filters: [...pool(), filter('tag:ci-kit-alloc', row.alloc)] }))
+        .find(i => poolJob(i) && tagMap(i)['ci-kit-alloc'] === row.alloc) ?? null;
+    }
     const shared = [...pool(), filter('availability-zone', row.zone)];
     // Two queries are OR evidence; combining tag and token filters would require both to match.
     const results = await Promise.all([filter('tag:ci-kit-alloc', row.alloc), filter('client-token', row.client_token)]
@@ -78,12 +86,17 @@ export function createProvider({ aws, account, cfg, now = Date.now, log = () => 
       return { instances, complete: true, volumes: volumePages.flatMap((p) => p.Volumes ?? []) };
     },
     async launch(row, c, jit) {
+      const sendBy = Date.parse(row.at) + SEND_WINDOW_MS;
+      if (!Number.isFinite(sendBy)) return { outcome: 'abandoned', detail: 'allocation time is required before sending' };
       let request;
       try {
         const report = Object.fromEntries(await Promise.all(['boot', 'notice', 'exit'].map(async (kind) => [kind,
           await aws.presignPut({ bucket: account.report_bucket, key: `reports/${row.alloc}/${kind}.json`, expiresIn: 9000 })])));
         request = jobRequest({ row, candidate: c, account, maxRunMinutes: cfg.max_run_minutes, jit, report, rootDevice: image?.RootDeviceName });
       } catch (err) { return { outcome: 'denied', detail: `prepare EC2 request: ${err.name}` }; }
+      // Check after asynchronous credential/signing work too: an old writer must not send after another
+      // launcher can retire its initial row. Local expiry is not an account denial or a request to replay.
+      if (now() >= sendBy) return { outcome: 'abandoned', detail: 'allocation send deadline exceeded' };
       try {
         const response = await aws.ec2.send(new RunInstancesCommand(request));
         const id = response.Instances?.[0]?.InstanceId;
@@ -92,7 +105,6 @@ export function createProvider({ aws, account, cfg, now = Date.now, log = () => 
     },
     async reconcileLaunch(row) {
       try {
-        if (!row.zone || !row.client_token || !Number.isFinite(Date.parse(row.sent_at))) return { outcome: 'uncertain', detail: 'no persisted attempt coordinates' };
         const found = await find(row);
         if (found) {
           if (!types.has(found.InstanceType)) {
@@ -103,7 +115,10 @@ export function createProvider({ aws, account, cfg, now = Date.now, log = () => 
           if (!c) return { outcome: 'uncertain', detail: 'instance capacity unknown' };
           return { outcome: 'accepted', id: found.InstanceId, detail: '', instance: viewInstance(found, c, row) };
         }
-        return { outcome: now() - Date.parse(row.sent_at) >= 10 * 60_000 ? 'abandoned' : 'uncertain', detail: 'no instance observed for attempt' };
+        // A fresh coordinate-free row can belong to an overlapping active writer. The finite grace starts
+        // at the initial write; submitted attempts retain their existing ten minutes from sent_at.
+        const since = hasAttempt(row) ? row.sent_at : row.at;
+        return { outcome: now() - Date.parse(since) >= RECOVERY_GRACE_MS ? 'abandoned' : 'uncertain', detail: 'no instance observed for allocation' };
       } catch (err) { log(`ec2 ${account.account}: reconciliation observation failed (${err.name})`); return { outcome: 'uncertain', detail: 'observation failed' }; }
     },
     terminate: (instance) => aws.ec2.send(new TerminateInstancesCommand({ InstanceIds: [instance.id ?? instance.instance_id] })),
