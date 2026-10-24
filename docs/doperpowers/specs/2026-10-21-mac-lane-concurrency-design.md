@@ -1755,7 +1755,7 @@ hold-aware plan send them to the guest, which this spec leaves open.
   /Users/admin/.local/bin` ENOENT: MAWS's connector probe launches the installed engine with no login, resolving
   `~/.local/bin/claude` (`e2e/support/p1-live.ts`, `installedEngine`), and the host has one from its user's own
   install. The audit before wave 3 read the binaries spawned by literal name or path constant; this one is joined
-  from `homedir()`, a home-relative path that audit could not see. ci-kit PR_NUMBER adds `provision.sh engine
+  from `homedir()`, a home-relative path that audit could not see. ci-kit #137 adds `provision.sh engine
   <version>` after Poppler, through Anthropic's native installer (which checks the binary against its release's
   manifest), and bake.sh passes the host user's own version, so on the bake's day the guest launches what the host's
   jobs launch. Between bakes the guest's engine falls behind the host's auto-updating one. **Rejected:** an install
