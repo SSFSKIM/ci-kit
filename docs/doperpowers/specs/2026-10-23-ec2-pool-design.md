@@ -1264,6 +1264,14 @@ The production chain is reviewed at each boundary:
 
 ## Surprises & Discoveries
 
+- Observation: The launcher role's actual federated Cost Explorer proof passed on 2026-10-24 at 07:45Z for
+  `2026-10-23..2026-10-25`, explicitly using `ce.us-east-1.amazonaws.com` and a four-hour STS session. This
+  satisfies M6's access prerequisite, not its durable-reading/policy acceptance. The paid read adds $0.01;
+  conservative cumulative AWS spend before the new EC2 builder is about $0.91.
+  Smoke-recovery PR #114 merged `d82efae`; fresh-main rebake `ci-kit-bake-295d5` has a full-lifetime background
+  `gcloud ... execute --wait` watcher, with finite progress monitoring only supplementary. No M6 credit activation
+  is authorized before M5's remaining live acceptance completes.
+
 - Observation: Combined bake `ci-kit-bake-v2jm5` failed at 2026-10-23T21:48:46Z. GCE image
   `ci-kit-runner-20261023-210242-du0p-215f283b` passed and remains in service; MAWS run `40027775933` proved
   all six jobs on it. EC2 AMI `ami-00c6296487b7d3cd9` had 11.4 GiB written snapshot data, but smoke instance
@@ -1622,6 +1630,13 @@ The production chain is reviewed at each boundary:
   Sources: https://github.com/canonical/cloud-init/blob/26.2/cloudinit/cmd/main.py#L1008 and
   https://github.com/canonical/cloud-init/blob/26.2/cloudinit/atomic_helper.py#L65.
   Date/Author: 2026-10-24, M5 executor and controller; live rebake still required.
+
+- Decision: Prepare M6 implementation/tests in an isolated branch while the reviewed M5 rebake and live proofs
+  run; merge/deploy M6 and enable credit only after M5 acceptance is complete. M5's live config-transition PRs
+  remain separate and must restore their starting config before M6 integrates.
+  Rationale: the code interfaces are reviewed and federated billing access is now proved; parallel preparation
+  uses the cloud bake's long wait without changing production eligibility or weakening milestone acceptance.
+  Date/Author: 2026-10-24, controller execution sequencing.
 
 ## Outcomes & Retrospective
 
