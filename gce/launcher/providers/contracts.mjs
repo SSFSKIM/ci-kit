@@ -34,8 +34,9 @@
  * @property {Candidate} candidate
  * @property {string} createdAt
  *
- * @typedef {{outcome: 'accepted'|'capacity'|'quota'|'denied'|'throttled'|'uncertain', scope?: string, detail: string, id?: string}} LaunchResult
- * @typedef {(LaunchResult & {instance?: Instance})|{outcome: 'abandoned', detail: string}} ReconcileResult
+ * @typedef {{outcome: 'accepted'|'capacity'|'quota'|'denied'|'throttled'|'uncertain'|'abandoned', scope?: string, detail: string, id?: string}} LaunchResult
+ * Launch may return abandoned for local presend expiry; no cloud request was sent and no account cooldown applies.
+ * @typedef {LaunchResult & {instance?: Instance}} ReconcileResult
  * @typedef {{kind: 'telemetry'|'claimed', [field: string]: unknown}} TelemetryReport
  * @typedef {{kind: 'terminal', [field: string]: unknown}} TerminalReport
  * @typedef {{telemetry: TelemetryReport[], terminal?: TerminalReport}} AllocationReports
