@@ -85,7 +85,7 @@ const line = (label, samples) => {
 
 export function renderReport(samples, { from, to, rows, ticks }) {
   const out = [
-    `GCE pool start latency, ${new Date(from).toISOString()} → ${new Date(to).toISOString()}: ${rows} ledger rows, ${ticks} ticks`,
+    `Pool start latency, ${new Date(from).toISOString()} → ${new Date(to).toISOString()}: ${rows} ledger rows, ${ticks} ticks`,
     `${'stage'.padEnd(34)}${'median'.padEnd(10)}${'p10–p90'.padEnd(14)}n`,
   ];
   for (const [key, label] of LINES) out.push(line(label, samples[key]));
@@ -99,6 +99,20 @@ export function renderByMachine(rows) {
   return [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([machine, list]) => {
     const samples = stages({ rows: list, ticks: [] });
     return [`${machine} (${list.length} VM${list.length === 1 ? '' : 's'})`, ...VM_LINES.map(([key, label]) => line(label, samples[key]))].join('\n');
+  }).join('\n\n');
+}
+
+// Provider/zone groups keep different clouds' boot paths separate, including accounts whose AZ names differ.
+export function renderByProviderZone(rows) {
+  const groups = new Map();
+  for (const r of rows) {
+    const key = `${r.provider ?? 'gce'}/${r.account ?? '(unknown)'} ${r.zone ?? '(no zone)'}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  return [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([key, list]) => {
+    const samples = stages({ rows: list, ticks: [] });
+    return [`${key} (${list.length} VM${list.length === 1 ? '' : 's'})`, ...VM_LINES.map(([stage, label]) => line(label, samples[stage]))].join('\n');
   }).join('\n\n');
 }
 
@@ -167,6 +181,7 @@ async function main(argv) {
   // A row counts when its VM was created in the span; its job's times then fall in or just after it.
   const rows = all.filter((r) => (!opts.repo || r.repo === opts.repo) && ms(r.created) >= from && ms(r.created) <= to);
   console.log(renderReport(stages({ rows, ticks }), { from, to, rows: rows.length, ticks: ticks.length }));
+  console.log(`\nBy provider and zone\n\n${renderByProviderZone(rows)}`);
   console.log(`\nBy machine type\n\n${renderByMachine(rows)}`);
   console.log(`\n${renderPrelaunch(rows)}`);
 }

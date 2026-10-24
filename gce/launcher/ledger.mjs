@@ -6,6 +6,7 @@ import { machineCpus } from '../bake/plan.mjs';
 import { providerRunnerName, requiredProvider } from './providers/contracts.mjs';
 import { MEMORY_GIB } from './providers/gce-data.mjs';
 import { ec2Dollars } from './providers/ec2-data.mjs';
+import { providerCosts, renderProviderCost } from './costs.mjs';
 
 const ROW_MARK = 'ci-kit-gce-ledger';
 const DAILY_MARK = 'ci-kit-gce-daily';
@@ -310,7 +311,7 @@ export function dailyLine(rows, day, config, nat) {
   for (const r of ofDay) ends[r.end] = (ends[r.end] ?? 0) + 1;
   const families = {};
   for (const r of vms) {
-    const at = `${r.machine.split('-')[0]}@${regionOf(r.zone)}`;
+    const at = r.provider === 'ec2' ? `ec2/${r.account} ${r.machine.split('.')[0]}@${r.region ?? r.zone?.slice(0, -1)}` : `${r.machine.split('-')[0]}@${regionOf(r.zone)}`;
     const f = (families[at] ??= { vms: 0, dollars: 0 });
     f.vms += 1;
     f.dollars = round4(f.dollars + (r.dollars ?? 0));
@@ -324,6 +325,7 @@ export function dailyLine(rows, day, config, nat) {
     ...(prelaunched.length ? {
       prelaunched: { vms: prelaunched.length, unclaimed: unclaimed.length, unclaimedDollars: round4(unclaimed.reduce((sum, r) => sum + (r.dollars ?? 0), 0)) },
     } : {}),
+    ...(ofDay.some(r => r.provider === 'ec2') ? { providers: providerCosts(ofDay) } : {}),
     ...walkCounts(rows, ofDay, day),
     ...(nat ? { nat } : {}),
   };
@@ -392,14 +394,18 @@ function renderWalks(d) {
 }
 
 export function renderDaily(d) {
+  const unpriced = d.providers?.reduce((sum, g) => sum + g.unpriced, 0) ?? 0;
+  const amount = unpriced && unpriced === d.vms ? 'unpriced' : `$${d.dollars.toFixed(4)}${unpriced ? ` + ${unpriced} unpriced` : ''}`;
+  const month = unpriced && unpriced === d.vms ? 'unpriced' : `$${d.month.toFixed(2)}${unpriced ? ' (priced VMs only)' : ''}`;
   const ends = Object.entries(d.ends).map(([e, n]) => `${e} ${n}`).join(', ') || 'none';
   const families = Object.entries(d.families ?? {})
-    .map(([at, f]) => `${at} ${f.vms} VMs $${f.dollars.toFixed(4)}${f.unpriced ? ` (${f.unpriced} unpriced)` : ''}`).join(', ');
+    .map(([at, f]) => `${at} ${f.vms} VMs ${d.providers && f.unpriced === f.vms ? 'unpriced' : `$${f.dollars.toFixed(4)}${f.unpriced ? ` (${f.unpriced} unpriced)` : ''}`}`).join(', ');
   return [
     `<!-- ${DAILY_MARK} ${JSON.stringify(d)} -->`,
-    `**GCE pool, ${d.day} (UTC):** ${d.vms} VMs, ${d.seconds} VM-seconds, $${d.dollars.toFixed(4)}; ` +
-      `projected month $${d.month.toFixed(2)} at this day's rate. Ends: ${ends}.${families ? ` By family@region: ${families}.` : ''} ` +
+    `**${d.providers ? 'Pool' : 'GCE pool'}, ${d.day} (UTC):** ${d.vms} VMs, ${d.seconds} VM-seconds, ${amount}; ` +
+      `projected month ${month} at this day's rate. Ends: ${ends}.${families ? ` By family@region: ${families}.` : ''} ` +
       `${d.prelaunched ? `Pre-launched: ${d.prelaunched.vms} VMs, ${d.prelaunched.unclaimed} unclaimed ($${d.prelaunched.unclaimedDollars.toFixed(4)}). ` : ''}` +
+      `${d.providers ? `By provider: ${d.providers.map(renderProviderCost).join('; ')}. ` : ''}` +
       `${renderWalks(d)}${renderNat(d.nat)}Launcher config (gce.json) ${d.config}.`,
   ].join('\n');
 }

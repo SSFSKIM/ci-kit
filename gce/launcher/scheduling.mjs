@@ -4,7 +4,7 @@ import { providerKey, requiredProvider } from './providers/contracts.mjs';
 export const identity = (value, project) => ({ provider: value.provider ?? value.name ?? 'gce', account: value.account ?? value.candidate?.account ?? ((value.provider ?? value.name ?? 'gce') === 'gce' ? project : null) });
 export const keyOf = (value, project) => providerKey(identity(value, project));
 
-export function providerWalk({ repo, cpus, job, cfg, repoProviders, providers, ec2, creditPreference = () => true }) {
+export function providerWalk({ repo, cpus, job, cfg, repoProviders, providers, ec2, creditPreference = (account) => !account.credit }) {
   const required = job ? requiredProvider(job.labels) : 'any';
   const refs = repoProviders?.[repo] ?? cfg.repos.find((r) => r.repo.toLowerCase() === repo.toLowerCase())?.providers ?? [{ provider: 'gce', account: cfg.project }];
   const listed = refs.map((ref) => ({ ...ref, account: ref.account ?? (ref.provider === 'gce' ? cfg.project : ec2?.accounts?.length === 1 ? ec2.accounts[0].account : null) }));

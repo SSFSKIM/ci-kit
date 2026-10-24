@@ -1,6 +1,10 @@
 # The pool — operator runbook
 
-The pool is one Hetzner server, `ci-kit-pool`, that exists only while private repos' pool-lane gates run
+The pool has a Hetzner backend and an ephemeral-VM launcher serving GCE and EC2. Repos belong to one
+backend; ephemeral repos choose their clouds/accounts in ci-kit's config. See [EC2 and credit preference](#ec2-and-credit-preference)
+for the second cloud, billing and independent guard. The Hetzner operating model follows first.
+
+The Hetzner pool is one server, `ci-kit-pool`, that exists only while private repos' pool-lane gates run
 (design: spec §3). A workflow's `plan` job runs **ensure**, which creates the box from the newest pool snapshot
 if none exists. The **agent** on the box starts one Docker container per queued pool job, each with a fresh
 just-in-time runner and an exclusive set of cores, and deletes the box when it is idle at minute ≥ 50 of its
@@ -829,13 +833,10 @@ per allocation:
   ticks a row is eventually final rather than finalized once: a stale write that lands in the milliseconds after
   another tick finalized the row rolls it back to running, and the next tick finalizes it again, possibly with a
   later deletion time and charge.
-- A launcher outage of more than 26 hours leaves residue (a deferred review finding). A row not yet final falls out
-  of the window the launcher reads and stays unfinished in the ledger. Its VM is not necessarily gone:
-  `maxRunDuration` deletes only a VM that is still running, and a VM whose guest powered off after its job is
-  `TERMINATED` with its timer cleared, so it and its disk stay, costing about $0.007 a day at 50 GB, until the
-  launcher is back. Its first tick deletes the stopped VM, under a new row ended `orphan` (it finds no row for it),
-  so the old row stays unfinished beside it. The failed-tick alert fires within minutes of an outage, long before
-  26 hours.
+- The 26-hour window applies to finalized cost history, not non-final allocations. Cold/full reads retain old
+  non-final rows across outages and issue rotation, so unknown EC2 inventory cannot release their reservations.
+  A failed cloud list is not an empty inventory: that account's allocations stay reserved until observation
+  recovers. The independent EC2 guard and guest deadlines remain backstops during a launcher outage.
 - Hidden markers `<!-- ci-kit-gce-ledger {…} -->` and `<!-- ci-kit-gce-daily {…} -->` hold the JSON the kit reads;
   the Hetzner readers skip them.
 
@@ -909,3 +910,111 @@ The billing budget alert on the project ($40, mails at 50/90/100 %) is the billi
 Human-only steps). Monitoring alerts (`gce/deploy.sh alert`) mail the owner: `ci-kit launcher ticks failing` when three
 ticks fail within 10 minutes; `ci-kit pool VM runners never online` when the launcher logs a VM whose runner never
 came online (above); and `ci-kit NAT dropping connections` when a pool NAT drops a connection (The network).
+
+## EC2 and credit preference
+
+The same launcher owns both ephemeral clouds; there is no second queue consumer. `pool/config/gce.json` still
+owns the served repos and global physical-vCPU budget. Each repo's optional `providers` list grants accounts
+and determines their order; absent means GCE alone. The configured MAWS, ci-kit-sandbox and manim-master lists
+name EC2 account `290475840169`, then GCE. Consumer `.github/ci-kit.yml` cannot grant access to an account.
+An optional `max_vcpus` on a list entry caps that repo's non-final physical reservations on that instance; there
+is no default per-repo cap. Generic labels remain `self-hosted, ci-kit-pool, cpus-N`. Hand-written
+`ci-kit-gce`/`ci-kit-ec2` labels restrict a job to its cloud, never bypass its repo's list.
+
+`pool/config/ec2.json` holds accounts, placements and role ARNs. This account uses c8a spot in us-east-2,
+zones c → a → b, encrypted 50-GiB gp3 and provisioned initialization at 200 MiB/s. Job instances have no
+instance profile and terminate on shutdown. Launcher/bake credentials come from the Google identity through
+four-hour STS federation, never stored AWS keys. Cost Explorer alone uses/signs for us-east-1. Adding an
+account requires its entry and its own `ec2/setup.sh` run; the bake, billing reader and guard then cover it.
+The builder uses on-demand only to stop for CreateImage; there are no on-demand EC2 job candidates.
+
+### Enabling, demoting and disabling
+
+Before first enabling credit preference, run the explicit `ec2/setup.sh --billing-proof` through the federated
+launcher role. An operator-profile billing success is not that proof. Failure blocks activation. M6's prepared
+config must not reach main/deployment before M5's live image, lifecycle and config-transition acceptance is complete.
+Merging provider/credit config onto main changes the launcher's reload input; it is itself an activation step.
+
+Account `290475840169` has a $180 preference budget against $200 credit, `since: 2026-10-23` (including the
+spike and bake) and `until: 2027-04-17` (inclusive UTC). While its credit preference is on, its repo-list place
+is retained: EC2 spot → GCE spot → GCE standard. When preference ends, only new walks change to GCE spot →
+EC2 spot → GCE standard. Existing EC2 VMs finish normally. A repo already listing GCE first stays GCE first;
+a repo listing only GCE never uses EC2. An account without a credit block always keeps its configured place.
+
+Preference ends when `credit.enabled` is false, the UTC date is after `until`, AWS `billed_usd` reaches the
+budget, or no valid reading for `since` is available / the newest is more than 48 hours old. The launcher logs
+one transition per reason/account, including `credit preference off: budget: <account>` and
+`credit preference off: stale billing: <account>`. Billing may lag about two days; the $20 margin is an
+estimate, not a hard spending cap. Turning preference off makes EC2 overflow, **not disabled**.
+
+To stop new EC2 allocations, set top-level `enabled: false`, or disable that account. Disabled accounts still
+observe/reconcile/retire existing VMs and remain guard legs. Do not delete `ec2.json` as an off switch: absence
+removes EC2 management and guard legs, leaving non-final reservations held and VMs to their guest deadlines.
+Removing a provider from one repo's list likewise changes new admissions only, not existing coverage.
+
+### Durable billing and reports
+
+For each account with credit, `gce/launcher/credit.mjs` reads Cost Explorer's unblended EC2 compute and EC2-Other
+charges since the configured start, grouped by record type; credits/refunds cannot hide gross charges. It
+refreshes on the next UTC day only after the newest stored reading is at least six hours old. That floor
+survives process restarts. Failed refreshes keep the previous reading, retry no more than hourly within the
+process, and eventually demote at the 48-hour cutoff. Overlapping processes may make duplicate $0.01 reads;
+there is deliberately no distributed lock. Stored readings are reread every five minutes.
+
+Each immutable reading is a comment on `ec2 credit <account>` in the configured ledger repo, never on the
+rotating allocation issues. Its fields are `v`, `since`, `billed_usd`, `through` (exclusive billing interval
+end) and `read_at`. Readers choose newest valid `read_at`, not last-posted comment; writers retain the newest
+20 readings. A late older writer cannot erase a newer reading. Missing issues are created on the first
+successful refresh. Allocation finalization never increments AWS billing or controls preference.
+
+From an authenticated checkout, these commands are read-only:
+
+```sh
+node gce/cost-report.mjs --since 2026-10-24T00:00:00Z
+node gce/latency-report.mjs --since 2026-10-24T00:00:00Z
+```
+
+Both support `--until <ISO>` and `--repo <owner/name>`; default is the last 24 hours. Cost reports count finalized
+VMs created in that window, grouped by provider/account, with estimated gross dollars and explicit unpriced
+counts. Refused allocations are not VMs, and active VM estimates are not yet finalized. For credit accounts,
+they also print the window's credit-funded estimate (placements whose `credit_policy` was on), the lifetime
+AWS reading and remaining preference budget. This estimate does not claim actual AWS credit application.
+Unknown rates or billing never print as zero. The latency report separates VM stages by provider/account and
+zone, alongside the existing whole-pool, machine and pre-launch sections. Mixed-cloud daily ledger lines also
+name each provider/account; GCE-only daily output retains its established format.
+
+EC2 row estimates include spot compute (60-second minimum), gp3 (its own minimum), IPv4 and the full snapshot's
+provisioned-initialization charge per created volume. A first-hour EC2-initiated interruption waives compute,
+not disk, IP or initialization. These estimates are not AWS invoices. Interruption notices are telemetry;
+only terminal evidence/actual disappearance retires the allocation, as `preempted`. No automatic rerun occurs.
+
+### Independent EC2 guard
+
+`.github/workflows/pool-guard.yml` retains Hetzner's ten-minute job and adds a distinct fifteen-minute EC2
+schedule. Each configured account, disabled ones included, gets an independent `ubuntu-latest` matrix leg;
+an absent file yields none, invalid config fails discovery, and one leg's failure does not cancel the others.
+Each leg exchanges GitHub OIDC for that account's guard role, trusted only for
+`repo:SSFSKIM/ci-kit:ref:refs/heads/main`, with temporary credentials kept in memory. It cannot launch resources.
+Manual dispatch must use main to satisfy that trust:
+
+```sh
+gh workflow run pool-guard.yml --repo SSFSKIM/ci-kit --ref main
+gh run list --repo SSFSKIM/ci-kit --workflow pool-guard.yml --limit 5
+gh run view <run-id> --repo SSFSKIM/ci-kit --log
+```
+
+The guard logs every action and only touches pool-tagged resources:
+
+- Expired live instances/volumes are reaped; attached disks require safe instance termination first.
+- Job VMs are also reaped when stopped, when their allocation is final (including a late VM after abandonment),
+  or when no ledger row exists fifteen minutes after launch. Unattached job volumes are deleted.
+- Builder/smoke instances and volumes before their deadlines are protected, including a stopped builder
+  waiting for CreateImage. A job's deadline is max-run plus fifteen minutes; builders get two hours, smoke thirty minutes.
+- Unready AMIs older than a day and ready generations beyond the newest two are deregistered with their tagged
+  snapshots deleted. Retained images protect shared snapshots. Image retention never uses VM deadlines.
+
+Failed ledger/instance lists cannot establish absent rows/orphan volumes. Independent known inventories still
+permit their own deadline/retention cleanup. A still-attached volume after termination is deferred rather than
+force-detached, with its id logged. Cron can be delayed, so guest deadlines and launcher cleanup remain active
+independent safety mechanisms. Live guard, FIS, budget/stale and MAWS acceptance procedures are in
+`docs/doperpowers/specs/2026-10-23-ec2-pool-design.md`; passing tests or deploying the producer is not those proofs.

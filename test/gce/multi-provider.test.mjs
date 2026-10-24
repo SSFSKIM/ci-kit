@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { allocationId } from '../../gce/launcher/logic.mjs';
 import { createConfigSource } from '../../gce/launcher/source.mjs';
 import { Launcher } from '../../gce/launcher/launcher.mjs';
+import { creditStatus } from '../../gce/launcher/credit.mjs';
 import { createProvider } from '../../gce/launcher/providers/gce.mjs';
 import { providerRunnerLabels } from '../../gce/launcher/providers/contracts.mjs';
 import { launchRow } from '../../gce/launcher/ledger.mjs';
@@ -487,4 +488,36 @@ test('a failed final-refusal write keeps both reservations and the registration 
   assert.equal(row.reserved, 8);
   assert.equal(s.b.calls.filter(([k]) => k === 'launch').length, 0);
   assert.ok((await s.w.github.runners(repo)).some((r) => r.name === row.instance));
+});
+
+test('a credit block without a billing policy fails closed, even when enabled', async () => {
+  const s = setup();
+  s.ec2.accounts[0].credit = { enabled: true, since: '2026-10-22', until: '2027-04-17', budget_usd: 180 };
+  s.queue();
+  await s.make().tick();
+  assert.equal((await s.rows())[0].provider, 'gce');
+});
+
+test('budget and stale demotion move only new demand; a running EC2 job remains managed and untouched', async () => {
+  for (const patch of [{ billed_usd: 180 }, { read_at: new Date(start - 49 * 3600_000).toISOString() }]) {
+    const s = setup();
+    s.ec2.accounts[0].credit = { enabled: true, since: '2026-10-22', until: '2027-04-17', budget_usd: 180 };
+    let reading = { v: 1, since: '2026-10-22', through: '2026-10-24', read_at: new Date(start).toISOString(), billed_usd: 10 };
+    const policy = a => creditStatus(a, reading, s.w.now()).on;
+    s.queue();
+    await s.make({ creditPreference: policy }).tick();
+    const [existing] = await s.rows();
+    assert.equal(existing.provider, 'ec2');
+    // GitHub marks the runner busy; it cannot cover the new queued demand.
+    const runners = await s.w.github.runners(repo);
+    runners.find(r => r.name === existing.instance).busy = true;
+    reading = { ...reading, ...patch };
+    s.queue();
+    await s.make({ creditPreference: policy }).tick();
+    assert.equal(s.a.calls.filter(([kind]) => kind === 'launch').length, 1);
+    assert.equal(s.a.calls.filter(([kind]) => kind === 'terminate').length, 0);
+    const rows = await s.rows();
+    assert.equal(rows.find(r => r.alloc === existing.alloc).state, 'running');
+    assert.ok(rows.some(r => r.provider === 'gce'));
+  }
 });

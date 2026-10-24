@@ -61,7 +61,7 @@ export class Launcher {
       return { promise, cancel: () => clearTimeout(timer) };
     };
     this.providerState ??= new Map();
-    this.creditPreference ??= (account) => account.credit?.enabled !== false;
+    this.creditPreference ??= (account) => !account.credit; // a credit account needs durable billing authority
     this.provider ??= createProvider({ gce: this.gce, cfg: this.cfg, config: this.config, now: this.now, log: this.log,
       after: this.after, limits: this.limits, insertDeadlineMs: this.insertDeadlineMs });
     this.providers = new Map((deps.providers ?? [this.provider]).filter((p) => p.name !== 'ec2' || this.ec2?.accounts.some((a) => a.account === p.account)).map((p) => [keyOf(p, this.cfg.project), p]));
