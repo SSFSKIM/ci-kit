@@ -686,6 +686,10 @@ is rewritten. New fields:
   survives a restart without storing the secret-bearing request;
 - `credit_policy`: `on` or `off` when placed.
 
+An EC2 VM can disappear between observations after uploading its terminal report. Before finalizing an absent
+or terminated allocation as orphan, read its terminal report by allocation; independently established preemption
+keeps priority. Unknown provider inventory still holds the row and reservation, and already-final rows stay final.
+
 Provider exhaustion gains the final end reason `refused`; existing reasons keep their meanings. An uncertain
 EC2 attempt that remains absent at its ten-minute reconciliation limit uses the existing `abandoned` reason.
 The job record also gains `labels` and `required_provider`, derived from those labels, for coverage and
@@ -1756,6 +1760,16 @@ The production chain is reviewed at each boundary:
   stale injection because it contaminates durable billing or requires breaking production CE access. Rejected a
   second live scheduler because it widens cloud/config scope without improving the predicate evidence.
   Date/Author: 2026-10-24, design-owner direction and controller.
+
+- Decision: M6 also consumes EC2 terminal reports for absent/terminated VMs before falling back to orphan;
+  independently established preemption retains priority. Add vanished-between-polls RED/GREEN regressions.
+  Rationale: a guest powers off within about two seconds of its report, so live-only report reads miss ordinary
+  job endings, not only unusually short jobs. Accurate end reasons underpin interruption and cost/report
+  acceptance. Rejected deferring to debt: cleanup succeeds, but lifecycle reporting is part of this initiative.
+  Before implementation, all 26 matching ledger issues yielded four EC2 finals: done 1, orphan 3, other 0;
+  no non-final EC2 rows. Of the orphans, one was deliberately unadopted idle cleanup, one the absent-config
+  deadline fixture, and one a successful scheduler job. Baseline recorded 2026-10-24T09:18:41Z.
+  Date/Author: 2026-10-24, design-owner scope ruling and controller.
 
 ## Outcomes & Retrospective
 
