@@ -89,6 +89,8 @@ measurement exists.
   AWS amount is not the resource-based execution estimate. Whole-initiative high review found a P1 pre-send
   reservation leak, present before M6 too. Fix-forward is in progress; activation and new EC2 fixtures are held.
   At 09:40:51Z no non-final EC2 rows existed. No rollback: revision 00021-qth contains the same leak.
+  Live guard run 40083424878 also exposed GitHub immutable-subject trust mismatch; explicit trust repair is an
+  independent pending fix. Read-only mixed-cloud cost/latency CLI proofs passed. Activation waits for both fixes.
 
 ## What it must not be
 
