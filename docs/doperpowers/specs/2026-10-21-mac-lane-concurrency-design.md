@@ -197,7 +197,9 @@ and by the coordinator's holds, and the design below says what is read and when.
   - [x] (2026-10-24 12:49–16:27Z) Step 4 wave 2: 13 candidate groups three times each in the guest at one scratch
     sha, beside a host reference at its parent. Ten pass: transcript, panel, side, tools, c7, code, scm, library,
     document and settings. `design` stays on the host; `presentations` and `dashboard` run again on the Poppler
-    image (Surprises, Decision Log). The MAWS architect's PR moves the ten into `MAC_VM_E2E`.
+    image (Surprises, Decision Log). MAWS #135 (af9bf672e, 2026-10-24 ~18:2xZ) added nine of them to
+    `MAC_VM_E2E`, twelve groups with wave 1's. `side` was held back: its post-Reload pin check failed in the PR's
+    own guest run and once on the host too, so it is under diagnosis as a MAWS intermittent.
   - [x] (2026-10-24 16:30–17:04:18Z) The fourth refresh, Poppler (ci-kit #128, 12a28a8):
     `maws-vm-candidate-20261024a` baked; first-run passed; a trial on `e2e:design` failed on design's own limit and
     a second on `e2e:document-app` passed (run 40113715486); promoted to `maws-vm-golden-20261024a`.
