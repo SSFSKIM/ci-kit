@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { prepareContainer, runContainer } from '../../pool/vm/container.mjs';
 import { smokeVerdict } from '../../pool/vm/run.mjs';
+import { formatDiagnostic } from './diagnostics.mjs';
 
 const sh = promisify(execFile);
 const STATE = '/run/ci-kit-ec2/state.json';
@@ -99,7 +100,7 @@ async function upload(deps, state, event, fields = {}) {
 
 export async function runGuest(deps) {
   let stage = 'userdata', state = { timings: { guest_start: stamp(deps) } }, stopNotice;
-  let value, smoke;
+  let value, smoke, diagnostic;
   try {
     const raw = await deps.readUserData();
     const data = JSON.parse(raw);
@@ -131,14 +132,15 @@ export async function runGuest(deps) {
     state.timings.container_exit = stamp(deps);
     value = `exit:${result.code}`;
     if (data.smoke) smoke = smokeVerdict(result.out, result.code);
-  } catch {
+  } catch (error) {
     value = `failed:${stage}`;
-    deps.log(value);
+    diagnostic = error instanceof ImageCheckError ? error.diagnostic : { reason: 'unexpected' };
+    deps.log(`${value} ${formatDiagnostic(diagnostic)}`);
   } finally {
     try {
       try { await stopNotice?.(); } catch { deps.log('notice watcher stop failed'); }
       state.timings.guest_end = stamp(deps);
-      await upload(deps, state, 'exit', { value, ...(smoke ? { smoke } : {}) });
+      await upload(deps, state, 'exit', { value, ...(smoke ? { smoke } : {}), ...(diagnostic ? { diagnostic } : {}) });
     } finally { await deps.poweroff(); }
   }
 }
@@ -161,35 +163,57 @@ export async function finalizeGuest(reason, deps) {
   finally { await deps.poweroff(); }
 }
 
+// Only this private type crosses into guest diagnostics. Its reason and path come from fixed checks,
+// never Error.message, manifest contents, discovered filenames, or subprocess output.
+class ImageCheckError extends Error {
+  constructor(reason, path, code) {
+    super(reason);
+    this.diagnostic = Object.freeze({ reason, path: `/${path}`, ...(code ? { code } : {}) });
+  }
+}
+const filesystemCodes = new Set(['ENOENT', 'EACCES', 'EPERM', 'ENOTDIR', 'EISDIR', 'EIO', 'ELOOP', 'EMFILE', 'ENFILE']);
+const imageFilesystemError = (name, error) => new ImageCheckError(
+  name === 'etc/ci-kit/bake-manifest.json' && error.code === 'ENOENT' ? 'manifest-missing' : 'filesystem',
+  name, filesystemCodes.has(error.code) ? error.code : undefined,
+);
+
 // Host-only smoke: never mount these files into the untrusted runner container.
 export async function checkImage(root = '/') {
   const path = name => join(root, name);
   const exists = async name => {
     try { await lstat(path(name)); return true; }
-    catch (err) { if (err.code === 'ENOENT') return false; throw err; }
+    catch (err) { if (err.code === 'ENOENT') return false; throw imageFilesystemError(name, err); }
   };
-  const manifest = JSON.parse(await readFile(path('etc/ci-kit/bake-manifest.json'), 'utf8'));
-  if (manifest.v !== 1 || !manifest.kit_commit || !manifest.node?.[22] || !manifest.node?.[24] ||
+  const read = async (name, operation) => {
+    try { return await operation(path(name)); }
+    catch (err) { throw imageFilesystemError(name, err); }
+  };
+  const manifestPath = 'etc/ci-kit/bake-manifest.json';
+  const raw = await read(manifestPath, file => readFile(file, 'utf8'));
+  let manifest;
+  try { manifest = JSON.parse(raw); }
+  catch { throw new ImageCheckError('manifest-invalid', manifestPath); }
+  if (manifest?.v !== 1 || !manifest.kit_commit || !manifest.node?.[22] || !manifest.node?.[24] ||
       !manifest.maws?.revision || !manifest.maws?.lock_sha256 || !manifest.runner_version ||
-      !Object.keys(manifest.warm ?? {}).length || !Object.values(manifest.warm).every(step => step.ok)) {
-    throw new Error('incomplete bake manifest');
+      !Object.keys(manifest.warm ?? {}).length || !Object.values(manifest.warm).every(step => step?.ok)) {
+    throw new ImageCheckError('manifest-incomplete', manifestPath);
   }
-  if (!await exists('etc/cloud/cloud-init.disabled')) throw new Error('cloud-init enabled');
-  if (await exists('var/lib/cloud/instance')) throw new Error('cloud-init identity remains');
+  if (!await exists('etc/cloud/cloud-init.disabled')) throw new ImageCheckError('cloud-init-marker-missing', 'etc/cloud/cloud-init.disabled');
+  if (await exists('var/lib/cloud/instance')) throw new ImageCheckError('cloud-init-identity', 'var/lib/cloud/instance');
   // Cloud-init is disabled on these images: persisted state is from the builder, not this guest's boot.
   // Empty container directories are harmless; current generator/job state lives separately under /run.
   for (const name of ['var/lib/cloud/instances', 'var/lib/cloud/data', 'var/lib/cloud/seed']) {
-    if (await exists(name) && (await readdir(path(name))).length) throw new Error('cloud-init state remains');
+    if (await exists(name) && (await read(name, readdir)).length) throw new ImageCheckError('cloud-init-state', name);
   }
   for (const name of ['root/.aws', 'root/.config/gcloud', 'root/.git-credentials', 'root/.netrc']) {
-    if (await exists(name)) throw new Error('builder credential artifact remains');
+    if (await exists(name)) throw new ImageCheckError('credential-artifact', name);
   }
-  for (const [directory, pattern, category] of [
-    ['var/log', /^cloud-init(?:-output)?\.log(?:\..+)?$/, 'cloud-init log'],
-    ['tmp', /^ci-kit-(?:warm|electron)-/, 'builder temporary artifact'],
+  for (const [directory, pattern, reason] of [
+    ['var/log', /^cloud-init(?:-output)?\.log(?:\..+)?$/, 'cloud-init-log'],
+    ['tmp', /^ci-kit-(?:warm|electron)-/, 'temporary-artifact'],
   ]) {
-    if (await exists(directory) && (await readdir(path(directory))).some(name => pattern.test(name))) {
-      throw new Error(`${category} remains`);
+    if (await exists(directory) && (await read(directory, readdir)).some(name => pattern.test(name))) {
+      throw new ImageCheckError(reason, directory);
     }
   }
 }

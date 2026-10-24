@@ -7,6 +7,7 @@ import { GetParameterCommand } from '@aws-sdk/client-ssm';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { manifestLabels, verifyManifest } from '../../pool/bake/manifest.mjs';
 import { CHECK, checkJitRequest, checkOutcome } from '../../gce/bake/plan.mjs';
+import { formatDiagnostic } from '../vm/diagnostics.mjs';
 
 const MINUTE = 60_000;
 const UBUNTU = '/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id';
@@ -14,6 +15,10 @@ const tagsOf = (x) => Object.fromEntries((x.Tags ?? []).map(({ Key, Value }) => 
 const tags = (obj) => Object.entries(obj).map(([Key, Value]) => ({ Key, Value: String(Value) }));
 const filters = (obj) => Object.entries(obj).map(([key, value]) => ({ Name: `tag:${key}`, Values: [String(value)] }));
 const owned = (x, run) => tagsOf(x)['ci-kit-pool'] === 'ec2' && tagsOf(x)['ci-kit-run'] === run;
+const failureStages = new Set(['userdata', 'deadline', 'prepare', 'image', 'container', 'unit',
+  'start', 'apt', 'kit', 'node', 'deps', 'warm', 'warm-check', 'boot', 'clean', 'finalizer', 'report-input', 'report']);
+const safeOutcome = value => typeof value === 'string' && (/^exit:-?\d{1,3}$/.test(value)
+  || (value.startsWith('failed:') && failureStages.has(value.slice(7)))) ? value : 'invalid report';
 
 export function fillEc2Builder(template, { manifest, token, report }) {
   const replacements = {
@@ -67,8 +72,11 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
     }
   };
   const report = async (key) => {
-    try { const res = await aws.s3.send(new GetObjectCommand({ Bucket: cfg.report_bucket, Key: `${prefix}/${key}.json` })); return JSON.parse(await res.Body.transformToString()); }
+    let text;
+    try { const res = await aws.s3.send(new GetObjectCommand({ Bucket: cfg.report_bucket, Key: `${prefix}/${key}.json` })); text = await res.Body.transformToString(); }
     catch (error) { if (error.name === 'NoSuchKey' || error.$metadata?.httpStatusCode === 404) return null; throw error; }
+    // JSON parser messages can quote the input; the report body never belongs in controller logs.
+    try { return JSON.parse(text); } catch { throw new Error(`invalid ${key} report JSON`); }
   };
   const url = (key) => aws.presignPut({ bucket: cfg.report_bucket, key: `${prefix}/${key}.json` });
   const instance = async (id) => (await list(ec2, DescribeInstancesCommand, { InstanceIds: [id] }, 'Reservations')).flatMap((r) => r.Instances ?? [])[0];
@@ -108,7 +116,11 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
     const i = await instance(id);
     if (!i || !owned(i, run)) throw new Error(`${kind} instance missing or no longer owned`);
     const r = await report(`${kind}/exit`);
-    if (r && (r.kind !== 'terminal' || r.value !== 'exit:0' || (kind === 'smoke' && r.smoke !== 'ok'))) throw new Error(`${kind} failed: ${r.value} ${r.smoke ?? ''}`);
+    if (r && (r.kind !== 'terminal' || r.value !== 'exit:0' || (kind === 'smoke' && r.smoke !== 'ok'))) {
+      // Reports cross a storage boundary: reflect only known outcomes and the shared bounded diagnostic vocabulary.
+      const value = r.kind === 'terminal' ? safeOutcome(r.value) : 'invalid terminal report';
+      throw new Error(`${kind} failed: ${value} ${formatDiagnostic(r.diagnostic)}`);
+    }
     // S3 reports and EC2 state arrive independently. Missing terminal evidence never implies success.
     return r && i.State.Name === 'terminated' ? r : null;
   };
@@ -120,7 +132,7 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
     const built = await wait('builder',30*MINUTE,async () => {
       const i = await instance(builder), r = await report('builder');
       if (!i || !owned(i,run)) throw new Error('builder missing or no longer owned');
-      if (r && r.value !== 'ok') throw new Error(`builder failed: ${r.value}`);
+      if (r && r.value !== 'ok') throw new Error(`builder failed: ${safeOutcome(r.value)} ${formatDiagnostic(r.diagnostic)}`);
       if (i.State.Name === 'terminated') throw new Error('builder terminated before CreateImage');
       return i.State.Name === 'stopped' && r ? r : null;
     });

@@ -67,8 +67,11 @@ measurement exists.
 - [ ] M5: the EC2 provider, its image and its one-time setup, serving ci-kit-sandbox.
   Code reviewed approved through be1dd1a; full gate 40018176821 green at 12c6cdd (successor is whitespace only).
   Initialization metadata for non-200 rates is deferred to ci-kit #108 entry 2. Required image-residue smoke
-  assertions fixed in 116bab4: injected-artifact RED/GREEN, focused guest tests 41/41. Final PR-head gate,
-  setup, deployment, bake and all live M5 proofs remain outstanding.
+  assertions fixed in 116bab4: injected-artifact RED/GREEN, focused guest tests 41/41. PR #111 and IAM correction
+  #112 merged with exact-head gates green; setup/idempotence, repaired federated Canonical/other-owner dry-runs,
+  deployed federation and GCE canaries passed. Combined bake ci-kit-bake-v2jm5 failed EC2 smoke `failed:image`
+  after its GCE image passed. Cleanup left zero EC2 instances/volumes/AMIs/snapshots. Safe diagnostics and the
+  cleanup/check cause are being corrected before rebake; EC2 image/runtime/lifecycle/transition proofs remain.
 - [ ] M6: credit preference, reports, guard, the MAWS canary and acceptance.
 
 ## What it must not be
@@ -1005,7 +1008,7 @@ A successful `deploy.sh bake` only deploys the producer. Execute it and wait; `u
     cd /private/tmp/ci-kit-deploy
     gcloud secrets list --project ssfskim-ci-kit --format='value(name)'
     gcloud run services describe ci-kit-launcher --region us-central1 --project ssfskim-ci-kit --format='yaml(spec.template.spec.containers[0].env)'
-    gcloud logging read 'resource.labels.service_name="ci-kit-launcher" AND jsonPayload.message:"aws: assumed"' --project ssfskim-ci-kit --limit 3 --format='value(jsonPayload.message)'
+    gcloud logging read 'resource.labels.service_name="ci-kit-launcher" AND (jsonPayload.message:"aws: assumed" OR textPayload:"aws: assumed")' --project ssfskim-ci-kit --limit 3 --format='value(jsonPayload.message,textPayload)'
     # expect: no AWS credential secret or key environment variable; "aws: assumed <role> until <time>"
     AWS_PROFILE=ci-kit-ops AWS_REGION=us-east-2 aws ec2 describe-images --image-ids <ami-id> --query 'Images[0].Tags'
     gcloud compute images describe <gce-image-name> --project ssfskim-ci-kit --format='json(labels)'
@@ -1058,7 +1061,7 @@ refusal tests remain the deterministic proof. For a fallback, inspect one tick's
 ledger rows: the same demand has a refused EC2 allocation and a different GCE allocation and registration.
 
     cd /private/tmp/ci-kit-deploy
-    gcloud logging read 'resource.labels.service_name="ci-kit-launcher"' --project ssfskim-ci-kit --freshness=1h --order asc --format='value(jsonPayload.message)'
+    gcloud logging read 'resource.labels.service_name="ci-kit-launcher"' --project ssfskim-ci-kit --freshness=1h --order asc --format='value(jsonPayload.message,textPayload)'
     gh api repos/SSFSKIM/ci-kit-sandbox/actions/runs/<sandbox-run>/jobs --jq '.jobs[]|[.name,.conclusion,.runner_name]|@tsv'
 
 ### Config transitions (M5; Acceptance 9)
@@ -1125,7 +1128,7 @@ and reading after the proof; do not replace production billing with invented amo
 flag and date ends, overlapping writers and a missing issue.
 
     cd /private/tmp/ci-kit-deploy
-    gcloud logging read 'resource.labels.service_name="ci-kit-launcher" AND jsonPayload.message:"credit preference off:"' --project ssfskim-ci-kit --freshness=1h --format='value(jsonPayload.message)'
+    gcloud logging read 'resource.labels.service_name="ci-kit-launcher" AND (jsonPayload.message:"credit preference off:" OR textPayload:"credit preference off:")' --project ssfskim-ci-kit --freshness=1h --format='value(jsonPayload.message,textPayload)'
     # expect for the respective fixtures: "credit preference off: budget"; "credit preference off: stale billing"
     node gce/cost-report.mjs --since <ISO>
     node gce/latency-report.mjs --since <ISO>
@@ -1261,6 +1264,27 @@ The production chain is reviewed at each boundary:
 
 ## Surprises & Discoveries
 
+- Observation: Combined bake `ci-kit-bake-v2jm5` failed at 2026-10-23T21:48:46Z. GCE image
+  `ci-kit-runner-20261023-210242-du0p-215f283b` passed and remains in service; MAWS run `40027775933` proved
+  all six jobs on it. EC2 AMI `ami-00c6296487b7d3cd9` had 11.4 GiB written snapshot data, but smoke instance
+  `i-03df5a82aee06a9d5` reported `failed:image` before its container started. The guest catch discarded the
+  thrown reason. Builder report contains a complete manifest with all warm steps successful; recovered console
+  shows cloud-final still active during builder shutdown after cleanup, but does not identify the retained path.
+  Do not equate that lifecycle hypothesis with the original smoke's proven cause. All failed EC2 resources were
+  cleaned: a 2026-10-24 federated sweep found zero nonterminated instances, volumes, own AMIs and own snapshots.
+  Evidence: execution status, S3 reports under `reports/bake-20261023-210242-du0p-290475840169/`, and recovered
+  console files in `/private/tmp/ci-kit-ec2-proof-tools/`. Conservative cumulative AWS spend is about $0.90.
+- Observation: The finite progress monitor expired one minute before this bake failed; its expiry notification
+  arrived only when the coordinator resumed the handed-back executor 9.5 hours later. There was no compute leak,
+  but the investigation stalled. The next bake gets a full-lifetime `gcloud ... execute --wait` background
+  completion watcher; finite monitors are supplementary progress only. Friction recorded in ci-kit #68.
+
+- Observation: Cloud Run promotes message-only structured records into `textPayload`; richer tick records retain
+  `jsonPayload.message`. Evidence queries now match/print both. Revision `ci-kit-launcher-00021-qth` logged
+  federated launcher-role assumption at 2026-10-23T20:59:04Z in textPayload, with four-hour expiry. M5's deployed
+  GCE canary `40023372535` passed all six pool jobs; the combined bake `ci-kit-bake-v2jm5` is running, not yet proof
+  of either new image. Friction tracked in ci-kit #68.
+
 - Observation: M5 setup created the report bucket, GitHub OIDC provider, four roles and isolated FIS template
   `EXTArbeHnuTzYMimN`; a second setup run reported nothing to change. The initial expected-allow Canonical
   builder dry-run nevertheless failed: decoded AMI authorization context had `ec2:Owner=amazon` while its actual
@@ -1270,7 +1294,8 @@ The production chain is reviewed at each boundary:
   `DryRunOperation`, Amazon Linux `ami-053ef5d7ebe355f4a` returned `UnauthorizedOperation`. No credentials were
   persisted. This proves condition evaluation, not the still-required Google-federated role proof after repair.
   Evidence: 2026-10-23 live dry-runs; AWS IAM global condition-key documentation lists RunInstances as supported
-  for ResourceAccount. Runtime/deploy work remains paused until the explicit policy repair lands.
+  for ResourceAccount. Runtime/deploy work was paused until the explicit policy repair landed in PR #112;
+  the repaired Google-federated role subsequently passed both positive and negative dry-runs.
 
 - Observation: M4's deployed scheduler preserves the GCE-only live path. MAWS run `40015186704`, attempt 1,
   tested master `0c86e4861` through wrapper `d69ecff5812793000cc31a9c72531a9185482d34`; static, probes and all four
@@ -1575,6 +1600,28 @@ The production chain is reviewed at each boundary:
   Rejected amazon alone (admits all aliased partners), per-AMI ImageID pins (IAM churn on every Canonical release),
   and additional launch-template infrastructure when the numeric ResourceAccount condition is supported.
   Date/Author: 2026-10-23, design owner and controller; live evidence above.
+
+- Decision: Preserve a safe, bounded diagnostic reason alongside a guest failure stage and propagate it through
+  the bake controller's terminal error. Do not log JIT data, signed URLs, arbitrary user-data or sensitive file
+  contents. Fix demonstrated cleanup/check failures without weakening the stated image-residue guarantee;
+  distinguish a reproduced lifecycle flaw from the original run's unknown exact artifact.
+  Rationale: stage-only failures hide which invariant blocked image promotion; a rebake must produce actionable
+  evidence rather than repeat an opaque failure. Full-lifetime completion observation is required for rebakes.
+  Date/Author: 2026-10-24, design-owner direction and controller.
+
+- Decision: EC2 builder preparation queues a nonblocking runtime-only oneshot ordered after
+  `cloud-final.service`, then returns. That finalizer removes builder state/logs/credentials, runs the existing
+  strict host image check, reports success only after it passes, and powers off. Preparation/finalizer failures
+  still report failure and power off; runtime report capabilities are removed before the image check.
+  Guest and bake-controller diagnostics use a bounded reason/path/code vocabulary rather than raw exception
+  messages or report contents. This preserves actionable failure causes without reflecting secrets.
+  Rationale: cloud-init 26.2 `status_wrapper` writes status/result after the userdata/module functor returns;
+  `atomic_helper` recreates the deleted parent directory. In-userdata cleanup therefore cannot establish the
+  final filesystem invariant. A behavioral late-writer test fails the old ordering and passes the finalizer;
+  this proves the structural flaw, not which artifact caused the destroyed first AMI's failure.
+  Sources: https://github.com/canonical/cloud-init/blob/26.2/cloudinit/cmd/main.py#L1008 and
+  https://github.com/canonical/cloud-init/blob/26.2/cloudinit/atomic_helper.py#L65.
+  Date/Author: 2026-10-24, M5 executor and controller; live rebake still required.
 
 ## Outcomes & Retrospective
 

@@ -13,9 +13,10 @@ finish() {
   if [ "$status" -ne 0 ]; then
     echo "ci-kit bake: failed at $step"
     curl -sf --max-time 20 -X PUT --data "{\"value\":\"failed:$step\"}" "$REPORT" >/dev/null
+    rm -rf /run/ci-kit-bake
+    sync
+    poweroff
   fi
-  sync
-  poweroff
 }
 trap finish EXIT
 warm_token() { printf '%s' "$WARM_TOKEN"; }
@@ -62,17 +63,27 @@ step=clean
 apt-get clean
 # Snapshot initialization charges every written GiB on every launch. None of this is read by a job VM.
 rm -rf /var/lib/apt/lists/* /opt/ci-kit/.git /opt/ci-kit/ec2/spike /opt/ci-kit/test /opt/ci-kit/docs /root/.npm /root/.cache
-rm -rf /root/.aws /root/.config/gcloud /root/.git-credentials /root/.netrc /tmp/ci-kit-warm-* /tmp/ci-kit-electron-*
 docker builder prune --all --force > /dev/null
 docker image prune --force > /dev/null
-cloud-init clean --logs --machine-id
-rm -rf /var/lib/cloud/instances /var/lib/cloud/instance /var/lib/cloud/data /var/lib/cloud/seed
-rm -f /var/log/cloud-init.log /var/log/cloud-init-output.log /etc/ssh/ssh_host_*
-: > /etc/hostname
-journalctl --rotate > /dev/null 2>&1 || true
-journalctl --vacuum-time=1s > /dev/null 2>&1 || true
-sync
-fstrim -av || true
-step=report
-jq -c '{value:"ok",manifest:.}' "$CI_KIT_BAKE_MANIFEST" | curl -sf --max-time 30 -X PUT --data-binary @- "$REPORT" > /dev/null
+# scripts-user is inside cloud-final, whose remaining modules and status wrapper write state after we return.
+# Queue, never wait here: the finalizer's ordering would deadlock a synchronous start from this service.
+step=finalizer
+install -d -m 0700 /run/ci-kit-bake
+(umask 077; printf '%s' "$REPORT" > /run/ci-kit-bake/report-url)
+cat > /run/systemd/system/ci-kit-bake-finalize.service <<'UNIT'
+[Unit]
+Description=Sanitize the ci-kit builder after cloud-init completes
+After=cloud-final.service
+FailureAction=poweroff
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/ci-kit/ec2/bake/finalize.sh
+TimeoutStartSec=5min
+TimeoutStopSec=30s
+StandardOutput=journal+console
+StandardError=journal+console
+UNIT
+systemctl daemon-reload
+systemctl --no-block start ci-kit-bake-finalize.service
 step=done
