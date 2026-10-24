@@ -1593,7 +1593,7 @@ The production chain is reviewed at each boundary:
   zero-filling is rejected. The larger redundant zero-fill experiment was cancelled and deleted. No cache,
   toolchain, host Node installation, or container layer is removed. IAM prerequisite #131/81fe86b adds only
   the five owner-reviewed regional, tagged snapshot/registration statements to the bake role; merged-main
-  setup applied them, with federated allowed/denied dry-runs for both APIs. Candidate size/boot proof follows.
+  setup applied them, with federated allowed/denied dry-runs for both APIs. Final acceptance is recorded below.
   Review/live correction: `e2image` skips zero-link orphan inode extents while copying allocation bitmaps;
   the fragmented-orphan reproduction omitted extent block 6183 and still failed fsck after normal recovery.
   The first real builder also blocked inside e2image while root was frozen; its exact blocked syscall is unknown.
@@ -1610,7 +1610,7 @@ The production chain is reviewed at each boundary:
   The final actual-root regression matched all 74340 files, passed fsck/GPT and executed copied ELF binaries;
   source/target hashing took 43/54 seconds cold on that 3.1-GB allocated fixture. A nonrecursive source view
   includes the six underlying `/run` files otherwise hidden by tmpfs, rather than weakening comparison with
-  an exclusion list. The final candidate still requires its own byte-checked bake and real sandbox job.
+  an exclusion list. The final candidate passed its byte-checked bake, common smoke and real sandbox job.
   Date/Author: 2026-10-24, CI-opt and image-trim executor.
 
 - Decision: M3 preserves GCE's existing walker via a provider outcome adapter that retains original GCE error
@@ -2074,3 +2074,51 @@ initialization tariff metadata beyond the promoted 200MiB/s setting, and rate-th
 weaken the accepted lifecycle or credit safeguards. The next useful work is ordinary production observation of
 interruption incidence, readiness latency and credit burn; changing retry policy, provider order or cost policy is
 a new product decision, not an implicit continuation of this completed initiative.
+
+### 2026-10-24 snapshot-compaction follow-up (#132)
+
+The owner accepted the first cut at 12.88% less snapshot data, with no job-visible content pruning. Candidate
+`ami-0dff29fca329bcd8e`, built from `fa0a8df21e487e2cf3db8a1fc77703086768bc52`, remains **unready**; the owner
+will merge/deploy the bake and run production from merged main, then delete this candidate when production
+has its own image. The normal unready-image guard may reap it after 2026-10-25T19:47:46Z. Production was not
+switched during this work: the sole ready AMI remained `ami-0053d3b9003781572`, and GCE was untouched.
+
+| AWS measurement | Production baseline | Verified candidate |
+|---|---:|---:|
+| Snapshot | snap-09448861ba825fb31 | snap-0432ff5f76a192157 |
+| FullSnapshotSizeInBytes | 12296126464 | 10712252416 |
+| GiB | 11.45166015625 | 9.9765625 |
+| Initialization at $0.0024/GiB | $0.027483984375 | $0.02394375 |
+
+Savings are **1.47509765625 GiB / $0.003540234375 per VM**, about **$1.239/day at 350 VMs**. This is initialization
+only, not an inferred total-bill or remaining-credit figure. The candidate's S3 source Git HTTPS preflight returned
+status 0. Common smoke `i-04f0b139dcb027e04` reported `exit:0`, `smoke:ok`; real sandbox bake-check
+[40127015564](https://github.com/SSFSKIM/ci-kit-sandbox/actions/runs/40127015564), job 120970510293 on
+`ci-kit-bake-trim-candidate-20261024-c-290475840169`, passed. All eight non-commit labels match the existing GCE
+image `ci-kit-runner-20261024-074600-ubhs-d82efaeb`; the ninth records the truthful new ci-kit commit.
+Medium review converged without material findings on fa0a8df; its full remote gate
+[40125486515](https://github.com/SSFSKIM/ci-kit/actions/runs/40125486515) passed. Final sweeps found zero active,
+stopped or shutting-down fixtures, zero fixture volumes and zero fixture runner registrations. Only the handed-over
+unready candidate and its completed snapshot remain; earlier failed candidates and experiment snapshots were deleted.
+
+**What remains in the image, measured without another bake.** EBS direct APIs listed 20432 blocks of 512 KiB.
+Checksum-verified reads of GPT, ext4 superblocks/group descriptors and journal inodes give the following attribution
+of the 2.65019083-GiB difference between the candidate and the earlier 7.32637167-GiB live-filesystem measurement:
+
+| Component | GiB | Basis |
+|---|---:|---|
+| Root and boot inode tables | 1.545197 | On-disk inode counts/sizes and group descriptors; root alone is 1.53125 GiB |
+| Root and boot journals | 0.078125 | Journal inode sizes: 64 MiB + 16 MiB |
+| Other ext4 metadata | 0.018009 | Bitmaps, superblocks, descriptors and reserved descriptor space; totals match stored ext4 overhead |
+| Whole boot/EFI/BIOS copying beyond live files and ext4 metadata | 0.850307 | Mostly free space, plus FAT/raw-boot overhead; copied partitions total 1023 MiB |
+| Root snapshot granularity and post-copy-write residual | 0.155418 | Root's listed snapshot bytes minus allocated filesystem blocks; an upper bound on scattered-file granularity, not a per-file trace |
+| GPT/other non-root rounding | 0.000976 | Remaining listed blocks beyond raw boot partition sizes |
+| New root live allocation versus the old baseline | 0.002159 | The new root has about 2.21 MiB more live allocation, including the new host tool |
+
+The root reserves 6422528 inodes but uses 201827 (3.14%). Descriptor flags identify 1.45703125 GiB of unused,
+zeroed root inode-table groups; three widely separated **listed** snapshot blocks sampled inside those tables were
+entirely zero. That is evidence for a further lever, not a validated extra saving: not every candidate zero block
+was read. The owner selected **zero-aware writes onto the blank destination, with geometry unchanged**, as a separate
+follow-up PR. Investigate those allocated zero tables and whole boot copies before inode-density changes or packing:
+scattered-file packing alone has only about 0.155 GiB of apparent headroom here. Preserve full-tree byte comparison,
+fsck and real-job acceptance in that follow-up. No such additional cut is included in #132.
