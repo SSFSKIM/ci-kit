@@ -1,5 +1,5 @@
 {
-  "enabled": true,
+  "enabled": false,
   "accounts": [{
     "account": "290475840169", "enabled": true, "region": "us-east-2",
     "placements": [
