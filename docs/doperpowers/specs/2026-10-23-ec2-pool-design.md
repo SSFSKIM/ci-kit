@@ -74,7 +74,9 @@ measurement exists.
   d82efae after review and exact-head gate 40074912381. Rebake ci-kit-bake-295d5 succeeded on 2026-10-24 at
   08:26:15Z: both images match all nine manifest fields; common smoke and real EC2 bake-check passed.
   Production scheduler run 40078252824 passed on EC2. Disabled/absent generic demand passed on GCE;
-  never-online retirement passed. Independent deadline and restored-management cleanup are still in progress.
+  never-online retirement passed. Independent guest-only five-minute deadline shutdown passed (1.839-second
+  observed upper bound); disabled restoration finalized the held EC2 row and released its reservation 33 seconds
+  after merge. Final enabled restoration, resumed pinned-job proof and final sweep remain.
 - [ ] M6: credit preference, reports, guard, the MAWS canary and acceptance.
 
 ## What it must not be
@@ -1311,8 +1313,21 @@ The production chain is reviewed at each boundary:
   carry only its unique JIT label: adding that label beside ordinary pool labels does not isolate it, because
   GitHub jobs match subsets. The live never-online fixture `m5ivm5cy16` used a separate S3-only egress group,
   remained offline, and the launcher retired it at 08:49:11Z, before its 09:08:41Z guest deadline. The production
-  security group was untouched. The transition fixture's row stayed running/reserved 2 while config was absent;
-  restoring disabled management must finalize it before this milestone can complete.
+  security group was untouched. The transition fixture's row stayed running/reserved 2 while config was absent.
+  PR #116 removed the file at 08:54:17Z; the same launcher revision logged absence at 08:55:05Z. New generic
+  run `40079906954` passed on GCE (`hsfyvyiqsy`, reserved 4) while the EC2 reservation remained 2. They count
+  together only against the global ceiling; the production admission code's provider-key filter keeps repo/provider
+  caps separate, also verified offline using the actual held row. PR #117 restored the disabled file at 09:10:40Z;
+  the old EC2 row became final/orphan at 09:11:13Z, 33 seconds later. Its historical reserved=2 remains in the row,
+  but the production admission calculation over that actual final row returns 0. No redeploy was involved.
+
+- Observation: Unmanaged deadline fixture `m5dvm6azqq` (`i-02230e464219e2721`) was launched while the production
+  EC2 config was confirmed absent and no EC2 guard existed. Requested deadline 09:10:09.977Z; guest terminal
+  report `failed:deadline` at 09:10:09.243Z; last running observation 09:10:08.937Z; first shutting-down observation
+  09:10:11.082Z, a 1.839-second conservative upper bound from exit. AWS recorded
+  `Client.InstanceInitiatedShutdown`. It terminated with zero allocation volumes before PR #117 merged. The
+  later Spot terminal timestamp 09:11:21Z is too loose alone; the precise observation satisfies the unchanged
+  60-second bound. Fixture runners were removed, and the idle fixture's isolated security group was deleted.
 
 - Observation: The launcher role's actual federated Cost Explorer proof passed on 2026-10-24 at 07:45Z for
   `2026-10-23..2026-10-25`, explicitly using `ce.us-east-1.amazonaws.com` and a four-hour STS session. This
