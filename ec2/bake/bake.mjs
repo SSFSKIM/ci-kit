@@ -15,6 +15,10 @@ const tagsOf = (x) => Object.fromEntries((x.Tags ?? []).map(({ Key, Value }) => 
 const tags = (obj) => Object.entries(obj).map(([Key, Value]) => ({ Key, Value: String(Value) }));
 const filters = (obj) => Object.entries(obj).map(([key, value]) => ({ Name: `tag:${key}`, Values: [String(value)] }));
 const owned = (x, run) => tagsOf(x)['ci-kit-pool'] === 'ec2' && tagsOf(x)['ci-kit-run'] === run;
+const failureStages = new Set(['userdata', 'deadline', 'prepare', 'image', 'container', 'unit',
+  'start', 'apt', 'kit', 'node', 'deps', 'warm', 'warm-check', 'boot', 'clean', 'finalizer', 'report-input', 'report']);
+const safeOutcome = value => typeof value === 'string' && (/^exit:-?\d{1,3}$/.test(value)
+  || (value.startsWith('failed:') && failureStages.has(value.slice(7)))) ? value : 'invalid report';
 
 export function fillEc2Builder(template, { manifest, token, report }) {
   const replacements = {
@@ -114,8 +118,7 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
     const r = await report(`${kind}/exit`);
     if (r && (r.kind !== 'terminal' || r.value !== 'exit:0' || (kind === 'smoke' && r.smoke !== 'ok'))) {
       // Reports cross a storage boundary: reflect only known outcomes and the shared bounded diagnostic vocabulary.
-      const value = typeof r.value === 'string' && /^(exit:-?\d{1,3}|failed:(userdata|deadline|prepare|image|container|unit))$/.test(r.value)
-        ? r.value : 'invalid terminal report';
+      const value = r.kind === 'terminal' ? safeOutcome(r.value) : 'invalid terminal report';
       throw new Error(`${kind} failed: ${value} ${formatDiagnostic(r.diagnostic)}`);
     }
     // S3 reports and EC2 state arrive independently. Missing terminal evidence never implies success.
@@ -129,7 +132,7 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
     const built = await wait('builder',30*MINUTE,async () => {
       const i = await instance(builder), r = await report('builder');
       if (!i || !owned(i,run)) throw new Error('builder missing or no longer owned');
-      if (r && r.value !== 'ok') throw new Error(`builder failed: ${r.value}`);
+      if (r && r.value !== 'ok') throw new Error(`builder failed: ${safeOutcome(r.value)} ${formatDiagnostic(r.diagnostic)}`);
       if (i.State.Name === 'terminated') throw new Error('builder terminated before CreateImage');
       return i.State.Name === 'stopped' && r ? r : null;
     });
