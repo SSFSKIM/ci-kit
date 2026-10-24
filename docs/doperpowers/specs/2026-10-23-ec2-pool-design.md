@@ -83,6 +83,12 @@ measurement exists.
   still serves revision 00021-qth, credit disabled. Conservative cumulative AWS execution estimate about $1.50,
   not a settled bill, comfortably below the $25 pre-activation limit.
 - [ ] M6: credit preference, reports, guard, the MAWS canary and acceptance.
+  Core PR #119 merged 21f9983 after task review and exact-head gate 40082348173. Fresh-main revision
+  00022-9h8 serves credit-disabled code; MAWS GCE canary 40082699042 passed all six pool jobs. Durable billing
+  issue #51 holds reading 0.19423134 USD, read_at 2026-10-24T09:37:12.999Z, through 2026-10-25. This lagged
+  AWS amount is not the resource-based execution estimate. Whole-initiative high review found a P1 pre-send
+  reservation leak, present before M6 too. Fix-forward is in progress; activation and new EC2 fixtures are held.
+  At 09:40:51Z no non-final EC2 rows existed. No rollback: revision 00021-qth contains the same leak.
 
 ## What it must not be
 
@@ -601,6 +607,12 @@ and EC2 refused opens a fresh GCE allocation, not a resurrection of a refused on
 other providers. A crash between refusal and unregister is covered by the existing no-VM-after-5-min orphan
 runner rule, extended to `ci-kit-ec2-*`; it acts only on known inventory and never removes a busy runner.
 
+**Pre-send EC2 rows are not ambiguous submitted requests.** A crash after the initial row write, or a failed
+coordinate write, can leave a launching row without attempt coordinates. First look for an instance carrying
+its `ci-kit-alloc` tag and adopt one if found. If successful observation finds none, abandon immediately: the
+persist-before-send ordering establishes that no request was sent. Finalize durably before releasing either
+reservation and remove the JIT registration by name. Failed/unknown observation still holds the row.
+
 **Uncertain EC2 launches resolve without replay.** The row holds `zone`, `client_token` and `sent_at` before
 `RunInstances` is sent. It never holds the launch request: that request contains the JIT configuration and
 presigned URLs, which are secrets. Every tick reconciles with `DescribeInstances` by `ci-kit-alloc` tag and by
@@ -1008,8 +1020,9 @@ After M5 live acceptance completes:
 2. From a fresh clone of merged main, record the current launcher revision and deploy `gce/deploy.sh launcher`.
 3. Verify the new runtime revision/commit and its federated billing-read/durable-reading behavior. Missing or
    stale readings must keep preference off. The prior setup proof alone is not evidence of deployed policy.
-4. Merge a separate, reviewed/green activation-config PR naming EC2 then GCE for the pool repos and enabling
-   the account credit block. Because config reloads from main at runtime, this merge is the activation event.
+4. Wait for the whole-initiative high review and resolve or explicitly dismiss every blocking finding before
+   pushing activation. Then merge a separate reviewed/green activation-config PR naming EC2 then GCE for the
+   pool repos and enabling the account credit block. Config reloads from main, so this merge is activation.
 5. Observe the MAWS EC2 canary and the policy/report/guard acceptance below; retain both config and revision IDs.
 
 If the M6 rollout must be rolled back, **revert the activation config first** on main and verify the launcher
@@ -1320,6 +1333,14 @@ The production chain is reviewed at each boundary:
   surface and a second control plane to a launcher that runs the owner's private CI.
 
 ## Surprises & Discoveries
+
+- Observation: Whole-initiative high review found a permanent reservation leak for an EC2 initial launching row
+  without attempt coordinates. The provider returned uncertain before any bounded recovery; scheduler cleanup
+  excluded it and protected its JIT registration. A focused reproduction held an eight-vCPU reservation for
+  48 hours and blocked a sixteen-vCPU GCE demand under a sixteen-vCPU global ceiling. This P1 predates M6,
+  including rollback revision 00021-qth. The owner chose fix-forward, held activation/new EC2 fixtures, and
+  required immediate tag-lookup/adopt-or-abandon recovery plus crash/write-failure/cold-restart regressions.
+  Production had no non-final EC2 rows at 2026-10-24T09:40:51Z. Finding remediation remains pending.
 
 - Observation: Rebake `ci-kit-bake-295d5` succeeded at 2026-10-24T08:26:15Z using the post-cloud-final cleanup
   boundary. Ready AMI `ami-0053d3b9003781572` and GCE image
@@ -1788,6 +1809,16 @@ The production chain is reviewed at each boundary:
   Rejected replacing it with a three-job per-repo-cap test. Capacity refusal before quota is valid fallback
   evidence but leaves real quota mapping unproven; do not enlarge or repeat the burst.
   Date/Author: 2026-10-24, design-owner ruling and controller.
+
+- Decision: Fix the whole-review P1 forward before activation; do not roll back to an older revision with the
+  same pre-send leak, and launch no new EC2 fixtures until the fix is deployed. A coordinate-free launching
+  row gets an allocation-tag lookup first: adopt an instance if present, otherwise abandon immediately after
+  successful absence observation, durably releasing both reservations and removing JIT by name. Submitted
+  requests retain their separate ten-minute uncertainty window and never replay.
+  Rationale: persistence ordering proves the coordinate-free state was never sent, so a ten-minute wait adds no
+  safety. The tag lookup covers the defensive case that ordering should exclude. Rejected rollback because
+  this defect predates M6. Same high reviewer rechecks only the bounded fix delta; activation waits for closure.
+  Date/Author: 2026-10-24, design-owner ruling after whole-initiative review.
 
 ## Outcomes & Retrospective
 
