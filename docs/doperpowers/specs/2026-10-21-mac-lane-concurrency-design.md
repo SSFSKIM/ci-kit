@@ -1716,6 +1716,13 @@ hold-aware plan send them to the guest, which this spec leaves open.
   `MAC_VM_E2E`, since the race needs a guest-eligible job queued when one completes. The coordinator's
   `lost-jobs.sh` counts them (cancelled, no runner, the "not acquired" annotation). **Rejected:** an automatic
   rerun, which recovers neither the 52 min nor the run's verdict time.
+- 2026-10-24 17:4xZ (CI-opt; the lifecycle): **A running clone whose runner is done waits only for its power-off.**
+  Twice the guest's halt stalled until its kernel panicked (`Halt/Restart Timed Out`) and rebooted, so `tart run`
+  never exited and the launcher kept the clone under the 50-min running bound (Surprises). `out/done` in preparing
+  or running now moves the clone to ending (`CI_KIT_VM_END_WAIT`, 60 s, then `tart stop`), as recovery and
+  `bake.sh --trial` already did; no failure is counted, since the job ended. ci-kit #130 (d8352bb), installed on
+  the mini 17:51Z. **Rejected:** a guest-side fix (killing leftovers before the halt), since the stall's sample held
+  no job process and the cause is in the guest's halt.
 - 2026-10-24 (CI-opt; the coordinator's scripts): **`window-from-hold.sh` refuses a timed hold named after the
   maintenance owner.** Twice (2026-10-23 19:20Z, 2026-10-24 16:31Z) a timed hold taken as `CI-opt` was released
   along with the maintenance hold the script had just taken under the same name. Both times the launcher was still
@@ -1987,6 +1994,13 @@ hold-aware plan send them to the guest, which this spec leaves open.
   - **`dashboard` hung in guest 2.** The Resolve click at `dashboard-export.spec.ts:388` timed out, `app.close()`
     in afterEach hung 180 s, and every later `electron.launch` in the job timed out: 24.8 min. Guest 3 failed only
     on Poppler. Wave 2b runs it again on the Poppler image, watching for the hang.
+- 2026-10-24, **the guest's halt can stall into a kernel panic.** After `e2e:dashboard` at 14:45Z (clone
+  `maws-vm-job-vm-20261024T141813Z`, golden 20261023d) and `e2e:presentations` at 17:20Z (clone
+  `maws-vm-job-vm-20261024T171233Z`, golden 20261024a), the wrapper's `shutdown -h now` was followed by a shutdown
+  stall report, then `panic(...): Halt/Restart Timed Out @IOPlatformExpert.cpp:900` about 2 min later, and a reboot.
+  The lane lost 23.5 min the first time (the running bound, counted as an `image` failure) and 15 min the second,
+  until CI-opt stopped the clone. 2 of 71 clones; otherwise the teardown follows the "powering off" line by a median
+  15 s. The panic, both stall reports and the log are kept on the mini in `~/ci-vm-spike/panic-20261024T1722Z/`.
 - 2026-10-24 16:30–17:04:18Z, **the fourth refresh**, Poppler:
   - The window opened with no Mac job queued. `maws-vm-candidate-20261024a` baked with Poppler 26.10.0, lowest free
     space 118 GB; first-run e2e:deliverables 12/12 after Gatekeeper's Open through cua in the guest.
