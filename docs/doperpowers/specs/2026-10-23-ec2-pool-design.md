@@ -692,8 +692,9 @@ The EC2 bake:
 2. runs the provider-neutral preparation (`pool/bake/prepare.sh` and the warm step), with the builder's EC2-specific
    steps in their own script beside `gce/bake/builder.sh`;
 3. after sanitation, copies only allocated ext4 root blocks onto an equal-sized, never-written second disk while
-   root is frozen; replicates both GPT headers and the boot partitions, verifies the target with `sgdisk -v` and
-   `e2fsck -fn`, then stops. It snapshots only that second disk and registers an unready AMI with Canonical's
+   root is frozen, using direct backing-device I/O; replicates both GPT headers and the boot partitions,
+   verifies every regular file against the frozen source inventory, and requires `sgdisk -v` and `e2fsck -fn`
+   to pass before stopping. It snapshots only that second disk and registers an unready AMI with Canonical's
    boot attributes, then terminates the builder and both disks. EBS does not support discard here, and zero-filled
    free space still counts as snapshot data; neither is a substitute for the fresh disk;
 4. through the federated launcher role, runs the smoke suite (`gce/vm/smoke.sh`, made provider-neutral where it
@@ -702,7 +703,7 @@ The EC2 bake:
 6. only then tags the AMI `ci-kit-ready=true`.
 
 M1 found that one-time spot with interruption behaviour `terminate` rejects
-`InstanceInitiatedShutdownBehavior=stop`. The builder must stop for CreateImage, so it uses on-demand under the
+`InstanceInitiatedShutdownBehavior=stop`. The builder must stop before imaging its prepared disk, so it uses on-demand under the
 32-vCPU standard quota. Job VMs remain spot with shutdown=terminate; this builder exception does not add
 on-demand scheduler candidates. M5 proves the builder launch with the federated bake role, not the operator's
 broader `ci-kit-ops` credentials.
@@ -1575,9 +1576,12 @@ The production chain is reviewed at each boundary:
 
 - Decision: Compact EC2 snapshot allocation without removing any job-visible file. The builder gets a blank,
   equal-sized encrypted disk; after its existing image checks, copy bitmap-allocated ext4 root blocks with
-  `partclone` through a read-only loop alias of the frozen source. Preserve GPT/boot data, mount/unmount only
-  the destination for normal kernel journal/orphan recovery, then require `e2fsck -fn` before registration.
-  The alias is created before freezing, logs live in `/run`, and a bounded copy always thaws on failure.
+  `partclone` through a read-only loop alias with verified direct backing-device I/O. Inventory every regular
+  source file while frozen through a nonrecursive read-only bind view, including files hidden by live mountpoints.
+  Preserve GPT/boot data; recover only the destination through a normal kernel mount/unmount, then compare its
+  independent read-only file inventory byte-for-byte and require `e2fsck -fn` before registration. The alias and
+  bind view are created before freezing; logs, inventories and sort spill live in `/run`; hashing and copying
+  have bounded timeouts with thaw/mount/alias cleanup.
   Keep shared preparation, GCE, and the manifest schema unchanged. A candidate bake passes both smoke and the
   real sandbox check but retains `ci-kit-ready=false` and does not prune production images; promotion belongs
   to the controller. Its ci-kit commit records the actual branch, while the other eight manifest labels retain
@@ -1598,6 +1602,15 @@ The production chain is reviewed at each boundary:
   Partclone 0.3.27 adds only its own host package (2145 KiB installed), no new dependencies; gdisk was already
   present. Jobs do not mount these host tools. Free blocks are skipped with `lseek`, not zero writes
   ([source](https://github.com/Thomas-Tsai/partclone/blob/0.3.27/src/partclone.c#L1836)).
+  A subsequent 9.96337890625-GiB candidate passed common smoke but failed real checkout with an ELF loader
+  assertion (run 40122731641); it was deleted, not promoted. A deterministic regression then established that
+  filesystem fsync/freeze does not invalidate buffered raw-device cache: the old copier passed fsck but copied
+  stale file bytes. Partclone's own direct-read option alone failed; direct I/O on the alias's backing-device
+  path fixed the coherency defect. Whole-tree verification now detects changed, extra or missing regular files.
+  The final actual-root regression matched all 74340 files, passed fsck/GPT and executed copied ELF binaries;
+  source/target hashing took 43/54 seconds cold on that 3.1-GB allocated fixture. A nonrecursive source view
+  includes the six underlying `/run` files otherwise hidden by tmpfs, rather than weakening comparison with
+  an exclusion list. The final candidate still requires its own byte-checked bake and real sandbox job.
   Date/Author: 2026-10-24, CI-opt and image-trim executor.
 
 - Decision: M3 preserves GCE's existing walker via a provider outcome adapter that retains original GCE error

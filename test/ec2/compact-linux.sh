@@ -42,8 +42,16 @@ for name in ['visible', 'orphan']:
         os.unlink(root + '/orphan')
 os.link(root + '/visible', root + '/hardlink')
 os.symlink('visible', root + '/symlink')
+true = open('/usr/bin/true', 'rb').read()
+false = open('/usr/bin/false', 'rb').read()
+elf = true.ljust(max(len(true), len(false)), b'\0')
+elf_fd = os.open(root + '/elf', os.O_WRONLY | os.O_CREAT, 0o755)
+os.write(elf_fd, elf)
+os.fsync(elf_fd)
+os.close(elf_fd)
 with open(ready, 'w') as f:
-    json.dump({'inode': inode, 'hash': hashlib.sha256(open(root + '/visible', 'rb').read()).hexdigest()}, f)
+    json.dump({'inode': inode, 'hash': hashlib.sha256(open(root + '/visible', 'rb').read()).hexdigest(),
+               'elf_hash': hashlib.sha256(elf).hexdigest()}, f)
 while True:
     time.sleep(1)
 PY
@@ -91,12 +99,46 @@ cat "$work/old-fsck"
 [ "$old_check" != 0 ]
 echo "RED: e2image zeroed allocated orphan extent block $extent_block; normal recovery + read-only fsck exit=$old_check"
 
+# Prime raw block-device page cache, then update the same allocated block through ext4.
+# Filesystem fsync/freeze flushes its own pages but may leave a buffered raw-device read stale.
+cache_block=$(debugfs -R 'bmap /visible 0' "$source" 2>/dev/null)
+dd if="$source" of=/dev/null bs=1M status=none
+dd if="$source" of="$work/cache-old" bs=4096 skip="$cache_block" count=1 status=none
+python3 -I - "$work/source" "$work/ready" <<'PY'
+import hashlib, json, os, sys
+root, ready = sys.argv[1:]
+fd = os.open(root + '/visible', os.O_RDWR)
+os.pwrite(fd, b'\xe1' * 4096, 0)
+os.fsync(fd)
+os.close(fd)
+# Replace a real ELF in-place too: stale raw reads can yield a valid filesystem with the wrong executable.
+elf = open('/usr/bin/false', 'rb').read().ljust(os.stat(root + '/elf').st_size, b'\0')
+elf_fd = os.open(root + '/elf', os.O_WRONLY)
+os.pwrite(elf_fd, elf, 0)
+os.fsync(elf_fd)
+os.close(elf_fd)
+with open(ready) as f:
+    expected = json.load(f)
+expected['hash'] = hashlib.sha256(open(root + '/visible', 'rb').read()).hexdigest()
+expected['elf_hash'] = hashlib.sha256(elf).hexdigest()
+with open(ready, 'w') as f:
+    json.dump(expected, f)
+PY
+dd if="$source" of="$work/cache-new-direct" iflag=direct bs=4096 skip="$cache_block" count=1 status=none
+dd if="$source" of="$work/cache-after-sync" bs=4096 skip="$cache_block" count=1 status=none
+if cmp -s "$work/cache-old" "$work/cache-new-direct"; then echo 'fixture overwrite did not reach disk' >&2; exit 1; fi
+cmp -s "$work/cache-old" "$work/cache-after-sync"
+echo 'REPRO: buffered raw source device still returns old file bytes after filesystem fsync'
+
 bash "$copy" "$source" "$target" "$work/source"
 mount -o ro "$target" "$work/check"
 python3 -I - "$work/check" "$work/ready" <<'PY'
-import hashlib, json, os, stat, sys
+import hashlib, json, os, stat, subprocess, sys
 root, ready = sys.argv[1:]
-assert hashlib.sha256(open(root + '/visible', 'rb').read()).hexdigest() == json.load(open(ready))['hash']
+expected = json.load(open(ready))
+assert hashlib.sha256(open(root + '/visible', 'rb').read()).hexdigest() == expected['hash'], 'copied stale file bytes'
+assert hashlib.sha256(open(root + '/elf', 'rb').read()).hexdigest() == expected['elf_hash'], 'copied stale ELF bytes'
+assert subprocess.run([root + '/elf']).returncode == 1
 assert os.stat(root + '/visible').st_ino == os.stat(root + '/hardlink').st_ino
 assert os.stat(root + '/visible').st_nlink == 2
 assert stat.S_IMODE(os.stat(root + '/visible').st_mode) == 0o640
@@ -107,7 +149,7 @@ PY
 umount "$work/check"
 dd if="$target" of="$work/freed-after" bs=4096 skip="$free_block" count=1 status=none
 cmp -s "$work/freed-after" "$work/zero"
-echo 'GREEN: allocated-block copy recovered fragmented orphan; retained bytes, hardlinks, symlink, mode and xattr; freed block stayed zero'
+echo 'GREEN: coherent file/ELF bytes and execution, fragmented orphan recovery, links/mode/xattr preserved; freed block stayed zero'
 
 # A linked inode with a corrupt link count is not orphan recovery. Never silently repair it.
 kill "$holder"
@@ -132,8 +174,11 @@ echo "GREEN: genuine linked-inode corruption rejected (exit=$corrupt), source th
 mkdir "$work/bin"
 cat > "$work/bin/timeout" <<'SH'
 #!/bin/bash
-shift 2
-exec /usr/bin/timeout --kill-after=1s 1s "$@"
+if [[ "$*" == *partclone.ext4* ]]; then
+  shift 2
+  exec /usr/bin/timeout --kill-after=1s 1s "$@"
+fi
+exec /usr/bin/timeout "$@"
 SH
 cat > "$work/bin/partclone.ext4" <<'SH'
 #!/bin/bash
@@ -164,9 +209,12 @@ if [ -n "${CI_KIT_ROOT_COPY_TARGET:-}" ]; then
   bash "$(dirname "$copy")/compact.sh"
   mount -o ro "${CI_KIT_ROOT_COPY_TARGET}p1" "$work/check"
   python3 -I - "$work/check/root/ci-kit-root-visible" "$work/root-ready" <<'PY'
-import hashlib, json, os, sys
+import hashlib, json, os, subprocess, sys
 root, ready = sys.argv[1:]
-assert hashlib.sha256(open(root + '/visible', 'rb').read()).hexdigest() == json.load(open(ready))['hash']
+expected = json.load(open(ready))
+assert hashlib.sha256(open(root + '/visible', 'rb').read()).hexdigest() == expected['hash']
+assert hashlib.sha256(open(root + '/elf', 'rb').read()).hexdigest() == expected['elf_hash']
+assert subprocess.run([root + '/elf']).returncode == 0
 assert os.stat(root + '/visible').st_nlink == 2
 assert os.getxattr(root + '/visible', 'user.ci-kit') == b'x' * 2048
 PY
