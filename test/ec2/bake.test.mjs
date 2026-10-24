@@ -71,9 +71,9 @@ test('provider stages share one resolution, including after a provider fails', a
 });
 
 // Fake only the external SDK boundary; the bake performs its own polling, promotion and cleanup.
-async function ec2Fixture({ smoke = 'ok', job = 'success', warmResult = warm, lostLaunch = false, refuseFirstSmoke = false, reportMissing = false, snapshotBytes = 12 * 2**30 } = {}) {
+async function ec2Fixture({ smoke = 'ok', job = 'success', warmResult = warm, lostLaunch = false, refuseFirstSmoke = false, reportMissing = false, snapshotBytes = 12 * 2**30, promote = true, otherImages = [], lostSnapshot = false, lostRegistration = false } = {}) {
   const api = await import('../../ec2/bake/bake.mjs');
-  const calls = [], instances = [], images = [];
+  const calls = [], instances = [], images = [], snapshots = [];
   const tags = (x) => Object.fromEntries((x.Tags ?? []).map((t) => [t.Key,t.Value]));
   const send = async (command, role = 'bake') => {
     const name = command.constructor.name, input = command.input;
@@ -81,15 +81,28 @@ async function ec2Fixture({ smoke = 'ok', job = 'success', warmResult = warm, lo
     if (name === 'GetParameterCommand') return { Parameter: { Value: 'ami-canonical' } };
     if (name === 'RunInstancesCommand') {
       if (refuseFirstSmoke && input.ImageId !== 'ami-canonical' && input.NetworkInterfaces[0].SubnetId === 'subnet-c') throw Object.assign(Error('no capacity'),{name:'InsufficientInstanceCapacity'});
-      const i = { InstanceId: `i-${instances.length}`, State: { Name: input.ImageId === 'ami-canonical' ? 'stopped' : 'terminated' }, Tags: input.TagSpecifications[0].Tags };
+      const i = { InstanceId: `i-${instances.length}`, State: { Name: input.ImageId === 'ami-canonical' ? 'stopped' : 'terminated' }, Tags: input.TagSpecifications[0].Tags,
+        BlockDeviceMappings: input.BlockDeviceMappings.map(d => ({ DeviceName: d.DeviceName, Ebs: { VolumeId: d.DeviceName === '/dev/sdf' ? 'vol-target' : 'vol-root', DeleteOnTermination: d.Ebs.DeleteOnTermination } })) };
       instances.push(i);
       if (lostLaunch) throw Error('connection lost');
       return { Instances: [i] };
     }
     if (name === 'DescribeInstancesCommand') return { Reservations: [{ Instances: input.InstanceIds ? instances.filter((i) => input.InstanceIds.includes(i.InstanceId)) : instances }] };
     if (name === 'CreateImageCommand') { images.push({ ImageId: 'ami-new', State:'available', CreationDate:'2026-10-23T12:00:00Z', Tags: input.TagSpecifications[0].Tags, BlockDeviceMappings:[{DeviceName:'/dev/sda1',Ebs:{SnapshotId:'snap-new'}}] }); return {ImageId:'ami-new'}; }
-    if (name === 'DescribeImagesCommand') return { Images: images };
-    if (name === 'DescribeSnapshotsCommand') return {Snapshots:[{SnapshotId:'snap-new',State:'completed',FullSnapshotSizeInBytes: snapshotBytes,VolumeSize:50}]};
+    if (name === 'DescribeImagesCommand') return { Images: input.ImageIds?.includes('ami-canonical')
+      ? [{ ImageId: 'ami-canonical', Architecture: 'x86_64', VirtualizationType: 'hvm', RootDeviceName: '/dev/sda1', BootMode: 'uefi-preferred', EnaSupport: true, ImdsSupport: 'v2.0' }]
+      : input.ImageIds ? images.filter(i => input.ImageIds.includes(i.ImageId)) : [...images, ...otherImages] };
+    if (name === 'CreateSnapshotCommand') {
+      snapshots.push({ SnapshotId: 'snap-new', State: 'completed', FullSnapshotSizeInBytes: snapshotBytes, VolumeSize: 50, Tags: input.TagSpecifications[0].Tags });
+      if (lostSnapshot) throw Error('snapshot response lost');
+      return { SnapshotId: 'snap-new' };
+    }
+    if (name === 'RegisterImageCommand') {
+      images.push({ ImageId: 'ami-new', State: 'available', CreationDate: '2026-10-23T12:00:00Z', Tags: input.TagSpecifications[0].Tags, BlockDeviceMappings: input.BlockDeviceMappings });
+      if (lostRegistration) throw Error('registration response lost');
+      return { ImageId: 'ami-new' };
+    }
+    if (name === 'DescribeSnapshotsCommand') return { Snapshots: snapshots.length ? [...snapshots] : input.SnapshotIds ? [{SnapshotId:'snap-new',State:'completed',FullSnapshotSizeInBytes:snapshotBytes,VolumeSize:50}] : [] };
     if (name === 'GetObjectCommand') {
       if (reportMissing && input.Key.includes('smoke/exit')) throw Object.assign(Error('missing'),{name:'NoSuchKey'});
       let data;
@@ -110,7 +123,7 @@ async function ec2Fixture({ smoke = 'ok', job = 'success', warmResult = warm, lo
   };
   const cfg = {account:'123456789012',region:'us-east-2',disk_gb:50,initialization_mibps:200,security_group:'sg-pool',report_bucket:'reports',placements:[{zone:'us-east-2c',subnet:'subnet-c'},{zone:'us-east-2a',subnet:'subnet-a'},{zone:'us-east-2b',subnet:'subnet-b'}]};
   let time = 0;
-  const run = () => api.runEc2Bake(aws, { runtimeAws:{ec2:{send:(c)=>send(c,'launcher')}}, cfg, manifest:base, runId:'20261023-120000-abcd',token:'warm-token',gh,script:'#!/bin/bash\n__MANIFEST__\n__TOKEN__\n__REPORT__\n__KIT_SHA__',now:()=>time,sleep:async (ms)=>{time+=ms;} });
+  const run = () => api.runEc2Bake(aws, { runtimeAws:{ec2:{send:(c)=>send(c,'launcher')}}, cfg, manifest:base, promote, runId:'20261023-120000-abcd',token:'warm-token',gh,script:'#!/bin/bash\n__MANIFEST__\n__TOKEN__\n__REPORT__\n__KIT_SHA__',now:()=>time,sleep:async (ms)=>{time+=ms;} });
   return {run,calls,images,tags};
 }
 
@@ -138,6 +151,65 @@ test('EC2 bake stops an on-demand Canonical builder, proves smoke and real job, 
   assert.equal(f.tags(f.images[0])['ci-kit-snapshot-gib'],'12');
   assert.equal(result.initializationUsd,0.0288);
   assert.deepEqual(result.manifest,{...base,warm});
+});
+
+test('bake snapshots only the fresh equal-sized destination and preserves Canonical boot attributes', async () => {
+  const f = await ec2Fixture();
+  await f.run();
+  const builder = f.calls.find(([n]) => n === 'RunInstancesCommand')[1];
+  const source = builder.BlockDeviceMappings.find(d => d.DeviceName === '/dev/sda1');
+  const target = builder.BlockDeviceMappings.find(d => d.DeviceName === '/dev/sdf');
+  assert.ok(target, 'builder needs a never-written destination');
+  assert.equal(target.Ebs.VolumeSize, source.Ebs.VolumeSize);
+  assert.equal(target.Ebs.Encrypted, true);
+  assert.equal(target.Ebs.DeleteOnTermination, true);
+  assert.equal(target.Ebs.SnapshotId, undefined);
+  const snapshot = f.calls.find(([n]) => n === 'CreateSnapshotCommand');
+  assert.equal(snapshot?.[1].VolumeId, 'vol-target');
+  assert.ok(snapshot[1].TagSpecifications[0].Tags.some(t => t.Key === 'ci-kit-pool' && t.Value === 'ec2'));
+  const registration = f.calls.find(([n]) => n === 'RegisterImageCommand')[1];
+  assert.equal(registration.BootMode, 'uefi-preferred');
+  assert.equal(registration.Architecture, 'x86_64');
+  assert.equal(registration.VirtualizationType, 'hvm');
+  assert.equal(registration.EnaSupport, true);
+  assert.equal(registration.ImdsSupport, 'v2.0');
+  assert.equal(registration.RootDeviceName, '/dev/sda1');
+  assert.deepEqual(registration.BlockDeviceMappings, [{ DeviceName: '/dev/sda1', Ebs: { SnapshotId: 'snap-new', VolumeSize: 50, VolumeType: 'gp3', DeleteOnTermination: true } }]);
+  assert.ok(!f.calls.some(([n]) => n === 'CreateImageCommand'), 'CreateImage would capture the dirty source root');
+});
+
+for (const option of ['lostSnapshot', 'lostRegistration']) test(`${option}: recover created resources by run tags without replay`, async () => {
+  const f = await ec2Fixture({ [option]: true, promote: false });
+  await assert.rejects(f.run(), /response lost/);
+  assert.equal(f.calls.filter(([n]) => n === 'CreateSnapshotCommand').length, 1);
+  assert.ok(f.calls.some(([n, v]) => n === 'DeleteSnapshotCommand' && v.SnapshotId === 'snap-new'));
+  if (option === 'lostRegistration') {
+    assert.equal(f.calls.filter(([n]) => n === 'RegisterImageCommand').length, 1);
+    assert.ok(f.calls.some(([n, v]) => n === 'DeregisterImageCommand' && v.ImageId === 'ami-new'));
+  }
+});
+
+test('candidate bake passes both proofs but cannot change production image selection or retention', async () => {
+  const otherImages = ['2026-10-10', '2026-10-20', '2026-10-22'].map((CreationDate, n) => ({
+    ImageId: `ami-production-${n}`, CreationDate,
+    Tags: [{ Key: 'ci-kit-pool', Value: 'ec2' }, { Key: 'ci-kit-ready', Value: 'true' }],
+    BlockDeviceMappings: [{ Ebs: { SnapshotId: `snap-production-${n}` } }],
+  }));
+  const f = await ec2Fixture({ promote: false, otherImages });
+  const result = await f.run();
+  assert.equal(result.image, 'ami-new');
+  assert.equal(result.check, 'https://job');
+  assert.equal(f.calls.filter(([n]) => n === 'RunInstancesCommand').length, 3);
+  assert.equal(f.tags(f.images[0])['ci-kit-ready'], 'false');
+  assert.ok(!f.calls.some(([n]) => ['DeregisterImageCommand', 'DeleteSnapshotCommand'].includes(n)));
+});
+
+test('failed candidate is removed rather than retained for promotion', async () => {
+  const f = await ec2Fixture({ promote: false, job: 'failure' });
+  await assert.rejects(f.run(), /real sandbox job failed/);
+  assert.equal(f.tags(f.images[0])['ci-kit-ready'], 'false');
+  assert.ok(f.calls.some(([n, v]) => n === 'DeregisterImageCommand' && v.ImageId === 'ami-new'));
+  assert.ok(f.calls.some(([n, v]) => n === 'DeleteSnapshotCommand' && v.SnapshotId === 'snap-new'));
 });
 
 for (const failure of [{smoke:'failed:metadata'}, {job:'failure'}, {warmResult:{...warm,'pnpm-fetch':{ok:false}}}]) test(`EC2 failed proof leaves image unready and deletes its snapshots: ${JSON.stringify(failure)}`, async () => {
@@ -313,6 +385,8 @@ curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat >> "$TEST_ROOT/report.j
     await assert.rejects(checkImage(root),/cloud-init/);
     const finalizer=join(root,'opt/ci-kit/ec2/bake/finalize.sh');
     await mkdir(join(root,'opt/ci-kit/ec2/bake'),{recursive:true});
+    const compact = join(root,'opt/ci-kit/ec2/bake/compact.sh');
+    await writeFile(compact, '#!/bin/bash\necho compact >> "$TEST_ROOT/compacted"\n');
     await writeFile(finalizer,relocate(await readFile(new URL('../../ec2/bake/finalize.sh',import.meta.url),'utf8')));
     run(finalizer);
     await checkImage(root);
@@ -321,6 +395,7 @@ curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat >> "$TEST_ROOT/report.j
     assert.deepEqual(report.manifest,{...base,warm});
     assert.equal(await present('poweroff'),true);
     assert.equal(await present('run/ci-kit-bake'),false,'finalizer removes its temporary report capability');
+    assert.equal(await present('compacted'),true,'success must follow verified sparse copy');
 
     // A failed preparation must still power off and report, never enqueue a success finalizer.
     for (const p of ['report.jsonl','poweroff','systemctl','curl-calls']) await rm(join(root,p),{force:true});
@@ -342,5 +417,16 @@ curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat >> "$TEST_ROOT/report.j
       value:'failed:image',diagnostic:{reason:'manifest-incomplete',path:'/etc/ci-kit/bake-manifest.json'},
     });
     assert.equal(await present('run/ci-kit-bake'),false);
+
+    // Copy/verification failure must report failure, even though the source image passed sanitation.
+    for (const p of ['report.jsonl','poweroff','curl-calls']) await rm(join(root,p),{force:true});
+    await mkdir(join(root,'run/ci-kit-bake'),{recursive:true});
+    await writeFile(join(root,'run/ci-kit-bake/report-url'),'https://reports.invalid/builder');
+    await writeFile(join(root,'etc/ci-kit/bake-manifest.json'),JSON.stringify({...base,warm}));
+    await writeFile(compact, '#!/bin/bash\nexit 7\n');
+    assert.throws(()=>run(finalizer));
+    assert.equal(await present('report.jsonl'),false);
+    assert.match(await readFile(join(root,'curl-calls'),'utf8'),/failed:compact/);
+    assert.equal(await present('poweroff'),true);
   } finally { await rm(root,{recursive:true,force:true}); }
 });

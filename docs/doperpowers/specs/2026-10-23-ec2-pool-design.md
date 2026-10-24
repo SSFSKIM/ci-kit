@@ -691,14 +691,19 @@ The EC2 bake:
    24.04 x86-64 AMI (Canonical's SSM parameter), with `ci-kit-purpose=builder` and shutdown behaviour **stop**;
 2. runs the provider-neutral preparation (`pool/bake/prepare.sh` and the warm step), with the builder's EC2-specific
    steps in their own script beside `gce/bake/builder.sh`;
-3. after the builder stops, runs `CreateImage`, tags the AMI unready, and terminates the builder;
+3. after sanitation, copies only allocated ext4 root blocks onto an equal-sized, never-written second disk while
+   root is frozen, using direct backing-device I/O; replicates both GPT headers and the boot partitions,
+   verifies every regular file against the frozen source inventory, and requires `sgdisk -v` and `e2fsck -fn`
+   to pass before stopping. It snapshots only that second disk and registers an unready AMI with Canonical's
+   boot attributes, then terminates the builder and both disks. EBS does not support discard here, and zero-filled
+   free space still counts as snapshot data; neither is a substitute for the fresh disk;
 4. through the federated launcher role, runs the smoke suite (`gce/vm/smoke.sh`, made provider-neutral where it
    reads metadata) on a smoke VM from the new AMI;
 5. through the same launcher role, runs one real job on ci-kit-sandbox;
 6. only then tags the AMI `ci-kit-ready=true`.
 
 M1 found that one-time spot with interruption behaviour `terminate` rejects
-`InstanceInitiatedShutdownBehavior=stop`. The builder must stop for CreateImage, so it uses on-demand under the
+`InstanceInitiatedShutdownBehavior=stop`. The builder must stop before imaging its prepared disk, so it uses on-demand under the
 32-vCPU standard quota. Job VMs remain spot with shutdown=terminate; this builder exception does not add
 on-demand scheduler candidates. M5 proves the builder launch with the federated bake role, not the operator's
 broader `ci-kit-ops` credentials.
@@ -1569,6 +1574,45 @@ The production chain is reviewed at each boundary:
 
 ## Decision Log
 
+- Decision: Compact EC2 snapshot allocation without removing any job-visible file. The builder gets a blank,
+  equal-sized encrypted disk; after its existing image checks, copy bitmap-allocated ext4 root blocks with
+  `partclone` through a read-only loop alias with verified direct backing-device I/O. Inventory every regular
+  source file while frozen through a nonrecursive read-only bind view, including files hidden by live mountpoints.
+  Preserve GPT/boot data; recover only the destination through a normal kernel mount/unmount, then compare its
+  independent read-only file inventory byte-for-byte and require `e2fsck -fn` before registration. The alias and
+  bind view are created before freezing; logs, inventories and sort spill live in `/run`; hashing and copying
+  have bounded timeouts with thaw/mount/alias cleanup.
+  Keep shared preparation, GCE, and the manifest schema unchanged. A candidate bake passes both smoke and the
+  real sandbox check but retains `ci-kit-ready=false` and does not prune production images; promotion belongs
+  to the controller. Its ci-kit commit records the actual branch, while the other eight manifest labels retain
+  the current GCE pins. Runtime selects ready AMIs by tags; cross-cloud manifest equality is a bake check,
+  not a launcher-time comparison against GCE.
+  Rationale: the original snapshot is 11.45166015625 GiB versus 7.32637166977 GiB of live filesystems.
+  Actual c8a EBS reports no discard support. On an encrypted 1-GiB control volume, completed snapshots grew
+  from 134217728 bytes (128 MiB random data) to 1073741824 bytes after overwrite/fill with zeros. Therefore
+  zero-filling is rejected. The larger redundant zero-fill experiment was cancelled and deleted. No cache,
+  toolchain, host Node installation, or container layer is removed. IAM prerequisite #131/81fe86b adds only
+  the five owner-reviewed regional, tagged snapshot/registration statements to the bake role; merged-main
+  setup applied them, with federated allowed/denied dry-runs for both APIs. Final acceptance is recorded below.
+  Review/live correction: `e2image` skips zero-link orphan inode extents while copying allocation bitmaps;
+  the fragmented-orphan reproduction omitted extent block 6183 and still failed fsck after normal recovery.
+  The first real builder also blocked inside e2image while root was frozen; its exact blocked syscall is unknown.
+  The replacement passed actual frozen-root copy/GPT/fsck, fragmented-orphan recovery, retained file/link/mode/
+  xattr checks, linked-inode corruption rejection, and timeout thaw/alias cleanup on an isolated Linux guest.
+  Partclone 0.3.27 adds only its own host package (2145 KiB installed), no new dependencies; gdisk was already
+  present. Jobs do not mount these host tools. Free blocks are skipped with `lseek`, not zero writes
+  ([source](https://github.com/Thomas-Tsai/partclone/blob/0.3.27/src/partclone.c#L1836)).
+  A subsequent 9.96337890625-GiB candidate passed common smoke but failed real checkout with an ELF loader
+  assertion (run 40122731641); it was deleted, not promoted. A deterministic regression then established that
+  filesystem fsync/freeze does not invalidate buffered raw-device cache: the old copier passed fsck but copied
+  stale file bytes. Partclone's own direct-read option alone failed; direct I/O on the alias's backing-device
+  path fixed the coherency defect. Whole-tree verification now detects changed, extra or missing regular files.
+  The final actual-root regression matched all 74340 files, passed fsck/GPT and executed copied ELF binaries;
+  source/target hashing took 43/54 seconds cold on that 3.1-GB allocated fixture. A nonrecursive source view
+  includes the six underlying `/run` files otherwise hidden by tmpfs, rather than weakening comparison with
+  an exclusion list. The final candidate passed its byte-checked bake, common smoke and real sandbox job.
+  Date/Author: 2026-10-24, CI-opt and image-trim executor.
+
 - Decision: M3 preserves GCE's existing walker via a provider outcome adapter that retains original GCE error
   evidence. The GCE provider additionally owns batched reconciliation, existence/preemption reads and NAT
   telemetry; ledger and JIT settlement remain scheduler-owned. Its optional observation inputs preserve the
@@ -2030,3 +2074,51 @@ initialization tariff metadata beyond the promoted 200MiB/s setting, and rate-th
 weaken the accepted lifecycle or credit safeguards. The next useful work is ordinary production observation of
 interruption incidence, readiness latency and credit burn; changing retry policy, provider order or cost policy is
 a new product decision, not an implicit continuation of this completed initiative.
+
+### 2026-10-24 snapshot-compaction follow-up (#132)
+
+The owner accepted the first cut at 12.88% less snapshot data, with no job-visible content pruning. Candidate
+`ami-0dff29fca329bcd8e`, built from `fa0a8df21e487e2cf3db8a1fc77703086768bc52`, remains **unready**; the owner
+will merge/deploy the bake and run production from merged main, then delete this candidate when production
+has its own image. The normal unready-image guard may reap it after 2026-10-25T19:47:46Z. Production was not
+switched during this work: the sole ready AMI remained `ami-0053d3b9003781572`, and GCE was untouched.
+
+| AWS measurement | Production baseline | Verified candidate |
+|---|---:|---:|
+| Snapshot | snap-09448861ba825fb31 | snap-0432ff5f76a192157 |
+| FullSnapshotSizeInBytes | 12296126464 | 10712252416 |
+| GiB | 11.45166015625 | 9.9765625 |
+| Initialization at $0.0024/GiB | $0.027483984375 | $0.02394375 |
+
+Savings are **1.47509765625 GiB / $0.003540234375 per VM**, about **$1.239/day at 350 VMs**. This is initialization
+only, not an inferred total-bill or remaining-credit figure. The candidate's S3 source Git HTTPS preflight returned
+status 0. Common smoke `i-04f0b139dcb027e04` reported `exit:0`, `smoke:ok`; real sandbox bake-check
+[40127015564](https://github.com/SSFSKIM/ci-kit-sandbox/actions/runs/40127015564), job 120970510293 on
+`ci-kit-bake-trim-candidate-20261024-c-290475840169`, passed. All eight non-commit labels match the existing GCE
+image `ci-kit-runner-20261024-074600-ubhs-d82efaeb`; the ninth records the truthful new ci-kit commit.
+Medium review converged without material findings on fa0a8df; its full remote gate
+[40125486515](https://github.com/SSFSKIM/ci-kit/actions/runs/40125486515) passed. Final sweeps found zero active,
+stopped or shutting-down fixtures, zero fixture volumes and zero fixture runner registrations. Only the handed-over
+unready candidate and its completed snapshot remain; earlier failed candidates and experiment snapshots were deleted.
+
+**What remains in the image, measured without another bake.** EBS direct APIs listed 20432 blocks of 512 KiB.
+Checksum-verified reads of GPT, ext4 superblocks/group descriptors and journal inodes give the following attribution
+of the 2.65019083-GiB difference between the candidate and the earlier 7.32637167-GiB live-filesystem measurement:
+
+| Component | GiB | Basis |
+|---|---:|---|
+| Root and boot inode tables | 1.545197 | On-disk inode counts/sizes and group descriptors; root alone is 1.53125 GiB |
+| Root and boot journals | 0.078125 | Journal inode sizes: 64 MiB + 16 MiB |
+| Other ext4 metadata | 0.018009 | Bitmaps, superblocks, descriptors and reserved descriptor space; totals match stored ext4 overhead |
+| Whole boot/EFI/BIOS copying beyond live files and ext4 metadata | 0.850307 | Mostly free space, plus FAT/raw-boot overhead; copied partitions total 1023 MiB |
+| Root snapshot granularity and post-copy-write residual | 0.155418 | Root's listed snapshot bytes minus allocated filesystem blocks; an upper bound on scattered-file granularity, not a per-file trace |
+| GPT/other non-root rounding | 0.000976 | Remaining listed blocks beyond raw boot partition sizes |
+| New root live allocation versus the old baseline | 0.002159 | The new root has about 2.21 MiB more live allocation, including the new host tool |
+
+The root reserves 6422528 inodes but uses 201827 (3.14%). Descriptor flags identify 1.45703125 GiB of unused,
+zeroed root inode-table groups; three widely separated **listed** snapshot blocks sampled inside those tables were
+entirely zero. That is evidence for a further lever, not a validated extra saving: not every candidate zero block
+was read. The owner selected **zero-aware writes onto the blank destination, with geometry unchanged**, as a separate
+follow-up PR. Investigate those allocated zero tables and whole boot copies before inode-density changes or packing:
+scattered-file packing alone has only about 0.155 GiB of apparent headroom here. Preserve full-tree byte comparison,
+fsck and real-job acceptance in that follow-up. No such additional cut is included in #132.

@@ -27,7 +27,7 @@ apt-get purge -y snapd
 rm -rf /snap /var/snap /var/lib/snapd /var/cache/snapd
 printf 'Package: snapd\nPin: release *\nPin-Priority: -10\n' > /etc/apt/preferences.d/ci-kit-no-snapd
 apt-get update
-apt-get install -y --no-install-recommends docker.io git jq curl xz-utils ca-certificates iptables
+apt-get install -y --no-install-recommends docker.io git jq curl xz-utils ca-certificates iptables gdisk partclone
 systemctl enable docker
 step=kit
 git clone --quiet https://github.com/SSFSKIM/ci-kit.git /opt/ci-kit
@@ -79,10 +79,11 @@ FailureAction=poweroff
 [Service]
 Type=oneshot
 ExecStart=/bin/bash /opt/ci-kit/ec2/bake/finalize.sh
-TimeoutStartSec=5min
+TimeoutStartSec=15min
 TimeoutStopSec=30s
-StandardOutput=journal+console
-StandardError=journal+console
+# Root is frozen during the sparse copy: no journal writes on its output path.
+StandardOutput=console
+StandardError=console
 UNIT
 systemctl daemon-reload
 systemctl --no-block start ci-kit-bake-finalize.service
