@@ -32,18 +32,36 @@ mount() {
   export READONLY
 }
 umount() { echo "CALL umount $*" >&3; READONLY=0; export READONLY; }
-rmdir() { command rmdir "$@"; case "$CASE" in cleanup-failure|copy-timeout-cleanup-failure) return 29;; esac; }
+rmdir() {
+  command rmdir "$@"
+  if [[ "$*" != *boot-fixture* ]]; then case "$CASE" in cleanup-failure|copy-timeout-cleanup-failure) return 29;; esac; fi
+}
 udevadm() { :; }
 sgdisk() { echo "CALL sgdisk $*"; if [[ "$*" == *'-v'* ]]; then [ "$CASE" != disk-verify-failure ] || return 13; echo 'No problems found.'; fi; }
 dd() { echo "CALL dd $*"; [ "$CASE" != boot-copy-failure ] || return 23; }
 sync() { :; }
-mktemp() { echo "CALL mktemp $*" >&2; command mktemp -d "\${TMPDIR:-/tmp}/copy-fixture.XXXXXX"; }
+mktemp() {
+  echo "CALL mktemp $*" >&2
+  if [[ "$*" == *ci-kit-boot* ]]; then command mktemp -d "\${TMPDIR:-/tmp}/boot-fixture.XXXXXX";
+  else command mktemp -d "\${TMPDIR:-/tmp}/copy-fixture.XXXXXX"; fi
+}
 losetup() {
   if [ "$1" = --detach ]; then echo "CALL losetup $*" >&3;
-  elif [[ "$*" == *DIO* ]]; then if [ "$CASE" = buffered-alias ]; then echo 0; else echo 1; fi
-  else echo "CALL losetup $*" >&2; echo /dev/loop7; fi
+  elif [[ "$*" == *DIO* ]]; then
+    if [ "$CASE" = buffered-alias ] && [[ "$*" == *loop7* ]] || [ "$CASE" = boot-buffered-alias ]; then echo 0; else echo 1; fi
+  else
+    echo "CALL losetup $*" >&2
+    case "$*" in *nvme0n1p15*) echo /dev/loop15;; *nvme0n1p16*) echo /dev/loop16;; *) echo /dev/loop7;; esac
+  fi
 }
 find() {
+  if [[ "$PWD" == *boot-fixture* ]]; then
+    echo "CALL boot-inventory $PWD readonly=\${READONLY:-0}" >&2
+    [ "\${READONLY:-0}" = 1 ] || return 2
+    [ "$CASE" != boot-inventory-failure ] || return 31
+    if [ "$CASE" = boot-changed-file ] && [[ "$PWD" == */target ]]; then echo 'changed-hash  ./file'; else echo 'same-hash  ./file'; fi
+    return 0
+  fi
   echo "CALL inventory frozen=\${FROZEN:-0} readonly=\${READONLY:-0}" >&2
   if [ "\${FROZEN:-0}" = 1 ]; then [ "$CASE" != hash-failure ] || return 1;
   else
@@ -56,8 +74,13 @@ find() {
   return 0
 }
 fsfreeze() { echo "CALL fsfreeze $*" >&3; if [ "$1" = -f ]; then FROZEN=1; else FROZEN=0; fi; export FROZEN; }
+partclone.fat() {
+  echo "CALL partclone.fat $*"
+  [ "$CASE" != boot-fat-copy-failure ] || return 27
+}
 partclone.ext4() {
   echo "CALL partclone.ext4 $*"
+  if [[ "$*" == *loop16* ]]; then [ "$CASE" != boot-ext4-copy-failure ] || return 28; return 0; fi
   [ "\${FROZEN:-0}" = 1 ] || return 2
   if [ "$CASE" = timed-copy ]; then node -e 'setTimeout(() => {}, 1100)'; fi
   case "$CASE" in copy-failure) return 1;; copy-timeout|copy-timeout-cleanup-failure) return 124;; esac
@@ -65,16 +88,25 @@ partclone.ext4() {
 timeout() {
   if [[ "$*" == *' find '* ]]; then
     echo "CALL timeout $*" >&2
-    if [ "$CASE" = source-timeout ] && [ "\${FROZEN:-0}" = 1 ]; then return 124; fi
-    if [ "$CASE" = target-timeout ] && [ "\${FROZEN:-0}" = 0 ]; then return 124; fi
+    if [[ "$*" != *boot-fixture* ]]; then
+      if [ "$CASE" = source-timeout ] && [ "\${FROZEN:-0}" = 1 ]; then return 124; fi
+      if [ "$CASE" = target-timeout ] && [ "\${FROZEN:-0}" = 0 ]; then return 124; fi
+    fi
   else echo "CALL timeout $*"; fi
   shift 2
   "$@"
 }
 e2image() { echo "CALL e2image $*"; }
-e2fsck() { echo "CALL e2fsck $*"; [ "$CASE" != corrupt ] || return 4; }
+e2fsck() {
+  echo "CALL e2fsck $*"
+  if [[ "$*" == *nvme1n1p1 ]] && [ "$CASE" = corrupt ]; then return 4; fi
+  if [[ "$*" == *loop16* ]] && [ "$CASE" = boot-source-fsck-failure ]; then return 4; fi
+  if [[ "$*" == *nvme1n1p16* ]] && [ "$CASE" = boot-target-fsck-failure ]; then return 4; fi
+  return 0
+}
+fsck.fat() { echo "CALL fsck.fat $*"; }
 # Run the real nested Bash processes, with only their Linux command boundary replaced.
-export -f find mount umount rmdir mktemp losetup sync fsfreeze timeout partclone.ext4 e2fsck
+export -f find mount umount rmdir mktemp losetup sync fsfreeze timeout partclone.ext4 partclone.fat e2fsck fsck.fat lsblk
 . "$1"
 `;
 const script = new URL('../../ec2/bake/compact.sh', import.meta.url).pathname;
@@ -88,7 +120,8 @@ const run = (scenario = 'ok', handoff = 'enabled') => {
         CI_KIT_COMPACT_DIAGNOSTIC: handoff === 'disabled' ? undefined : diagnostic,
         CI_KIT_COMPACT_TRACE: handoff === 'disabled' ? undefined : trace },
     });
-    return { ...result, diagnostic: existsSync(diagnostic) ? JSON.parse(readFileSync(diagnostic, 'utf8')) : undefined,
+    const rootOutput = result.stdout.slice(result.stdout.indexOf('CALL mount --bind'));
+    return { ...result, rootOutput, diagnostic: existsSync(diagnostic) ? JSON.parse(readFileSync(diagnostic, 'utf8')) : undefined,
       trace: existsSync(trace) ? readFileSync(trace, 'utf8').trim().split('\n').map(line => {
         const [phase, elapsed, status] = line.split(' ');
         return { phase, elapsed_seconds: Number(elapsed), exit_status: Number(status) };
@@ -100,6 +133,13 @@ const run = (scenario = 'ok', handoff = 'enabled') => {
 for (const [scenario, phase, exit_status] of [
   ['size', 'disk-validation', 1],
   ['boot-copy-failure', 'boot-copy', 23],
+  ['boot-fat-copy-failure', 'boot-copy', 27],
+  ['boot-ext4-copy-failure', 'boot-copy', 28],
+  ['boot-inventory-failure', 'boot-copy', 31],
+  ['boot-source-fsck-failure', 'boot-copy', 4],
+  ['boot-target-fsck-failure', 'boot-copy', 4],
+  ['boot-changed-file', 'boot-copy', 1],
+  ['boot-buffered-alias', 'boot-copy', 1],
   ['buffered-alias', 'copy-root-setup', 1],
   ['hash-failure', 'source-inventory', 1],
   ['source-timeout', 'source-inventory', 124],
@@ -161,7 +201,7 @@ test('successful compaction records every completed phase and actual elapsed cop
   assert.ok(result.trace.find(entry => entry.phase === 'root-copy').elapsed_seconds >= 1);
   assert.ok(result.trace.find(entry => entry.phase === 'compact').elapsed_seconds >= 1);
   const timeouts = (result.stderr + result.stdout).match(/CALL timeout --kill-after=10s 5m bash/g) ?? [];
-  assert.equal(timeouts.length, 2, 'both inventories receive the measured-cold 300-second bound');
+  assert.equal(timeouts.length, 6, 'root and both boot source/target inventories receive a 300-second bound');
   assert.match(result.stdout, /CALL timeout --kill-after=10s 8m partclone/);
 });
 
@@ -173,7 +213,7 @@ test('copy preserves all allocated blocks, recovers normally, then verifies with
   assert.ok(at('umount /boot/efi') >= 0);
   assert.ok(at('umount /boot') < at('fsfreeze -f /'));
   assert.ok(at('sgdisk --replicate=/dev/nvme1n1 /dev/nvme0n1') >= 0);
-  const copy = lines.find(line => line.startsWith('CALL partclone.ext4 '));
+  const copy = lines.find(line => line.startsWith('CALL partclone.ext4 ') && line.endsWith('--output /dev/nvme1n1p1'));
   assert.ok(copy, r.stdout);
   assert.match(copy, /--dev-to-dev/);
   assert.match(copy, /--source \/dev\/loop7/);
@@ -181,20 +221,21 @@ test('copy preserves all allocated blocks, recovers normally, then verifies with
   assert.match(r.stderr, /CALL mktemp -d \/run\//, 'runtime files must live on tmpfs while root is frozen');
   assert.match(copy, /--logfile .*\/partclone.log/);
   assert.doesNotMatch(copy, /--force|--rescue|--skip_write_error/);
-  assert.ok(at('fsfreeze -f /') < at('CALL partclone.ext4 '));
-  assert.ok(at('CALL partclone.ext4 ') < at('fsfreeze -u /'));
+  assert.ok(at('fsfreeze -f /') < lines.indexOf(copy));
+  assert.ok(lines.indexOf(copy) < at('fsfreeze -u /'));
   const recovery = at('mount -t ext4 -o rw ');
   assert.ok(at('fsfreeze -u /') < recovery);
   assert.match(lines[recovery], /-t ext4 -o rw \/dev\/nvme1n1p1 .*\/root/);
   assert.ok(recovery < lines.findIndex(line => /CALL umount .*\/root$/.test(line)));
   const readonly = at('mount -t ext4 -o ro ');
   assert.ok(readonly > recovery, r.stdout);
-  assert.ok(readonly < at('e2fsck -fn /dev/nvme1n1p1'));
+  assert.ok(readonly < lines.indexOf('CALL e2fsck -fn /dev/nvme1n1p1'));
   assert.match(r.stderr, /CALL inventory frozen=1/);
   assert.match(r.stderr, /CALL inventory frozen=0 readonly=1/);
   assert.ok(at('losetup --detach /dev/loop7') > at('fsfreeze -u /'));
   assert.ok(at('sgdisk -v /dev/nvme1n1') >= 0);
-  for (const part of [14, 15, 16]) assert.ok(lines.some(line => line.startsWith('CALL dd ') && line.includes(`if=/dev/nvme0n1p${part} of=/dev/nvme1n1p${part}`)));
+  assert.ok(lines.some(line => line.startsWith('CALL dd ') && line.includes('if=/dev/nvme0n1p14 of=/dev/nvme1n1p14')));
+  for (const part of [15, 16]) assert.ok(!lines.some(line => line.startsWith('CALL dd ') && line.includes(`if=/dev/nvme0n1p${part} `)), 'boot free space must not be copied');
   assert.ok(!lines.some(line => line.startsWith('CALL dd ') && /if=\/dev\/nvme0n1p1(?:\s|$)/.test(line)), 'raw copying the root would preserve deleted blocks');
 });
 
@@ -211,21 +252,21 @@ for (const scenario of ['copy-failure', 'copy-timeout']) test(`${scenario} still
   assert.match(r.stdout, /CALL timeout --kill-after=10s /);
   assert.match(r.stdout, /CALL fsfreeze -u \//);
   assert.match(r.stdout, /CALL losetup --detach \/dev\/loop7/);
-  assert.doesNotMatch(r.stdout, /CALL mount -t ext4|CALL e2fsck/);
+  assert.doesNotMatch(r.rootOutput, /CALL mount -t ext4|CALL e2fsck/);
 });
 
 test('normal recovery failure does not proceed to verification or report success', () => {
   const r = run('recovery-failure');
   assert.notEqual(r.status, 0);
   assert.match(r.stdout, /CALL mount /);
-  assert.doesNotMatch(r.stdout, /CALL e2fsck|copied root verified/);
+  assert.doesNotMatch(r.rootOutput, /CALL e2fsck|copied root verified/);
 });
 
 test('read-only verification failure prevents successful compaction without attempting repair', () => {
   const r = run('corrupt');
   assert.notEqual(r.status, 0);
   assert.match(r.stdout, /CALL e2fsck -fn \/dev\/nvme1n1p1/);
-  assert.equal(r.stdout.split('\n').filter(line => line.startsWith('CALL e2fsck ')).length, 1);
+  assert.equal(r.rootOutput.split('\n').filter(line => line.startsWith('CALL e2fsck ')).length, 1);
   assert.doesNotMatch(r.stdout, /copied root verified/);
 });
 
@@ -233,7 +274,7 @@ for (const scenario of ['changed-file', 'extra-file', 'missing-file']) test(`${s
   const r = run(scenario);
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /content inventory differs/);
-  assert.doesNotMatch(r.stdout, /CALL e2fsck|copied root verified/);
+  assert.doesNotMatch(r.rootOutput, /CALL e2fsck|copied root verified/);
   assert.match(r.stdout, /CALL umount .*\/root/);
 });
 
@@ -241,12 +282,46 @@ test('source content read failure thaws root before any block copy', () => {
   const r = run('hash-failure');
   assert.notEqual(r.status, 0);
   assert.match(r.stdout, /CALL fsfreeze -u \//);
-  assert.doesNotMatch(r.stdout, /CALL partclone|CALL mount -t ext4|copied root verified/);
+  assert.doesNotMatch(r.rootOutput, /CALL partclone|CALL mount -t ext4|copied root verified/);
 });
 
 test('a loop alias without backing direct I/O is refused before root is frozen', () => {
   const r = run('buffered-alias');
   assert.notEqual(r.status, 0);
-  assert.doesNotMatch(r.stdout, /CALL fsfreeze|CALL partclone|copied root verified/);
+  assert.doesNotMatch(r.rootOutput, /CALL fsfreeze|CALL partclone|copied root verified/);
   assert.match(r.stdout, /CALL losetup --detach \/dev\/loop7/);
 });
+
+test('both boot copies use coherent bitmap reads and independently verify every regular file read-only', () => {
+  const r = run();
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  const lines = r.stdout.split('\n');
+  for (const [part, tool, fsck, options] of [[15, 'fat', 'fsck.fat -n', 'ro'], [16, 'ext4', 'e2fsck -fn', 'ro,noload']]) {
+    const copy = lines.find(line => line.startsWith(`CALL partclone.${tool} `) && line.includes(`--output /dev/nvme1n1p${part}`));
+    assert.ok(copy, r.stdout);
+    assert.match(copy, new RegExp(`--source /dev/loop${part}`));
+    assert.match(copy, /--dev-to-dev/);
+    assert.match(copy, /--logfile .*boot-fixture.*\/partclone.log/);
+    assert.doesNotMatch(copy, /--force|--rescue|--skip_write_error/);
+    const before = lines.slice(0, lines.indexOf(copy)).join('\n');
+    assert.match(before, new RegExp(`CALL ${fsck} /dev/loop${part}`));
+    assert.match(before, new RegExp(`CALL mount -t (?:vfat|ext4) -o ${options} /dev/loop${part} `));
+    assert.match(before, /CALL umount .*boot-fixture.*\/source/);
+    const after = lines.slice(lines.indexOf(copy) + 1).join('\n');
+    assert.match(after, new RegExp(`CALL ${fsck} /dev/nvme1n1p${part}`));
+    assert.match(after, new RegExp(`CALL mount -t (?:vfat|ext4) -o ${options} /dev/nvme1n1p${part} `));
+    assert.match(after, new RegExp(`CALL losetup --detach /dev/loop${part}`));
+    assert.match(r.stderr, new RegExp(`CALL losetup --find --show --read-only --direct-io=on /dev/nvme0n1p${part}`));
+  }
+  assert.equal((r.stderr.match(/CALL boot-inventory .*readonly=1/g) ?? []).length, 4);
+});
+
+for (const scenario of ['boot-fat-copy-failure', 'boot-ext4-copy-failure', 'boot-inventory-failure', 'boot-changed-file']) {
+  test(`${scenario} cleans boot mounts and direct aliases without copying root`, () => {
+    const r = run(scenario);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stdout, /CALL umount .*boot-fixture.*\/(source|target)/);
+    assert.match(r.stdout, /CALL losetup --detach \/dev\/loop1[56]/);
+    assert.doesNotMatch(r.stdout, /CALL fsfreeze/);
+  });
+}

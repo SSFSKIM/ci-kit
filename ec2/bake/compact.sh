@@ -1,5 +1,6 @@
 #!/bin/bash
-# EBS has no discard support. Copy allocated root blocks onto a never-written disk; do not zero its holes.
+# EBS has no discard support. Copy bitmap-allocated filesystem blocks; do not zero free space.
+# Unwritten EBS bytes may be pseudorandom: only bitmap-free blocks may be skipped, never allocated zeros.
 # The builder supplies exactly two equal-sized disks. The destination becomes the AMI's only root disk.
 set -euo pipefail
 export LC_ALL=C
@@ -38,9 +39,9 @@ blockdev --rereadpt "$target"
 udevadm settle
 # Preserve the legacy boot code too, without overwriting the replicated GPT's protective MBR partition table.
 dd if="$source" of="$target" bs=446 count=1 conv=notrunc status=none
-for part in 14 15 16; do
-  dd if="${source}p${part}" of="${target}p${part}" bs=4M conv=fsync status=none
-done
+dd if="${source}p14" of="${target}p14" bs=4M conv=fsync status=none
+bash "$bake_dir/copy-boot.sh" vfat "${source}p15" "${target}p15"
+bash "$bake_dir/copy-boot.sh" ext4 "${source}p16" "${target}p16"
 
 compact_phase copy-root-setup
 bash "$bake_dir/copy-root.sh" "$root" "${target}p1" /

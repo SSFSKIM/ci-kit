@@ -1378,6 +1378,26 @@ The production chain is reviewed at each boundary:
 
 ## Surprises & Discoveries
 
+- Observation (2026-10-24): **A new EBS volume is not a zero-reading device.** AWS guarantees logically empty
+  blocks that are either zeroed or cryptographically pseudorandom, not zero-valued reads
+  ([data security](https://docs.aws.amazon.com/ebs/latest/userguide/data-protection.html#data-security)).
+  An attempted `partclone` raw stream through `dd conv=sparse` failed full-tree comparison before imaging.
+  Replay `zero-stage-repro-20261024-mvmzfujr-290475840169` used a fresh encrypted 50-GiB target
+  `vol-0668ba6b0a5270905`, whose AWS `SnapshotId` was empty. All 12 sampled 512-KiB chunks corresponding
+  to allocated all-zero source data already read nonzero on the target **before root copying**. All remained
+  nonzero immediately after copying and after filesystem recovery; each sampled chunk's first 4-KiB hash
+  was identical at all three stages. Five files differed (host, toolcache and container Node executables plus
+  an apt cache). An earlier replay mapped all 320 printed differing-block samples to actual sparse seeks;
+  all were zero on the source and nonzero on the target. The sampled target hashes matched none of the
+  scanned source blocks in the five files, so misplaced stream data was not the observed mechanism.
+  The zero-backed loop tests had passed because they supplied a stronger precondition than EBS provides.
+  Allocated zero bytes must be written. Only filesystem-bitmap-free blocks may remain unwritten; do not
+  reinterpret inode-table initialization flags to rescue the rejected optimization. Production's direct-device
+  partclone path already writes every allocated run verbatim, including zeros
+  ([0.3.27 source, lines 970–1003](https://github.com/Thomas-Tsai/partclone/blob/0.3.27/src/main.c#L970)).
+  The rejected candidate/replays made no AMI or snapshot; final tag reads found their instances terminated
+  and no volumes, snapshots or images. This does not establish the cause of the earlier `r29cc` failure.
+
 - Observation: FIS request `sir-f2a7mf7g` reported `instance-terminated-by-experiment`, while its instance
   `i-04e073caf4c22aac6` reported `Client.UserInitiatedShutdown`. Notice was 10:52:33Z for termination at
   10:54:33Z; guest terminal `failed:unit` arrived 10:54:36Z. The old StateReason-only classifier finalized
@@ -1573,6 +1593,24 @@ The production chain is reviewed at each boundary:
   Evidence: the verdict's launch log. Zone order c -> a -> b.
 
 ## Decision Log
+
+- Decision: Abandon allocated-zero skipping after the EBS pre-copy probe above disproved its precondition.
+  Preserve the production root copier: write every bitmap-allocated block, including zeros, and skip only
+  blocks marked free. Keep BIOS p14's whole-partition copy. The safe remaining cut is allocation-bitmap
+  copying of unmounted EFI p15 (FAT) and `/boot` p16 (ext4), with read-only filesystem checks and complete
+  independent source/target regular-file inventories, coherent reads and existing root/boot acceptance.
+  No inode-density, packing, inode-table-flag reinterpretation, encryption or IAM change is included.
+  Rationale: [AWS's empty-volume contract](https://docs.aws.amazon.com/ebs/latest/userguide/data-protection.html#data-security)
+  permits pseudorandom unwritten bytes; the replay observed them before copying. The saved source metadata
+  measures p16 at 233728 blocks of 4096 bytes, with 196305 free: 153284608 bytes allocated versus 957350400
+  total, or 0.748844 GiB of free space. EFI is 111149056 bytes with earlier measured live data 6399488 bytes,
+  giving roughly another 0.097556 GiB before FAT metadata. The combined estimate of about 0.846 GiB before
+  512-KiB snapshot rounding clears the owner's 0.3-GiB threshold; actual savings still require a candidate.
+  Production bake `ci-kit-bake-h2mtl` from `09f04c3` is ready as `ami-0e6ab11b8a334c7f0`:
+  9.96142578125 GiB, $0.023907421875 initialization. Its S3 source/copy/target times were 47/157/135 seconds
+  against 300/480/300-second bounds, leaving 165 seconds for the target inventory. On owner instruction,
+  previous candidate `ami-0dff29fca329bcd8e` and `snap-0432ff5f76a192157` were deleted and verified absent.
+  Date/Author: 2026-10-24, CI-opt and boot-compaction executor; owner's explicit fallback decision.
 
 - Decision: Preserve bounded compaction phase, exit status and timing in the builder's existing S3 report,
   on failure and success, rather than relying on a terminated instance's serial console. Keep diagnostic

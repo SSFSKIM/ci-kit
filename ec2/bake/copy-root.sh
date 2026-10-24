@@ -1,5 +1,6 @@
 #!/bin/bash
 # Copy a frozen ext4 partition by its allocation bitmap, not by walking linked inodes.
+# Unwritten EBS blocks may read pseudorandom: skip only bitmap-free blocks, never allocated zeros.
 set -euo pipefail
 export LC_ALL=C
 source=$1 target=$2 source_mount=$3
