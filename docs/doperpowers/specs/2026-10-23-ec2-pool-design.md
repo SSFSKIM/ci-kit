@@ -82,7 +82,7 @@ measurement exists.
   one intentional ready AMI. Fixture runners, temporary branches and isolated security group removed. Production
   still serves revision 00021-qth, credit disabled. Conservative cumulative AWS execution estimate about $1.50,
   not a settled bill, comfortably below the $25 pre-activation limit.
-- [ ] M6: credit preference, reports, guard, the MAWS canary and acceptance.
+- [x] (2026-10-24 12:23Z) M6: credit preference, reports, guard, the MAWS canary and acceptance.
   Core PR #119 merged 21f9983 after task review and exact-head gate 40082348173. Fresh-main revision
   00022-9h8 serves credit-disabled code; MAWS GCE canary 40082699042 passed all six pool jobs. Durable billing
   issue #51 holds reading 0.19423134 USD, read_at 2026-10-24T09:37:12.999Z, through 2026-10-25. This lagged
@@ -97,9 +97,14 @@ measurement exists.
   MAWS canary 40087574181 passed all six jobs on EC2. The owner accepted the late-final/orphan/stopped-builder
   guard proofs and the single quota burst 40087892049 (17/17 jobs, real AWS quota refusal and GCE fallback).
   Live budget demotion #124/a83ec70 produced the budget log and GCE job 40090068292 while the existing EC2
-  fixture stayed running/busy; #125/e4610be restored 180, with credit on observed at 11:32:13Z. FIS-specific
-  outcome correction and idempotent volume deletion are reviewed but not yet deployed; one FIS rerun, post-fix
-  stale harness, final sweep/interruption tally and retrospective remain.
+  fixture stayed running/busy; #125/e4610be restored 180, with credit on observed at 11:32:13Z. PR #126/db0a608
+  passed high review and exact-head CI 40090491895, then deployed as 00024-zhh after the one-statement launcher
+  policy addition was diffed and federated-read verified. Guard 40091309261 passed. The single corrected FIS
+  retest produced preempted/interrupted-free; job 120864562822 failed at 12:01:31Z in run 40091372050 attempt 1,
+  no rerun. Post-fix stale harness passed on exact db0a608/00024 with GCE-first walk and zero mutations.
+  Final tag/volume/registration/branch sweeps left no fixtures or stopped/unattached resources; production job
+  VMs and the ready AMI/snapshot were deliberately retained. Whole-initiative high review and all corrective
+  deltas converged without outstanding material findings. See Outcomes for acceptance references and limits.
 
 ## What it must not be
 
@@ -1941,4 +1946,87 @@ The production chain is reviewed at each boundary:
 
 ## Outcomes & Retrospective
 
-Pending — written at finish.
+M2–M6 completed on 2026-10-24. The deployed launcher is `ci-kit-launcher-00024-zhh`, serving
+`db0a60824449fc15040774c35afd9d47acd5a832` at 100% in us-central1. The three pool repos explicitly list EC2 then
+GCE, credit preference is on, and the normal budget is $180. No consumer action/workflow pinned by v1 was
+changed and v1 was not moved. No AWS key or Secret Manager write was introduced; the secret inventory remains
+only app-id, app-key and webhook-secret. Every deployment used a fresh merged-main clone.
+
+### Acceptance record
+
+| Acceptance | Evidence |
+|---|---|
+| 1 Federation/no AWS secret | Actual four-hour Google-federated launcher/bake calls and allowed/denied IAM dry-runs; existing three-secret inventory unchanged. Launcher-only Spot-status permission was applied as exactly one new regional statement, all other managed role documents unchanged. |
+| 2 MAWS EC2 | Run 40087574181: all six pool jobs passed on ci-kit-ec2 runners. Corrected final-runtime pool smoke 120864563055 also passed. |
+| 3 Refusal/recovery/overflow | M4/M5/M6 focused recovery tests plus single burst 40087892049, 17/17 jobs passed. CloudTrail ties real MaxSpotInstanceCountExceeded to hsg2830hf5; same tick placed fresh GCE hsg28ru0v6. No cap edits or second burst. |
+| 4 Guest cleanup | Ordinary EC2 job shutdown bound 2.414s; independent unmanaged deadline bound 1.839s, zero volumes. Separate never-online fixture retired after the ten-minute idle limit, before its guest deadline. |
+| 5 Guard | Late-final run 40087283001 explicitly reaped the late VM; run 40088100440 reaped the busy rowless orphan at age 15m34s and preserved the stopped pre-image builder. Builder later explicitly cleaned before deadline; all fixture volumes gone. Missing-volume concurrency false failures corrected; final guard run 40091309261 green. |
+| 6 Interruption/no rerun | Corrected FIS EXPjBGG9xKJ7qqeBDU: m6fvmc3qsk preempted/interrupted-free; sir-szczqcsj by-experiment; GitHub job 120864562822 failure at 12:01:31Z, run 40091372050 attempt 1. First misclassified FIS row retained as historical evidence. |
+| 7 Credit demotion | Genuine durable reading in issue 51; PR124's threshold below actual billing logged budget demotion, generic run 40090068292 passed on GCE while busy EC2 stayed running. PR125 restored 180 and on was observed. Approved isolated stale harness used exact final production SHA/revision, real policy/selection/walk modules, aged in-memory genuine reading, failed CE, no cloud mutations/retirement; order GCE spot → EC2 spot → GCE standard. |
+| 8 Reports | Final cost and latency CLIs read real ledgers and grouped both providers/zones. Cost output separates finalized VM cohorts from lifetime AWS billing and displays remaining budget. Tests cover unknown costs, immutable duplicate/overlapping readings and interrupted pricing. |
+| 9 GCE unchanged/off transitions | GCE canaries at M3/M4/M5 and M6 40082699042/40086890035 passed all six jobs; enabled→disabled→absent→disabled→enabled live config proof held reservations and finalized the old row 33s after management restoration. |
+| 10 Images in step | Successful bake ci-kit-bake-295d5; nine manifest fields match GCE and ami-0053d3b9003781572. Both common smokes and real EC2 bake-check 40077936064 passed. |
+| 11 Per-repo policy | M4 multi-account/reservation tests; M5 sandbox-only EC2 and MAWS-only GCE; M6 explicit lists and real EC2 canary/overflow. No second queue reader. |
+
+### Interruption and spend snapshot
+
+At 12:00Z, counting EC2 records from 09:37Z, the census contained **82 allocation rows**, including four refused
+attempts; joining ledger identities with accepted fixture records and AWS inventory identified **78 created Spot
+VMs**. One genuine capacity reclamation occurred: `m6bvmav4m5`, c8a.large in us-east-2c. Two other interruptions
+were deliberate FIS experiments, excluded from the real-reclamation numerator.
+
+| Zone | Instance type | Created Spot VMs | Real reclamations | Synthetic FIS | Still active at census |
+|---|---|---:|---:|---:|---:|
+| us-east-2a | c8a.large | 2 | 0 | 1 | 0 |
+| us-east-2c | c8a.large | 17 | 1 | 1 | 3 |
+| us-east-2c | c8a.xlarge | 2 | 0 | 0 | 1 |
+| us-east-2c | c8a.2xlarge | 36 | 0 | 0 | 9 |
+| us-east-2c | c8a.4xlarge | 21 | 0 | 0 | 3 |
+
+Observed real-reclamation incidence was **1/78 created VMs (1.28%)**, or **1/82 allocation attempts (1.22%)**;
+for c8a.large in us-east-2c it was **1/17 (5.88%)**. This is a short mixed proof/production sample with 16 VMs
+still active at the census, not a stable service-rate estimate. With both deliberately interrupted VMs removed
+from the denominator too, it is 1/76 non-FIS VMs (1.32%). EC2 interruption still fails the job without automatic
+rerun, so this operational tradeoff remains visible rather than hidden by retry behavior.
+
+Pre-activation work stayed below the $25 ceiling: the conservative resource estimate was about $1.50 at M5
+completion and below $2 at activation. At 12:04Z the M6 finalized cohort reported 63 EC2 VMs/$2.6501 gross,
+including $2.5033 placed with credit preference on; GCE reported 63 VMs/$0.4660. These are cohort estimates,
+not invoices or exact promotional-credit usage. AWS's lagged persisted reading was $0.19423134 through
+2026-10-25, read at 09:37:12.999Z, leaving $179.81 against policy budget. Active production load continues
+accruing; no fixed final account-spend claim is made.
+
+### Cleanup and operating state
+
+Final explicit-fixture sweeps found zero pending/running/stopping/stopped/shutting-down fixture instances and
+zero fixture volumes. Workflow-linked GCE proof instances were absent. All temporary proof branches and
+manual fixture runner registrations were removed. The broader pool sweep at completion contained four live
+production job VMs and four attached production volumes, with no stopped instance or unattached volume;
+these were retained, not mistaken for leaks. Ready AMI `ami-0053d3b9003781572` and its completed snapshot
+`snap-09448861ba825fb31` are intentional retained capacity. No background proof or experiment remains active.
+
+Rollback remains **config first**: restore the pre-activation lists/credit flag and verify the runtime observes it
+before any traffic rollback. The immediately preceding revision 00023-sb6 is the recorded rollback target for
+00024-zhh; use it only if the new revision is at fault, since it lacks the final Spot-status/cleanup correction.
+
+### What changed the plan, and what remains
+
+The highest-value findings came from real service boundaries: Canonical's IAM owner alias, cloud-final rewriting
+image residue after userdata, GitHub immutable OIDC subjects, Smithy's header-only timeout behavior, FIS's
+experiment-specific Spot status, and concurrent volume deletion. Each was reproduced or observed, fixed with
+focused RED/GREEN evidence, independently reviewed and verified through the applicable live path. The
+whole-initiative review also found a pre-send reservation leak that milestone tests missed; the bounded recovery
+and send-age fence now cover crashes, write failures and overlapping writers without introducing a second
+scheduler or distributed lock.
+
+The process correction is to pair finite progress monitors with durable terminal watchers; a first bake failure
+was otherwise noticed hours late despite successful automatic cleanup. Deployment was deliberately staged:
+core with credit off, genuine durable billing verification, separate activation, then bounded acceptance fixtures.
+No production regression required rollback. GitHub's roughly ten-minute lost-runner failure delay is distinct
+from EC2 termination and was recorded rather than mistaken for a stuck cloud instance.
+
+All material review findings are resolved. Deferred items remain in ci-kit #108: shared overrun-alert wording,
+initialization tariff metadata beyond the promoted 200MiB/s setting, and rate-throttle spill to GCE. They do not
+weaken the accepted lifecycle or credit safeguards. The next useful work is ordinary production observation of
+interruption incidence, readiness latency and credit burn; changing retry policy, provider order or cost policy is
+a new product decision, not an implicit continuation of this completed initiative.
