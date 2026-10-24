@@ -507,11 +507,27 @@ into per machine (`install.sh --vm`), and a Mac without it has none of what foll
 | Launcher | `mac/vm/lane.sh`, the program of the LaunchAgent `com.ssfskim.ci-kit.vm-lane` (RunAtLoad, KeepAlive, Aqua session only, `ProcessType` Interactive), run from the installed kit. It is the only automated way a guest starts: it reads the queue every 15 s, decides admission, boots a job clone, follows it through its one job and deletes it. Its header has the lifecycle, the boot rule, the guard and every input. |
 | Installed kit | `~/ci-kit-vm/kit`, a copy of `mac/` that `install.sh` publishes with the hooks' staged swap, so the checkout can move on. Every clone is shown it read-only, so a hook change needs no image refresh. |
 | Golden image | the local Tart VM `~/ci-kit-vm/golden` names (`maws-vm-golden-<id>`): the macOS 27 base (`ghcr.io/cirruslabs/macos-golden-gate-base`) with Node 22, pnpm, the warm store, LibreOffice, Poppler, the runner, its seeded MAWS work repository and the compiled helpers baked in. It is never run for a job; only the [maintenance procedure](#the-vm-lanes-maintenance) makes or replaces it. |
-| Job clone | `maws-vm-job-vm-<time>`, an APFS copy of the golden image (seconds; it holds only what the job writes), run with `tart run --no-graphics --no-clipboard` (its pasteboard is never the host's) and four directory shares: the kit and the slot's identity read-only, its `out/` and `cache/` read-write. |
-| Slot | `~/ci-kit-vm/vm/`: `identity/` (the runner's `.runner`, `.credentials`, `.credentials_rsaparams`, copied into each clone and never baked), `out/` (what the guest writes back: its markers, `_diag`, its hooks log), `cache/` (MAWS's e2e build cache). The trial slot, `~/ci-kit-vm/vm-trial/`, is the same for a candidate's trial and serves nothing else. |
-| In the guest | `mac/vm/guest/`: `kickoff.sh` (run by `tart exec`, which is gRPC to the Tart guest agent, never the guest's address) makes the clone the slot's runner and starts `wrapper.sh`, which runs `run.sh --once`, writes the `out/` markers (its header is the protocol), answers the idle stop and powers the guest off; `hooks/` is the guest's start and end, cut down: the display and dialog check, Terminal in front, the posture line with `vm=` and `clone=`, no sweep, no alert, no `gh`. |
+| Job clone | `maws-vm-job-vm-<time>`, an APFS copy of the golden image (seconds; it holds only what the job writes), run with `tart run --no-graphics --no-clipboard` (its pasteboard is never the host's) and four directory shares: the kit and this clone's JIT directory read-only, its `out/` and `cache/` read-write. |
+| Slot | `~/ci-kit-vm/vm/`: `jit/<clone>/` (a 0700 directory holding the 0600 one-use config and cleanup record, removed at teardown), `out/` (what the guest writes back: its markers, `_diag`, its hooks log), `cache/` (MAWS's e2e build cache). The trial slot, `~/ci-kit-vm/vm-trial/`, is the same for a candidate's trial and serves nothing else. |
+| In the guest | `mac/vm/guest/`: `kickoff.sh` (run by `tart exec`, which is gRPC to the Tart guest agent, never the guest's address) makes the clone the slot's runner and starts `wrapper.sh`, which supplies the JIT config to `run.sh` through its masked secret input environment, writes the `out/` markers (its header is the protocol), answers the idle stop and powers the guest off; `hooks/` is the guest's start and end, cut down: the display and dialog check, Terminal in front, the posture line with `vm=` and `clone=`, no sweep, no alert, no `gh`. |
 | State | in `~/Library/Logs/ci-kit`, each file replaced whole, written under `desktop.lock`: `vm-reserved` (the slot's reservation), `vm-released` (the last release's epoch second), `vm-hold.<owner>` (the holds, written and removed by `mac/vm/hold.sh`), `vm-claim.<worker>` (host jobs keeping the guest out), `vm-pause` (the guard's), and the launcher's own `vm-failures` and `vm-lane.alert.<kind>`. |
 | Logs | `vm-lane.log` (every decision, every boot's reads, the guard's samples, each clone's `out/` folded in at its end), `vm-run.log` (the clones' `tart run` output), `vm-out/<clone>/` (the last 20 clones' `out/`), `vm-bake.log` (the maintenance procedure's transcript); the guest's hook lines land in `mac-runner-hooks.log`. |
+
+**One registration per clone.** Before booting, `jit.py` mints `generate-jitconfig` through the machine user's
+existing `gh` login, with `GH_TOKEN` and `GITHUB_TOKEN` removed just as the queue reader does. No new credential or
+token file is installed. GitHub itself holds a JIT runner to one job; the old persistent runner's `--once` could
+lose the next queued job to an exiting poll (actions/runner#4728). A mint failure logs a reason, boots nothing and
+retries on the lane's next poll. Each clone sees only its own config, never in argv, logs or `out/`; the listener
+consumes and removes `ACTIONS_RUNNER_INPUT_JITCONFIG` before workers start and writes identity files under umask 077.
+After the verified end, teardown deletes the registration if it remains (404 is fine), revokes the local config,
+and removes its directory. A failed delete retains the nonsecret cleanup record and reservation for retry. Recovery
+also finds a mint interrupted before the clone existed, using the record written before POST and its unique name.
+
+`bake.sh --register` is retired and refuses without booting. Existing `vm/identity/` and `vm-trial/identity/`
+directories are unused and not shared or modified. Once installed, the old persistent GitHub registrations
+`ci-kit-mac-<machine>-vm` and `ci-kit-mac-<machine>-vm-trial` can be deleted by the coordinator; this change does not
+delete them. `--trial` mints its own config with only `ci-kit-mac-vm-trial` and cleans it up by the same path.
+An interrupted trial's stopped registration is cleaned by the next trial or `--retire <trial clone>`.
 
 **The reservation.** `vm-reserved` means "a job clone of this slot may be running", whatever became of the launcher
 that wrote it. It is written in the same locked step that spawns the clone, before the clone exists, and removed only
@@ -524,8 +540,8 @@ detached), so the reservation is never read as stale by its writer's pid: settle
 | Runner | Labels | Who reaches it |
 |---|---|---|
 | `ci-kit-mac-<machine>` (the exclusive instance) | today's, plus `ci-kit-mac-solo` | today's jobs, and a solo job when it is free |
-| `ci-kit-mac-<machine>-vm` (the guest) | `ci-kit-mac-solo`, `ci-kit-mac-vm` (`--no-default-labels`) | a solo job when it is free, or a job forced to the guest |
-| `ci-kit-mac-<machine>-vm-trial` (a candidate's trial clone) | `ci-kit-mac-vm-trial` alone | a trial commit's job, and nothing else |
+| `ci-kit-mac-<machine>-<job clone>` (the guest) | `ci-kit-mac-solo`, `ci-kit-mac-vm` (JIT labels, no OS/architecture defaults) | a solo job when it is free, or a job forced to the guest |
+| `ci-kit-mac-<machine>-<trial clone>` (a candidate's trial clone) | `ci-kit-mac-vm-trial` alone | a trial commit's job, and nothing else |
 
 A job that asks for `[ci-kit-mac-solo]` runs on whichever of the exclusive instance and the guest is free: GitHub's
 assignment does the balancing, and the launcher boots a clone only when the host will not take the job first. MAWS
@@ -755,7 +771,7 @@ booking.
    #   expect: booted out
    ```
 
-2. **The reserve.** `--bake`, `--register` and `--trial` read the free space of the volume of `~/.tart` and refuse
+2. **The reserve.** `--bake` and `--trial` read the free space of the volume of `~/.tart` and refuse
    under `CI_KIT_VM_DISK_RESERVE` GB (40), printing the figure. `--bake` also prints the lowest free space it saw
    between its steps, and stops under the floor (5 GB). The first refresh (2026-10-23) measured an 8 GB bake peak:
    134 GB free before, lowest 126 GB during, 124 GB after registration and the trial. The default stays 40 GB,
@@ -813,7 +829,7 @@ booking.
    **The image carries a work repository, not just a warm store.** After installing the runner (which replaces its
    directory), `workrepo` clones the share's master into `<runner>/<work folder>/MAWS/MAWS`, normally
    `~/actions-runner-maws/_work/MAWS/MAWS`. It reads `.runner`'s `workFolder` if present; before registration it uses
-   the same `_work` setting as `register`. The clone is depth 1, single-branch, without tags, made through git's
+   the same `_work` setting as the JIT registration. The clone is depth 1, single-branch, without tags, made through git's
    transport (`--no-local`) so it holds its own objects: no hardlinks, alternates, copied host config, credentials,
    dependencies or dirty files. Its origin is `https://github.com/SSFSKIM/MAWS`, exactly the URL checkout v7 expects.
    The `.git` directory, clean tree and valid HEAD let checkout detach, remove old refs, clean and reset without
@@ -873,29 +889,16 @@ booking.
    step in a candidate. A cancelled `tart exec` can kill the cleanup shell; the next run cleans its leftovers first.
    A failure leaves the guest up for inspection and returns non-zero. Fix the cause and rerun `--first-run` until it
    passes. Only then does it shut the guest down itself, with `sudo -n /sbin/shutdown -h now`, and verify the stop:
-   under `tart exec`, sudo's PATH has no `/sbin`, so the full path is needed. Run `--register` only after that pass
-   and verified stop. `--register` and `--trial` refuse a candidate still running.
+   under `tart exec`, sudo's PATH has no `/sbin`, so the full path is needed. Run `--trial` only after that pass
+   and verified stop; it refuses a candidate still running.
 
-4. **Registration**, once per identity, not per refresh (the first refresh, or after a slot's identity is removed):
-   `--register` boots the candidate (or the golden), runs the runner's `config.sh --unattended --no-default-labels`
-   for each slot whose `identity/` is incomplete, production first (`ci-kit-mac-mini-vm`, `ci-kit-mac-solo,
-   ci-kit-mac-vm`), then the trial's (`ci-kit-mac-mini-vm-trial`, `ci-kit-mac-vm-trial`), moves each identity's three
-   files to its slot (mode 600) and out of the image, and verifies the stop. It reads one token a line on stdin, one
-   per identity it registers, every one before it boots, and hands each to the guest on the exec's stdin, never in an
-   argument:
-
-   ```bash
-   for i in 1 2; do gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token; done \
-     | ssh mini "~/ci-kit-vm/kit/vm/bake.sh --register $cand"
-   gh api repos/SSFSKIM/MAWS/actions/runners --jq '.runners[]|select(.name|test("-vm"))|[.name,.status,([.labels[].name]|join(","))]|@tsv'
-   #   expect: ci-kit-mac-mini-vm  offline  ci-kit-mac-solo,ci-kit-mac-vm
-   #           ci-kit-mac-mini-vm-trial  offline  ci-kit-mac-vm-trial
-   ```
+4. **Registration is automatic.** No `--register` step or registration token is needed. The trial and job clone
+   each mint a JIT configuration with the host user's existing `gh` login, as described above.
 
 5. **The trial.** Push a scratch MAWS commit whose trailer is `Lane: vm-trial` (`scripts/ci-gate.sh --lane vm-trial`,
    with `MAC_VM_E2E` naming one group, `document-app` the first time); its job asks for `[ci-kit-mac-vm-trial]` alone
    and waits queued. Then `--trial` clones the candidate to `maws-vm-trial-<time>` and boots and kicks it off as the
-   launcher boots a job clone, but with the trial slot's identity, `out/` and cache, so its runner carries
+   launcher boots a job clone, but with its own JIT config and the trial slot's `out/` and cache, so its runner carries
    `ci-kit-mac-vm-trial` alone and no production job can reach it. It prints each `out/` marker, waits for the guest
    to power itself off (no job within 30 min: the idle stop; a job past 50 min: a stop), verifies the stop, deletes
    the clone, keeps its `out/` as `~/ci-kit-vm/trials/<clone>.out`, reads the job's numeric id and conclusion

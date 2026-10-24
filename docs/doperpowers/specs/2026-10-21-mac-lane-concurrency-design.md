@@ -94,6 +94,11 @@ and by the coordinator's holds, and the design below says what is read and when.
 
 ## Progress
 
+- 2026-10-24: Implemented clone-scoped JIT registration using the mini's existing `gh` login, including trial
+  clones, private config transport, teardown/restart cleanup, and credential-boundary tests. The live MacBook probe
+  minted and deleted MAWS runner 3290: only the requested probe label, no macOS/ARM64 labels. Awaiting the PR's
+  independent review and CI gate; deployment and merge remain CI-opt's work.
+
 - [x] (2026-10-21 09:5xZ) Read-only audit of every MAWS Mac group (local:
   `~/Developer/ci-analysis/mac-concurrency-audit.md` on the MacBook; MAWS is private, so this spec carries its
   conclusions, not its line references).
@@ -373,15 +378,15 @@ fail rules.
   Aqua session only, like the runners'). It is in the user's GUI session on purpose: Virtualization.framework needs an
   unlocked login keychain on macOS 15+ (Tart's FAQ: "Failed to generate keypair" without one), which auto-login gives
   the mini's session at boot, and the display rule below needs the host's main screen.
-- `mac/vm/bake.sh`: the maintenance procedure's script (`--bake`, `--first-run`, `--register`, `--trial`, `--promote`,
+- `mac/vm/bake.sh`: the maintenance procedure's script (`--bake`, `--first-run`, `--trial`, `--promote`,
   `--retire`), run by the coordinator under the maintenance hold and refusing to run outside it (The image).
 - `mac/vm/guest/`: what runs inside a clone. `kickoff.sh` starts the one job's runner under `wrapper.sh`, which owns the
   listener, writes the `out/` markers from the listener's diag log and process, answers the idle handshake and powers
   the guest off at the end; `hooks/` is the guest's copy of the lane's hooks, cut down (below). The directory is shown
   to every clone read-only, so a hook change needs no image refresh.
-- The slot, `~/ci-kit-vm/<slot>/`: `identity/` (the runner's `.runner`, `.credentials`, `.credentials_rsaparams`),
+- The slot, `~/ci-kit-vm/<slot>/`: `jit/<clone>/` (the private one-use config and cleanup record),
   `out/` (what the guest writes back: its markers, `_diag`, its hooks log) and `cache/` (MAWS's e2e build cache,
-  below). The launcher gives a clone `identity/` and the kit read-only, `out/` and `cache/` read-write, as Tart
+  below). The launcher gives a clone only its own `jit/<clone>/` and the kit read-only, `out/` and `cache/` read-write, as Tart
   directory shares (`--dir`, virtio-fs, mounted in the guest under `/Volumes/My Shared Files/<name>`, as the spike's
   checkout was).
 - The lane's state, in `~/Library/Logs/ci-kit/` beside the shared hold's, written under the same `desktop.lock`, each
@@ -419,7 +424,7 @@ released only after the VM's end is verified; the guard samples through every ro
 |---|---|---|
 | idle | nothing runs; the launcher reads the queue every 15 s (`CI_KIT_VM_POLL`) | the boot rule (Admission) holds |
 | booting | one step under the lock, held from the first write to the spawn: `vm-reserved` written, `tart clone <golden> maws-vm-job-<slot>-<time>` (APFS copy-on-write: seconds, and the clone holds only what the job writes), `tart run --no-graphics` with the four shares spawned detached; a clone that fails releases under the same lock, a spawn that fails deletes the stopped clone first, so no reservation ever stands for a VM that was never asked to run, and nothing can release one between its write and the run | `tart exec <clone> true` answers (37 s in the spike), bound 120 s (`CI_KIT_VM_BOOT`) |
-| kicking off | `tart exec <clone> …/kickoff.sh <slot>`: copies the identity into the runner's directory, links the cache, starts `wrapper.sh` (`run.sh --once` under it) detached from the exec and returns | `out/listening` or `out/session-conflict` appears, bound 60 s |
+| kicking off | `tart exec <clone> …/kickoff.sh <slot>`: requires its own JIT config, links the cache, starts `wrapper.sh` (the JIT listener under it) detached from the exec and returns | `out/listening` or `out/session-conflict` appears, bound 60 s |
 | session recovery | the listener found the slot's previous session still open at GitHub (a clone that died mid-job) and retries, every 30 s for up to 4 min in runner 2.338.0 (`MessageListener`, `BrokerMessageListener`); the wrapper writes the marker from the listener's diag log | `out/listening` appears, bound 5 min (`CI_KIT_VM_SESSION`); past it, teardown, and a failure counted as `session`, apart from the image's count |
 | listening | the runner polls GitHub for its one job | `out/assigned` appears (the wrapper's watcher saw the listener take a job: a job line in the newest diag log, or a `Runner.Worker`); or no assignment within 3 min (`CI_KIT_VM_IDLE`): the idle handshake (below) |
 | preparing | GitHub prepares the job in the guest (`Set up job`, action downloads: minutes in a bad case) before the job-started hook runs | `out/job` appears (the guest's job-started hook writes it) |
@@ -427,19 +432,28 @@ released only after the VM's end is verified; the guard samples through every ro
 | teardown | the VM's end verified: `tart list` shows the clone stopped and no `tart run` of its name is in the process table; if it still runs, `tart stop` (its own timeout, then force), and the check again; `out/` folded into the lane's logs; then `tart delete <clone>`; then `vm-released` stamped and `vm-reserved` removed under the lock | → idle. A stop that fails, or a state that cannot be read, keeps the reservation, is retried each poll, and opens one alert after 10 min (`ci-kit alert: vm lane on <machine> cannot stop <clone> since <minute>`) |
 | failed | a bound passed or a command failed: teardown, the reason logged, a failure counted by kind (`image`, `session`, `memory`, `disk`, `raced`); three `image` failures in a row pause the lane (`vm-pause`, no expiry) and open one alert | an operator clears the pause |
 
-- **Why the runner runs once and exits, with no registration per job.** The guest's runner is a registered,
-  non-ephemeral runner whose identity lives on the host in the slot and is copied into each clone; it is started with
-  `run.sh --once`, so the listener runs one job and then exits (actions/runner `Runner.cs`: the once mode ends the
-  loop after the job finishes, with a warning that `--once` "is going to be deprecated in the future"). It gives a
-  one-job lifecycle without the credential the second review rejected: a just-in-time registration needs an
-  `Administration: write` token on the host, readable by every host job (Decision Log).
-  **It is not race-free at the server** (corrected 2026-10-24): `--once` ends the loop in the client only. To the
-  service the runner is a persistent one, so the service can hand the next queued job to the runner's still-open
-  busy poll at the moment its job completes; the listener aborts that poll and exits, and about 50 min later the
-  job is cancelled as "not acquired by Runner of type self-hosted even after multiple attempts" (actions/runner
-  #4728). It happened once in the guest's first ~80 jobs (Surprises). A just-in-time registration is what the
-  service itself holds to one job: the owner's call on the token, brought back to them if the loss recurs
-  (Decision Log). If `--once` is ever removed, the fallback is that same JIT path.
+- **Why each clone has a JIT registration.** GitHub itself holds a just-in-time runner to one job. The old
+  persistent slot identity, copied into every clone and started with `run.sh --once`, ended the client loop only:
+  the service could hand the next queued job to its still-open busy poll as it exited, then cancel that job about
+  45–52 min later as "not acquired by Runner of type self-hosted even after multiple attempts" (actions/runner#4728).
+  There were 3 lost in 106 guest jobs on 10-24, one in an acceptance run; the owner chose **JIT, existing login**.
+  `jit.py` uses the mini's own bounded `gh api` path, removing `GH_TOKEN` and `GITHUB_TOKEN`, as the queue reader
+  does. That existing owner's classic OAuth login has `repo` scope and repository admin rights: no new token,
+  token file or secret is introduced. The name is `ci-kit-mac-<machine>-<clone>`, `runner_group_id` is 1 and
+  `work_folder` is `_work`. Job labels are `ci-kit-mac-solo`, `ci-kit-mac-vm`; trials get only `ci-kit-mac-vm-trial`.
+  The live probe's mint and GET showed only its requested label, not macOS or ARM64. Runner.cs's JIT path loads
+  the supplied identity without ConfigurationManager's registration/default-label path; a guest cannot match
+  the host's exclusive `[self-hosted, macOS, ARM64]` selector.
+  The encoded config rests only in the clone's 0700 directory as a 0600 file, never in `out/`, logs or arguments.
+  The wrapper supplies `ACTIONS_RUNNER_INPUT_JITCONFIG`; runner 2.338.0's CommandSettings masks and removes that
+  input before workers, and umask 077 keeps its decoded identity files private. Each clone sees only its own
+  directory. A mint failure refuses the boot with its reason and is retried, not counted as an image failure.
+  A cleanup record is published before POST so a lost response or crash before cloning is recoverable by name.
+  After the verified stop, local config access is revoked and the registration is deleted if it remains (404 is
+  success); a failed delete retains only cleanup metadata and the reservation for retry. The directory goes when
+  cleanup succeeds. The old persistent registrations and `identity/` directories are unused, not deleted by this
+  change; `bake.sh --register` is retired. Trials use the same helper and their own label and directory; a stopped
+  interrupted trial is cleaned by the next trial or `--retire`.
 - **Why the runner is started by `tart exec` and not by a LaunchAgent in the image.** TCC on macOS attributes a
   grant to the responsible process, which is how the host's jobs hold Full Disk Access through `/bin/bash`. The base
   image's build writes rows into both TCC databases (cirruslabs `macos-image-templates`, `update-tcc-database.sh`):
@@ -689,14 +703,10 @@ checks:
    verified (`tart list` stopped, no `tart run` of its name in the process table) before the step reports done. The
    first-run window step follows, on the candidate; `--first-run` runs its shell part from the MacBook through ssh
    to the mini, leaving only clicks in the guest (Decision Log, 2026-10-23).
-4. **Registration** (`bake.sh --register`, once per identity, not per refresh): boots the candidate or the golden
-   image, runs `config.sh --unattended --no-default-labels` with a token from stdin (piped from the MacBook as
-   `install.sh` takes it) for the production identity (`ci-kit-mac-<machine>-vm`, labels `ci-kit-mac-solo,
-   ci-kit-mac-vm`), and again with a second token for the trial identity (`ci-kit-mac-<machine>-vm-trial`, the one
-   label `ci-kit-mac-vm-trial`); moves each identity's three files to its slot (`~/ci-kit-vm/vm/identity/`,
-   `~/ci-kit-vm/vm-trial/identity/`); stops the VM and verifies the stop.
+4. **Registration is automatic.** The host mints JIT for each clone with its existing `gh` login. No registration
+   token or `bake.sh --register` step is needed; that command is retired, and the old identities are unused.
 5. **The trial** (`bake.sh --trial <candidate>`): a clone of the candidate, `maws-vm-trial-<time>`, booted and kicked
-   off as the launcher boots a job clone, but given the trial slot's identity, so the guest's runner carries
+   off as the launcher boots a job clone, but given its own JIT config with the trial slot's label, so the guest's runner carries
    `ci-kit-mac-vm-trial` alone: no production job can match it, and the scratch MAWS commit written for the trial
    asks for that label alone (`Lane: vm-trial`, Routing), so the job the clone takes is the trial's and no other. The
    script waits for the clone's power-off, verifies the stop, deletes the clone, reads the run and job ids from
@@ -1728,6 +1738,14 @@ hold-aware plan send them to the guest, which this spec leaves open.
   along with the maintenance hold the script had just taken under the same name. Both times the launcher was still
   booted out, so no guest could start, and the maintenance hold was taken again at once. The timed hold is
   `CI-opt-t`.
+
+- 2026-10-24 (the owner, on CI-opt's lost-job counts): **JIT, existing login.** CI-opt counted 3 jobs lost to
+  actions/runner#4728 in 106 guest jobs today, one in an acceptance run. The owner chose a JIT registration per
+  clone, replacing persistent identity plus `--once`. The mini's existing `gh` login already has the needed rights
+  (the owner's classic OAuth token with `repo` scope and admin access), so this adds no new credential. This
+  supersedes the 10-21 rejection of JIT and the earlier 10-24 decision to wait for recurrence. Merge and install
+  remain CI-opt's; the implementation is prepared as an unmerged PR. Persistent slot registrations remain for
+  CI-opt to delete after installation; job and trial clones no longer use them.
 
 ## Surprises & Discoveries
 

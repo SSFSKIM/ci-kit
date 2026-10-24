@@ -87,7 +87,7 @@
 #   7. CI_KIT_VM_LANE_MODE is always (the default), or hold-only with every host instance held or stopped;
 #   8. every host job now running is VM-safe: a job that is not holds a claim, so this is 3.
 # Outside the rule: the lane's parts must be there (Tart, the golden image ~/ci-kit-vm/golden names (CI_KIT_VM_GOLDEN),
-# read at every boot, the slot's identity, the kit (CI_KIT_VM_KIT, ~/ci-kit-vm/kit)), and a window of CI_KIT_VM_PAUSE_WINDOWS (UTC HH:MM-HH:MM,
+# read at every boot, the kit (CI_KIT_VM_KIT, ~/ci-kit-vm/kit)), and a window of CI_KIT_VM_PAUSE_WINDOWS (UTC HH:MM-HH:MM,
 # comma-separated, none by default) keeps the lane down. Missing parts alert after CI_KIT_VM_GOLDEN_ALERT s (3600) of a
 # job waiting. A hold is logged once per change and alerted, per owner, after CI_KIT_VM_HOLD_ALERT s (21600) on.
 #
@@ -196,7 +196,6 @@ lane_lock=$ci_kit_logs/vm-lane.lock
 run_log=$ci_kit_logs/vm-run.log
 drain_marker=$ci_kit_logs/runner-drained
 markers='listening session-conflict assigned job refused stop-request stop-refused stop-raced stopped done unfit'
-identity_files='.runner .credentials .credentials_rsaparams'
 job_clone_pattern="^maws-vm-job-$slot-[0-9]{8}T[0-9]{6}Z\$"
 
 # Logged when what is said under its key changes, not at every poll; a read whose figures move at every poll gives
@@ -658,6 +657,10 @@ boot() {
   forget boot
   clear_guest
   clone=$name
+  if ! why=$(jit_mint "$repo" "$machine" "$slot_dir" "$slot" "$clone" 2>&1); then
+    boot_undo "$why" no-image-failure
+    return
+  fi
   say "booting $clone from the golden image $g_name: $boot_reads"
   if ! why=$(tart_clone "$g_name" "$clone" 2>&1); then
     why="tart clone $g_name $clone failed: $(tail -1 <<<"$why")"
@@ -666,7 +669,7 @@ boot() {
   fi
   printf '%s %s: tart run\n' "$now" "$clone" >>"$run_log" 2>/dev/null
   # shellcheck disable=SC2046 # one option a line, no space in any
-  tart_spawn "$clone" "$run_log" $(tart_shares "$kit" "$slot_dir")
+  tart_spawn "$clone" "$run_log" $(tart_shares "$kit" "$slot_dir" "$clone")
   run_pid=$tart_run_pid
   for ((i = 0; i < spawn_check * 10; i++)); do
     kill -0 "$run_pid" 2>/dev/null || break
@@ -690,10 +693,10 @@ boot_undo() { # <why>, with the lock held
   # A failed list is not an absent clone: keep the reservation until teardown can verify and delete it.
   if ((status == 0)) && vms=$(tart_vms) &&
     { [[ -z $(tart_state_in "$vms" "$clone") ]] || tart_delete "$clone" >/dev/null 2>&1; } &&
-    release; then
+    jit_delete "$slot_dir" "$clone" && release; then
     unlock
     say "no boot: $1; nothing of $clone is left, and the reservation is released"
-    count_failure image "$1"
+    [[ ${2:-} == no-image-failure ]] || count_failure image "$1"
     clear_guest
     enter idle
     return
@@ -701,7 +704,7 @@ boot_undo() { # <why>, with the lock held
   unlock
   failed=image
   say "$clone: $1; its end cannot be verified here (${tart_why:-the delete or the release failed}); teardown"
-  count_failure image "$1"
+  [[ ${2:-} == no-image-failure ]] || count_failure image "$1"
   enter teardown
 }
 
@@ -742,7 +745,7 @@ raced() { # <job>
   raced_once "an acceptance raced the idle stop (job $1)" \
     "ci-kit alert: vm lane on $machine cancelled job $1 at $(minute "$now") (an acceptance raced the idle stop)" \
     "Clone: $clone
-Job: $1 (the runner's id; GitHub shows the job cancelled on the runner ci-kit-mac-$machine-vm)
+Job: $1 (the runner's id; GitHub shows the job cancelled on the runner ci-kit-mac-$machine-$clone)
 The guest's listener accepted this job as the launcher's idle stop reached it. Rerun the job."
 }
 
@@ -895,7 +898,7 @@ step_stopping() {
   if ((now_epoch - stop_at >= answer_bound)); then
     raced_once "the stop was not answered within $answer_bound s" \
       "ci-kit alert: vm lane on $machine stopped $clone with its idle stop unanswered at $(minute "$now")" \
-      "The wrapper did not answer the idle stop within $answer_bound s, so a job it may have accepted is unknown; the clone was stopped. Check the run on ci-kit-mac-$machine-vm and rerun what was cancelled."
+      "The wrapper did not answer the idle stop within $answer_bound s, so a job it may have accepted is unknown; the clone was stopped. Check the run on ci-kit-mac-$machine-$clone and rerun what was cancelled."
     to_teardown "the stop was not answered within $answer_bound s; stopping it"
   fi
 }
@@ -1020,6 +1023,7 @@ step_teardown() {
     teardown_stuck "tart delete failed: $(tail -1 <<<"$status")"
     return
   fi
+  if ! why=$(jit_delete "$slot_dir" "$clone" 2>&1); then teardown_stuck "$why"; return; fi
   if ! lock 30; then teardown_stuck 'the desktop lock stayed taken'; return; fi
   if ! release; then
     unlock
@@ -1143,7 +1147,7 @@ recovered() {
   recover_since=''
 }
 recover_poll() {
-  local vms clones target vstate pids
+  local vms clones target vstate pids entry
   ((now_epoch >= ${next_poll:-0})) || return 0
   next_poll=$((now_epoch + queue_poll))
   if ! lock 30; then recovery_waits 'the desktop lock stayed taken for 30 s'; return; fi
@@ -1159,6 +1163,11 @@ recover_poll() {
     return
   fi
   clones=$(awk -F'\t' -v p="$job_clone_pattern" '$1 ~ p { print $1 }' <<<"$vms")
+  # A lost reservation must not strand a minted registration (including a crash before tart clone).
+  for entry in "$slot_dir"/jit/*; do
+    [[ -d $entry && ${entry##*/} =~ $job_clone_pattern ]] || continue
+    clones+="${clones:+$'\n'}${entry##*/}"
+  done
   target=$r_vm
   if [[ -z $target ]]; then
     target=${clones%%$'\n'*}

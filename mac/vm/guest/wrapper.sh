@@ -1,6 +1,6 @@
 #!/bin/bash
 # The VM lane's runner wrapper (docs/mac-lane.md, the VM lane), started by kickoff.sh in a job clone as
-# `wrapper.sh <slot> <clone>`. It owns the clone's one runner: it runs `run.sh --once` on the PATH of the runner's
+# `wrapper.sh <slot> <clone>`. It owns the clone's one runner: it runs `run.sh` with a JIT config on the PATH of the runner's
 # .path, so the listener takes one job and exits (a clone without that .path, or whose display is not at the image's
 # mode, starts nothing, says why in out/unfit, and powers off); it tells the launcher, through out/, what the listener
 # is doing, read from the listener's own diag log (diag.sh) and from the processes (a Runner.Worker, by the kernel's
@@ -237,13 +237,22 @@ elif ! vm_display_right; then
   unfit "the display is $dp_res scaling:$dp_scaling, not $vm_display_res scaling:on (the image's bake sets it: provision.sh display)"
 fi
 say "display $dp_res scaling:$dp_scaling ($dp_id)"
-say "starting $vm_runner/run.sh --once (PATH from its .path: $runner_path)"
+say "starting $vm_runner/run.sh with JIT (PATH from its .path: $runner_path)"
 export CI_KIT_VM_SLOT=$slot CI_KIT_VM_CLONE=$clone
 # The runner gets its own process group, which the stop signals as a terminal's Ctrl-C would, and SIGINT back: a
 # command started in the background of a non-interactive shell has it ignored, and a listener that ignores it cannot
 # stop gracefully.
-perl -e '$SIG{INT} = $SIG{QUIT} = "DEFAULT"; setpgrp(0, 0) or exit 126; exec { $ARGV[0] } @ARGV; exit 127' \
-  /usr/bin/env PATH="$runner_path" "$vm_runner/run.sh" --once </dev/null &
+(
+# Runner 2.338.0 consumes and masks ACTIONS_RUNNER_INPUT_JITCONFIG, then removes it
+# from its environment before starting workers. Keep it off argv and make the
+# decoded identity files private too (Runner.cs writes them in the runner root).
+umask 077
+ACTIONS_RUNNER_INPUT_JITCONFIG=$(cat "$vm_jit") || exit 1
+[[ -n $ACTIONS_RUNNER_INPUT_JITCONFIG ]] || exit 1
+export ACTIONS_RUNNER_INPUT_JITCONFIG
+exec perl -e '$SIG{INT} = $SIG{QUIT} = "DEFAULT"; setpgrp(0, 0) or exit 126; exec { $ARGV[0] } @ARGV; exit 127' \
+  /usr/bin/env PATH="$runner_path" "$vm_runner/run.sh"
+) </dev/null &
 pid=$!
 while kill -0 "$pid" 2>/dev/null; do
   watch_once

@@ -42,7 +42,7 @@
 #
 # --vm installs the VM lane (docs/mac-lane.md, the VM lane): the launcher's LaunchAgent com.ssfskim.ci-kit.vm-lane
 # (mac/vm/com.ssfskim.ci-kit.vm-lane.plist), the slots' directories under ~/ci-kit-vm (vm and vm-trial, each with
-# identity/, out/ and cache/, and trials/), and the installed kit ~/ci-kit-vm/kit, a copy of this mac/ directory
+# jit/, out/ and cache/, and trials/), and the installed kit ~/ci-kit-vm/kit, a copy of this mac/ directory
 # published with the hooks' staged swap, which the launcher runs from and every clone is shown read-only. Every host
 # instance's .env gains CI_KIT_VM_RESERVATION (the absolute vm-reserved path, for MAWS's verdict-time load read), and an
 # exclusive instance registered now carries ci-kit-mac-solo too; an existing registration's labels are changed by hand
@@ -523,8 +523,8 @@ if ((vm == 1)); then
   kit_staged=
   mkdir -p "$VM_HOME/trials"
   for slot in vm vm-trial; do
-    mkdir -p "$VM_HOME/$slot/identity" "$VM_HOME/$slot/out" "$VM_HOME/$slot/cache"
-    chmod 700 "$VM_HOME/$slot/identity"
+    mkdir -p "$VM_HOME/$slot/jit" "$VM_HOME/$slot/out" "$VM_HOME/$slot/cache"
+    chmod 700 "$VM_HOME/$slot/jit"
   done
   lane_path=$RUNNER_PATH
   if [[ -n $tart_dir && ":$RUNNER_PATH:" != *":$tart_dir:"* ]]; then lane_path=$tart_dir:$RUNNER_PATH; fi

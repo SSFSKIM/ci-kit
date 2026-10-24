@@ -614,8 +614,8 @@ test('--vm installs the launcher disabled, the kit laid out as mac/ is, the slot
   }
   assert.deepEqual(readdirSync(join(f.home, 'ci-kit-vm')).sort(), ['kit', 'trials', 'vm', 'vm-trial']);
   for (const slot of ['vm', 'vm-trial']) {
-    assert.deepEqual(readdirSync(join(f.home, 'ci-kit-vm', slot)).sort(), ['cache', 'identity', 'out']);
-    assert.equal(statSync(join(f.home, 'ci-kit-vm', slot, 'identity')).mode & 0o777, 0o700);
+    assert.deepEqual(readdirSync(join(f.home, 'ci-kit-vm', slot)).sort(), ['cache', 'jit', 'out']);
+    assert.equal(statSync(join(f.home, 'ci-kit-vm', slot, 'jit')).mode & 0o777, 0o700);
   }
   // Every host instance can read the lane's actual reservation, even while the launcher is disabled.
   const reservation = `CI_KIT_VM_RESERVATION=${join(f.home, 'Library/Logs/ci-kit/vm-reserved')}\n`;

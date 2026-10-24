@@ -137,6 +137,17 @@ if [[ $1 == api ]]; then
   # slow: each API call answers after the seconds the file names (3 when it names none).
   if [[ -e $g/slow ]]; then touch "$g/slow-waiting"; read -r seconds < "$g/slow"; sleep "\${seconds:-3}"; fi
   case $2 in
+    */generate-jitconfig)
+      [[ ! -e $g/fail-mint ]] || { echo 'gh: Resource not accessible (HTTP 403)' >&2; exit 1; }
+      n=$(( $(cat "$g/mints" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$g/mints"
+      cat > "$g/request-$n.json"
+      printf '{"runner":{"id":%s,"name":"fixture","os":"unknown","status":"offline","busy":false,"labels":[]},"encoded_jit_config":"fixture-jit-secret-%s"}\\n' "$n" "$n"
+      exit 0 ;;
+    */actions/runners/[0-9]*)
+      [[ ! -e $g/fail-delete ]] || { echo 'gh: Bad Gateway (HTTP 502)' >&2; exit 1; }
+      [[ ! -e $g/delete-404 ]] || { echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }
+      exit 0 ;;
+    *'/actions/runners?'*) if [[ -f $g/runners.json ]]; then cat "$g/runners.json"; else echo '{"total_count":0,"runners":[]}'; fi; exit 0 ;;
     *'runs?status=queued'*) file=$g/runs-queued.json ;;
     *'runs?status=in_progress'*) file=$g/runs-in_progress.json ;;
     */jobs\\?*) id=\${2#*/runs/}; file=$g/jobs-\${id%%/*}.json ;;
@@ -458,9 +469,9 @@ exec /bin/mv "$@"`);
     // The reservation, written before the clone, names it and the golden image it came from.
     assert.match(m.reserved(), new RegExp(`^reserved since \\S+: vm=${clone} slot=${m.slot} golden=${GOLDEN} \\(launcher ${a.pid}\\)\\nvm=${clone}\\n`));
     assert.match(m.log(), new RegExp(`booting ${clone} from the golden image ${GOLDEN}: 1 ci-kit-mac-vm job\\(s\\) queued; holds none; pressure 1, available 60%, swap 500 MB, swap steady over \\d+ s; free 120 GB; display 2560x1440@2x; mode always`));
-    // tart run with the four shares, the kit and the identity read-only.
+    // tart run with the four shares, the kit and this clone's JIT read-only.
     assert.deepEqual(readFileSync(join(m.vms, clone, 'run.args'), 'utf8').trim().split('\n'), [
-      '--no-graphics', '--no-clipboard', `--dir=kit:${mac}:ro`, `--dir=identity:${m.slotDir}/identity:ro`, `--dir=out:${m.out}`, `--dir=cache:${m.slotDir}/cache`, clone]);
+      '--no-graphics', '--no-clipboard', `--dir=kit:${mac}:ro`, `--dir=jit:${m.slotDir}/jit/${clone}:ro`, `--dir=out:${m.out}`, `--dir=cache:${m.slotDir}/cache`, clone]);
     assert.deepEqual(readFileSync(join(m.vms, clone, 'kicked'), 'utf8').trim().split('\n'), ['/Users/admin/ci-kit/vm/guest/kickoff.sh', m.slot, clone]);
     assert.deepEqual(readdirSync(m.out).filter((name) => name !== 'wrapper.log'), [], 'the clone is handed an empty out/ (the wrapper.log its kickoff opens aside)');
     await m.listening(clone);
@@ -1681,5 +1692,127 @@ exec /bin/mv "$@"`);
     assert.equal(m.failures().total_image, '1');
     assert.equal(m.failures().image_run, '1', 'a clone that failed does not end the run of image failures');
     await finish(m, a);
+  });
+});
+
+
+describe('clone-scoped JIT credentials', macOnly, () => {
+  test('each clone mints one private config, shares only it, and deletes its registration on teardown', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    rmSync(join(m.slotDir, 'identity'), { recursive: true }); // no persistent registration is needed
+    const a = m.start();
+    try {
+      for (let n = 1; n <= 2; n++) {
+        const clone = await m.booted();
+        const request = JSON.parse(readFileSync(join(m.home, `gh/request-${n}.json`), 'utf8'));
+        assert.deepEqual(request, { name: `ci-kit-mac-mini-${clone}`, runner_group_id: 1,
+          labels: ['ci-kit-mac-solo', 'ci-kit-mac-vm'], work_folder: '_work' });
+        const credential = join(m.slotDir, 'jit', clone, 'config');
+        assert.equal(statSync(credential).mode & 0o777, 0o600);
+        assert.equal(statSync(join(m.slotDir, 'jit', clone)).mode & 0o777, 0o700);
+        assert.equal(readFileSync(credential, 'utf8').trim(), `fixture-jit-secret-${n}`);
+        const args = readFileSync(join(m.vms, clone, 'run.args'), 'utf8');
+        assert.ok(args.includes(`--dir=jit:${m.slotDir}/jit/${clone}:ro`));
+        assert.ok(!args.includes('identity'));
+        assert.equal(m.ghCalls().filter((c) => c.includes('repos/SSFSKIM/MAWS/actions/runners/generate-jitconfig')).length, n);
+        m.queue();
+        if (n === 2) m.ghFlag('delete-404');
+        await m.finished(clone);
+        assert.ok(!existsSync(credential), 'the credential must not survive teardown');
+        assert.ok(m.ghCalls().some((c) => c.includes(`repos/SSFSKIM/MAWS/actions/runners/${n}`) && c.includes('DELETE')));
+        if (n === 1) m.queue(['ci-kit-mac-vm']);
+      }
+      for (const call of m.ghCalls().filter((c) => c[0] === 'api')) assert.ok(call.includes('GH_TOKEN=unset'));
+      const check = (dir) => {
+        if (!existsSync(dir)) return;
+        for (const name of readdirSync(dir)) {
+          const path = join(dir, name);
+          if (statSync(path).isDirectory()) check(path);
+          else assert.ok(!readFileSync(path, 'utf8').includes('fixture-jit-secret-'), `credential leaked to ${path}`);
+        }
+      };
+      check(m.logs); check(m.out);
+      assert.ok(!a.stderr().includes('fixture-jit-secret-'));
+    } finally { await finish(m, a); }
+  });
+
+  test('a failed runner delete revokes the config but retains recovery metadata and reservation until retry', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    const a = m.start();
+    let b;
+    try {
+      const clone = await m.booted();
+      m.queue(); m.ghFlag('fail-delete');
+      m.mark('done', '0'); m.powerOff(clone);
+      await m.waitLog(/cannot be torn down yet.*JIT delete.*HTTP 502/);
+      assert.ok(m.reserved());
+      assert.ok(!existsSync(join(m.slotDir, 'jit', clone, 'config')));
+      assert.ok(existsSync(join(m.slotDir, 'jit', clone, 'runner.json')));
+      await a.kill();
+      m.ghFlag('fail-delete', false);
+      b = m.start();
+      await m.waitLog(/recovery: no job clone and no reservation; idle.*$/s);
+      await m.until(() => !m.reserved(), 'the cleanup retried after restart');
+      assert.ok(!existsSync(join(m.slotDir, 'jit', clone)));
+    } finally { await finish(m, ...(b ? [b] : [a])); }
+  });
+
+  test('recovery cleans a mint whose response was lost before a VM or reservation remained, by exact clone name', async () => {
+    const m = lane();
+    const clone = `maws-vm-job-${m.slot}-20261021T120000Z`;
+    const name = `ci-kit-mac-mini-${clone}`;
+    const dir = join(m.slotDir, 'jit', clone);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, 'runner.json'), JSON.stringify({ repo: 'SSFSKIM/MAWS', name }), { mode: 0o600 });
+    writeFileSync(join(m.home, 'gh/runners.json'), JSON.stringify({ total_count: 2, runners: [
+      { id: 41, name, os: 'unknown', status: 'offline', busy: false, labels: [] },
+      { id: 42, name: 'ci-kit-mac-mini-vm', os: 'osx', status: 'offline', busy: false, labels: [] },
+    ] }));
+    const a = m.start();
+    try {
+      await m.waitLog(/recovery: no job clone and no reservation; idle/);
+      const deletes = m.ghCalls().filter((c) => c.includes('DELETE'));
+      assert.deepEqual(deletes.map((c) => c[1]), ['repos/SSFSKIM/MAWS/actions/runners/41']);
+      assert.ok(!existsSync(dir));
+      assert.equal(m.reserved(), null);
+    } finally { await finish(m, a); }
+  });
+
+  test('the trial slot mints only its trial label; failed gh output cannot leak credential bytes', () => {
+    const m = lane();
+    const helper = join(mac, 'vm/jit.py');
+    const env = { ...process.env, HOME: m.home, CI_KIT_GH_BIN: join(m.home, 'bin/gh'), GH_TOKEN: 'job-token' };
+    const clone = 'maws-vm-trial-20261021T120000Z';
+    const dir = join(m.vmHome, 'vm-trial');
+    const minted = spawnSync('python3', ['-I', helper, 'mint', 'SSFSKIM/MAWS', 'mini', dir, 'vm-trial', clone], { env, encoding: 'utf8' });
+    assert.equal(minted.status, 0, minted.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(join(m.home, 'gh/request-1.json'), 'utf8')), {
+      name: `ci-kit-mac-mini-${clone}`, runner_group_id: 1, labels: ['ci-kit-mac-vm-trial'], work_folder: '_work',
+    });
+    const removed = spawnSync('python3', ['-I', helper, 'delete', dir, clone], { env, encoding: 'utf8' });
+    assert.equal(removed.status, 0, removed.stderr);
+    executable(join(m.home, 'bin/gh'), 'echo "fixture-jit-secret-on-stdout"; echo "fixture-jit-secret-on-stderr (HTTP 403)" >&2; exit 1');
+    const failed = spawnSync('python3', ['-I', helper, 'mint', 'SSFSKIM/MAWS', 'mini', dir, 'vm-trial', clone], { env, encoding: 'utf8' });
+    assert.equal(failed.status, 1);
+    assert.match(failed.stderr, /JIT mint: POST failed \(HTTP 403\)/);
+    assert.ok(!(failed.stdout + failed.stderr).includes('fixture-jit-secret'));
+    assert.ok(!existsSync(join(dir, 'jit', clone, 'config')));
+  });
+
+  test('a mint failure refuses the boot with its reason and retries without an image pause', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    m.ghFlag('fail-mint');
+    const a = m.start();
+    try {
+      await m.waitLog(/no boot:.*JIT.*HTTP 403/);
+      assert.equal(m.calls().filter((c) => c.startsWith('clone ') || c.startsWith('run ')).length, 0);
+      await m.until(() => m.ghCalls().filter((c) => c[1]?.endsWith('/generate-jitconfig')).length >= 4, 'four refused mints');
+      assert.equal(m.pause(), null);
+      assert.equal(Number(m.failures().image || 0), 0);
+      m.ghFlag('fail-mint', false);
+      const clone = await m.booted();
+      m.queue();
+      await m.finished(clone);
+    } finally { await finish(m, a); }
   });
 });
