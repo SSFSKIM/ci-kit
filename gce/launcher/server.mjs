@@ -18,6 +18,7 @@ import { createGitHub } from '../../lib/github.mjs';
 import { createAppTokens } from '../../lib/github-app.mjs';
 import { createConfigSource } from './source.mjs';
 import { createGceLedger } from './ledger-store.mjs';
+import { createCreditManager } from './credit.mjs';
 import { Launcher } from './launcher.mjs';
 import { createPreparation } from './preparation.mjs';
 import { stockoutMemory } from './logic.mjs';
@@ -52,7 +53,7 @@ async function deps(preparation) {
   github = gh;
   // stockouts: capacity refusals remembered across ticks (logic.mjs stockoutMemory), for this process's life; limits:
   // the placements' quota limits (room.mjs), read live and kept for minutes.
-  return { gce, gh, source, ledgers: new Map(), providerState: new Map(), stockouts: stockoutMemory(), limits: createLimits(gce, log) };
+  return { gce, gh, source, ledgers: new Map(), credits: new Map(), providerState: new Map(), stockouts: stockoutMemory(), limits: createLimits(gce, log) };
 }
 
 async function reconcile(preparation) {
@@ -65,7 +66,9 @@ async function reconcile(preparation) {
   if (!d.ledgers.has(key)) d.ledgers.set(key, createGceLedger(d.gh, cfg.ledger, { log }));
   const error = (message, fields) => say('ERROR', message, fields);
   const providers = createProviders({ gce: d.gce, cfg, config, ec2, log, limits: d.limits });
-  const launcher = new Launcher({ provider: providers[0], providers, gh: d.gh, ledger: d.ledgers.get(key), cfg, config, poolRepos, ec2, repoProviders, log, error, stockouts: d.stockouts, providerState: d.providerState });
+  if (!d.credits.has(cfg.ledger.repo)) d.credits.set(cfg.ledger.repo, createCreditManager({ gh: d.gh, repo: cfg.ledger.repo, log }));
+  const creditPreference = await preparation.time('credit', () => d.credits.get(cfg.ledger.repo).update(ec2));
+  const launcher = new Launcher({ provider: providers[0], providers, gh: d.gh, ledger: d.ledgers.get(key), cfg, config, poolRepos, ec2, repoProviders, creditPreference, log, error, stockouts: d.stockouts, providerState: d.providerState });
   return { config: config.slice(0, 8), repos: cfg.repos.map((r) => r.repo), ...(await launcher.tick(preparation)), github: d.gh.stats() };
 }
 

@@ -61,7 +61,7 @@ export class Launcher {
       return { promise, cancel: () => clearTimeout(timer) };
     };
     this.providerState ??= new Map();
-    this.creditPreference ??= (account) => account.credit?.enabled !== false;
+    this.creditPreference ??= (account) => !account.credit; // a credit account needs durable billing authority
     this.provider ??= createProvider({ gce: this.gce, cfg: this.cfg, config: this.config, now: this.now, log: this.log,
       after: this.after, limits: this.limits, insertDeadlineMs: this.insertDeadlineMs });
     this.providers = new Map((deps.providers ?? [this.provider]).filter((p) => p.name !== 'ec2' || this.ec2?.accounts.some((a) => a.account === p.account)).map((p) => [keyOf(p, this.cfg.project), p]));
@@ -260,6 +260,12 @@ export class Launcher {
     const result = new Map();
     await Promise.all(this.partitions(seen).map(async (part) => {
       const allocs = reportable(part.instances, runnersOf).map((v) => ({ ...(seen.rowOf.get(v.alloc) ?? {}), alloc: v.alloc, instance: v.name, zone: v.zone }));
+      if (part.api.name === 'ec2') {
+        // S3 reports outlive the VM: its exit and termination can both occur between ticks. Known
+        // inventory is required by partitions(); absent allocations do not depend on runner visibility.
+        const live = new Set(part.instances.map(i => i.alloc));
+        allocs.push(...part.rows.filter(r => r.state !== 'final' && !live.has(r.alloc)));
+      }
       const reports = await part.api.readReports(allocs, preparation);
       for (const a of allocs) result.set(a.instance, reports.get(a.alloc)?.terminal ?? null);
     }));
@@ -442,7 +448,7 @@ export class Launcher {
       instances: seen.instances,
       runnerKnown: (row) => seen.runners.has(row.repo),
       runnerOf: (row) => this.runnerOf(seen, row.repo, row.instance),
-      preempted: preempted && new Set(preempted.keys()),
+      preempted: preempted && new Set(preempted.keys()), reports: seen.reports,
       now: this.now(), cfg: this.cfg, complete: seen.complete,
     });
     for (const a of actions) {
