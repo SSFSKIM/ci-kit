@@ -64,7 +64,7 @@ measurement exists.
   40014591706 green; PR #109 merged dcdc629. Fresh-main revision ci-kit-launcher-00020-t8v passed MAWS class 1a
   run 40015186704: all six pool jobs on GCE, v2 rows, no ERROR logs or rollback. AWS resource spend unchanged
   from M1's <=$0.735, plus this execution's one $0.01 Cost Explorer read.
-- [ ] M5: the EC2 provider, its image and its one-time setup, serving ci-kit-sandbox.
+- [x] (2026-10-24 09:17Z) M5: the EC2 provider, its image and its one-time setup, serving ci-kit-sandbox.
   Code reviewed approved through be1dd1a; full gate 40018176821 green at 12c6cdd (successor is whitespace only).
   Initialization metadata for non-200 rates is deferred to ci-kit #108 entry 2. Required image-residue smoke
   assertions fixed in 116bab4: injected-artifact RED/GREEN, focused guest tests 41/41. PR #111 and IAM correction
@@ -76,7 +76,12 @@ measurement exists.
   Production scheduler run 40078252824 passed on EC2. Disabled/absent generic demand passed on GCE;
   never-online retirement passed. Independent guest-only five-minute deadline shutdown passed (1.839-second
   observed upper bound); disabled restoration finalized the held EC2 row and released its reservation 33 seconds
-  after merge. Final enabled restoration, resumed pinned-job proof and final sweep remain.
+  after merge. PR #118/f5e66bb restored the exact starting configuration at 09:14:32Z after exact-head gate
+  40080962319 passed. Previously queued pinned job 40079511350 then passed on EC2 at 09:15:40Z; disabled and
+  absent generic jobs had passed on GCE. Final sweep: zero active/stopped pool instances, zero pool volumes,
+  one intentional ready AMI. Fixture runners, temporary branches and isolated security group removed. Production
+  still serves revision 00021-qth, credit disabled. Conservative cumulative AWS execution estimate about $1.50,
+  not a settled bill, comfortably below the $25 pre-activation limit.
 - [ ] M6: credit preference, reports, guard, the MAWS canary and acceptance.
 
 ## What it must not be
@@ -1152,17 +1157,23 @@ A notice without terminal evidence is not a cleanup signal; the actual interrupt
     gh issue list --repo SSFSKIM/ci-kit-sandbox --search '"ec2 credit" in:title' --state all --json number,title
     gh api repos/SSFSKIM/ci-kit-sandbox/issues/<credit-issue-number>/comments --jq '.[].body'
 
-For the budget proof, run the launcher with a test config whose `budget_usd` is below this reading's `billed_usd`.
-Keep a running sandbox VM through that tick and queue generic demand. Observe the exact budget log, GCE-first
-placement and that the running VM was untouched. For stale billing, supply a reading with `read_at` more than
-48 h old and make refresh unavailable for that fixture; otherwise a successful refresh would rightly make the
-data fresh. Observe the exact stale-billing log and the same placement behaviour. Restore the normal config
-and reading after the proof; do not replace production billing with invented amounts. Tests also exercise the
-flag and date ends, overlapping writers and a missing issue.
+For the budget proof, use the deployed launcher with a test config on main whose `budget_usd` is below the
+actual reading's `billed_usd`. Keep a real running sandbox VM through that tick and queue generic demand.
+Observe the exact budget log, real GCE-first placement and that the running VM was untouched; restore normal
+config afterward. This proves the deployed transition path.
+
+For stale billing, run an isolated acceptance harness at exactly the commit production serves, recording that
+SHA beside the Cloud Run revision. Use the real credit manager, reading selection and scheduler walk. Replace
+only the Cost Explorer transport (failing), the reading source (a genuine reading copied and aged beyond 48 hours
+only in the fixture), and all cloud mutation transports (record-only, never real writes). Reading real running VM
+inventory is permitted. Record the account-naming `credit preference off: stale billing` log, the scheduler's
+GCE-spot-before-EC2 decision for synthetic generic demand without launching it, and zero retire/stop calls against
+the existing VM. Assert zero real mutations; never write the aged fixture to a production issue or real ledger.
+Tests also exercise flag and date ends, overlapping writers and a missing issue.
 
     cd /private/tmp/ci-kit-deploy
     gcloud logging read 'resource.labels.service_name="ci-kit-launcher" AND (jsonPayload.message:"credit preference off:" OR textPayload:"credit preference off:")' --project ssfskim-ci-kit --freshness=1h --format='value(jsonPayload.message,textPayload)'
-    # expect for the respective fixtures: "credit preference off: budget"; "credit preference off: stale billing"
+    # expect live: "credit preference off: budget"; the isolated harness emits "credit preference off: stale billing"
     node gce/cost-report.mjs --since <ISO>
     node gce/latency-report.mjs --since <ISO>
     # expect: groups per provider; estimated row costs, AWS billing reading and remaining budget
@@ -1735,6 +1746,16 @@ The production chain is reviewed at each boundary:
   deprecated and untagged ones, must protect their references. M6 review found and verified the two-pass fix
   in bf8c617; preactivation head bf8c617 and activation-only commit fac0ec3 remain separate.
   Date/Author: 2026-10-24, M6 reviewer, executor and controller.
+
+- Decision: Stale-billing injection uses an isolated production-code harness at the deployed SHA, not the live
+  billing issue. Real policy/reading-selection/scheduler modules consume a genuine reading aged only in the
+  fixture and failed CE transport; all cloud mutations are intercepted and asserted absent. Record the exact
+  stale log, GCE-before-EC2 walk and zero retirement calls against the observed VM. The budget predicate still
+  gets its separate deployed-main-config, real-VM, real-demand proof.
+  Rationale: the live budget transition proves deployed wiring; stale differs in its predicate. Rejected live
+  stale injection because it contaminates durable billing or requires breaking production CE access. Rejected a
+  second live scheduler because it widens cloud/config scope without improving the predicate evidence.
+  Date/Author: 2026-10-24, design-owner direction and controller.
 
 ## Outcomes & Retrospective
 
