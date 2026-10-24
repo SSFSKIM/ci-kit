@@ -1638,6 +1638,24 @@ The production chain is reviewed at each boundary:
   uses the cloud bake's long wait without changing production eligibility or weakening milestone acceptance.
   Date/Author: 2026-10-24, controller execution sequencing.
 
+- Decision: M6 billing refresh runs on the next UTC day subject to the persisted six-hour floor; failed reads
+  retry at most hourly within a process, and stored readings are refreshed every five minutes. Matching billing
+  issues are read even when closed or duplicated; newest valid `read_at` wins and pruning retains twenty readings.
+  Cost-report row estimates explicitly describe finalized VM cohorts created in the requested window, separate
+  from lifetime account billing. Missing injected policy defaults credit accounts off; no-credit accounts retain
+  their configured list order.
+  Rationale: preserve best-effort cost control across restarts/overlaps without introducing locks or equating
+  cohort estimates with account spend. These implementation defaults remain subject to M6 review.
+  Date/Author: 2026-10-24, M6 executor and controller.
+
+- Decision: M6 rolls out in two stages after M5 acceptance: merge and deploy core policy/report/guard code while
+  production credit stays disabled, then merge a separate activation-config commit. Config merges, not only
+  launcher deploys, change production eligibility because the launcher reloads main at runtime.
+  Rationale: the M5 launcher treats the credit flag as a policy input without durable billing injection. Merging
+  activation before deploying M6 could briefly run credit-first under the old implementation. A distinct final
+  activation commit preserves the intended end state without that unguarded interval.
+  Date/Author: 2026-10-24, M6 executor and controller.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
