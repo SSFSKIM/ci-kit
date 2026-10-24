@@ -20,7 +20,7 @@
 #               wrapper that started no runner (out/unfit: no .path, the display off the image's mode) is an `image`
 #               failure naming its reason, counted once per clone even after a failed kickoff or a launcher restart.
 #               This terminal outcome is read in every active state and at teardown: no stop answer is owed
-#   session     the listener found the slot's last session open: until out/listening (or out/assigned, a job taken
+#   session     the listener reported an open session (the recovery protocol is retained): until out/listening (or out/assigned, a job taken
 #               all the same), at most CI_KIT_VM_SESSION s (300); past it a `session` failure, counted apart from
 #               `image`. A bound passed before a job (the kickoff's, the session's) gives the guest up through the
 #               idle handshake where a wrapper may run, and stops it outright only where none can

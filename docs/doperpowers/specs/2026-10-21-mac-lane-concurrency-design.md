@@ -67,10 +67,9 @@ and by the coordinator's holds, and the design below says what is read and when.
   (`ghcr.io/cirruslabs/macos-golden-gate-base`) plus what a MAWS job needs baked in. It is never run for a job.
 - **A job clone.** The copy of the golden image booted for exactly one job and deleted after it; APFS makes the copy
   instant and the clone holds only what the job writes.
-- **A slot.** One guest's identity on the host: a registered runner name (`ci-kit-mac-<machine>-vm`, a second
-  `-vm2`), its registration files, and the per-slot directories the guest is shown. A slot runs at most one clone at a
-  time. **The trial slot** (`ci-kit-mac-<machine>-vm-trial`, the one label `ci-kit-mac-vm-trial`) is the identity a
-  candidate image's trial job runs under, and nothing else.
+- **A slot.** One guest lane's directories on the host (`vm`, a future `vm2`): its per-clone JIT configs, pending
+  cleanup records, output and cache. A slot runs at most one clone at a time, each with its own runner registration.
+  **The trial slot** (`vm-trial`, the one label `ci-kit-mac-vm-trial`) serves a candidate image's trial job alone.
 - **The launcher.** The host-side LaunchAgent of the lane (`com.ssfskim.ci-kit.vm-lane`), in the user's GUI session,
   which reads the queue, decides admission, boots a clone for a job, and deletes it after.
 - **`ci-kit-mac-solo`.** The label of a job that wants a desktop to itself, whichever desktop is free: the exclusive
@@ -84,11 +83,11 @@ and by the coordinator's holds, and the design below says what is read and when.
   worker.
 - **A hold.** A marker of the coordinator's (CI-opt, the session that books the mini for other sessions),
   `vm-hold.<owner>`, one file per owner, each removed by its owner alone: a timed hold, or the maintenance hold.
-- **The maintenance procedure.** The coordinator's own sequence (bake, registration, trial, promote, retire), run
+- **The maintenance procedure.** The coordinator's own sequence (bake, trial, promote, retire), run
   with `bake.sh` under a full hold of the mini with the launcher booted out, so nothing automated boots, recovers
   or releases while it runs. It is the only way a candidate or golden image is made, tried or replaced.
 - **A candidate.** A freshly baked image, `maws-vm-candidate-<date>`, that becomes the golden image only after one
-  trial job, under the trial slot's identity, boots from it and ends green.
+  trial job, with the trial slot's label, boots from it and ends green.
 - **Proven-VM group.** A group whose trial evidence (V4) shows its guest results green and matching its host results.
   Only these are on MAWS's `MAC_VM_E2E`.
 
@@ -573,7 +572,7 @@ hold waits for it, and the guard stops it only at critical pressure or the disk 
     p95 plus the boot), then boots out the instances. At release it removes its own hold, then brings the instances
     back. A hold script that forgets the marker gets a guest beside its bench, so the hold scripts carry it, and the
     booking a session makes through CI-opt says which kind it is.
-  - **Maintenance** (the bake, a registration, a candidate's trial, promote) is never admitted: it is the
+  - **Maintenance** (the bake, a candidate's trial, promote) is never admitted: it is the
     coordinator's procedure under a full hold, timed in shape, with the launcher's agent booted out as well as the
     host's instances (The image). While it runs nothing automated boots, recovers or releases, and while the launcher
     runs `bake.sh` refuses to start.
@@ -670,10 +669,8 @@ owner's `gh` login on the mini keeps that checkout at master), and through `tart
   every clone, while one left unanswered would come up on every job's fresh desktop (the 10-16 incident,
   `UserNotificationCenter` in front, would recur per job). The owner's 2026-10-23 ruling permits CI-opt to answer
   the guest's first-run prompts through cua; the host's prompts stay the human's. The image never holds a runner
-  identity: registration (step 4 below) runs `config.sh` in a booted image and moves `.runner`, `.credentials` and
-  `.credentials_rsaparams` to the slot on the host, leaving the image clean. Those three files let a holder take that
-  runner's jobs, which is what today's `~/actions-runner-maws/.credentials` on the host already allows; no new class of
-  credential is on the mini.
+  identity: each job or trial clone loads its own JIT config only at kickoff, and its decoded identity disappears
+  with that clone. The mint uses the mini's existing `gh` login; no new long-lived credential is installed.
 
 What invalidates the image, and what each costs if stale:
 - **the runner's version:** a self-update per job until refreshed (time, not correctness);
@@ -684,7 +681,7 @@ What invalidates the image, and what each costs if stale:
 - **the base image's macOS** when the mini's moves: parity is the point of macOS 27;
 - **the helpers or the kit's guest files that are compiled, not shared;**
 - **first-run grants:** a new Electron bundle id or LibreOffice version wants the human's window again.
-**Maintenance is the coordinator's procedure, under a full hold.** The bake, a registration, a candidate's trial,
+**Maintenance is the coordinator's procedure, under a full hold.** The bake, a candidate's trial,
 the promote and the retire never go through the launcher: nothing automated boots, recovers or releases while they
 run, which is what keeps a candidate, the golden image or a trial clone from being torn down as a job clone would be,
 and keeps a candidate's trial from taking a production job. Refreshes are rare, on invalidation and not on a
@@ -750,7 +747,7 @@ guest. In MAWS's plan (V3):
   `timeout-minutes` carries the same +10; in the guest it waits nowhere.
 - Budgets: the guest's runner environment sets `CI_KIT_VM_GUEST=1`, which no host instance sets; MAWS's load-aware
   latency budgets treat a guest as a loaded host, as they treat `CI_KIT_SHARED_DESKTOP=1`, since the guest runs at
-  1.3–1.7x the host's time. The runner-name contract stands: `ci-kit-mac-<machine>-vm` ends in no `-<n>`, and the
+  1.3–1.7x the host's time. The runner-name contract stands: `ci-kit-mac-<machine>-<clone>` ends in no `-<n>`, and the
   shared-desktop flag is unset in the guest. Every host instance instead gets
   `CI_KIT_VM_RESERVATION=<absolute path to vm-reserved>` from `install.sh --vm`; `--no-vm` removes it and refresh
   removes the old static `CI_KIT_VM_LANE=1`. At verdict time, a test started at wall-clock `t0` reads the reservation
@@ -779,7 +776,7 @@ owner's call, put to them only with a named group that needs it and its trial ev
 |---|---|
 | the golden image is missing or `tart` is | no boot; one log line per change; an alert after an hour of a job waiting with no boot |
 | a clone never answers, or never lists | teardown, a failure of kind `image`; three in a row pause the lane with an alert, since the image is the likely cause |
-| the listener finds the slot's session still open (a clone died mid-job) | `session recovery`, up to 5 min, counted apart from `image`; past the bound, teardown and a `session` failure, and the next boot tries again, since the server closes the old session on its own |
+| the listener reports a session conflict (the recovery protocol is retained) | `session recovery`, up to 5 min, counted apart from `image`; past the bound, teardown and a `session` failure, and the next boot tries again, since the server closes the old session on its own |
 | the runner refuses the job's start (the guest's hook: a dialog in the guest, a display off geometry) | the `ci-kit: … rerun` line; MAWS's `ci-gate.sh` relaunches; two such refusals in a row pause the lane with an alert naming the reason, because a fresh clone showing the same dialog is an image fault |
 | a job outlives the running bound | `tart stop`, delete, the job fails at GitHub as a lost runner; logged |
 | the host's memory goes critical | the clone is stopped (The memory guard) |
@@ -802,9 +799,9 @@ time, the e2e build once per sha per slot through the cache share, and MAWS's ow
 in the guest. That is the price of a job that
 would otherwise wait for the host's desktop, or not run at all during a hold.
 
-**A second guest.** Apple's license allows two. A second slot (`ci-kit-mac-<machine>-vm2`) needs: V4's memory samples
+**A second guest.** Apple's license allows two. A second slot (`vm2`) needs: V4's memory samples
 showing the available figure above two guests' floor through the owner's day, which 16 GB with the owner's apps is
-unlikely to show; its own identity through the procedure's registration step; the boot rule counted per slot (two
+unlikely to show; its own directories and per-clone JIT registrations; the boot rule counted per slot (two
 reservations, the queue read for two); and a trial of two clones beside the host's jobs, judged by V4's rules.
 Maintenance runs under the same full hold, with both slots idle. Until then one slot.
 
@@ -828,7 +825,7 @@ Maintenance runs under the same full hold, with both slots idle. Until then one 
 - VA7. `install.sh` on a Mac without `--vm` installs nothing of the lane and behaves exactly as today; `--uninstall`
   removes the launcher with the rest.
 - VA8. (V2 builds `bake.sh` and its tests; V4 rehearses the procedure once and records the runs.) Under the
-  maintenance hold, a candidate is trialled by one clone under the trial identity, whose runner carries
+  maintenance hold, a candidate is trialled by one clone with its own JIT registration, whose runner carries
   `ci-kit-mac-vm-trial` alone, and promoted only on a record binding the candidate, the trial commit's run id, its job
   id and `success`, by a promote that is safe to repeat; a failed candidate leaves the pointer and the golden
   untouched. V4 records one refresh that promoted and one that rolled back.
@@ -838,9 +835,11 @@ Maintenance runs under the same full hold, with both slots idle. Until then one 
 - VA10. The launcher killed during a job (and again during a boot), while a measured job waits at settle: settle
   stays parked, the restarted launcher adopts the job, the job finishes green, the clone is deleted only after Tart
   shows it stopped, and settle releases then.
-- VA11. One slot's identity is reused: two jobs back to back; a job after a clone forced dead mid-job (`tart stop`),
-  whose next listener recovers its session within the budget; and a second job queued while one runs waits for the
-  reservation, never a second clone.
+- VA11. Each clone gets a distinct JIT registration: two jobs back to back, and a job after a clone forced dead
+  mid-job (`tart stop`), never reuse an identity. A second job queued while one runs waits for the reservation,
+  never a second clone. No guest registration has macOS/ARM64 labels, so exclusive-host jobs cannot reach it.
+  Mint failure boots nothing. After verified teardown the config is gone; a remote DELETE failure retains only
+  nonsecret cleanup metadata, and later loops retry while admitting the next clone.
 - VA12. With free space faked under the reserve, no boot and no bake; under the floor during a job, the guest is
   stopped with the alert; a marker write on a full volume leaves the stricter state.
 
