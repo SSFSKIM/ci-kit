@@ -2179,3 +2179,46 @@ was read. The owner selected **zero-aware writes onto the blank destination, wit
 follow-up PR. Investigate those allocated zero tables and whole boot copies before inode-density changes or packing:
 scattered-file packing alone has only about 0.155 GiB of apparent headroom here. Preserve full-tree byte comparison,
 fsck and real-job acceptance in that follow-up. No such additional cut is included in #132.
+
+### 2026-10-24 safe boot-block follow-up acceptance
+
+The allocated-zero experiment described above is rejected, not shipped. The accepted replacement copies only
+filesystem-allocated EFI and `/boot` blocks; the production root copier and BIOS p14 copy are unchanged.
+`copy-boot.sh` uses backing-direct read-only source aliases, read-only FAT/ext4 checks, and independent full
+regular-file inventories on source and target. Every allocated block is written even when its bytes are zero.
+`dosfstools` supplies the FAT checker; shared preparation and GCE remain untouched.
+
+The actual Canonical fixture confirmed EFI allocation at 15871 × 512 = 8125952 bytes (including FAT metadata),
+and ext4 boot allocation at 37423 × 4096 = 153284608 bytes. Their bitmap-free space totals about 0.844767 GiB
+before EBS's 512-KiB rounding. The nonzero-target FAT/ext4 regressions preserved allocated-zero files and all
+regular-file bytes/UUIDs while leaving a known free block or cluster unchanged. Actual EBS fixture
+`i-06a483798f969a47b` then passed boot checks, root comparison (74341 files), fsck/GPT and phase tracing;
+boot copying took 10 seconds and total compact 160 seconds. It terminated with zero remaining volumes.
+
+Candidate `ami-01f28403ee71b4d17`, built from `43b158dbb758f786e9f7b2b73a5475d2ae7c4d99`, passed its unchanged
+root byte/fsck checks, the new boot checks, common smoke (`i-092057f91a7ed9455`, `exit:0`, `smoke:ok`), and
+[real sandbox bake-check 40142927849](https://github.com/SSFSKIM/ci-kit-sandbox/actions/runs/40142927849)
+(job 121018251356 on `ci-kit-bake-boot-candidate-20261024-mvn0hm2h-290475840169`). It remains **unready**.
+All eight non-commit fields match ready GCE `ci-kit-runner-20261024-212102-62mp-09f04c32`; the ninth truthfully
+records the candidate's code commit. No production configuration or ready tag was changed.
+
+| AWS completed snapshot measurement | Current production | Boot-only candidate |
+|---|---:|---:|
+| AMI | ami-0e6ab11b8a334c7f0 | ami-01f28403ee71b4d17 |
+| Snapshot | snap-0be4f9ae73a7dab6c | snap-0d25e4896a954095c |
+| FullSnapshotSizeInBytes | 10695999488 | 9794748416 |
+| GiB | 9.96142578125 | 9.1220703125 |
+| Initialization at $0.0024/GiB | $0.023907421875 | $0.02189296875 |
+
+Measured savings are **0.83935546875 GiB / 8.4261% / $0.002014453125 per initialized VM** versus current
+production, about **$0.705/day at 350 VMs**. Relative to the original 11.45166015625-GiB image, both safe cuts
+save 2.32958984375 GiB (20.3428%) and $0.005591015625/VM. These are initialization-only savings, not total bill
+or remaining-credit estimates. Candidate S3 timings were boot 15s, source inventory 48/300s, root copy 158/480s,
+target inventory 135/300s (165s margin), total 357s; every phase exited zero.
+
+Independent registered medium review found no material findings. Focused compaction tests passed 45 cases,
+bake/diagnostic tests 29; the code head's full remote gate
+[40141320128](https://github.com/SSFSKIM/ci-kit/actions/runs/40141320128) passed. Final AWS tag sweeps found
+zero active/stopped/shutting-down experiment instances, zero volumes and zero registered fixture runners.
+Only the handed-over unready candidate and its completed snapshot remain. Its normal one-day unready guard
+can expire it after 2026-10-25T23:28:04Z; the controller owns merge, production bake and candidate disposal.
