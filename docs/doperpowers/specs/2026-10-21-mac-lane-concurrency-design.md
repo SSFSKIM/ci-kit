@@ -204,8 +204,8 @@ and by the coordinator's holds, and the design below says what is read and when.
     `maws-vm-golden-20261023d` retired 17:16:04Z after the first green production job from 20261024a (run
     40112861862, job 120928539099, `e2e:transcript`).
   - [ ] Step 4 wave 2b: `presentations` and `dashboard` three times on 20261024a.
-  - [ ] Step 4 wave 3 (browser, browser-comment, delivery), after the host tools MAWS's groups run are checked
-    against the image's (the Poppler gap's lesson, Decision Log).
+  - [ ] Step 4 wave 3 (browser, browser-comment, delivery). The host tools MAWS's groups run were checked against
+    the image first (2026-10-24, the Poppler gap's lesson, Decision Log): no other gap.
 - [ ] V5 — Widen the proven-VM set; the second guest, if memory ever allows it.
 
 ## Design
@@ -1688,9 +1688,11 @@ hold-aware plan send them to the guest, which this spec leaves open.
   tools first.** Guest 1 of wave 2 failed `design` and `presentations` on `/opt/homebrew/bin/pdfinfo` ENOENT: the
   host has Poppler from its own Homebrew set and the image never had it. ci-kit #128 (12a28a8) adds
   `provision.sh poppler` after LibreOffice and verifies `pdfinfo`, `pdftoppm`, `pdftotext` and `pdffonts`. The
-  image's tools had been chosen from the bake's own list, not from what the groups run; before wave 3, the binaries
-  MAWS's e2e groups and the code under them spawn are checked against the image. **Rejected:** finding the next gap
-  the same way, which cost a wave's run and a refresh.
+  image's tools had been chosen from the bake's own list, not from what the groups run, so before wave 3 the
+  binaries MAWS's e2e specs and main process spawn were read from master (every `execFile`/`spawn` by literal name
+  or path constant): beyond `/usr/bin` and `/bin`, only Poppler, LibreOffice's `soffice` and git, all in the image.
+  The host's other Homebrew tools (ffmpeg, Ghostscript, qpdf, tesseract) and its Google Chrome are not called.
+  **Rejected:** finding the next gap the way this one was found, at the cost of a wave's run and a refresh.
 - 2026-10-24 14:1xZ (the MAWS architect; wave 2): **`tools` passes on its other eleven tests.** Its two failures
   were stale tests on master (UX1 moved the Needs-you reason into the accessible name), red on the host reference
   too and fixed by UX2. The ruling: a pass if the guest fails exactly those two in all three runs with the other
