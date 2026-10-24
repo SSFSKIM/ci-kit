@@ -45,8 +45,8 @@ FAILURE_REPORT=$(node --input-type=module -e "
   }
 ")
 [ -z "$FAILURE_REPORT" ] || exit 1
-sync
-fstrim -av || true
+step=compact
+bash /opt/ci-kit/ec2/bake/compact.sh
 step=report
 jq -c '{value:"ok",manifest:.}' /etc/ci-kit/bake-manifest.json | curl -sf --max-time 30 -X PUT --data-binary @- "$REPORT" > /dev/null
 step=done

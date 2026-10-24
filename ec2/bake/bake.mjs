@@ -1,6 +1,6 @@
 // One account's AMI stage. All AWS calls use federated clients; nothing reads an operator profile.
 import {
-  RunInstancesCommand, DescribeInstancesCommand, TerminateInstancesCommand, CreateImageCommand,
+  RunInstancesCommand, DescribeInstancesCommand, TerminateInstancesCommand, CreateSnapshotCommand, RegisterImageCommand,
   DescribeImagesCommand, DescribeSnapshotsCommand, CreateTagsCommand, DeregisterImageCommand, DeleteSnapshotCommand,
 } from '@aws-sdk/client-ec2';
 import { GetParameterCommand } from '@aws-sdk/client-ssm';
@@ -16,7 +16,7 @@ const tags = (obj) => Object.entries(obj).map(([Key, Value]) => ({ Key, Value: S
 const filters = (obj) => Object.entries(obj).map(([key, value]) => ({ Name: `tag:${key}`, Values: [String(value)] }));
 const owned = (x, run) => tagsOf(x)['ci-kit-pool'] === 'ec2' && tagsOf(x)['ci-kit-run'] === run;
 const failureStages = new Set(['userdata', 'deadline', 'prepare', 'image', 'container', 'unit',
-  'start', 'apt', 'kit', 'node', 'deps', 'warm', 'warm-check', 'boot', 'clean', 'finalizer', 'report-input', 'report']);
+  'start', 'apt', 'kit', 'node', 'deps', 'warm', 'warm-check', 'boot', 'clean', 'compact', 'finalizer', 'report-input', 'report']);
 const safeOutcome = value => typeof value === 'string' && (/^exit:-?\d{1,3}$/.test(value)
   || (value.startsWith('failed:') && failureStages.has(value.slice(7)))) ? value : 'invalid report';
 
@@ -96,7 +96,8 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
       MetadataOptions: { HttpTokens:'required', HttpPutResponseHopLimit:1, HttpEndpoint:'enabled', HttpProtocolIpv6:'disabled' },
       InstanceInitiatedShutdownBehavior: builder ? 'stop' : 'terminate',
       BlockDeviceMappings: [{DeviceName:'/dev/sda1',Ebs:{VolumeType:'gp3',VolumeSize:cfg.disk_gb,Encrypted:true,DeleteOnTermination:true,
-        ...(!builder ? {VolumeInitializationRate:cfg.initialization_mibps} : {})}}],
+        ...(!builder ? {VolumeInitializationRate:cfg.initialization_mibps} : {})}},
+        ...(builder ? [{DeviceName:'/dev/sdf',Ebs:{VolumeType:'gp3',VolumeSize:cfg.disk_gb,Encrypted:true,DeleteOnTermination:true}}] : [])],
       TagSpecifications: ['instance','volume'].map((ResourceType) => ({ ResourceType, Tags:tags(labels) })),
       UserData: Buffer.from(userData).toString('base64'),
       })); } catch (error) {
@@ -129,24 +130,40 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
   const cleanupStep = async (label, fn) => { try { await fn(); } catch (error) { log(`cleanup ${cfg.account} ${label}: ${error.message}`); } };
   try {
     const base = await aws.ssm.send(new GetParameterCommand({Name:UBUNTU}));
+    const baseImage = (await ec2.send(new DescribeImagesCommand({ImageIds:[base.Parameter.Value]}))).Images?.[0];
+    if (!baseImage) throw new Error('Canonical image attributes unavailable');
     const builderScript = fillEc2Builder(script, {manifest,token,report:await url('builder')});
     const builder = await launch('builder',base.Parameter.Value,builderScript,true);
     const built = await wait('builder',30*MINUTE,async () => {
       const i = await instance(builder), r = await report('builder');
       if (!i || !owned(i,run)) throw new Error('builder missing or no longer owned');
       if (r && r.value !== 'ok') throw new Error(`builder failed: ${safeOutcome(r.value)} ${formatDiagnostic(r.diagnostic)}`);
-      if (i.State.Name === 'terminated') throw new Error('builder terminated before CreateImage');
-      return i.State.Name === 'stopped' && r ? r : null;
+      if (i.State.Name === 'terminated') throw new Error('builder terminated before snapshot');
+      return i.State.Name === 'stopped' && r ? {report:r,instance:i} : null;
     });
-    const actual = verifyManifest(built.manifest,manifest);
+    const actual = verifyManifest(built.report.manifest,manifest);
     const labels = { ...pool,...manifestLabels(actual),'ci-kit-ready':'false' };
-    const made = await ec2.send(new CreateImageCommand({InstanceId:builder,Name:`ci-kit-${run}`,NoReboot:true,
-      TagSpecifications:['image','snapshot'].map((ResourceType) => ({ResourceType,Tags:tags(labels)}))}));
+    const target = built.instance.BlockDeviceMappings?.find(d => d.DeviceName === '/dev/sdf')?.Ebs?.VolumeId;
+    if (!target) throw new Error('builder compacted destination volume missing');
+    const snapshot = await ec2.send(new CreateSnapshotCommand({VolumeId:target,Description:`ci-kit compacted root ${run}`,
+      TagSpecifications:[{ResourceType:'snapshot',Tags:tags(labels)}]}));
+    await wait('snapshot',30*MINUTE,async () => {
+      const s = (await ec2.send(new DescribeSnapshotsCommand({SnapshotIds:[snapshot.SnapshotId]}))).Snapshots?.[0];
+      if (s && !owned(s,run)) throw new Error('snapshot no longer owned');
+      if (s?.State === 'error') throw new Error('CreateSnapshot failed');
+      return s?.State === 'completed' ? s : null;
+    });
+    const made = await ec2.send(new RegisterImageCommand({Name:`ci-kit-${run}`,
+      Architecture:baseImage.Architecture,VirtualizationType:baseImage.VirtualizationType,RootDeviceName:baseImage.RootDeviceName,
+      EnaSupport:baseImage.EnaSupport,BootMode:baseImage.BootMode,ImdsSupport:baseImage.ImdsSupport,
+      ...(baseImage.TpmSupport ? {TpmSupport:baseImage.TpmSupport} : {}),
+      BlockDeviceMappings:[{DeviceName:baseImage.RootDeviceName,Ebs:{SnapshotId:snapshot.SnapshotId,VolumeSize:cfg.disk_gb,VolumeType:'gp3',DeleteOnTermination:true}}],
+      TagSpecifications:[{ResourceType:'image',Tags:tags(labels)}]}));
     image = made.ImageId;
     const available = await wait('image',30*MINUTE,async () => {
       const i = (await ec2.send(new DescribeImagesCommand({ImageIds:[image]}))).Images?.[0];
       if (i && !owned(i,run)) throw new Error('image no longer owned');
-      if (i?.State === 'failed') throw new Error('CreateImage failed');
+      if (i?.State === 'failed') throw new Error('RegisterImage failed');
       return i?.State === 'available' ? i : null;
     });
     await ec2.send(new TerminateInstancesCommand({InstanceIds:[builder]}));
@@ -191,9 +208,15 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
     });
     await cleanupStep('images and snapshots',async () => {
       const all = await list(ec2,DescribeImagesCommand,{Owners:['self'],Filters:filters({'ci-kit-pool':'ec2'})},'Images');
-      // Tag lookup also recovers a CreateImage response lost in transit.
+      // Tag lookup also recovers a RegisterImage response lost in transit.
       const doomed = new Map([...(!checked ? all.filter((i) => owned(i,run)) : []),...(promote ? imagesToPrune(all,now()) : [])].map((i) => [i.ImageId,i]));
       for (const i of doomed.values()) { await removeImage(ec2,i); log(`${cfg.account}: removed ${i.ImageId} and its snapshots`); }
+      // A failed/lost snapshot or registration response may leave a snapshot with no AMI mapping.
+      if (!checked) {
+        const removed = new Set([...doomed.values()].flatMap(i => (i.BlockDeviceMappings ?? []).map(d => d.Ebs?.SnapshotId)));
+        const orphaned = await list(ec2,DescribeSnapshotsCommand,{OwnerIds:['self'],Filters:filters(pool)},'Snapshots');
+        for (const s of orphaned.filter(s => owned(s,run) && !removed.has(s.SnapshotId))) await ec2.send(new DeleteSnapshotCommand({SnapshotId:s.SnapshotId}));
+      }
     });
   }
 }

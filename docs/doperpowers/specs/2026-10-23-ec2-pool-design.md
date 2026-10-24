@@ -691,7 +691,11 @@ The EC2 bake:
    24.04 x86-64 AMI (Canonical's SSM parameter), with `ci-kit-purpose=builder` and shutdown behaviour **stop**;
 2. runs the provider-neutral preparation (`pool/bake/prepare.sh` and the warm step), with the builder's EC2-specific
    steps in their own script beside `gce/bake/builder.sh`;
-3. after the builder stops, runs `CreateImage`, tags the AMI unready, and terminates the builder;
+3. after sanitation, copies only allocated ext4 root blocks onto an equal-sized, never-written second disk while
+   root is frozen; replicates both GPT headers and the boot partitions, verifies the target with `sgdisk -v` and
+   `e2fsck -fn`, then stops. It snapshots only that second disk and registers an unready AMI with Canonical's
+   boot attributes, then terminates the builder and both disks. EBS does not support discard here, and zero-filled
+   free space still counts as snapshot data; neither is a substitute for the fresh disk;
 4. through the federated launcher role, runs the smoke suite (`gce/vm/smoke.sh`, made provider-neutral where it
    reads metadata) on a smoke VM from the new AMI;
 5. through the same launcher role, runs one real job on ci-kit-sandbox;
@@ -1568,6 +1572,23 @@ The production chain is reviewed at each boundary:
   Evidence: the verdict's launch log. Zone order c -> a -> b.
 
 ## Decision Log
+
+- Decision: Compact EC2 snapshot allocation without removing any job-visible file. The builder gets a blank,
+  equal-sized encrypted disk; after its existing image checks, copy allocated ext4 root blocks with `e2image`
+  from a frozen source, preserve GPT/boot data, and verify the copied filesystem before snapshot/registration.
+  Keep shared preparation, GCE, and the manifest schema unchanged. A candidate bake passes both smoke and the
+  real sandbox check but retains `ci-kit-ready=false` and does not prune production images; promotion belongs
+  to the controller. Its ci-kit commit records the actual branch, while the other eight manifest labels retain
+  the current GCE pins. Runtime selects ready AMIs by tags; cross-cloud manifest equality is a bake check,
+  not a launcher-time comparison against GCE.
+  Rationale: the original snapshot is 11.45166015625 GiB versus 7.32637166977 GiB of live filesystems.
+  Actual c8a EBS reports no discard support. On an encrypted 1-GiB control volume, completed snapshots grew
+  from 134217728 bytes (128 MiB random data) to 1073741824 bytes after overwrite/fill with zeros. Therefore
+  zero-filling is rejected. The larger redundant zero-fill experiment was cancelled and deleted. No cache,
+  toolchain, host Node installation, or container layer is removed. IAM prerequisite #131/81fe86b adds only
+  the five owner-reviewed regional, tagged snapshot/registration statements to the bake role; merged-main
+  setup applied them, with federated allowed/denied dry-runs for both APIs. Candidate size/boot proof follows.
+  Date/Author: 2026-10-24, CI-opt and image-trim executor.
 
 - Decision: M3 preserves GCE's existing walker via a provider outcome adapter that retains original GCE error
   evidence. The GCE provider additionally owns batched reconciliation, existence/preemption reads and NAT
