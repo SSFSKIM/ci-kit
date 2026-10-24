@@ -981,6 +981,26 @@ M5; before that the scheduler's second provider is a fake under `test/gce/`.
     bin/ci-gate . --gates test
     # expect: the focused test passes; PASS test, then GREEN <run-url> from the remote gate
 
+### M6 staged activation and config-first rollback
+
+After M5 live acceptance completes:
+
+1. Merge M6 core code with credit still disabled; keep the activation-config commit out of this PR.
+2. From a fresh clone of merged main, record the current launcher revision and deploy `gce/deploy.sh launcher`.
+3. Verify the new runtime revision/commit and its federated billing-read/durable-reading behavior. Missing or
+   stale readings must keep preference off. The prior setup proof alone is not evidence of deployed policy.
+4. Merge a separate, reviewed/green activation-config PR naming EC2 then GCE for the pool repos and enabling
+   the account credit block. Because config reloads from main at runtime, this merge is the activation event.
+5. Observe the MAWS EC2 canary and the policy/report/guard acceptance below; retain both config and revision IDs.
+
+If the M6 rollout must be rolled back, **revert the activation config first** on main and verify the launcher
+has observed the restored disabled/pre-activation configuration. Only then run:
+
+    gcloud run services update-traffic ci-kit-launcher --to-revisions=<saved-revision>=100 --region us-central1 --project ssfskim-ci-kit
+
+Do not route traffic to the M5 launcher while activated credit config remains on main: it would read that flag
+without M6's durable billing policy. This ordering applies even when the rollback revision itself is healthy.
+
 ### Setup and deployment produce the system, not acceptance evidence (M3, M5, M6)
 
 Deploy only from merged `main`. Create a fresh clone once, and use it for all following deploy and observation
@@ -1651,10 +1671,11 @@ The production chain is reviewed at each boundary:
 - Decision: M6 rolls out in two stages after M5 acceptance: merge and deploy core policy/report/guard code while
   production credit stays disabled, then merge a separate activation-config commit. Config merges, not only
   launcher deploys, change production eligibility because the launcher reloads main at runtime.
-  Rationale: the M5 launcher treats the credit flag as a policy input without durable billing injection. Merging
-  activation before deploying M6 could briefly run credit-first under the old implementation. A distinct final
-  activation commit preserves the intended end state without that unguarded interval.
-  Date/Author: 2026-10-24, M6 executor and controller.
+  Rationale: the M5 launcher treats the credit flag as a policy input without durable billing injection. Rejected
+  one merge for code and activation: it could briefly run credit-first before M6 is deployed. Rollback has the
+  same hazard in reverse, so revert activation config on main and verify it is observed BEFORE routing traffic
+  to an older launcher revision. A distinct activation commit makes both directions explicit.
+  Date/Author: 2026-10-24, M6 executor and controller; confirmed by design owner.
 
 ## Outcomes & Retrospective
 
