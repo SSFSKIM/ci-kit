@@ -1393,6 +1393,22 @@ exec /bin/mv "$@"`);
     await finish(m, a);
   });
 
+  // A runner done in a guest that never powers off (on the mini, a halt that stalled until the guest's kernel panicked
+  // and rebooted): the power-off wait applies, not the running bound, and the job's end is no failure.
+  test('a runner done in a guest that does not power off: stopped after the power-off wait, no failure counted', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_END_WAIT: '2' } });
+    const a = m.start();
+    const clone = await states.running.reach(m);
+    m.mark('done', '0');
+    await m.waitLog(new RegExp(`${clone}: its runner is done \\(0\\); waiting for its power-off`));
+    await m.waitLog(new RegExp(`${clone}: the guest did not power off within 2 s; stopping it; teardown`));
+    await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
+    assert.ok(m.calls().includes(`stop ${clone} --timeout 30`), 'stopped');
+    assert.doesNotMatch(m.log(), /outlived the running bound/);
+    assert.equal(m.failures().total_image ?? '0', '0');
+    await finish(m, a);
+  });
+
   // A bound passed by a guest whose wrapper runs: counted, and given up through the handshake, never a plain stop.
   for (const { name, env, reach, line, kind } of [
     { name: 'the kickoff', env: { CI_KIT_VM_KICKOFF: '2' }, reach: states.kicking.reach, line: 'neither out/listening nor out/session-conflict within 2 s', kind: 'image' },
