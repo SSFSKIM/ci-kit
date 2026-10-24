@@ -177,6 +177,39 @@ and by the coordinator's holds, and the design below says what is read and when.
     in 3 s, `vm-hold.cua_repl` timed, no guest, host instance offline. It passed directly to maintenance: install
     under the timed hold, take the maintenance hold, then release the timed hold (Decision Log). The other hold
     rehearsals remain.
+  - [x] (2026-10-23 19:20–20:15Z) Step 3's launch-cost probes 3 and 4. Probe 3, one fresh clone per arm, left the
+    guest's boot storm as the cost; probe 4 cut the storm in a candidate golden, −30% on a fresh clone's first
+    19-test run (Surprises). The cut is `provision.sh quiet` (ci-kit #110, 00eb5d5; its readback fixed by #113,
+    215f283).
+  - [x] (2026-10-23 21:22Z) The third refresh, the first quiet golden: `maws-vm-candidate-20261023c` failed its own
+    quiet readback and was deleted; `maws-vm-candidate-20261023d` baked 20:57:38–21:07:53Z, trial job 120648991952
+    (MAWS run 40021721987) green in 3 min 21 s, promoted to `maws-vm-golden-20261023d`. `maws-vm-golden-20261023`
+    was retired in that window, `maws-vm-golden-20261023b` on 2026-10-24 at 07:10:02Z after the first green
+    production job from 20261023d (run 40072500084, job 120809253916, `e2e:to-human`). Step 11's retirement half
+    has now run three times; its rollback rehearsal is still open.
+  - [x] (2026-10-23 11:04Z – 2026-10-24 10:57Z) Step 6's timed hold in daily use: seven more bookings for
+    cua_repl's owner sittings and parity runs, each released on its "done" (or back to CI while it waited on a
+    human) with the lane's reads clean. Two new
+    forms: a maintenance window handed straight to a timed booking (`handover-maint-to-timed.sh`: the booking's
+    hold first, then the launcher back, then maintenance released), and a hold taken once a named run's Mac jobs
+    finish even while newer ones queue (`hold-after-run.sh`). The untimed hold with the lane taking jobs (VA1) and
+    an overlapping second owner (VA4) are still to rehearse.
+  - [x] (2026-10-24 12:49–16:27Z) Step 4 wave 2: 13 candidate groups three times each in the guest at one scratch
+    sha, beside a host reference at its parent. Ten pass: transcript, panel, side, tools, c7, code, scm, library,
+    document and settings. `design` stays on the host; `presentations` and `dashboard` run again on the Poppler
+    image (Surprises, Decision Log). MAWS #135 (af9bf672e, 2026-10-24 ~18:2xZ) added nine of them to
+    `MAC_VM_E2E`, twelve groups with wave 1's. `side` was held back: its post-Reload pin check failed in the PR's
+    own guest run and once on the host too, so it is under diagnosis as a MAWS intermittent.
+  - [x] (2026-10-24 16:30–17:04:18Z) The fourth refresh, Poppler (ci-kit #128, 12a28a8):
+    `maws-vm-candidate-20261024a` baked; first-run passed; a trial on `e2e:design` failed on design's own limit and
+    a second on `e2e:document-app` passed (run 40113715486); promoted to `maws-vm-golden-20261024a`.
+    `maws-vm-golden-20261023d` retired 17:16:04Z after the first green production job from 20261024a (run
+    40112861862, job 120928539099, `e2e:transcript`).
+  - [x] (2026-10-24 17:05–18:47Z) Step 4 wave 2b on 20261024a: `dashboard` 3/3 green, its longest job 5.4 min
+    (1.30x the host's); `presentations` 2/3, a hang in a non-export test in run 1 (Surprises); the MAWS architect
+    judges it against the test's host history.
+  - [ ] Step 4 wave 3 (browser, browser-comment, delivery). The host tools MAWS's groups run were checked against
+    the image first (2026-10-24, the Poppler gap's lesson, Decision Log): no other gap.
 - [ ] V5 — Widen the proven-VM set; the second guest, if memory ever allows it.
 
 ## Design
@@ -396,11 +429,17 @@ released only after the VM's end is verified; the guard samples through every ro
 
 - **Why the runner runs once and exits, with no registration per job.** The guest's runner is a registered,
   non-ephemeral runner whose identity lives on the host in the slot and is copied into each clone; it is started with
-  `run.sh --once`, so the listener takes one job and exits before asking for another (actions/runner `Runner.cs`: the
-  once mode ends the loop after the job finishes, with a warning that `--once` "is going to be deprecated in the
-  future"). This is the one-job lifecycle the second review called race-free at the server, without the credential
-  it rejected: a just-in-time registration needs an `Administration: write` token on the host, readable by every host
-  job (Decision Log). If `--once` is ever removed, the fallback is that JIT path, and the owner's call on the token.
+  `run.sh --once`, so the listener runs one job and then exits (actions/runner `Runner.cs`: the once mode ends the
+  loop after the job finishes, with a warning that `--once` "is going to be deprecated in the future"). It gives a
+  one-job lifecycle without the credential the second review rejected: a just-in-time registration needs an
+  `Administration: write` token on the host, readable by every host job (Decision Log).
+  **It is not race-free at the server** (corrected 2026-10-24): `--once` ends the loop in the client only. To the
+  service the runner is a persistent one, so the service can hand the next queued job to the runner's still-open
+  busy poll at the moment its job completes; the listener aborts that poll and exits, and about 50 min later the
+  job is cancelled as "not acquired by Runner of type self-hosted even after multiple attempts" (actions/runner
+  #4728). It happened once in the guest's first ~80 jobs (Surprises). A just-in-time registration is what the
+  service itself holds to one job: the owner's call on the token, brought back to them if the loss recurs
+  (Decision Log). If `--once` is ever removed, the fallback is that same JIT path.
 - **Why the runner is started by `tart exec` and not by a LaunchAgent in the image.** TCC on macOS attributes a
   grant to the responsible process, which is how the host's jobs hold Full Disk Access through `/bin/bash`. The base
   image's build writes rows into both TCC databases (cirruslabs `macos-image-templates`, `update-tcc-database.sh`):
@@ -1637,6 +1676,59 @@ hold-aware plan send them to the guest, which this spec leaves open.
   actual release. A launcher disabled before the window stays off. The former instruction, bootstrap only if the
   agent is currently enabled, would leave a previously live lane offline after the handoff's disabled install.
 
+- 2026-10-23 20:0xZ (CI-opt and the MAWS architect; V4 step 3): **Probe 4 cuts the boot storm in a candidate
+  golden instead of waiting it out.** Probe 3 left the boot storm: every clone started its run at load1 51–94, and
+  the launch arm's gain was matched by a time-only control of the same seconds (Surprises). The candidate is a clone
+  of the golden with Spotlight indexing off and the heavy background services disabled, nothing WindowServer-,
+  TCC-, LaunchServices- or fseventsd-related; three fresh clones of each golden run interleaved, with load1 at the
+  run's start read beside the times. **Rejected:** a load-gated settle before the job, which spends inside the job
+  the seconds it saves; kept only for the case where the cut falls short.
+- 2026-10-23 20:17Z (CI-opt; probe 4's verdict): **The golden carries the boot-storm cut, `provision.sh quiet`.**
+  −30% on a fresh clone's first run, the two ranges further apart than probe 3's noise floor. The list of services
+  is explicit, and the step reads its own effect back at bake: indexing off on `/` and Data, each service disabled.
+  Built as ci-kit #110 (00eb5d5). Its first bake failed that readback (Surprises); #113 (215f283) checks Preboot
+  only when `mdutil -a -s` lists it.
+- 2026-10-24 14:0xZ (CI-opt; V4 step 4 wave 2): **The image carries Poppler, and the next wave checks the host's
+  tools first.** Guest 1 of wave 2 failed `design` and `presentations` on `/opt/homebrew/bin/pdfinfo` ENOENT: the
+  host has Poppler from its own Homebrew set and the image never had it. ci-kit #128 (12a28a8) adds
+  `provision.sh poppler` after LibreOffice and verifies `pdfinfo`, `pdftoppm`, `pdftotext` and `pdffonts`. The
+  image's tools had been chosen from the bake's own list, not from what the groups run, so before wave 3 the
+  binaries MAWS's e2e specs and main process spawn were read from master (every `execFile`/`spawn` by literal name
+  or path constant): beyond `/usr/bin` and `/bin`, only Poppler, LibreOffice's `soffice` and git, all in the image.
+  The host's other Homebrew tools (ffmpeg, Ghostscript, qpdf, tesseract) and its Google Chrome are not called.
+  **Rejected:** finding the next gap the way this one was found, at the cost of a wave's run and a refresh.
+- 2026-10-24 14:1xZ (the MAWS architect; wave 2): **`tools` passes on its other eleven tests.** Its two failures
+  were stale tests on master (UX1 moved the Needs-you reason into the accessible name), red on the host reference
+  too and fixed by UX2. The ruling: a pass if the guest fails exactly those two in all three runs with the other
+  eleven green, which it did.
+- 2026-10-24 17:05Z (the MAWS architect; wave 2): **`design` stays on the host.** Its PNG export renders the board
+  in an offscreen BrowserWindow and reads it back with `capturePage`, a side up to `PNG_MAX_SIDE` = 8192 with the
+  design layer's scale on top. On the Poppler image 18 of 19 passed; the scaled and over-cap poster case failed with
+  `artifacts.export failed: internal UnknownVizError`, green on the host: the paravirtual GPU's maximum texture size
+  is below that capture. **Rejected:** capping the test's capture size, which drops the coverage the case exists
+  for, the product's largest export. A group that fails only in a big-capture export is judged the same way.
+- 2026-10-24 (CI-opt; the lost job): **Lost guest jobs are counted; the JIT registration waits for a recurrence
+  and the owner.** One guest job in about 80 (MAWS run 40095523463, job 120877297390, `e2e:dashboard`) was lost to
+  actions/runner#4728 (Design, "Why the runner runs once"). A loss holds its run about 52 min before GitHub cancels
+  the job, then costs a rerun. The service-side fix, a just-in-time registration per clone, needs the
+  `Administration: write` token on the host that the second review rejected, so it is the owner's call; they have
+  been told, and it goes back to them with the counts if a second loss appears. The exposure grows with
+  `MAC_VM_E2E`, since the race needs a guest-eligible job queued when one completes. The coordinator's
+  `lost-jobs.sh` counts them (cancelled, no runner, the "not acquired" annotation). **Rejected:** an automatic
+  rerun, which recovers neither the 52 min nor the run's verdict time.
+- 2026-10-24 17:4xZ (CI-opt; the lifecycle): **A running clone whose runner is done waits only for its power-off.**
+  Twice the guest's halt stalled until its kernel panicked (`Halt/Restart Timed Out`) and rebooted, so `tart run`
+  never exited and the launcher kept the clone under the 50-min running bound (Surprises). `out/done` in preparing
+  or running now moves the clone to ending (`CI_KIT_VM_END_WAIT`, 60 s, then `tart stop`), as recovery and
+  `bake.sh --trial` already did; no failure is counted, since the job ended. ci-kit #130 (d8352bb), installed on
+  the mini 17:51Z. **Rejected:** a guest-side fix (killing leftovers before the halt), since the stall's sample held
+  no job process and the cause is in the guest's halt.
+- 2026-10-24 (CI-opt; the coordinator's scripts): **`window-from-hold.sh` refuses a timed hold named after the
+  maintenance owner.** Twice (2026-10-23 19:20Z, 2026-10-24 16:31Z) a timed hold taken as `CI-opt` was released
+  along with the maintenance hold the script had just taken under the same name. Both times the launcher was still
+  booted out, so no guest could start, and the maintenance hold was taken again at once. The timed hold is
+  `CI-opt-t`.
+
 ## Surprises & Discoveries
 
 - 2026-10-21, M1 (ci-kit #67), from its reviews:
@@ -1857,6 +1949,76 @@ hold-aware plan send them to the guest, which this spec leaves open.
   window followed without a gap. `install.sh` refuses under a maintenance-kind hold or a standing reservation,
   but accepts a timed hold. Installing under the timed hold, then taking maintenance before releasing it, kept
   the lane closed throughout (Decision Log).
+
+- 2026-10-23 19:20–19:43Z, V4 step 3, **launch-cost probe 3**: golden `maws-vm-golden-20261023b`, MAWS ef19e6224,
+  the same 19 `document-app` tests, one fresh clone per arm, each run right after setup and its arm's step:
+
+  | arm | sum s | median s | first test s |
+  |---|---|---|---|
+  | baseline | 145.0 | 6.13 | 21.1 |
+  | launch (one throwaway launch of out/, 6.8 s) | 150.1 | 7.06 | 15.2 |
+  | time (a 7 s wait, no launch) | 129.4 | 5.02 | 17.2 |
+  | verify (`codesign --deep --strict` and `spctl` over the restored app) | 146.7 | 6.55 | 18.9 |
+  | pwwarm (a no-op test importing the launch support) | 146.7 | 5.37 | 19.4 |
+  | baseline | 164.5 | 6.48 | 23.8 |
+
+  The two baselines differ by 19.5 s, the noise floor. No step brought a run near probe 2's warmed 99–105 s, and
+  the launch's first-test gain was matched by the time-only control, so first-launch assessment and the transform
+  cache are not the main cost. Every clone started its run at load1 51–94, 25 s after boot: the boot storm.
+- 2026-10-23 19:52–20:15Z, **probe 4**: `maws-vm-golden-20261023b` against `maws-vm-candidate-nostorm` (its clone
+  with `mdutil -a -i off` and 22 background services disabled and booted out), three fresh clones each,
+  interleaved, all 19/19. Sums: current 167.5, 149.5, 145.4 s (mean 154.1); cut 110.3, 104.1, 109.0 s (mean 107.8):
+  −46.3 s, −30%, the ranges 35.1 s apart. Load1 at the run's start fell from a mean of 60.6 to 38.2. A fresh
+  clone's first run came within about 5 s of probe 2's warmed runs. Still busy at start in the cut: fseventsd and
+  mds (5–9% each; indexing off, the daemons stay), Finder, now and then visualintelligenced, imagent, akd.
+- 2026-10-23, **the third refresh**, the first quiet golden:
+  - `maws-vm-candidate-20261023c` failed at its own quiet readback (20:50Z). The candidate's `mdutil -a -s` lists
+    only `/` and Data; the check required Preboot, which a booted clone of a golden lists as well. The lane went
+    back to CI at 20:50:57Z, #113 merged, and the failed candidate was deleted.
+  - `maws-vm-candidate-20261023d` baked 20:57:38–21:07:53Z, lowest free space 119 GB; quiet passed (22 services
+    disabled, indexing off). First-run through cua in the guest as before, e2e:deliverables 12/12.
+  - Its trial took 3 min 21 s, the test step 116 s against 179 s in 20261023b's trial: the cut, on one sample.
+- 2026-10-24, V4 step 4 **wave 2**: scratch 6a15a356e (MAWS master 43d0f0588 with the 13 groups added to
+  `MAC_VM_E2E`), `Lane: vm`; guest runs 40095523463 (12:49–13:48Z), 40099706584 and 40107391110 (to 16:27Z), one
+  after another; host reference run 40095523499 at 43d0f0588.
+  - The guest's longest job and its ratio to the host's, per passing group: transcript 6.2 min / 1.38, panel 2.7 /
+    1.88, side 2.8 / 1.78, tools 2.3 / 1.92, c7 2.5 / 1.55, code 3.6 / 1.31, scm 1.9 / 2.09, library 1.9 / 1.29,
+    document 1.8 / 1.26, settings 1.9 / 2.02. The ratios run 1.26–2.09, past V1's 1.3–1.7 at the top; every guest
+    job stayed inside 10 min.
+  - **No Poppler in the image.** Guest 1's `design` and `presentations` failed only on `pdfinfo` ENOENT (Decision
+    Log).
+  - **A lost job.** Guest 1's `dashboard` was cancelled at 13:43:53Z, about 52 min after it queued, with "The job
+    was not acquired by Runner of type self-hosted even after multiple attempts", no runner name and no steps:
+    actions/runner#4728's shape (Design). The first in about 80 guest jobs; none on the host in its 98 runs that
+    day.
+  - **`dashboard` hung in guest 2.** The Resolve click at `dashboard-export.spec.ts:388` timed out, `app.close()`
+    in afterEach hung 180 s, and every later `electron.launch` in the job timed out: 24.8 min. Guest 3 failed only
+    on Poppler. Wave 2b runs it again on the Poppler image, watching for the hang.
+- 2026-10-24, **the guest's halt can stall into a kernel panic.** After `e2e:dashboard` at 14:45Z (clone
+  `maws-vm-job-vm-20261024T141813Z`, golden 20261023d) and `e2e:presentations` at 17:20Z (clone
+  `maws-vm-job-vm-20261024T171233Z`, golden 20261024a), the wrapper's `shutdown -h now` was followed by a shutdown
+  stall report, then `panic(...): Halt/Restart Timed Out @IOPlatformExpert.cpp:900` about 2 min later, and a reboot.
+  The lane lost 23.5 min the first time (the running bound, counted as an `image` failure) and 15 min the second,
+  until CI-opt stopped the clone. 2 of 71 clones; otherwise the teardown follows the "powering off" line by a median
+  15 s. The panic, both stall reports and the log are kept on the mini in `~/ci-vm-spike/panic-20261024T1722Z/`.
+- 2026-10-24 16:30–17:04:18Z, **the fourth refresh**, Poppler:
+  - The window opened with no Mac job queued. `maws-vm-candidate-20261024a` baked with Poppler 26.10.0, lowest free
+    space 118 GB; first-run e2e:deliverables 12/12 after Gatekeeper's Open through cua in the guest.
+  - **A trial group must be one the guest already passes.** The first trial took `e2e:design` (run 40112000620,
+    job 120925987036): Poppler worked, and 18 of 19 passed, but design's capture limit failed the record
+    (Decision Log), and `--promote` refuses a failed record. A second trial on `e2e:document-app` (run
+    40113715486, job 120931846734) passed and promoted.
+
+- 2026-10-24 17:05–18:47Z, V4 step 4 **wave 2b** on `maws-vm-golden-20261024a` (scratch 6a15a356e, `Lane: vm`; runs
+  40114501885, 40120234172, 40121336786, one after another and interleaved with production guest jobs):
+  - `dashboard`: 5.4, 5.2 and 4.6 min, all green, against the host reference's 4.2 min; no repeat of wave 2's hang.
+  - `presentations`: green in runs 2 and 3 (4.7 min each, against the host's 3.1). In run 1, 37 passed and
+    `presentations.spec.ts:965` (an svg's stylesheet and ids) ran to its 180 s test timeout with no other error:
+    not an export case, and green in all three wave-2 guest runs on the old image.
+  - **Both guests whose halt stalled ran a hung test just before** (wave 2's `dashboard` close hang, this run's
+    timeout), and the stall sample shows no job process left, so a hang in the guest's graphics stack may sit under
+    both. ci-kit #130 bounds the halt's cost to the 60 s power-off wait either way.
+  - The Poppler exports passed in every run.
 
 ## Outcomes & Retrospective
 
