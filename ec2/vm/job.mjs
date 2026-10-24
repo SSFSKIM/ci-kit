@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { prepareContainer, runContainer } from '../../pool/vm/container.mjs';
 import { smokeVerdict } from '../../pool/vm/run.mjs';
+import { formatDiagnostic } from './diagnostics.mjs';
 
 const sh = promisify(execFile);
 const STATE = '/run/ci-kit-ec2/state.json';
@@ -134,7 +135,7 @@ export async function runGuest(deps) {
   } catch (error) {
     value = `failed:${stage}`;
     diagnostic = error instanceof ImageCheckError ? error.diagnostic : { reason: 'unexpected' };
-    deps.log(`${value} ${JSON.stringify(diagnostic)}`);
+    deps.log(`${value} ${formatDiagnostic(diagnostic)}`);
   } finally {
     try {
       try { await stopNotice?.(); } catch { deps.log('notice watcher stop failed'); }
