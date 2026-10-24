@@ -64,14 +64,24 @@ measurement exists.
   40014591706 green; PR #109 merged dcdc629. Fresh-main revision ci-kit-launcher-00020-t8v passed MAWS class 1a
   run 40015186704: all six pool jobs on GCE, v2 rows, no ERROR logs or rollback. AWS resource spend unchanged
   from M1's <=$0.735, plus this execution's one $0.01 Cost Explorer read.
-- [ ] M5: the EC2 provider, its image and its one-time setup, serving ci-kit-sandbox.
+- [x] (2026-10-24 09:17Z) M5: the EC2 provider, its image and its one-time setup, serving ci-kit-sandbox.
   Code reviewed approved through be1dd1a; full gate 40018176821 green at 12c6cdd (successor is whitespace only).
   Initialization metadata for non-200 rates is deferred to ci-kit #108 entry 2. Required image-residue smoke
   assertions fixed in 116bab4: injected-artifact RED/GREEN, focused guest tests 41/41. PR #111 and IAM correction
   #112 merged with exact-head gates green; setup/idempotence, repaired federated Canonical/other-owner dry-runs,
   deployed federation and GCE canaries passed. Combined bake ci-kit-bake-v2jm5 failed EC2 smoke `failed:image`
-  after its GCE image passed. Cleanup left zero EC2 instances/volumes/AMIs/snapshots. Safe diagnostics and the
-  cleanup/check cause are being corrected before rebake; EC2 image/runtime/lifecycle/transition proofs remain.
+  after its GCE image passed. Cleanup left zero EC2 instances/volumes/AMIs/snapshots. Recovery PR #114 merged
+  d82efae after review and exact-head gate 40074912381. Rebake ci-kit-bake-295d5 succeeded on 2026-10-24 at
+  08:26:15Z: both images match all nine manifest fields; common smoke and real EC2 bake-check passed.
+  Production scheduler run 40078252824 passed on EC2. Disabled/absent generic demand passed on GCE;
+  never-online retirement passed. Independent guest-only five-minute deadline shutdown passed (1.839-second
+  observed upper bound); disabled restoration finalized the held EC2 row and released its reservation 33 seconds
+  after merge. PR #118/f5e66bb restored the exact starting configuration at 09:14:32Z after exact-head gate
+  40080962319 passed. Previously queued pinned job 40079511350 then passed on EC2 at 09:15:40Z; disabled and
+  absent generic jobs had passed on GCE. Final sweep: zero active/stopped pool instances, zero pool volumes,
+  one intentional ready AMI. Fixture runners, temporary branches and isolated security group removed. Production
+  still serves revision 00021-qth, credit disabled. Conservative cumulative AWS execution estimate about $1.50,
+  not a settled bill, comfortably below the $25 pre-activation limit.
 - [ ] M6: credit preference, reports, guard, the MAWS canary and acceptance.
 
 ## What it must not be
@@ -735,6 +745,9 @@ purpose, not one broad “stopped pool VM” rule:
   a stopped builder waiting for CreateImage is protected.
 - Unready AMIs older than a day are deregistered with their snapshots deleted. The newest two ready generations
   are retained; older ready generations and their snapshots are removed by the image policy.
+- Snapshot deletion is retriable even after AMI deregistration removes its mapping. Independently rediscover
+  completed, pool-tagged snapshots older than 24 hours and delete only those unreferenced by any surviving owned
+  AMI, including untagged, disabled and deprecated images. Both image and snapshot inventories must be complete.
 
 It never acts without the pool tag, or on what a failed list would have covered. For example, a failed ledger
 read cannot establish “no row,” and a failed instance list cannot establish that a volume is orphaned. It names
@@ -981,6 +994,26 @@ M5; before that the scheduler's second provider is a fake under `test/gce/`.
     bin/ci-gate . --gates test
     # expect: the focused test passes; PASS test, then GREEN <run-url> from the remote gate
 
+### M6 staged activation and config-first rollback
+
+After M5 live acceptance completes:
+
+1. Merge M6 core code with credit still disabled; keep the activation-config commit out of this PR.
+2. From a fresh clone of merged main, record the current launcher revision and deploy `gce/deploy.sh launcher`.
+3. Verify the new runtime revision/commit and its federated billing-read/durable-reading behavior. Missing or
+   stale readings must keep preference off. The prior setup proof alone is not evidence of deployed policy.
+4. Merge a separate, reviewed/green activation-config PR naming EC2 then GCE for the pool repos and enabling
+   the account credit block. Because config reloads from main at runtime, this merge is the activation event.
+5. Observe the MAWS EC2 canary and the policy/report/guard acceptance below; retain both config and revision IDs.
+
+If the M6 rollout must be rolled back, **revert the activation config first** on main and verify the launcher
+has observed the restored disabled/pre-activation configuration. Only then run:
+
+    gcloud run services update-traffic ci-kit-launcher --to-revisions=<saved-revision>=100 --region us-central1 --project ssfskim-ci-kit
+
+Do not route traffic to the M5 launcher while activated credit config remains on main: it would read that flag
+without M6's durable billing policy. This ordering applies even when the rollback revision itself is healthy.
+
 ### Setup and deployment produce the system, not acceptance evidence (M3, M5, M6)
 
 Deploy only from merged `main`. Create a fresh clone once, and use it for all following deploy and observation
@@ -1078,9 +1111,14 @@ restart alone is not this proof: the config source must see the enabled → disa
 
 ### Lifecycle and guard evidence (M5 and M6; Acceptance 4 and 5)
 
-For a completed sandbox job, read its exit object and AWS state-transition timestamp. Compare those timestamps,
-not when a polling command happened to observe termination. Inspect volumes by this allocation, since other
-jobs or a bake may legitimately own pool volumes.
+For a completed sandbox job, read its exit object and AWS state-transition timestamp. A timestamped
+`StateTransitionReason` is the direct bound; when absent, the Spot request's terminal `Status.UpdateTime` is an
+AWS-generated upper bound. Also poll DescribeInstances every 2 seconds around expected poweroff and record
+the first observed `shutting-down` or `terminated`, the preceding running sample and the polling interval:
+EC2 compute billing stops on entering `shutting-down`. This observation is a conservative upper bound, not an
+internal event timestamp. At least one bound must be within 60 seconds of guest exit. If both exceed 60 seconds,
+the proof is inconclusive: rerun once, then escalate rather than relax acceptance. Inspect volumes by allocation,
+since other jobs or a bake may legitimately own pool volumes.
 
     cd /private/tmp/ci-kit-deploy
     AWS_PROFILE=ci-kit-ops AWS_REGION=us-east-2 aws s3 cp s3://ci-kit-ec2-reports-290475840169/reports/<alloc>/exit.json -
@@ -1119,17 +1157,23 @@ A notice without terminal evidence is not a cleanup signal; the actual interrupt
     gh issue list --repo SSFSKIM/ci-kit-sandbox --search '"ec2 credit" in:title' --state all --json number,title
     gh api repos/SSFSKIM/ci-kit-sandbox/issues/<credit-issue-number>/comments --jq '.[].body'
 
-For the budget proof, run the launcher with a test config whose `budget_usd` is below this reading's `billed_usd`.
-Keep a running sandbox VM through that tick and queue generic demand. Observe the exact budget log, GCE-first
-placement and that the running VM was untouched. For stale billing, supply a reading with `read_at` more than
-48 h old and make refresh unavailable for that fixture; otherwise a successful refresh would rightly make the
-data fresh. Observe the exact stale-billing log and the same placement behaviour. Restore the normal config
-and reading after the proof; do not replace production billing with invented amounts. Tests also exercise the
-flag and date ends, overlapping writers and a missing issue.
+For the budget proof, use the deployed launcher with a test config on main whose `budget_usd` is below the
+actual reading's `billed_usd`. Keep a real running sandbox VM through that tick and queue generic demand.
+Observe the exact budget log, real GCE-first placement and that the running VM was untouched; restore normal
+config afterward. This proves the deployed transition path.
+
+For stale billing, run an isolated acceptance harness at exactly the commit production serves, recording that
+SHA beside the Cloud Run revision. Use the real credit manager, reading selection and scheduler walk. Replace
+only the Cost Explorer transport (failing), the reading source (a genuine reading copied and aged beyond 48 hours
+only in the fixture), and all cloud mutation transports (record-only, never real writes). Reading real running VM
+inventory is permitted. Record the account-naming `credit preference off: stale billing` log, the scheduler's
+GCE-spot-before-EC2 decision for synthetic generic demand without launching it, and zero retire/stop calls against
+the existing VM. Assert zero real mutations; never write the aged fixture to a production issue or real ledger.
+Tests also exercise flag and date ends, overlapping writers and a missing issue.
 
     cd /private/tmp/ci-kit-deploy
     gcloud logging read 'resource.labels.service_name="ci-kit-launcher" AND (jsonPayload.message:"credit preference off:" OR textPayload:"credit preference off:")' --project ssfskim-ci-kit --freshness=1h --format='value(jsonPayload.message,textPayload)'
-    # expect for the respective fixtures: "credit preference off: budget"; "credit preference off: stale billing"
+    # expect live: "credit preference off: budget"; the isolated harness emits "credit preference off: stale billing"
     node gce/cost-report.mjs --since <ISO>
     node gce/latency-report.mjs --since <ISO>
     # expect: groups per provider; estimated row costs, AWS billing reading and remaining budget
@@ -1263,6 +1307,38 @@ The production chain is reviewed at each boundary:
   surface and a second control plane to a launcher that runs the owner's private CI.
 
 ## Surprises & Discoveries
+
+- Observation: Rebake `ci-kit-bake-295d5` succeeded at 2026-10-24T08:26:15Z using the post-cloud-final cleanup
+  boundary. Ready AMI `ami-0053d3b9003781572` and GCE image
+  `ci-kit-runner-20261024-074600-ubhs-d82efaeb` match ci-kit commit, both Node versions, MAWS revision,
+  lock hash, runner version and warm hash (nine storage fields). The EC2 snapshot contains 11.45166015625 GiB,
+  so each initialized volume costs $0.027483984375 before compute/disk/IP. EC2 smoke `i-03eafd4c61d5ca0b1`
+  reported `exit:0`, `smoke:ok`; bake-check run `40077936064` passed. Scheduler run `40078252824` independently
+  passed on `ci-kit-ec2-hsfy5cd25q`, finalized in sandbox ledger #50 at estimated $0.028. Its exit was
+  08:30:31.586Z; AWS transition time 08:30:34Z bounds shutdown by 2.414 seconds, Spot terminal UpdateTime
+  08:31:16Z bounds it by 44.414 seconds; zero allocation volumes remained.
+
+- Observation: AWS `StateTransitionReason` sometimes omits its timestamp. Use the approved terminal Spot
+  UpdateTime or a precisely sampled first `shutting-down` observation as conservative upper bounds, not an
+  invented exact transition time; the 60-second acceptance threshold remains unchanged. A new fixture must
+  carry only its unique JIT label: adding that label beside ordinary pool labels does not isolate it, because
+  GitHub jobs match subsets. The live never-online fixture `m5ivm5cy16` used a separate S3-only egress group,
+  remained offline, and the launcher retired it at 08:49:11Z, before its 09:08:41Z guest deadline. The production
+  security group was untouched. The transition fixture's row stayed running/reserved 2 while config was absent.
+  PR #116 removed the file at 08:54:17Z; the same launcher revision logged absence at 08:55:05Z. New generic
+  run `40079906954` passed on GCE (`hsfyvyiqsy`, reserved 4) while the EC2 reservation remained 2. They count
+  together only against the global ceiling; the production admission code's provider-key filter keeps repo/provider
+  caps separate, also verified offline using the actual held row. PR #117 restored the disabled file at 09:10:40Z;
+  the old EC2 row became final/orphan at 09:11:13Z, 33 seconds later. Its historical reserved=2 remains in the row,
+  but the production admission calculation over that actual final row returns 0. No redeploy was involved.
+
+- Observation: Unmanaged deadline fixture `m5dvm6azqq` (`i-02230e464219e2721`) was launched while the production
+  EC2 config was confirmed absent and no EC2 guard existed. Requested deadline 09:10:09.977Z; guest terminal
+  report `failed:deadline` at 09:10:09.243Z; last running observation 09:10:08.937Z; first shutting-down observation
+  09:10:11.082Z, a 1.839-second conservative upper bound from exit. AWS recorded
+  `Client.InstanceInitiatedShutdown`. It terminated with zero allocation volumes before PR #117 merged. The
+  later Spot terminal timestamp 09:11:21Z is too loose alone; the precise observation satisfies the unchanged
+  60-second bound. Fixture runners were removed, and the idle fixture's isolated security group was deleted.
 
 - Observation: The launcher role's actual federated Cost Explorer proof passed on 2026-10-24 at 07:45Z for
   `2026-10-23..2026-10-25`, explicitly using `ce.us-east-1.amazonaws.com` and a four-hour STS session. This
@@ -1637,6 +1713,49 @@ The production chain is reviewed at each boundary:
   Rationale: the code interfaces are reviewed and federated billing access is now proved; parallel preparation
   uses the cloud bake's long wait without changing production eligibility or weakening milestone acceptance.
   Date/Author: 2026-10-24, controller execution sequencing.
+
+- Decision: M6 billing refresh runs on the next UTC day subject to the persisted six-hour floor; failed reads
+  retry at most hourly within a process, and stored readings are refreshed every five minutes. Matching billing
+  issues are read even when closed or duplicated; newest valid `read_at` wins and pruning retains twenty readings.
+  Cost-report row estimates explicitly describe finalized VM cohorts created in the requested window, separate
+  from lifetime account billing. Missing injected policy defaults credit accounts off; no-credit accounts retain
+  their configured list order.
+  Rationale: preserve best-effort cost control across restarts/overlaps without introducing locks or equating
+  cohort estimates with account spend. These implementation defaults remain subject to M6 review.
+  Date/Author: 2026-10-24, M6 executor and controller.
+
+- Decision: M6 rolls out in two stages after M5 acceptance: merge and deploy core policy/report/guard code while
+  production credit stays disabled, then merge a separate activation-config commit. Config merges, not only
+  launcher deploys, change production eligibility because the launcher reloads main at runtime.
+  Rationale: the M5 launcher treats the credit flag as a policy input without durable billing injection. Rejected
+  one merge for code and activation: it could briefly run credit-first before M6 is deployed. Rollback has the
+  same hazard in reverse, so revert activation config on main and verify it is observed BEFORE routing traffic
+  to an older launcher revision. A distinct activation commit makes both directions explicit.
+  Date/Author: 2026-10-24, M6 executor and controller; confirmed by design owner.
+
+- Decision: Accept an AWS terminal Spot status timestamp or the first precisely sampled `shutting-down`/
+  `terminated` observation as a conservative shutdown bound when StateTransitionReason has no timestamp.
+  Poll every two seconds near expected poweroff; record the previous running sample. If both bounds exceed
+  60 seconds, rerun once and escalate rather than weaken acceptance.
+  Rationale: AWS billing stops at shutting-down; neither source claims an unavailable exact internal time.
+  Date/Author: 2026-10-24, design-owner direction and controller.
+
+- Decision: Guard snapshot retry discovery is independent of AMI mappings, limited to completed pool snapshots
+  older than 24 hours, with complete inventories and no reference from any surviving owned image.
+  Rationale: deregistration can succeed before snapshot deletion fails; all owned images, including disabled,
+  deprecated and untagged ones, must protect their references. M6 review found and verified the two-pass fix
+  in bf8c617; preactivation head bf8c617 and activation-only commit fac0ec3 remain separate.
+  Date/Author: 2026-10-24, M6 reviewer, executor and controller.
+
+- Decision: Stale-billing injection uses an isolated production-code harness at the deployed SHA, not the live
+  billing issue. Real policy/reading-selection/scheduler modules consume a genuine reading aged only in the
+  fixture and failed CE transport; all cloud mutations are intercepted and asserted absent. Record the exact
+  stale log, GCE-before-EC2 walk and zero retirement calls against the observed VM. The budget predicate still
+  gets its separate deployed-main-config, real-VM, real-demand proof.
+  Rationale: the live budget transition proves deployed wiring; stale differs in its predicate. Rejected live
+  stale injection because it contaminates durable billing or requires breaking production CE access. Rejected a
+  second live scheduler because it widens cloud/config scope without improving the predicate evidence.
+  Date/Author: 2026-10-24, design-owner direction and controller.
 
 ## Outcomes & Retrospective
 
