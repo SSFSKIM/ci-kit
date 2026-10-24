@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runShape, planPrelaunches, SHAPE_RUNS } from '../../gce/launcher/prelaunch.mjs';
 import { NEW_CFG, ONE_REGION_CFG } from './config-fixtures.mjs';
+import { planLaunches, claimedInstances, repoLabel } from '../../gce/launcher/logic.mjs';
 
 const MAWS = 'SSFSKIM/MAWS';
 const GATE = '.github/workflows/gate.yml';
@@ -38,7 +39,7 @@ test(`the shape is over the workflow's last ${SHAPE_RUNS} runs, newest by run id
 });
 
 // A run as the launcher reads it (readRepo), and its jobs.
-const run = (id, { repo = MAWS, path = GATE, attempt = 1 } = {}) => ({ repo, id, path, attempt });
+const run = (id, { repo = MAWS, path = GATE, attempt = 1, message } = {}) => ({ repo, id, path, attempt, message });
 const job = (runId, labels, { status = 'queued', conclusion = null } = {}) => ({ id: runId * 10, run_id: runId, labels, status, conclusion, repo: MAWS });
 const PLAN = ['ubuntu-slim'];
 const history = [...classOneA(101), ...classOneA(102), ...classOneA(103)];
@@ -118,4 +119,141 @@ test('a pre-launch and the race of its slow insert fill one slot of the run\'s s
   // Another attempt's race fills nothing of this one.
   const other = { ...raceOf(statics), race: { of: 'zzz', demand: { run: 500, attempt: 2 } } };
   assert.deepEqual(sizes(plan({ rows: [...history, gone, other, ...rest] })), [16]);
+});
+
+const hinted = (message, options = {}) => run(500, { message, ...options });
+test('attempt one uses the exact head-commit demand instead of history, including an unseen workflow and explicit zero', () => {
+  assert.deepEqual(sizes(plan({ runs: [hinted('gate\n\nPool-Demand: 2x1 4x2 16x1 8x4')] })), [16, 8, 8, 8, 8, 4, 4, 2]);
+  assert.deepEqual(sizes(plan({ runs: [hinted('Pool-Demand: 4x2', { path: 'new.yml' })], rows: [] })), [4, 4]);
+  assert.deepEqual(plan({ runs: [hinted('Pool-Demand: none')] }), []);
+  for (const message of ['Pool-Demand: none', 'Pool-Demand: 4x2']) {
+    assert.deepEqual(sizes(plan({ runs: [hinted(message, { attempt: 2 })] })), [16, 8, 8, 8, 8, 2]);
+  }
+});
+
+test('the last trailer line wins, including when its value is malformed; CRLF and surrounding spaces work', () => {
+  assert.deepEqual(sizes(plan({ runs: [hinted('Pool-Demand: none\r\n\r\nPool-Demand:  4x2  2x1  \r\n')] })), [4, 4, 2]);
+  assert.deepEqual(plan({ runs: [hinted('Pool-Demand: 4x2\nPool-Demand: none')] }), []);
+  assert.deepEqual(sizes(plan({ runs: [hinted('Pool-Demand: none\nPool-Demand: broken')] })), [16, 8, 8, 8, 8, 2]);
+  assert.deepEqual(sizes(plan({ runs: [hinted('Pool-Demand: 4x01')] })), [4]);
+});
+
+for (const value of ['', ' ', 'None', 'none 4x1', '4x1 none', '3x1', '32x1', '04x1', '4x0', '4x-1', '4x+1', '4x1.5', '4x1e2', '4x1 4x2', '4x1,8x1', '4X1', '4x1 junk', '4x1\t8x1']) {
+  test(`malformed demand ${JSON.stringify(value)} falls back to history`, () => {
+    assert.deepEqual(sizes(plan({ runs: [hinted(`Pool-Demand: ${value}`)] })), [16, 8, 8, 8, 8, 2]);
+  });
+}
+
+test('absent, embedded and differently cased trailer names do not override history', () => {
+  for (const message of [undefined, '', 'gate', 'text Pool-Demand: none', 'pool-demand: none']) {
+    assert.deepEqual(sizes(plan({ runs: [hinted(message)] })), [16, 8, 8, 8, 8, 2]);
+  }
+});
+
+test('hinted demand still obeys job visibility, runner-list success, admission and per-attempt dedupe', () => {
+  const runs = [hinted('Pool-Demand: 16x2 4x1')];
+  assert.deepEqual(plan({ runs, waiting: 1 }), []);
+  assert.deepEqual(plan({ runs, runners: new Map() }), []);
+  assert.deepEqual(plan({ runs, jobs: [job(500, PLAN, { status: 'completed' })] }), []);
+  assert.deepEqual(plan({ runs, jobs: [job(500, ['ci-kit-pool', 'cpus-4'])] }), []);
+  assert.deepEqual(sizes(plan({ runs, inflight: NEW_CFG.max_vcpus - 16 })), [16]);
+  assert.deepEqual(sizes(plan({ runs, rows: [prelaunched(500, 16, { state: 'final', end: 'done' })] })), [16, 4]);
+});
+
+test('enormous positive demand stays bounded even when physical admission is deferred to the launch queue', () => {
+  const launches = plan({ runs: [hinted(`Pool-Demand: 4x${'9'.repeat(400)}`)], admission: false });
+  assert.equal(launches.length, Math.floor(NEW_CFG.max_vcpus / 4));
+});
+
+const NOW = Date.parse('2026-10-24T12:00:00Z');
+function inventory(cpus, { repo = MAWS, provider = 'gce', status = 'online', busy = false, row = {}, age = 1000, labels } = {}) {
+  const alloc = `i${seq += 1}`;
+  const name = `ci-kit-${provider}-${alloc}`;
+  return {
+    repo,
+    runner: { name, status, busy, labels: (labels ?? ['self-hosted', 'ci-kit-pool', `cpus-${cpus}`, `ci-kit-${provider}`]).map((name) => ({ name })) },
+    instance: { name, alloc, repoLabel: repoLabel(repo), cpus, vcpus: cpus, provider, status: 'RUNNING', created: NOW - age, running: NOW - age },
+    row: { alloc, instance: name, repo, cpus, state: 'running', at: new Date(NOW - age).toISOString(), ...row },
+  };
+}
+function withInventory(items, over = {}) {
+  const rows = [...history, ...items.map((i) => i.row), ...(over.rows ?? [])];
+  const mine = new Map([[MAWS, new Map()]]);
+  for (const i of items) {
+    if (!mine.has(i.repo)) mine.set(i.repo, new Map());
+    mine.get(i.repo).set(i.runner.name, i.runner);
+  }
+  const jobs = over.jobs ?? [];
+  const queued = jobs.filter((j) => j.status === 'queued' && j.labels.includes('ci-kit-pool'));
+  const claims = claimedInstances({ jobs, rows, reports: over.reports ?? new Map() });
+  const reactive = planLaunches({ queued, instances: items.map((i) => i.instance), rows, runners: mine, now: NOW, cfg: NEW_CFG, claimed: claims });
+  return plan({ ...over, rows, runners: mine, spare: reactive.spare });
+}
+
+test('shared idle online inventory covers only the same repo and size, on either provider', () => {
+  const items = [inventory(4), inventory(4, { provider: 'ec2' }), inventory(8), inventory(4, { repo: 'SSFSKIM/other' })];
+  assert.deepEqual(sizes(withInventory(items, { runs: [hinted('Pool-Demand: 4x3')] })), [4]);
+});
+
+test('busy, offline, expired and previously claimed JIT runners are not reusable inventory', () => {
+  const report = inventory(4);
+  const jobClaim = inventory(4);
+  const items = [inventory(4, { busy: true }), inventory(4, { status: 'offline' }), inventory(4, { age: 11 * 60_000 }),
+    inventory(4, { row: { job: { id: 1, run: 100, workflow: GATE } } }), report, jobClaim];
+  assert.deepEqual(sizes(withInventory(items, { runs: [hinted('Pool-Demand: 4x1')], reports: new Map([[report.runner.name, { id: 2 }]]),
+    jobs: [{ ...job(99, ['ci-kit-pool', 'cpus-4'], { status: 'completed' }), runner_name: jobClaim.runner.name }] })), [4]);
+});
+
+test('ready inventory is consumed once across pending runs, oldest first; replaying a tick is stable', () => {
+  const items = [inventory(4)];
+  const runs = [run(501, { message: 'Pool-Demand: 4x1' }), hinted('Pool-Demand: 4x1')];
+  for (let k = 0; k < 2; k += 1) {
+    assert.deepEqual(withInventory(items, { runs }).map((l) => l.prelaunch.run), [501]);
+  }
+});
+
+test('a pending run keeps its own prelaunch and race inventory, without subtracting it twice from its shape', () => {
+  const original = inventory(4, { row: { prelaunch: { run: 501, attempt: 1, workflow: GATE } } });
+  const race = inventory(4, { row: { race: { of: original.row.alloc, demand: { run: 501, attempt: 1 } } } });
+  const runs = [hinted('Pool-Demand: 4x1'), run(501, { message: 'Pool-Demand: 4x2' })];
+  assert.deepEqual(withInventory([original, race], { runs }).map((l) => l.prelaunch.run), [500, 501]);
+});
+
+test('inventory from runs no longer awaiting pool jobs, and older attempts, can cover a new run', () => {
+  for (const jobs of [[], [job(99, PLAN, { status: 'completed' })], [job(99, ['ci-kit-pool', 'cpus-4'], { status: 'in_progress' })]]) {
+    const item = inventory(4, { row: { prelaunch: { run: 99, attempt: 1, workflow: GATE } } });
+    const runs = jobs.length ? [run(99), hinted('Pool-Demand: 4x1')] : [hinted('Pool-Demand: 4x1')];
+    assert.deepEqual(withInventory([item], { runs, jobs }), []);
+  }
+  assert.deepEqual(withInventory([inventory(4, { row: { prelaunch: { run: 500, attempt: 2 } } })], { runs: [hinted('Pool-Demand: 4x1')] }), []);
+});
+
+test('queued jobs reserve inventory first, with provider-pinned demand kept separate from generic demand', () => {
+  const items = [inventory(4, { provider: 'ec2' }), inventory(4)];
+  const jobs = [job(90, ['self-hosted', 'ci-kit-pool', 'cpus-4']), job(91, ['self-hosted', 'ci-kit-pool', 'cpus-4', 'ci-kit-ec2'])];
+  assert.deepEqual(sizes(withInventory(items, { runs: [hinted('Pool-Demand: 4x1')], jobs })), [4]);
+  assert.deepEqual(withInventory(items, { runs: [hinted('Pool-Demand: 4x1')], jobs: jobs.slice(1) }), []);
+});
+
+test('historical provider-pinned shapes are not turned into generic prelaunch demand', () => {
+  const rows = [{ ...ran(200, 4), v: 2, job: { run: 200, workflow: GATE, required_provider: 'ec2' } }];
+  assert.deepEqual(plan({ rows }), []);
+});
+
+test('inventory accounting also reduces historical demand, without counting a runner twice', () => {
+  const item = inventory(8);
+  assert.deepEqual(sizes(withInventory([item, item])), [16, 8, 8, 8, 2]);
+});
+
+test('retiring runners and labels that do not identify the same pool size are not inventory', () => {
+  const items = [inventory(4, { row: { state: 'deleting' } }), inventory(4, { row: { state: 'final' } }),
+    inventory(4, { labels: ['self-hosted', 'cpus-4'] }), inventory(4, { labels: ['ci-kit-pool', 'cpus-8'] }),
+    inventory(4, { labels: ['ci-kit-pool', 'cpus-4', 'cpus-8'] })];
+  assert.deepEqual(sizes(withInventory(items, { runs: [hinted('Pool-Demand: 4x1')] })), [4]);
+});
+
+test('a provider-pinned pending run keeps its prelaunched runner out of generic shared inventory', () => {
+  const item = inventory(4, { provider: 'ec2', row: { prelaunch: { run: 501, attempt: 1, workflow: 'pinned.yml' } } });
+  const rows = [{ ...ran(200, 4), v: 2, job: { run: 200, workflow: 'pinned.yml', required_provider: 'ec2' } }];
+  assert.deepEqual(withInventory([item], { runs: [hinted('Pool-Demand: 4x1'), run(501, { path: 'pinned.yml' })], rows }).map((l) => l.prelaunch.run), [500]);
 });

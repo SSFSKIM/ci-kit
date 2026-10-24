@@ -716,6 +716,22 @@ VM's walk.
   send → done, after 6.813 s tick preparation. Other runs likewise have little or no prequeue lead, exposing
   ordinary ~26 s boot/start time. Reject the earlier pooled reading as a basis for closing A5; M5 remains open.
 
+- 2026-10-24 (CI-opt): **Exact pre-launch demand travels on the head commit, not through a new service.** MAWS's
+  local `ci-gate.sh` computes its plan and writes `Pool-Demand: <cpus>x<count> ...` (sizes 2/4/8/16, each once,
+  positive integer counts), or `Pool-Demand: none`, on the empty commit it pushes. ci-kit reads `head_commit.message`
+  in the existing runs listing. The last trailer wins; malformed/absent falls back to the historical shape; only
+  attempt 1 honours it, since later attempts may rerun a subset. This supersedes history as the first choice for M5
+  without changing queued-job priority, admission, ordering or per-attempt prelaunch dedupe. Alternatives rejected:
+  an OIDC-authenticated hint receiver adds moving parts and a credential for no earlier signal; waiting for the plan
+  job loses about 10 s of lead. No new endpoint, secret or durable hint store is needed.
+  **Count shared inventory before creating more VMs.** The queued-job planner exposes unused cover by runner identity;
+  pre-launch uses only its online, idle, never-claimed runners with matching repo and size labels, excluding rows for
+  attempts still awaiting pool jobs (including their races). Each spare runner covers one run, oldest first, after
+  queued jobs' provider-aware reservations. This preserves the ordinary claim/lifetime rules and avoids double-counting
+  an attempt's own prelaunch dedupe. Historical provider-pinned shapes remain separate and are not turned into generic
+  speculation. Very large valid counts are materialized only up to the per-size global-cap bound per tick; physical
+  admission remains in the existing launch queue. This is reuse, not the full-standby design excluded above.
+
 ## Surprises & Discoveries
 
 - 2026-10-21 (CI-opt): the first version of this spec and the owner's first standby question assumed a pool hop for

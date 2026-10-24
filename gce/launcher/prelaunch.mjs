@@ -1,7 +1,8 @@
 // Pre-launch (spec 2026-10-21 M5): when a served repo's run begins, the launcher launches the VMs its pool jobs will
 // ask for before those jobs are queued, so the VMs boot while the run's first job runs (MAWS's plan, on a hosted
 // runner, ~15 s from queued to done; its gates are created when it ends). What to launch is the shape of the same
-// workflow's recent runs in the ledger. Nothing new is kept: a pre-launched VM is an ordinary job VM (its runner covers
+// workflow's recent runs in the ledger, unless attempt 1 carries an exact Pool-Demand commit trailer. Nothing new is
+// kept: a pre-launched VM is an ordinary job VM (its runner covers
 // any queued job of its repo and size, and the idle rule removes it if none comes), and its ledger row names the run it
 // was launched for, which is what keeps a later tick, a second launcher or a redelivered event from launching for that
 // run again.
@@ -56,35 +57,82 @@ export function prelaunchedFor(rows, run) {
   return out;
 }
 
+// null means absent/malformed, {} means explicitly no pool jobs. Only the last trailer is authoritative,
+// including when it is malformed. Counts beyond Number's range are still positive demand; planning bounds them.
+function poolDemand(message) {
+  const line = message?.split(/\r?\n/).filter((line) => line.startsWith('Pool-Demand:')).at(-1);
+  if (line === undefined) return null;
+  const value = line.slice('Pool-Demand:'.length).replace(/^ +| +$/g, '');
+  if (value === 'none') return {};
+  const shape = {};
+  for (const token of value.split(/ +/)) {
+    const match = /^(2|4|8|16)x(\d+)$/.exec(token);
+    if (!match || !(Number(match[2]) > 0) || Object.hasOwn(shape, match[1])) return null;
+    shape[match[1]] = Number(match[2]);
+  }
+  return shape;
+}
+
 const isPoolJob = (job) => job.labels.some((l) => l.toLowerCase() === 'ci-kit-pool');
+const runKey = (repo, id, attempt) => JSON.stringify([repo.toLowerCase(), id, attempt]);
+
+// planLaunches has already removed queued jobs' cover and excluded claimed/expired VMs. Of what remains, only
+// online runners can save a speculative launch. A prelaunch (or its race) still belongs to its pending attempt:
+// prelaunchedFor already counts it there, so sharing it would count one VM twice, even within its owner's shape.
+function sharedInventory(spare, runners, rows, pending) {
+  const awaiting = new Set(pending.map((r) => runKey(r.repo, r.id, r.attempt)));
+  const byName = new Map(rows.map((r) => [runKey(r.repo, r.instance), r]));
+  const seen = new Set();
+  return spare.filter((c) => {
+    const key = runKey(c.repo, c.name);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    const runner = runners.get(c.repo)?.get(c.name);
+    if (!runner || runner.status !== 'online' || runner.busy) return false;
+    const labels = (runner.labels ?? []).map((l) => (typeof l === 'string' ? l : l.name).toLowerCase());
+    if (!labels.includes('ci-kit-pool') || !labels.includes(`cpus-${c.cpus}`) || labels.filter((l) => /^cpus-/.test(l)).length !== 1) return false;
+    const row = byName.get(key);
+    if (row?.job || ['final', 'deleting'].includes(row?.state)) return false;
+    return ![row?.prelaunch, row?.race?.demand].some((d) => d?.run && awaiting.has(runKey(c.repo, d.run, d.attempt)));
+  });
+}
 
 // The VMs to launch now for runs that have begun: [{repo, cpus, prelaunch: {run, attempt, workflow}}].
 // A run has begun and its pool jobs are still to come while none of its listed jobs is a pool job (queued, running or
 // skipped) and none has ended: GitHub creates the jobs that need the first ones when those end, so a run whose first
 // job ended with no pool job listed has none coming. Each such run gets its workflow's shape, less the VMs already
 // pre-launched for it (prelaunchedFor: the rows naming its run and attempt, a race with its original as one, in any
-// state but abandoned, which made no VM).
-// runs: [{repo, id, path, attempt}] of the served repos, queued and in progress; jobs: their jobs (run_id, labels,
+// state but abandoned, which made no VM), and shared idle inventory, assigned once oldest run first.
+// spare: planLaunches' unused cover, after queued jobs (including provider-pinned jobs) reserved theirs.
+// runs: [{repo, id, path, attempt, message}] of the served repos, queued and in progress; jobs: their jobs (run_id, labels,
 // status); rows: the ledger's; runners: Map repo → its runners, for the repos whose listing succeeded (no other repo
 // gets anything); inflight and waiting: the vCPUs in flight after this tick's launches for queued jobs, and how many
 // queued jobs wait (planLaunches). Queued jobs come first: nothing is pre-launched while one waits, and pre-launches go
 // oldest run first, largest size first (a run waits for its slowest gate, and its long gates are the large ones), each
 // reserving its largest machine as a launch does, until one does not fit.
-export function planPrelaunches({ runs, jobs, rows, runners, inflight, waiting, cfg, admission = true }) {
+export function planPrelaunches({ runs, jobs, rows, runners, inflight, waiting, cfg, admission = true, spare = [] }) {
   if (waiting > 0) return [];
   const out = [];
+  const pending = runs.filter((run) => runners.has(run.repo)
+    && !jobs.some((j) => j.run_id === run.id && (isPoolJob(j) || j.status === 'completed'))).sort((a, b) => a.id - b.id);
+  const idle = sharedInventory(spare, runners, rows, pending);
   let reserved = inflight;
-  for (const run of [...runs].sort((a, b) => a.id - b.id)) {
-    if (!runners.has(run.repo)) continue;
-    const own = jobs.filter((j) => j.run_id === run.id);
-    if (own.some((j) => isPoolJob(j) || j.status === 'completed')) continue;
-    const shape = runShape(rows, run.repo, run.path);
+  for (const run of pending) {
+    const shape = (run.attempt === 1 ? poolDemand(run.message) : null) ?? runShape(rows, run.repo, run.path);
     if (!shape) continue;
     const done = new Map();
     for (const [cpus, groups] of prelaunchedFor(rows, run)) done.set(cpus, groups.size);
     const sizes = Object.keys(shape).map(Number).filter((cpus) => cfg.placements[0].machines[cpus]).sort((a, b) => b - a);
     for (const cpus of sizes) {
-      for (let k = done.get(cpus) ?? 0; k < shape[cpus]; k += 1) {
+      let remaining = shape[cpus] - (done.get(cpus) ?? 0);
+      for (let k = 0; k < idle.length && remaining > 0;) {
+        if (sameRepo(idle[k].repo, run.repo) && idle[k].cpus === cpus) { idle.splice(k, 1); remaining -= 1; }
+        else k += 1;
+      }
+      // No tick can launch more of a size than the global cap allows, even when the launch queue handles physical
+      // admission. Bound materialization of a commit-supplied count without rejecting otherwise valid demand.
+      remaining = Math.min(remaining, Math.floor(cfg.max_vcpus / cpus));
+      for (let k = 0; k < remaining; k += 1) {
         const need = largestMachineCpus(cpus, cfg);
         if (admission && reserved + need > cfg.max_vcpus) return out;
         reserved += need;

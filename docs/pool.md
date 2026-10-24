@@ -486,16 +486,30 @@ served repo's run begins, the tick launches the VMs its pool jobs will ask for, 
   a run whose first job ended with no pool job listed has none coming (a docs-only run's skipped gates, or class 1a
   on the Mac), and it gets nothing. The webhook's request for the plan's `queued` event finds the run at once; a
   minute tick that falls inside the plan finds it too.
-- **What to launch** is the shape of the same workflow's runs on the ledger: for each size, the median count of VMs
-  its pool jobs took over its last 10 runs (newest by run id) among the rows in the ledger's 26 h window, rounded up;
-  a run with no job of a size counts 0 for it. A row counts through the job its VM ran (`job.run`, `job.workflow`),
-  whichever run it was launched for. A workflow with no run on the ledger gets nothing. Sizes go largest first.
+- **What to launch.** On attempt 1, the last `Pool-Demand:` line of the head commit message supplies the exact
+  demand: space-separated `<cpus>x<count>` tokens, sizes 2, 4, 8 or 16, each size at most once, each count a positive
+  decimal integer. For example, `Pool-Demand: 16x1 8x4 4x2 2x1`. Exactly `Pool-Demand: none` means no pool jobs and
+  launches nothing, even when history predicts otherwise. The message comes from the existing workflow-runs listing;
+  no receiver or extra API read is needed. A malformed last value counts as absent, not as an earlier valid trailer.
+  Later attempts ignore the trailer: a failed-jobs rerun needs a subset, not the original full plan.
+- **Without a valid hint**, the same workflow's runs on the ledger supply its shape: for each size, the median count
+  of VMs its pool jobs took over its last 10 runs (newest by run id) in the ledger's 26 h window, rounded up; a run
+  with no job of a size counts 0 for it. A row counts through the job its VM ran (`job.run`, `job.workflow`), whichever
+  run it was launched for. A workflow with neither a valid hint nor history gets nothing. Historical provider-pinned
+  jobs stay separate from generic demand and are not speculated as generic VMs. Sizes go largest first.
 - **Once per run.** A pre-launched VM's row names the run it was launched for (`prelaunch`: run, attempt, workflow,
   written in the `launching` row before the runner is minted), and a run gets its shape less the VMs already
   pre-launched for its run and attempt, whatever became of them (an `abandoned` row, which made no VM, does not
   count). A later tick, a redelivered or duplicate event and a second launcher reading the same ledger therefore
   launch nothing more; two ticks overlapping can both launch for one run, the overlap's usual over-launch, which the
   idle rule removes. A re-run of all of a run's jobs is a new attempt and is pre-launched again.
+- **Shared inventory.** Before launching the remainder, subtract idle, online pool runners of the same repo and
+  `cpus-N` size that queued jobs have not already reserved. Queued-job accounting matches required-provider labels
+  first, so a pinned job and a generic job cannot spend the same runner. A runner whose ledger row names a pre-launch
+  (or race) for an attempt still awaiting its pool jobs stays with that attempt; its own dedupe already counts it.
+  Other eligible runners are assigned once per tick, oldest run first, with no durable reservation. Busy, offline,
+  expired, retiring and previously used single-job runners do not count. Claims are known from jobs, ledger rows and
+  guest reports, as for ordinary queued-job coverage. This reuses leftover capacity; it does not maintain standby.
 - **An ordinary job VM.** Its runner is minted at launch with the size's labels, so it counts as cover for any queued
   job of its repo and size from that moment, and the run's gates, once queued, launch nothing more. GitHub gives
   each gate to any runner of its repo and size, so a VM pre-launched for one run may serve another's; the cover
