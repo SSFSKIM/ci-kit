@@ -29,8 +29,9 @@
 #               (180) on this launcher's clock; past it the wrapper could not answer, which may hide a cancelled job:
 #               tart stop, a `raced` failure and its alert
 #   preparing   from out/assigned (the wrapper saw the listener take a job) until out/job (the guest's hook ran)
-#   running     until tart run exits, the guest having powered itself off; at most CI_KIT_VM_JOB_BOUND min (50) from
-#               out/assigned, then an `image` failure: GitHub ends a job at its timeout, so a clone past it did not end
+#   running     until tart run exits, the guest having powered itself off, or out/done (the runner exited: ending); at
+#               most CI_KIT_VM_JOB_BOUND min (50) from out/assigned, then an `image` failure: GitHub ends a job at its
+#               timeout, so a clone past it did not end
 #   ending      a guest with nothing left to run: until it powers off, at most CI_KIT_VM_END_WAIT s (60)
 #   teardown    the end verified against Tart (tart.sh; where it still runs, tart stop with CI_KIT_VM_STOP_TIMEOUT s
 #               of graceful stop (30), then the check again), out/ folded into the logs, tart delete, then vm-reserved
@@ -904,6 +905,9 @@ step_job() { # preparing and running
     enter running
   fi
   if run_gone; then to_teardown 'the guest powered itself off'; return; fi
+  # The runner exited, so nothing in the guest can hold a job: its power-off is waited for as an ending's, not under
+  # the running bound (a halt can stall until the guest's kernel panics and reboots, and tart run then never exits).
+  if has 'done'; then say "$clone: its runner is done ($(first_line 'done')); waiting for its power-off"; enter ending; return; fi
   ((now_epoch - assigned_at < job_bound)) ||
     fail image "the job outlived the running bound ($job_bound_min min from out/assigned); stopping it"
 }
