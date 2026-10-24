@@ -224,6 +224,64 @@ test('host smoke rejects each retained builder state, log, credential and tempor
   }
 });
 
+test('image failures retain only a controlled diagnostic in both the terminal report and guest log', async t => {
+  const manifest = 'etc/ci-kit/bake-manifest.json';
+  const cases = [
+    ['manifest missing', manifest, 'remove', { reason: 'manifest-missing', path: `/${manifest}`, code: 'ENOENT' }],
+    ['manifest malformed', manifest, 'malformed', { reason: 'manifest-invalid', path: `/${manifest}` }],
+    ['manifest null', manifest, 'null', { reason: 'manifest-incomplete', path: `/${manifest}` }],
+    ['disabled marker missing', 'etc/cloud/cloud-init.disabled', 'remove', { reason: 'cloud-init-marker-missing', path: '/etc/cloud/cloud-init.disabled' }],
+    ['identity', 'var/lib/cloud/instance', 'file', { reason: 'cloud-init-identity', path: '/var/lib/cloud/instance' }],
+    ['instance cache', 'var/lib/cloud/instances/sensitive-residue/user-data', 'file', { reason: 'cloud-init-state', path: '/var/lib/cloud/instances' }],
+    ['state', 'var/lib/cloud/data/sensitive-residue', 'file', { reason: 'cloud-init-state', path: '/var/lib/cloud/data' }],
+    ['seed', 'var/lib/cloud/seed/sensitive-residue', 'file', { reason: 'cloud-init-state', path: '/var/lib/cloud/seed' }],
+    ['log', 'var/log/cloud-init.log.sensitive-residue', 'file', { reason: 'cloud-init-log', path: '/var/log' }],
+    ['credential', 'root/.netrc', 'file', { reason: 'credential-artifact', path: '/root/.netrc' }],
+    ['temporary', 'tmp/ci-kit-warm-sensitive-residue', 'file', { reason: 'temporary-artifact', path: '/tmp' }],
+    ['filesystem', 'var/lib/cloud/data', 'file', { reason: 'filesystem', path: '/var/lib/cloud/data', code: 'ENOTDIR' }],
+  ];
+  for (const [name, artifact, operation, expected] of cases) {
+    await t.test(name, async t => {
+      const root = await imageFixture(t);
+      const target = join(root, artifact);
+      await mkdir(dirname(target), { recursive: true });
+      if (operation === 'remove') await rm(target);
+      else await writeFile(target, operation === 'null' ? 'null' : operation === 'malformed' ? '{"secret":"sensitive-residue"' : 'sensitive-residue');
+      const f = fixture({ readUserData: async () => JSON.stringify({ ...data(), jit: undefined, smoke: 2 }),
+        checkImage: () => guest.checkImage(root) });
+      await runGuest(f.deps);
+      const terminal = f.reports.at(-1);
+      assert.equal(terminal.value, 'failed:image');
+      assert.deepEqual(terminal.diagnostic, expected);
+      assert.ok(f.calls.some(([op, text]) => op === 'log' && text === `failed:image ${JSON.stringify(expected)}`));
+      const output = JSON.stringify([terminal, f.calls.filter(([op]) => op === 'log')]);
+      assert.ok(!output.includes('sensitive-residue'));
+      assert.ok(!output.includes(root));
+      assert.ok(!f.calls.some(([op]) => op === 'run'));
+      assert.equal(f.calls.at(-1)[0], 'poweroff');
+    });
+  }
+});
+
+test('arbitrary external errors cannot impersonate safe image diagnostics or leak secrets', async () => {
+  const secret = `secret-jit ${data().report.boot}`;
+  const error = Object.assign(new Error(secret), { name: 'ImageCheckError', code: secret,
+    stdout: secret, stderr: secret, diagnostic: { reason: secret, path: secret } });
+  for (const dependency of ['checkImage', 'runContainer']) {
+    const f = fixture({ readUserData: async () => JSON.stringify({ ...data(), jit: undefined, smoke: 2 }),
+      [dependency]: async () => { throw error; } });
+    await runGuest(f.deps);
+    const stage = dependency === 'checkImage' ? 'image' : 'container';
+    assert.equal(f.reports.at(-1).value, `failed:${stage}`);
+    assert.deepEqual(f.reports.at(-1).diagnostic, { reason: 'unexpected' });
+    assert.ok(f.calls.some(([op, text]) => op === 'log' && text === `failed:${stage} {"reason":"unexpected"}`));
+    const output = JSON.stringify([f.reports.map(({ url, ...body }) => body), f.calls.filter(([op]) => op === 'log')]);
+    assert.ok(!output.includes('secret-jit'));
+    assert.ok(!output.includes('signature=secret'));
+    assert.equal(f.calls.at(-1)[0], 'poweroff');
+  }
+});
+
 test('host smoke permits fresh guest identity, runtime state and unrelated logs or temporary files', async t => {
   const root = await imageFixture(t);
   for (const file of ['etc/machine-id', 'etc/hostname', 'etc/ssh/ssh_host_ed25519_key',
