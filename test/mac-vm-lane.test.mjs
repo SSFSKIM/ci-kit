@@ -1719,7 +1719,8 @@ describe('clone-scoped JIT credentials', macOnly, () => {
         if (n === 2) m.ghFlag('delete-404');
         await m.finished(clone);
         assert.ok(!existsSync(credential), 'the credential must not survive teardown');
-        assert.ok(m.ghCalls().some((c) => c.includes(`repos/SSFSKIM/MAWS/actions/runners/${n}`) && c.includes('DELETE')));
+        await m.until(() => m.ghCalls().some((c) => c.includes(`repos/SSFSKIM/MAWS/actions/runners/${n}`) && c.includes('DELETE')), 'the asynchronous registration cleanup');
+        await m.until(() => !existsSync(join(m.slotDir, 'jit-pending', clone)), 'the registration deleted (including 404)');
         if (n === 1) m.queue(['ci-kit-mac-vm']);
       }
       for (const call of m.ghCalls().filter((c) => c[0] === 'api')) assert.ok(call.includes('GH_TOKEN=unset'));
@@ -1736,25 +1737,24 @@ describe('clone-scoped JIT credentials', macOnly, () => {
     } finally { await finish(m, a); }
   });
 
-  test('a failed runner delete revokes the config but retains recovery metadata and reservation until retry', async () => {
+  test('a failed runner delete revokes the config and releases the reservation; another clone boots while cleanup retries', async () => {
     const m = lane({ queue: [['ci-kit-mac-vm']] });
     const a = m.start();
-    let b;
     try {
       const clone = await m.booted();
-      m.queue(); m.ghFlag('fail-delete');
-      m.mark('done', '0'); m.powerOff(clone);
-      await m.waitLog(/cannot be torn down yet.*JIT delete.*HTTP 502/);
-      assert.ok(m.reserved());
-      assert.ok(!existsSync(join(m.slotDir, 'jit', clone, 'config')));
-      assert.ok(existsSync(join(m.slotDir, 'jit', clone, 'runner.json')));
-      await a.kill();
-      m.ghFlag('fail-delete', false);
-      b = m.start();
-      await m.waitLog(/recovery: no job clone and no reservation; idle.*$/s);
-      await m.until(() => !m.reserved(), 'the cleanup retried after restart');
+      m.ghFlag('fail-delete');
+      await m.finished(clone);
+      await m.waitLog(/registration cleanup pending: JIT reap: DELETE failed \(HTTP 502\)/);
       assert.ok(!existsSync(join(m.slotDir, 'jit', clone)));
-    } finally { await finish(m, ...(b ? [b] : [a])); }
+      const pending = join(m.slotDir, 'jit-pending', clone);
+      assert.deepEqual(readdirSync(pending), ['runner.json'], 'only nonsecret metadata remains');
+      const next = await m.booted();
+      assert.notEqual(next, clone, 'failed cleanup must not hold admission');
+      m.queue();
+      m.ghFlag('fail-delete', false);
+      await m.until(() => !existsSync(pending), 'the pending cleanup retried while another clone runs');
+      await m.finished(next);
+    } finally { await finish(m, a); }
   });
 
   test('recovery cleans a mint whose response was lost before a VM or reservation remained, by exact clone name', async () => {
@@ -1771,6 +1771,7 @@ describe('clone-scoped JIT credentials', macOnly, () => {
     const a = m.start();
     try {
       await m.waitLog(/recovery: no job clone and no reservation; idle/);
+      await m.until(() => m.ghCalls().some((c) => c.includes('DELETE')), 'the orphan cleanup');
       const deletes = m.ghCalls().filter((c) => c.includes('DELETE'));
       assert.deepEqual(deletes.map((c) => c[1]), ['repos/SSFSKIM/MAWS/actions/runners/41']);
       assert.ok(!existsSync(dir));
@@ -1789,8 +1790,10 @@ describe('clone-scoped JIT credentials', macOnly, () => {
     assert.deepEqual(JSON.parse(readFileSync(join(m.home, 'gh/request-1.json'), 'utf8')), {
       name: `ci-kit-mac-mini-${clone}`, runner_group_id: 1, labels: ['ci-kit-mac-vm-trial'], work_folder: '_work',
     });
-    const removed = spawnSync('python3', ['-I', helper, 'delete', dir, clone], { env, encoding: 'utf8' });
+    const removed = spawnSync('python3', ['-I', helper, 'retire', dir, clone], { env, encoding: 'utf8' });
     assert.equal(removed.status, 0, removed.stderr);
+    const reaped = spawnSync('python3', ['-I', helper, 'reap', dir], { env, encoding: 'utf8' });
+    assert.equal(reaped.status, 0, reaped.stderr);
     executable(join(m.home, 'bin/gh'), 'echo "fixture-jit-secret-on-stdout"; echo "fixture-jit-secret-on-stderr (HTTP 403)" >&2; exit 1');
     const failed = spawnSync('python3', ['-I', helper, 'mint', 'SSFSKIM/MAWS', 'mini', dir, 'vm-trial', clone], { env, encoding: 'utf8' });
     assert.equal(failed.status, 1);

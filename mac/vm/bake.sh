@@ -501,7 +501,7 @@ do_register() {
 trial_jit_cleanup() {
   [[ -n ${trial:-} ]] || return 0
   tart_ended "$trial" || return 1
-  jit_delete "$vm_home/vm-trial" "$trial"
+  jit_retire "$vm_home/vm-trial" "$trial"
 }
 
 # The trial's job, through gh: j_id, j_conclusion; false with j_why.
@@ -629,7 +629,7 @@ do_trial() {
   for entry in "$vm_home/vm-trial"/jit/maws-vm-trial-*; do
     [[ -d $entry ]] || continue
     tart_ended "${entry##*/}" || refuse "${entry##*/}: $tart_why"
-    jit_delete "$vm_home/vm-trial" "${entry##*/}" || die 'the previous trial JIT registration could not be removed'
+    jit_retire "$vm_home/vm-trial" "${entry##*/}" || die 'the previous trial JIT config could not be revoked'
   done
   [[ -f $kit/vm/guest/kickoff.sh ]] || refuse "no installed kit at $kit (mac/install.sh --vm)"
   t_out=$vm_home/vm-trial/out
@@ -661,7 +661,8 @@ do_trial() {
   fi
   say "$trial: $t_end"
   end_vm || die "$trial's end is not verified; no record is written, and it is left for the verified stop by hand"
-  trial_jit_cleanup || die "JIT cleanup failed; --retire $trial retries it"
+  trial_jit_cleanup || die "local JIT cleanup failed; --retire $trial retries it"
+  jit_reap "$vm_home/vm-trial" || say 'registration cleanup pending; the lane or the next maintenance step retries it'
   trap - EXIT
   vms=$(tart_vms) || die "Tart cannot list its VMs; $trial is stopped but not deleted"
   if [[ -n $(tart_state_in "$vms" "$trial") ]]; then
@@ -756,7 +757,8 @@ do_retire() {
   tart_list=$(tart_vms) || refuse 'Tart cannot list its VMs'
   if [[ $vm == maws-vm-trial-* ]]; then
     tart_ended "$vm" || refuse "$vm is not verified ended: $tart_why"
-    jit_delete "$vm_home/vm-trial" "$vm" || die "JIT cleanup failed for $vm"
+    jit_retire "$vm_home/vm-trial" "$vm" || die "local JIT cleanup failed for $vm"
+    jit_reap "$vm_home/vm-trial" || say 'registration cleanup pending; the lane retries it'
   fi
   if [[ -z $(tart_state_in "$tart_list" "$vm") ]]; then
     say "retired already: $vm is not among Tart's VMs"

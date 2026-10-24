@@ -97,7 +97,7 @@ and by the coordinator's holds, and the design below says what is read and when.
 - 2026-10-24: Implemented clone-scoped JIT registration using the mini's existing `gh` login, including trial
   clones, private config transport, teardown/restart cleanup, and credential-boundary tests. The live MacBook probe
   minted and deleted MAWS runner 3290: only the requested probe label, no macOS/ARM64 labels. Awaiting the PR's
-  independent review and CI gate; deployment and merge remain CI-opt's work.
+  final-HEAD CI gate; reviewer-high found no material findings, and deployment and merge remain CI-opt's work.
 
 - [x] (2026-10-21 09:5xZ) Read-only audit of every MAWS Mac group (local:
   `~/Developer/ci-analysis/mac-concurrency-audit.md` on the MacBook; MAWS is private, so this spec carries its
@@ -449,9 +449,10 @@ released only after the VM's end is verified; the guard samples through every ro
   input before workers, and umask 077 keeps its decoded identity files private. Each clone sees only its own
   directory. A mint failure refuses the boot with its reason and is retried, not counted as an image failure.
   A cleanup record is published before POST so a lost response or crash before cloning is recoverable by name.
-  After the verified stop, local config access is revoked and the registration is deleted if it remains (404 is
-  success); a failed delete retains only cleanup metadata and the reservation for retry. The directory goes when
-  cleanup succeeds. The old persistent registrations and `identity/` directories are unused, not deleted by this
+  After the verified stop, local config access is revoked and only cleanup metadata is moved to
+  `jit-pending/<clone>/`; the reservation releases normally. A bounded detached worker retries remote deletion on
+  later loops (404 is success), logging failures without blocking boots or the memory guard. The pending directory
+  goes when cleanup succeeds. A local revocation failure still holds teardown; an API hiccup does not. The old persistent registrations and `identity/` directories are unused, not deleted by this
   change; `bake.sh --register` is retired. Trials use the same helper and their own label and directory; a stopped
   interrupted trial is cleaned by the next trial or `--retire`.
 - **Why the runner is started by `tart exec` and not by a LaunchAgent in the image.** TCC on macOS attributes a
@@ -1745,7 +1746,10 @@ hold-aware plan send them to the guest, which this spec leaves open.
   (the owner's classic OAuth token with `repo` scope and admin access), so this adds no new credential. This
   supersedes the 10-21 rejection of JIT and the earlier 10-24 decision to wait for recurrence. Merge and install
   remain CI-opt's; the implementation is prepared as an unmerged PR. Persistent slot registrations remain for
-  CI-opt to delete after installation; job and trial clones no longer use them.
+  CI-opt to delete after installation; job and trial clones no longer use them. CI-opt clarified during implementation
+  that a failed remote DELETE is housekeeping, not admission: once the clone is verified gone and the config
+  revoked, the offline registration is harmless. Keep its nonsecret record and retry on later loops, with a log
+  line, without holding the reservation or boot admission.
 
 ## Surprises & Discoveries
 

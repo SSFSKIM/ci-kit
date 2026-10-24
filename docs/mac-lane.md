@@ -519,15 +519,17 @@ token file is installed. GitHub itself holds a JIT runner to one job; the old pe
 lose the next queued job to an exiting poll (actions/runner#4728). A mint failure logs a reason, boots nothing and
 retries on the lane's next poll. Each clone sees only its own config, never in argv, logs or `out/`; the listener
 consumes and removes `ACTIONS_RUNNER_INPUT_JITCONFIG` before workers start and writes identity files under umask 077.
-After the verified end, teardown deletes the registration if it remains (404 is fine), revokes the local config,
-and removes its directory. A failed delete retains the nonsecret cleanup record and reservation for retry. Recovery
+After the verified end, teardown revokes the local config, moves only the nonsecret cleanup record to
+`jit-pending/<clone>/`, and releases the reservation. A bounded background worker retries remote deletion on later
+loops (404 is fine), logging failures without blocking boots or guard samples. Recovery
 also finds a mint interrupted before the clone existed, using the record written before POST and its unique name.
 
 `bake.sh --register` is retired and refuses without booting. Existing `vm/identity/` and `vm-trial/identity/`
 directories are unused and not shared or modified. Once installed, the old persistent GitHub registrations
 `ci-kit-mac-<machine>-vm` and `ci-kit-mac-<machine>-vm-trial` can be deleted by the coordinator; this change does not
 delete them. `--trial` mints its own config with only `ci-kit-mac-vm-trial` and cleans it up by the same path.
-An interrupted trial's stopped registration is cleaned by the next trial or `--retire <trial clone>`.
+An interrupted trial's stopped registration is retired by the next trial or `--retire <trial clone>`; the lane also
+retries the trial slot's pending deletions. A local revocation failure still holds teardown; an API hiccup does not.
 
 **The reservation.** `vm-reserved` means "a job clone of this slot may be running", whatever became of the launcher
 that wrote it. It is written in the same locked step that spawns the clone, before the clone exists, and removed only

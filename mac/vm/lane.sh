@@ -693,7 +693,7 @@ boot_undo() { # <why>, with the lock held
   # A failed list is not an absent clone: keep the reservation until teardown can verify and delete it.
   if ((status == 0)) && vms=$(tart_vms) &&
     { [[ -z $(tart_state_in "$vms" "$clone") ]] || tart_delete "$clone" >/dev/null 2>&1; } &&
-    jit_delete "$slot_dir" "$clone" && release; then
+    jit_retire "$slot_dir" "$clone" && release; then
     unlock
     say "no boot: $1; nothing of $clone is left, and the reservation is released"
     [[ ${2:-} == no-image-failure ]] || count_failure image "$1"
@@ -1023,7 +1023,7 @@ step_teardown() {
     teardown_stuck "tart delete failed: $(tail -1 <<<"$status")"
     return
   fi
-  if ! why=$(jit_delete "$slot_dir" "$clone" 2>&1); then teardown_stuck "$why"; return; fi
+  if ! why=$(jit_retire "$slot_dir" "$clone" 2>&1); then teardown_stuck "$why"; return; fi
   if ! lock 30; then teardown_stuck 'the desktop lock stayed taken'; return; fi
   if ! release; then
     unlock
@@ -1251,6 +1251,22 @@ recover_poll() {
   enter teardown
 }
 
+# Remote registration deletion is housekeeping, not admission. Retire removed
+# the config after the verified end; an offline orphan cannot run another job.
+# The bounded worker closes our locks and never delays a boot or guard sample.
+jit_reap_pid='' next_jit_reap=0
+jit_housekeeping() {
+  ((now_epoch >= next_jit_reap)) || return 0
+  [[ -z $jit_reap_pid ]] || ! kill -0 "$jit_reap_pid" 2>/dev/null || return 0
+  [[ -z $jit_reap_pid ]] || wait "$jit_reap_pid" 2>/dev/null
+  next_jit_reap=$((now_epoch + queue_poll))
+  (
+    message=$(jit_reap "$slot_dir" "$vm_home/vm-trial" 2>&1)
+    [[ -z $message ]] || say "registration cleanup pending: $message"
+  ) 7>&- 8>&- &
+  jit_reap_pid=$!
+}
+
 # THE LAUNCHER.
 step() { # the state's step; a kickoff under way is followed in every state
   kickoff_poll
@@ -1301,5 +1317,6 @@ while :; do
     next_sample=$((now_epoch + sample_every))
     guard_sample
   fi
+  jit_housekeeping
   sleep "$tick"
 done

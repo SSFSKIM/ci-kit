@@ -145,6 +145,9 @@ tart_wait_answer() { # <name> <seconds> <tart run pid>
 jit_mint() { # <repo> <machine> <slot dir> <slot> <clone>
   bounded 20 python3 -I "$here/jit.py" mint "$@" 7>&- 8>&-
 }
-jit_delete() { # <slot dir> <clone>, only after the verified end
-  bounded 20 python3 -I "$here/jit.py" delete "$@" 7>&- 8>&-
+jit_retire() { # <slot dir> <clone>, only after the verified end; local revocation, no API wait
+  bounded 5 python3 -I "$here/jit.py" retire "$@" 7>&- 8>&-
+}
+jit_reap() { # <slot dirs...>: one nonsecret pending registration, best-effort remote cleanup
+  bounded 20 python3 -I "$here/jit.py" reap "$@" 7>&- 8>&-
 }

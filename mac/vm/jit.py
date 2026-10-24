@@ -3,7 +3,8 @@
 
 Only config is secret; all files are private and outside out/. The nonsecret record
 is written before POST so recovery can find a registration even if its reply was
-lost. Delete runs only after the caller has verified the clone's end.
+lost. Retire runs only after the caller has verified the clone's end; remote
+cleanup is retried separately without holding the lane.
 """
 import json
 import os
@@ -72,19 +73,26 @@ def mint(repo, machine, slot_dir, slot, clone):
     save(directory / "config", config)
 
 
-def delete(slot_dir, clone):
+def retire(slot_dir, clone):
     directory = slot_dir / "jit" / clone
     if not directory.exists():
         return
-    # Revoke local access even if GitHub is unavailable; retain only cleanup metadata.
+    # Local revocation belongs to teardown; the remote DELETE must not hold a
+    # reservation once the VM is gone. Only nonsecret metadata enters pending/.
     for name in ("config", "config.tmp"):
         (directory / name).unlink(missing_ok=True)
-    record_file = directory / "runner.json"
-    if not record_file.exists():
+    if not (directory / "runner.json").exists():
         # The process died before publishing the record, hence before the POST.
         (directory / "runner.json.tmp").unlink(missing_ok=True)
         directory.rmdir()
         return
+    pending = slot_dir / "jit-pending"
+    pending.mkdir(mode=0o700, exist_ok=True)
+    directory.rename(pending / clone)
+
+
+def delete(directory):
+    record_file = directory / "runner.json"
     record = json.loads(record_file.read_text())
     ids = [record["id"]] if "id" in record else []
     if "id" not in record:
@@ -105,6 +113,22 @@ def delete(slot_dir, clone):
     directory.rmdir()
 
 
+def reap(slot_dirs):
+    # One pending registration per loop, oldest attempt first. A failing endpoint
+    # cannot starve later records, and the launcher's detached call cannot delay
+    # admission or the memory guard. A restarted launcher may duplicate a DELETE;
+    # 404 and a record already removed by its predecessor are both success.
+    records = [p for slot in slot_dirs for p in (slot / "jit-pending").glob("*/runner.json")]
+    if not records:
+        return
+    try:
+        record = min(records, key=lambda p: p.stat().st_mtime_ns)
+        os.utime(record, None)
+        delete(record.parent)
+    except FileNotFoundError:
+        pass
+
+
 def main():
     os.umask(0o077)
     action, *args = sys.argv[1:]
@@ -112,9 +136,11 @@ def main():
         if action == "mint":
             repo, machine, slot_dir, slot, clone = args
             mint(repo, machine, Path(slot_dir), slot, clone)
-        elif action == "delete":
+        elif action == "retire":
             slot_dir, clone = args
-            delete(Path(slot_dir), clone)
+            retire(Path(slot_dir), clone)
+        elif action == "reap":
+            reap([Path(arg) for arg in args])
         else:
             raise Failure("unknown operation")
     except (Failure, OSError, ValueError, KeyError, TypeError) as exc:
