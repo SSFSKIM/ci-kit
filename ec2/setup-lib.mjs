@@ -79,7 +79,7 @@ export function buildRoles(config, claims, guardSubject) {
   }]);
   const role = (name, trust, policy, duration = 3600) => ({ name: `ci-kit-ec2-${name}`, arn: `arn:aws:iam::${account}:role/ci-kit-ec2-${name}`, trust, policy: document(policy), duration });
   return {
-    launcher: role('launcher', googleTrust, [reads, ...cleanup, ...launch(['job', 'smoke']), ...reports,
+    launcher: role('launcher', googleTrust, [reads, regional('ec2:DescribeSpotInstanceRequests', '*'), ...cleanup, ...launch(['job', 'smoke']), ...reports,
       statement('servicequotas:GetServiceQuota', `arn:aws:servicequotas:${REGION}:${account}:ec2/*`, regionCondition()),
       statement('ce:GetCostAndUsage', '*', { StringEquals: { 'aws:RequestedRegion': 'us-east-1' } }),
     ], 14400),

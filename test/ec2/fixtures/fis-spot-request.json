@@ -1,0 +1,14 @@
+{
+    "SpotInstanceRequests": [
+        {
+            "SpotInstanceRequestId": "sir-f2a7mf7g",
+            "InstanceId": "i-04e073caf4c22aac6",
+            "State": "closed",
+            "Status": {
+                "Code": "instance-terminated-by-experiment",
+                "Message": "Your Spot instance was terminated by a user-initiated experiment in FIS.",
+                "UpdateTime": "2026-10-24T10:52:33+00:00"
+            }
+        }
+    ]
+}
