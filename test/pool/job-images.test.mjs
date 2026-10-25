@@ -54,6 +54,7 @@ test('build clones exact pins behind metadata firewall, scopes token to fetch, c
   assert.ok(commits[0].args.includes('CMD []'));
   assert.ok(commits[0].args.includes('WORKDIR /home/runner'));
   assert.ok(commits[0].args.includes('ENV CI_KIT_SETUP_HASH='+ 'b'.repeat(16)));
+  assert.ok(commits[0].args.includes('LABEL CI_KIT_REPO=SSFSKIM/one'));
   assert.deepEqual(f.manifest.repos['SSFSKIM/one'].apply,{ok:true,image_bytes:250});
   assert.deepEqual(f.manifest.repos['SSFSKIM/one'].warm,{ok:true});
   assert.match(f.logs.join('\n'),/250 bytes above base/);

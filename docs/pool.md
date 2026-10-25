@@ -723,7 +723,10 @@ still start `ci-kit-runner:latest`**; selecting the repository image is a separa
 This completes the separate deployment described above. The launcher passes the job's `owner/name` as GCE
 metadata `ci-kit-repo` or EC2 user-data `repo`. Before starting the runner container, the VM inspects the local
 `ci-kit-job/<owner>-<repo>:latest` image (the bake's lowercase, punctuation-normalized name). If it exists, the
-job uses it; otherwise it uses `ci-kit-runner:latest`. No repository is also a base-image fallback, for VMs
+job uses it only if its `CI_KIT_REPO` label matches `owner/name` case-insensitively; otherwise it uses
+`ci-kit-runner:latest`. The bake writes that identity label beside `CI_KIT_SETUP_HASH`, since normalized tags can
+alias different repository names. Older, unlabeled images also fall back to the base, and the image-choice log
+names the fallback reason. No repository is also a base-image fallback, for VMs
 started by an older launcher. The Hetzner agent is unchanged. Smoke still checks the base container and each
 repository image separately.
 

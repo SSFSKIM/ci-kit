@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { runGuest } from '../../gce/vm/job.mjs';
 import { selectJobImage } from '../../pool/vm/container.mjs';
 
-function fixture({ repo, present = true, smoke = null, jit = 'secret-jit' } = {}) {
+function fixture({ repo, present = true, smoke = null, jit = 'secret-jit', label = repo } = {}) {
   const calls = [];
   const values = { name: 'ci-kit-gce-test', 'attributes/ci-kit-jit': jit, 'attributes/ci-kit-smoke': smoke,
     'attributes/ci-kit-repo': repo ?? null };
@@ -14,9 +14,10 @@ function fixture({ repo, present = true, smoke = null, jit = 'secret-jit' } = {}
     prepareContainer: async name => calls.push(['prepare', name]),
     smokeJobImages: async () => calls.push(['smoke-images']),
     cpus: 4,
-    selectJobImage: repo => selectJobImage(repo, { exec: async (cmd, args) => {
+    selectJobImage: (repo, options) => selectJobImage(repo, { ...options, exec: async (cmd, args) => {
       calls.push([cmd, ...args]);
       if (!present) throw new Error('No such image');
+      return { stdout: `${label}\n` };
     } }),
     docker: async (args, options) => {
       calls.push(['run', args, options]);
@@ -25,19 +26,22 @@ function fixture({ repo, present = true, smoke = null, jit = 'secret-jit' } = {}
   } };
 }
 
-for (const [scenario, repo, present, expected] of [
+for (const [scenario, repo, present, expected, label = repo] of [
   ['both deployed', 'SSFSKIM/MAWS', true, 'ci-kit-job/ssfskim-maws:latest'],
   ['image first, old launcher', undefined, true, 'ci-kit-runner:latest'],
   ['launcher first, no repository image yet', 'SSFSKIM/MAWS', false, 'ci-kit-runner:latest'],
+  ['normalized alias belongs to another repo', 'SSFSKIM/tool-box', true, 'ci-kit-runner:latest', 'SSFSKIM/tool.box'],
+  ['old image has no identity label', 'SSFSKIM/MAWS', true, 'ci-kit-runner:latest', ''],
 ]) {
   test(`GCE ${scenario}: the actual startup selects and announces its image before Docker`, async () => {
-    const f = fixture({ repo, present });
+    const f = fixture({ repo, present, label });
     await runGuest(f.deps);
     const runIndex = f.calls.findIndex(c => c[0] === 'run');
     const [, args, options] = f.calls[runIndex];
     assert.equal(args.at(-1), expected);
-    const logIndex = f.calls.findIndex(c => c[0] === 'log' && c[1] === `job image ${expected}`);
+    const logIndex = f.calls.findIndex(c => c[0] === 'log' && c[1].startsWith(`job image ${expected}`));
     assert.ok(logIndex >= 0 && logIndex < runIndex);
+    if (repo && present && label?.toLowerCase() !== repo.toLowerCase()) assert.match(f.calls[logIndex][1], /lacks matching CI_KIT_REPO/);
     assert.deepEqual(options.env, { CI_KIT_JIT: 'secret-jit' });
     assert.ok(!args.includes('secret-jit'));
     assert.deepEqual(f.calls.at(-1), ['report', 'job', 'exit:0']);

@@ -8,13 +8,21 @@ import { jobImage } from '../bake/manifest.mjs';
 import { jobRunArgs, METADATA_BLOCK } from './run.mjs';
 
 const sh = promisify(execFile);
-// Old launchers supply no repository; old images may lack its layer. Both rollouts keep running on the base.
-export async function selectJobImage(repo, { exec = sh } = {}) {
-  if (!repo) return IMAGE;
+// Tags are normalized, so only an explicit repository label establishes which repository owns the image.
+export async function selectJobImage(repo, { exec = sh, log = console.log } = {}) {
+  const selected = (image, reason = '') => {
+    log(`job image ${image}${reason ? ` (${reason})` : ''}`);
+    return image;
+  };
+  if (!repo) return selected(IMAGE, 'no repository supplied');
   const image = jobImage(repo);
-  try { await exec('docker', ['image', 'inspect', image], { timeout: 10_000 }); }
-  catch { return IMAGE; }
-  return image;
+  let label;
+  try {
+    const result = await exec('docker', ['image', 'inspect', '--format', '{{index .Config.Labels "CI_KIT_REPO"}}', image], { timeout: 10_000 });
+    label = result.stdout.trim();
+  } catch { return selected(IMAGE, 'repository image unavailable'); }
+  if (label.toLowerCase() !== repo.toLowerCase()) return selected(IMAGE, 'repository image lacks matching CI_KIT_REPO');
+  return selected(image);
 }
 
 export async function prepareContainer(name, { exec = sh, makeDir = mkdir, own = chown, blockIpv6 = false } = {}) {
@@ -47,8 +55,8 @@ export function docker(args, { env = {}, capture = false, spawnProcess = spawn }
 // Attach preserves the job's serial-console output; wait supplies its actual exit status even on attach errors.
 export async function runContainer({ name, repo, jit, smoke, onStarted, log = console.log, cpus = availableParallelism() },
   { exec = sh, runDocker = docker } = {}) {
-  const image = smoke ? IMAGE : await selectJobImage(repo, { exec });
-  log(`job image ${image}`);
+  const image = smoke ? IMAGE : await selectJobImage(repo, { exec, log });
+  if (smoke) log(`job image ${image}`);
   const args = jobRunArgs({ name, cpus, smoke, image });
   args.splice(args.indexOf('--rm'), 1, '--detach');
   const started = await exec('docker', args, { env: { ...process.env, CI_KIT_JIT: jit ?? '' }, timeout: 60_000 });

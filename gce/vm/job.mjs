@@ -60,8 +60,7 @@ export async function runGuest({ meta, log, report, prepareContainer, docker, sm
     return;
   }
   const jit = await meta('attributes/ci-kit-jit');
-  const image = await selectJobImage(await meta('attributes/ci-kit-repo'));
-  log(`job image ${image}`);
+  const image = await selectJobImage(await meta('attributes/ci-kit-repo'), { log });
   const { code } = await docker(jobRunArgs({ name, cpus, image }), { env: { CI_KIT_JIT: jit } });
   log(`job container exited ${code}`);
   await report('job', `exit:${code}`);
