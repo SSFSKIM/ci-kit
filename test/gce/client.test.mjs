@@ -63,6 +63,24 @@ test('an insert waits for its zone operation and fails with the operation\'s err
   assert.equal(f.calls[0].auth, 'Bearer tok');
 });
 
+test('a server error or a timeout on an operation\'s wait call is retried; the operation decides the outcome', async () => {
+  // Bake 20261025-032424-8cct: a smoke VM's insert wait answered 502 after ten minutes pending, failing the GCE half.
+  const op = (status) => ({ kind: 'compute#operation', name: 'op-1', zone: `${BASE}/zones/z`, status, selfLink: `${BASE}/zones/z/operations/op-1` });
+  const replies = [
+    () => json(502, { error: { code: 502, message: 'Bad Gateway' } }),
+    () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); },
+    () => json(503, {}),
+    () => json(200, op('DONE')),
+  ];
+  let waits = 0;
+  const { gce } = gceWith([
+    ['POST /zones/z/instances', json(200, op('RUNNING'))],
+    ['POST /zones/z/operations/op-1/wait', () => replies[waits++]()],
+  ]);
+  await gce.insertInstance('z', { name: 'b' });
+  assert.equal(waits, 4);
+});
+
 test('a request refused outright carries its reasons, as a quota refusal does', async () => {
   const { gce } = gceWith([['POST /zones/z/instances', json(403, { error: { code: 403, message: "Quota 'E2_CPUS' exceeded.", errors: [{ reason: 'quotaExceeded', message: 'x' }] } })]]);
   await assert.rejects(gce.insertInstance('z', { name: 'b' }), (e) => e.status === 403 && e.codes[0] === 'quotaExceeded' && /E2_CPUS/.test(e.message) && !e.accepted);
@@ -185,18 +203,22 @@ test('an insert past its deadline fails as accepted and pending, carrying its op
   assert.equal(f.calls.filter((c) => c.key.includes('/wait')).length, 2);
 });
 
-test('an operation that finished with an error is marked finished; a wait call that failed is not', async () => {
+test('an operation that finished with an error is marked finished; a wait call that kept failing to the deadline is not', async () => {
   const op = (extra) => ({ name: 'op-5', status: 'RUNNING', selfLink: `${BASE}/zones/z/operations/op-5`, ...extra });
   const finished = gceWith([
     ['POST /zones/z/instances', json(200, op())],
     ['POST /zones/z/operations/op-5/wait', json(200, op({ status: 'DONE', error: { errors: [{ code: 'ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS' }] } }))],
   ]).gce;
   await assert.rejects(finished.insertInstance('z', { name: 'b' }), (e) => e.finished === true && e.accepted === true);
-  const lost = gceWith([
+  let clock = 0;
+  const f = fake([
     ['POST /zones/z/instances', json(200, op())],
-    ['POST /zones/z/operations/op-5/wait', json(503, { error: { code: 503, message: 'backend error' } })],
-  ]).gce;
-  await assert.rejects(lost.insertInstance('z', { name: 'b' }), (e) => e.finished === false && e.accepted === true && e.status === 503);
+    ['POST /zones/z/operations/op-5/wait', () => { clock += 30_000; return json(503, { error: { code: 503, message: 'backend error' } }); }],
+  ]);
+  const lost = createGce({ project: 'ssfskim-ci-kit', token: async () => 'tok', fetchImpl: f.fetchImpl, sleep: async () => {}, now: () => clock });
+  await assert.rejects(lost.insertInstance('z', { name: 'b' }, { deadlineMs: 100_000 }),
+    (e) => e.finished === false && e.accepted === true && e.status === 503);
+  assert.equal(f.calls.filter((c) => c.key.includes('/wait')).length, 4);
 });
 
 test('a delete asked not to wait returns once the request is accepted', async () => {
