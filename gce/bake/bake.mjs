@@ -11,12 +11,14 @@
 // and a busy placement does not hold back every image. Every VM and runner registration
 // the bake made is gone when it ends, a failed bake deletes its own image, and the two newest ready images are kept.
 // Env (optional): CI_KIT_COMMIT, the kit commit to bake (default: main's head); CI_KIT_BAKE_RUN, the run id.
+// CI_KIT_BAKE_IF_STALE=1: the separate hourly job checks declarations and running bakes before doing any build.
 import { readFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createGce, accessToken, GceError } from '../../lib/gce.mjs';
 import { createAppTokens } from '../../lib/github-app.mjs';
 import { createGitHub } from '../../lib/github.mjs';
+import { checkStale } from './stale.mjs';
 import { parseGceConfig, parseEc2Config } from '../launcher/config.mjs';
 import { resolveManifest, verifyManifest, manifestLabels, bakeProviders, bakeScope, logRepoResults } from '../../pool/bake/manifest.mjs';
 import {
@@ -304,24 +306,31 @@ async function main() {
   const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
   // The gce.json bundled at the bake job's deploy, not main's (spec 2026-10-21, The bake).
   const cfg = parseGceConfig(await readFile(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
-  const sha = process.env.CI_KIT_COMMIT || (await mainHead());
-  const runId = process.env.CI_KIT_BAKE_RUN || bakeRunId(new Date());
-  const gce = createGce({ project: cfg.project, token: accessToken() });
+  const googleToken = accessToken();
+  const gce = createGce({ project: cfg.project, token: googleToken });
   const app = { appId: (await gce.secret('ci-kit-app-id')).trim(), pem: await gce.secret('ci-kit-app-key'), owner: 'SSFSKIM' };
   // One-hour builder tokens: contents read on the served repositories, never the real-job credentials.
   const scope = bakeScope(cfg.repos);
   const token = await createAppTokens({ ...app, scope })();
-  // The real job's: ci-kit-sandbox only, minted as needed, so it is fresh after a long build.
-  const gh = createGitHub(createAppTokens({ ...app, scope: CHECK_SCOPE }));
-  const script = fillBuilderScript(await readFile(new URL('./builder.sh', import.meta.url), 'utf8'), { sha });
+  const contents = createGitHub(token);
   let ec2Config = null;
   try { ec2Config = parseEc2Config(await readFile(new URL('../../pool/config/ec2.json', import.meta.url), 'utf8')); }
   catch (err) { if (err.code !== 'ENOENT') throw err; }
   const accounts = ec2Config?.accounts ?? [];
+  if (process.env.CI_KIT_BAKE_IF_STALE === '1' && !await checkStale({
+    cfg, gce, gh: contents, accounts, token: googleToken,
+    execution: process.env.CLOUD_RUN_EXECUTION, job: process.env.CLOUD_RUN_JOB, log,
+  })) return;
+  // A stale check continues here, in this execution; the weekly/manual bake remains unconditional.
+  const sha = process.env.CI_KIT_COMMIT || (await mainHead());
+  const runId = process.env.CI_KIT_BAKE_RUN || bakeRunId(new Date());
+  // The real job's: ci-kit-sandbox only, minted as needed, so it is fresh after a long build.
+  const gh = createGitHub(createAppTokens({ ...app, scope: CHECK_SCOPE }));
+  const script = fillBuilderScript(await readFile(new URL('./builder.sh', import.meta.url), 'utf8'), { sha });
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   log(`bake ${runId}: kit ${sha.slice(0, 8)}, project ${cfg.project}, ${accounts.length} EC2 accounts`);
   await bakeProviders({
-    resolve: () => resolveManifest({ sha, gh: createGitHub(token), repos: cfg.repos }),
+    resolve: () => resolveManifest({ sha, gh: contents, repos: cfg.repos }),
     gce: (manifest) => runBake(gce, { cfg, sha, manifest, runId, token, gh, script, sleep, log }),
     accounts,
     ec2: async (account, manifest) => {
