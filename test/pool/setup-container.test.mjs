@@ -60,6 +60,56 @@ test('metadata reachability and credentialed git config stop before repository c
   await assert.rejects(readFile(join(f.root,'proof')),/ENOENT/);
 });
 
+test('credential words in repository paths are harmless with real local git config',async t=>{
+  const f=await fixture(t);
+  execFileSync('git',['-C',f.root,'config','remote.origin.url','https://github.com/owner/credential-tools']);
+  execFileSync('git',['-C',f.root,'config','remote.origin.pushurl','https://github.com/owner/extraheader-tools']);
+  execFileSync('git',['-C',f.root,'config','url.https://github.com/owner/credential-tools.insteadOf','https://github.com/owner/extraheader-tools']);
+  const result=f.run('apply');
+  assert.equal(result.status,0,result.stderr);
+  assert.match(result.stdout,/clone credentials absent/);
+  assert.match(await readFile(join(f.root,'proof'),'utf8'),/node-ok/);
+});
+
+for (const [name,key,value] of [
+  ['helper','credential.helper','store'],
+  ['scoped helper','credential.https://github.com.helper','!echo secret'],
+  ['username','credential.https://github.com.username','secret'],
+  ['global auth header','http.extraHeader','AUTHORIZATION: secret'],
+  ['scoped auth header','http.https://github.com/.extraheader','AUTHORIZATION: secret'],
+  ['empty auth header','http.https://github.com/.extraheader',''],
+  ['scope containing equals','http.https://github.com/?x=y.extraheader','AUTHORIZATION: secret'],
+  ['scope containing carriage return','http.https://github.com/\r.extraheader','AUTHORIZATION: secret'],
+  ['username URL','remote.origin.url','https://secret@github.com/owner/repo'],
+  ['password URL','remote.origin.pushurl','HTTP://user:secret@github.com/owner/repo'],
+  ['rewrite URL key','url.https://secret@github.com/.insteadOf','https://github.com/'],
+  ['rewrite URL value','url.https://github.com/.insteadOf','https://secret@github.com/'],
+  ['proxy URL','http.proxy','socks5://user:secret@proxy.invalid'],
+  ['multiline value','remote.origin.url','https://github.com/owner/repo\nhttps://secret@github.com/owner/repo'],
+  ['uninspected include','include.path','/nonexistent/bake-config'],
+  ['conditional include','includeIf.gitdir:/other/.path','/nonexistent/bake-config'],
+]) {
+  test(`local git config rejects ${name} before repository code runs`,async t=>{
+    const f=await fixture(t);
+    execFileSync('git',['-C',f.root,'config','--local',key,value]);
+    const result=f.run('apply');
+    assert.notEqual(result.status,0,result.stdout);
+    assert.match(result.stderr,/credential|ambiguous/);
+    assert.doesNotMatch(result.stderr,/secret/);
+    await assert.rejects(readFile(join(f.root,'proof')),/ENOENT/);
+  });
+}
+
+test('valueless authentication keys cannot bypass the local config guard',async t=>{
+  const f=await fixture(t);
+  const path=join(f.root,'.git/config');
+  await writeFile(path,await readFile(path,'utf8')+'\n[http]\nextraHeader\n');
+  const result=f.run('apply');
+  assert.notEqual(result.status,0);
+  assert.match(result.stderr,/credential/);
+  await assert.rejects(readFile(join(f.root,'proof')),/ENOENT/);
+});
+
 test('changed pinned declaration and stale image fail smoke even when packages would be present',async t=>{
   const f=await fixture(t);
   const stale=f.run('smoke',{CI_KIT_SETUP_HASH:'0'.repeat(16)});
