@@ -41,11 +41,21 @@ Macs.
   green on the pool, run 40151266892; remaining: the two Mac runs of Concrete Steps, the mini's scratch-formula
   check, the architect's merge).
 - [ ] M3 — Per-repo job images in the pool bake (completed: ci-kit #141 merged as d60bc8b after a high review, the
-  bake job deployed from it; ci-kit-sandbox's default branch declares `apt: [cowsay]` (sandbox #52); remaining: the
-  proof bake on both providers and its records).
-- [ ] M4 — Pool jobs run on their repository's image.
-- [ ] M5 — Rebuild on a declaration change.
-- [ ] M6 — The Mac guest from the declaration.
+  bake job deployed from it; ci-kit-sandbox's default branch declares `apt: [cowsay]` (sandbox #52); proof bake
+  `ci-kit-bake-k5dj8`, GCE half: `bake: SSFSKIM/ci-kit-sandbox setup 8ef8651a970b7e69: apply ok (metadata refused;
+  clone credentials absent); 38824480 bytes above base; warm ok`, image `ci-kit-runner-20261025-015921-32z9-d60bc8b7`
+  ready 02:25Z after 8 smoke VMs and a real sandbox job, labelled `ci-kit-setup-ssfskim-ci-kit-sandbox=8ef8651a970b7e69`;
+  remaining: the EC2 half and its records).
+- [ ] M4 — Pool jobs run on their repository's image (completed: ci-kit #144 merged as ffa08f8 after a high review
+  whose one finding, normalized-tag aliasing, added the `CI_KIT_REPO` label (Decision Log); launcher
+  `ci-kit-launcher-00026-xb8`, bake and check jobs deployed from it; remaining: a bake carrying it, then the
+  sandbox's matching and stale jobs).
+- [ ] M5 — Rebuild on a declaration change (completed: ci-kit #145 merged as 81368e7 after a high review with no
+  findings; `ci-kit-bake-check` and `ci-kit-bake-check-hourly` deployed; its first hourly run,
+  `ci-kit-bake-check-7ns4c` at 02:23Z, logged `bake: skipped; …/ci-kit-bake-k5dj8 still running`; remaining: the
+  sandbox's declaration change (sandbox #53) rebuilding by itself, then `bake: images current`).
+- [ ] M6 — The Mac guest from the declaration (completed: ci-kit #146 merged as bc9be38 after a medium review whose
+  two findings were fixed (Decision Log); remaining: the Mac refresh under the maintenance hold).
 - [ ] M7 — ci-kit forgets MAWS.
 - [ ] M8 — manim-master declares its environment; acceptance.
 
@@ -321,12 +331,14 @@ workspace; `install` (`true`/`false`, default `false`) also runs the declared `i
 differed). The same code runs as a CLI for the bakes: `node setup/apply.mjs --mode bake --root <clone> [--install]`,
 where `--install` also runs the declaration's `install` command in the clone.
 
-**Image records.** Job image: `ci-kit-job/<owner>-<repo>:latest`, env and label `CI_KIT_SETUP_HASH=<hash>`. GCE
+**Image records.** Job image: `ci-kit-job/<owner>-<repo>:latest`, env and label `CI_KIT_SETUP_HASH=<hash>`, and label
+`CI_KIT_REPO=<owner>/<repo>` (the tag's normalization can alias two names; the label is the image's identity). GCE
 image label `ci-kit-setup-<owner>-<repo>` (lower-case, `-` for any other character; GCE label keys and values allow
 lower-case letters, digits, `-` and `_`, up to 63 characters) = `<hash>`. AMI tag `ci-kit-setup:<owner>/<repo>` =
 `<hash>`. Mac guest: `CI_KIT_SETUP_HASH=<hash>` in `~/actions-runner-maws/.env`, written from
 `~/.ci-kit/setup-hash` by every provisioning step that writes that `.env`; the apps left quarantined in
-`~/.ci-kit/quarantined-apps`, one path a line.
+`~/.ci-kit/quarantined-apps`, one path a line. A MAWS revision without a declaration writes neither file (an earlier
+declaration's are removed) and keeps the legacy steps, whose first-run check names LibreOffice.
 
 **The bake manifest** (`pool/bake/manifest.mjs`). Beside its current fields it carries
 `repos: { "<owner>/<repo>": { revision: <40 hex>, setup_hash: <hash> } }` for every served repository with a
@@ -340,7 +352,10 @@ them together.
 
 **The repository on the VM.** The launcher adds the job's repository (`owner/name`) to what it already passes a VM:
 GCE metadata key `ci-kit-repo`, and the EC2 user-data's JSON field `repo`. The VM's job runner uses
-`ci-kit-job/<owner>-<repo>:latest` when `docker image inspect` finds it, else `ci-kit-runner:latest`, and logs which.
+`ci-kit-job/<owner>-<repo>:latest` when `docker image inspect` finds it and its `CI_KIT_REPO` label equals the
+repository (case-insensitively), else `ci-kit-runner:latest`, and logs which before the container starts (the VM's
+console, not the job's log): `job image <name>`, with the reason on a fallback (`no repository supplied`,
+`repository image unavailable`, `repository image lacks matching CI_KIT_REPO`).
 
 **The stale check.** A second Cloud Run job, `ci-kit-bake-check`, deployed from the same source as `ci-kit-bake`
 with `CI_KIT_BAKE_IF_STALE=1` in its environment, so no per-execution override is needed. For each served
@@ -675,6 +690,13 @@ acceptance item checked as written above, its evidence recorded in Surprises & D
   callers are the connector, delivery and live suites; LIBREOFFICE_E2E `document presentations` (Mac groups);
   desk-web's Playwright config uses Chromium on Linux and the installed Chrome on Darwin. A Linux native install of
   Claude Code measured 9.1-13.2 s per job before it was made Darwin-only (run 40150847990).
+- Observation: Homebrew prints an artifact installed beneath the user's home abbreviated (`~/Applications/X.app`,
+  its `printable_target`), so a parser of `brew list --cask` that expects absolute paths silently skips it.
+  Evidence: M6 review reproduction against the adapter; fixed in ci-kit #146 (c8bf1dc).
+- Observation: the bake already bakes every configured EC2 account, enabled or not (`bakeProviders` in
+  `pool/bake/manifest.mjs`), so the stale check compares every account too, or a disabled account's images would
+  stay stale behind a "current" verdict.
+  Evidence: ci-kit #145's tests over several accounts.
 
 ## Decision Log
 
@@ -751,6 +773,30 @@ acceptance item checked as written above, its evidence recorded in Surprises & D
   installed it. The fixture bake covers already-installed LibreOffice beside a newly installed app with spaces in
   its path; both enter the record and the printed window step.
   Date/Author: 2026-10-25, CI-opt (M6 executor's discovery; coordinator approved).
+
+- Decision: A job image carries `CI_KIT_REPO=<owner>/<repo>` as a label, and a VM uses a repository's image only
+  when that label equals the job's repository (case-insensitively); an image without it falls back to the base.
+  Rationale: the tag's normalization maps distinct names (`tool.box`, `tool-box`, case variants) to one tag, and the
+  bake's collision check sees one bake's repositories only, so across a change of served repositories a VM could run
+  one repository's job on another's image. Images baked before the label fall back to the base, which costs one
+  stale-image install until the next bake. Rejected: trusting the tag alone; reading the image's manifest entry,
+  which a VM does not keep.
+  Date/Author: 2026-10-25, CI-opt (M4 high review finding).
+
+- Decision: The stale check's guard against overlapping bakes is a preflight (it lists both jobs' executions and
+  skips while one is pending or running), not a lock; a failed GitHub, GCE or AWS read fails the check without
+  baking; a provider with no ready image counts as stale.
+  Rationale: the hourly cadence and a bake's hour-long run make a race between a check and a manual bake rare, and
+  two overlapping bakes already keep distinct resource names; failing closed on reads keeps an outage from starting
+  a bake every hour. Rejected: lock infrastructure (a lease object) for a race that costs one duplicate bake.
+  Date/Author: 2026-10-25, CI-opt (M5 executor's decisions, high review clean).
+
+- Decision: A MAWS revision without a declaration still bakes the Mac guest: the setup step logs that it skips,
+  writes no hash, and the legacy provision steps and LibreOffice first-run check stay; a declaration that fails
+  still fails the bake. M7 removes that fallback with the legacy steps.
+  Rationale: MAWS's master has no declaration until #145 lands, and a refresh may need to run first (the engine step
+  of #137); the medium review reproduced the bake stopping with ENOENT. Rejected: requiring #145 before any refresh.
+  Date/Author: 2026-10-25, CI-opt (M6 medium review finding).
 
 ## Outcomes & Retrospective
 
