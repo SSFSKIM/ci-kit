@@ -141,7 +141,7 @@ and by the coordinator's holds, and the design below says what is read and when.
   landed 64483a63d (reviewer-medium, three rounds; class 1a green; Mac set 39684439702 green at 17a27e686; CI-opt
   rebased it onto 489f591c7 and added two gate-plan test commits, final head ecb877349). It also carries M3's
   alert-reader `-<n>` fold.
-- [ ] V4 — Install on the mini, trials, the first proven-VM groups, the mode verdict, the coordinator's holds.
+- [x] (2026-10-25) V4 — Install on the mini, trials, the first proven-VM groups, the mode verdict, the coordinator's holds.
   - [x] (2026-10-22 21:36Z) Step 1: `install.sh --vm` at e7cef20 in hold 3's tail; the launcher installed disabled;
     `~/ci-kit-vm` laid out; the exclusive instance (runner id 21) gained `ci-kit-mac-solo`.
   - [x] (2026-10-23 06:13Z) Step 2, the first refresh, under CI-opt's maintenance hold from 01:13Z:
@@ -276,8 +276,8 @@ and by the coordinator's holds, and the design below says what is read and when.
     not a second observed settle wait, is the boot-case evidence accepted here (Decision Log). Dashboard then
     passed in `maws-vm-job-vm-20261025T210942Z`; the final Tart read had no job clone and no guest registration
     remained at GitHub. Evidence: `v4r-p1.log`, `v4r-p1-lane.log`, `v4r-p1-hooks.log`, `v4r-p1-tart.txt`,
-    `v4r-g1.log`, `v4r-m1.log` in `/tmp/ci-analysis`, and STATE's 21:16Z entry. This proves VA3's wait and claim,
-    not its timing comparison against a solo spread.
+    `v4r-g1.log`, `v4r-m1.log` in `/tmp/ci-analysis`, and STATE's 21:16Z entry. This proves VA3's wait and claim;
+    the same-tree solo comparison below supplies its timing evidence.
   - [x] (2026-10-25 22:01Z) Step 8, VA9: legacy run 39694759772 attempt 2, design at ff3945fcc9, was
     `vm-safe: unknown (no contract line in .github/workflows/gate.yml at ff3945fcc942)` at 21:32:42Z. Its hook
     raised the claim and waited on `maws-vm-job-vm-20261025T213050Z` (dashboard of run 40235684332, 0ce340a21);
@@ -321,8 +321,8 @@ and by the coordinator's holds, and the design below says what is read and when.
     2026-10-23 07:26Z, apart from the recorded holds and maintenance windows. The mini now runs ci-kit 861acf2:
     `install.sh --vm --disabled` at 22:20Z removed the floor-57 plist bridge, and the installed kit's default is
     57. Release explicitly enabled and bootstrapped the launcher at 22:24:59Z; recovery read no job clone and no
-    reservation, then waited on maintenance and `CI-opt-t2` until their release. This records the verdict, not
-    completion of every VA in V4's Proof line.
+    reservation, then waited on maintenance and `CI-opt-t2` until their release. The proof map below separates
+    the live evidence from the accepted test evidence.
   - [x] (2026-10-25 22:43–22:50Z) Phase 3, VA2, VA4, VA6 and VA11's remaining live reads: run 40241550857
     (453b54604, document-app, widgets and to-human, all `ci-kit-mac-solo`, no `Lane:`), host idle at the start,
     all green. The host `ci-kit-mac-mini` took document-app and later widgets; at 22:45:54Z the lane booted
@@ -343,22 +343,26 @@ and by the coordinator's holds, and the design below says what is read and when.
     were empty. Phase 2's failed-DELETE retries remain the live failure read; its private-config boundary and mint
     failure are accepted on tests (Decision Log). Evidence: `/tmp/ci-analysis/v4r-p3.log`, `v4r-p3-lane.log`,
     `v4r-p3-extra.txt`; the read commands are in `v4r-p3.sh`.
-  - [x] (2026-10-25) VA3's first timing comparison read: step 7's measured presentations-drag run 40233476445
-    met its bound, `the agent trials' best move → frame p95 19.1 ms against 24 ms at load 2.7: met`. Per-trial
-    p95 was 19.0–20.1 ms on control trials and 19.1–19.9 on agent trials, at load 1.91–2.88. The earlier solo run
-    39758746459 (2026-10-22, an older master) read 17.9–18.7 control and 19.0–19.3 agent, load 2.55–3.3; its
-    best agent p95 was 19 ms against 24 ms, met. No guest ran during the measured part of 40233476445: settle
-    released after verified teardown and its claim kept the next clone out. The reference is one older-tree run,
-    not a reliable solo spread, and the new trial ranges extend beyond it; a green bound does not establish
-    VA3's inside-spread clause. Evidence: `/tmp/ci-analysis/v4r-p3-extra.txt`, `va3-40233476445.log` and
-    `va3-39758746459.log`.
-  - [ ] (2026-10-25) V4's remaining proof is VA3's timing comparison against same-tree solo controls; its wait
-    and claim are shown in step 7. VA1 is shown by step 6; VA2 and VA6 by phase 3 (VA2 also uses production
-    reads); VA4 by step 6 and phase 3's reservation refusal; VA5 by the live floor/warning paths and the
-    injected-fault decision; VA8 by the promoted refreshes and step 11's rollback (its interface tested in V2);
-    VA9 by step 8; VA10 by step 7 with its stated boot-case substitution; VA11 by steps 9 and phase 3 plus the
-    fault tests; VA12 by the fault-test decision. V4 stays unticked pending VA3; the accepted injected-fault
-    evidence is not represented as live production faults.
+  - [x] (2026-10-25) VA3's same-tree solo comparison: presentations-drag runs 40242233868 and 40242514695
+    used step 7's scratch 8dcc698c3 on the host, with no guest, both green and each settling in 31 s (`vm=none`
+    at start and release). Solo 1's control p95 was 18.8–19.9 ms, agent 19.0–19.7, at load 2.34–3.4; solo 2's
+    control 18.1–19.3, agent 19.2–19.9, at load 2.7–3.67. Their bounds read best agent p95 19 ms at load 3.35
+    and 19.2 ms at load 3.45, each against 24 ms, met. Step 7's run 40233476445 waited 242 s behind the guest;
+    its measured part ran after verified teardown with the claim keeping the next clone out. Its best agent p95
+    19.1 ms at load 2.7 is inside the same-tree solo metric's 19.0–19.2 ms, and all four agent trials
+    (19.1–19.9) are inside the solo agent spread 19.0–19.9. Its controls were 19.0–20.1: three of four inside
+    solo's 18.1–19.9, but control trial 3 at 20.1 was 0.2 ms above that two-run maximum. CI-opt accepts VA3 on
+    the bound's own metric and every agent trial, with that control outlier explicit, not a claim that every
+    recorded timing was inside (Decision Log). Two same-tree solo runs remain a small reference; they replace
+    the older-master run 39758746459 as the acceptance reference. Evidence: `/tmp/ci-analysis/va3-40233476445.log`,
+    `va3-40242233868.log` and `va3-40242514695.log`.
+  - [x] (2026-10-25) V4's proof is recorded: VA1 by step 6; VA2 and VA6 by phase 3 (VA2 also uses production
+    reads); VA3 by step 7's wait and claim and the same-tree solo comparison above; VA4 by step 6 and phase 3's
+    reservation refusal; VA5 by the live floor/warning paths and the injected-fault decision; VA8 by the promoted
+    refreshes and step 11's rollback (its interface tested in V2); VA9 by step 8; VA10 by step 7 with its stated
+    boot-case substitution; VA11 by step 9 and phase 3 plus the fault tests; VA12 by the fault-test decision.
+    V4 is ticked on that evidence and those recorded decisions; accepted injected-fault evidence is not
+    represented as live production faults.
 - [ ] V5 — Widen the proven-VM set; the second guest, if memory ever allows it.
 
 ## Design
@@ -1960,6 +1964,17 @@ hold-aware plan send them to the guest, which this spec leaves open.
   real remote-DELETE failure and nonblocking retries; tests supply the private-config/metadata boundary that
   live record did not inspect. This changes the evidence accepted for these fault clauses only, not their
   required behavior or VA3's solo-spread criterion.
+
+- 2026-10-25 (CI-opt; VA3's verdict): **Judge the same-tree solo spread on the quantity the group's bound
+  reads, with the control outlier recorded.** Runs 40242233868 and 40242514695 at scratch 8dcc698c3 supply the
+  reference: best agent move → frame p95 19.0–19.2 ms, individual agent trials 19.0–19.9. The measured-wait run
+  40233476445's 19.1 ms best and every agent trial sit inside those ranges. Its control trial 3 at 20.1 ms is
+  0.2 ms above the solo controls' 19.9 maximum; the other three controls sit inside. The bound does not read
+  control trials, and two solo runs give only a small observed range, so this outlier is disclosed but does not
+  overturn VA3. **Rejected:** treating every auxiliary control timing as the bound's pass metric, or using the
+  three-day-old, different-master run 39758746459 as the solo spread. No claim is made that all timings matched,
+  that two runs establish a population limit, or that the earlier green bound alone proved the comparison.
+  Evidence: `/tmp/ci-analysis/va3-40233476445.log`, `va3-40242233868.log`, `va3-40242514695.log`.
 
 ## Surprises & Discoveries
 
