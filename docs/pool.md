@@ -763,6 +763,71 @@ query is documented below. Correlate each VM to the Actions runner name, not jus
 instances have `ci-kit-alloc=<runner-name without ci-kit-ec2->`. A provider image becoming ready proves its
 smoke, not a job's hash comparison: retain both the console and Actions evidence.
 
+**Hourly declaration check (GCE and EC2).** `ci-kit-bake-check` runs the same source as the bake, with
+`CI_KIT_BAKE_IF_STALE=1`, as `ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com`. Its timeout is the bake's
+(180 minutes plus 120 per configured EC2 account). `ci-kit-bake-check-hourly` invokes it at minute 23 of every hour,
+UTC. The weekly bake and manual `ci-kit-bake` executions remain unconditional; their job and weekly cadence are unchanged.
+
+Before comparing anything, the check lists **both** jobs' executions, excluding itself. A pending/running execution
+makes it log `bake: skipped; <execution names> still running` and exit successfully. This is a preflight check, not
+an atomic lock: do not manually start a bake alongside a check. The check needs `run.executions.list`; deployment
+grants its service account `roles/run.viewer` on both jobs, plus `roles/run.invoker` on the new job for Scheduler.
+A failed listing fails the check rather than starting an unguarded bake.
+
+It reads every served repository in its bundled `pool/config/gce.json` using the App's contents-read token. Config
+and script bytes come through the contents API at one pinned default-branch commit, using the same resolver and
+`setupHash` as a bake. Missing config or no declaration is `none`, matching an absent image label/tag. It compares
+against the newest **ready** GCE image in the configured family and the newest available, ready pool AMI in **every**
+configured EC2 account (disabled accounts still receive bakes). A missing ready image is stale. API/validation
+failures are errors, not missing declarations. All equal logs `bake: images current` and exits without resolving the
+full bake manifest or making a builder. Otherwise each changed repository is logged as
+`bake: stale <owner/repo> on <gce|ec2/account>: <image hash> -> <default-branch hash>` (a missing provider image logs
+`bake: stale <provider>: no ready image`), then this same execution continues through the ordinary bake. The bake
+resolves its inputs afresh, once for both providers; a declaration merged during the check is therefore included.
+
+Deploy **from merged main**, by the coordinator; no `v1` move is needed for the scheduler path:
+
+```
+gce/deploy.sh bake-check bake-schedule
+# deploy: bake check job ok (execution reads on both bake jobs)
+# deploy: bake schedule ok
+# deploy: bake check schedule ok (hourly at minute 23 UTC)
+```
+
+This adds the check job and both execution-read grants without redeploying `ci-kit-bake`. `bake-schedule` converges
+the existing weekly schedule to its unchanged settings and adds the hourly one. After future bake-code or bundled
+config changes, deploy both `bake` and `bake-check` so they keep the same source/config.
+
+Proof, under the bake's own identity (the check runs in Cloud Run, never `node ...` as an operator):
+
+1. Merge a ci-kit-sandbox default-branch change from `apt: [cowsay]` to `apt: [cowsay, hello]`, leaving the rest of
+   its config intact. Record that commit. Let the hourly schedule fire; do not manually dispatch a bake. To test only
+   invocation/IAM ahead of the timed proof, `gcloud scheduler jobs run ci-kit-bake-check-hourly --location=us-central1
+   --project=ssfskim-ci-kit` invokes the same job as Scheduler's service account.
+2. List the execution and read its log (set `EXECUTION` to that execution's short name):
+   ```
+   gcloud run jobs executions list --job=ci-kit-bake-check --region=us-central1 --project=ssfskim-ci-kit
+   gcloud logging read 'resource.type="cloud_run_job" AND resource.labels.job_name="ci-kit-bake-check" AND labels."run.googleapis.com/execution_name"="'"$EXECUTION"'"' \
+     --project=ssfskim-ci-kit --freshness=2h --order=asc --format='value(textPayload)'
+   ```
+   Expect `bake: stale SSFSKIM/ci-kit-sandbox on gce: <old> -> <new>` and the EC2 equivalent, then
+   `bake <run>: kit ...`, the normal smoke/real-job records, and
+   `done: every configured provider passed smoke and its real sandbox job`. Both newest ready images must carry
+   `<new>` (not just a successful execution):
+   ```
+   gcloud compute images list --project=ssfskim-ci-kit \
+     --filter='family=ci-kit-runner AND status=READY AND labels.ci-kit=gce-image AND labels.ci-kit-ready=true' \
+     --sort-by='~creationTimestamp' --limit=1 --format='json(name,labels)'
+   aws ec2 describe-images --owners self --profile ci-kit-ops --region us-east-2 \
+     --filters Name=tag:ci-kit-pool,Values=ec2 Name=tag:ci-kit-ready,Values=true Name=state,Values=available \
+     --query 'sort_by(Images, &CreationDate)[-1].{ImageId:ImageId,Tags:Tags}'
+   ```
+   Read `ci-kit-setup-ssfskim-ci-kit-sandbox` in GCE labels and `ci-kit-setup:SSFSKIM/ci-kit-sandbox` in AMI tags.
+3. The first hourly execution **after that bake completes**, with no declaration change, must log
+   `bake: images current` with no `bake <run>: kit ...` or new images. An intervening hour while the bake is still
+   running instead logs the skip. Finally merge removal of `hello` (restore `[cowsay]`) and repeat steps 2–3: removal
+   must also rebuild and settle to current. Record execution names, image IDs and both hashes.
+
 **Checking for leftovers.**
 
 ```

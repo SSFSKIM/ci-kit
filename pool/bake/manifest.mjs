@@ -28,12 +28,20 @@ export async function resolveManifest({ sha, gh, repos = [], fetch: fetcher = gl
   const dockerfile = await source.text();
   const runner_version = /FROM ghcr\.io\/actions\/actions-runner:(\d+\.\d+\.\d+)@sha256:/.exec(dockerfile)?.[1];
   if (!runner_version) throw new Error('runner image must pin its version and digest');
+  const resolved = await resolveRepos({ gh, repos, revisions: { 'SSFSKIM/MAWS': revision } });
+  return { v: 1, kit_commit: sha, node, maws: { revision, lock_sha256: digest(lock) }, runner_version, repos: resolved };
+}
+
+// Shared by the bake and its hourly stale check: read config and script at one default-branch revision.
+// No config (404) or no declaration means no job image. Other read/validation failures propagate.
+export async function resolveRepos({ gh, repos, revisions = {} }) {
+  const raw = { accept: 'application/vnd.github.raw+json', text: true };
   const resolved = {}, identities = new Set();
   for (const { repo } of repos) {
     const slug = repoSlug(repo);
     if (`ci-kit-setup-${slug}`.length > 63 || identities.has(slug)) throw new Error(`unsupported or colliding image identity: ${repo}`);
     identities.add(slug);
-    const pinned = repo === 'SSFSKIM/MAWS' ? revision : (await gh.request('GET', `/repos/${repo}/commits/HEAD`)).sha;
+    const pinned = revisions[repo] ?? (await gh.request('GET', `/repos/${repo}/commits/HEAD`)).sha;
     if (!/^[a-f0-9]{40}$/.test(pinned)) throw new Error(`cannot resolve ${repo} revision`);
     let text;
     try { text = await gh.request('GET', `/repos/${repo}/contents/.github/ci-kit.yml?ref=${pinned}`, raw); }
@@ -44,7 +52,7 @@ export async function resolveManifest({ sha, gh, repos = [], fetch: fetcher = gl
     const hash = setupHash(setup, bytes);
     if (hash !== 'none') resolved[repo] = { revision: pinned, setup_hash: hash };
   }
-  return { v: 1, kit_commit: sha, node, maws: { revision, lock_sha256: digest(lock) }, runner_version, repos: resolved };
+  return resolved;
 }
 
 export function verifyManifest(actual, expected) {

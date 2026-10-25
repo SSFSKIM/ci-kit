@@ -1,7 +1,7 @@
 #!/bin/bash
 # Deploys the GCE backend's control plane (spec §3a, I12) into ssfskim-ci-kit, idempotently, from the MacBook with
 # gcloud's default account. No GCP credential exists anywhere else.
-#   gce/deploy.sh [base] [network] [bake] [bake-schedule] [launcher] [launcher-schedule] [webhook] [alert] [app-hook]
+#   gce/deploy.sh [base] [network] [bake] [bake-check] [bake-schedule] [launcher] [launcher-schedule] [webhook] [alert] [app-hook]
 #                  (no argument: all of them but app-hook, in that order)
 #   base               the APIs, the service account ci-kit-launcher and its compute role on the project, the receiver's
 #                      service account ci-kit-webhook (no role here: webhook grants its two), and serial port logging, so
@@ -12,7 +12,8 @@
 #                      ci-kit-nat: pool and bake VMs have no external address. No firewall rule: GCE's implied rules
 #                      deny all ingress and allow all egress. It then checks that no rule allows ingress into it.
 #   bake               the Cloud Run job ci-kit-bake, built from this checkout
-#   bake-schedule      the Scheduler job ci-kit-bake-weekly, which runs the bake every Sunday at 18:00 UTC
+#   bake-check         the additive Cloud Run job ci-kit-bake-check, and read grants on both bake jobs
+#   bake-schedule      ci-kit-bake-weekly (Sunday 18:00 UTC) and ci-kit-bake-check-hourly (minute 23, UTC)
 #   launcher           the Cloud Run service ci-kit-launcher, built from this checkout: no public ingress, one
 #                      instance, 300 s per request; requests are many at a time, ticks one. Like webhook, it ends with
 #                      all traffic on the revision it deployed, a rollback's pin undone, and fails if that does not serve
@@ -138,7 +139,9 @@ network() {
 
 }
 
-bake() {
+deploy_bake_job() {
+  local job=$1
+  shift
   # Source deploy includes ec2/, pool/bake/, lib/aws.mjs and package-lock.json's SDK dependencies.
   # Roles come only from pool/config/ec2.json; there are no AWS keys or duplicate role env maps.
   # GCE keeps its 180-minute envelope, followed by each account's builder (30), image (30), smoke/check
@@ -150,12 +153,27 @@ bake() {
     catch (e) { if (e.code === "ENOENT") console.log(0); else throw e; }
   ' "$KIT/pool/config/ec2.json")
   timeout=$((180 + 120 * accounts))
-  g run jobs deploy ci-kit-bake --source="$KIT" --region="$REGION" --service-account="$SA" \
+  g run jobs deploy "$job" --source="$KIT" --region="$REGION" --service-account="$SA" \
     --command=launcher --args=node,gce/bake/bake.mjs --labels=ci-kit=bake \
-    --tasks=1 --max-retries=0 --task-timeout="${timeout}m" --cpu=1 --memory=512Mi
-  g run jobs add-iam-policy-binding ci-kit-bake --region="$REGION" \
+    --tasks=1 --max-retries=0 --task-timeout="${timeout}m" --cpu=1 --memory=512Mi "$@"
+  g run jobs add-iam-policy-binding "$job" --region="$REGION" \
     --member="serviceAccount:$SA" --role=roles/run.invoker > /dev/null
+}
+
+bake() {
+  deploy_bake_job ci-kit-bake
   echo "deploy: bake job ok"
+}
+
+bake_check() {
+  deploy_bake_job ci-kit-bake-check --set-env-vars=CI_KIT_BAKE_IF_STALE=1
+  # The check lists both jobs as the bake's identity, not as an operator. Existing bake is not redeployed.
+  local job
+  for job in ci-kit-bake ci-kit-bake-check; do
+    g run jobs add-iam-policy-binding "$job" --region="$REGION" \
+      --member="serviceAccount:$SA" --role=roles/run.viewer > /dev/null
+  done
+  echo "deploy: bake check job ok (execution reads on both bake jobs)"
 }
 
 bake_schedule() {
@@ -166,6 +184,13 @@ bake_schedule() {
     --uri="https://run.googleapis.com/v2/projects/$PROJECT/locations/$REGION/jobs/ci-kit-bake:run" \
     --oauth-service-account-email="$SA" > /dev/null
   echo "deploy: bake schedule ok"
+  verb=create
+  g scheduler jobs describe ci-kit-bake-check-hourly --location="$REGION" > /dev/null 2>&1 && verb=update
+  g scheduler jobs "$verb" http ci-kit-bake-check-hourly --location="$REGION" \
+    --schedule='23 * * * *' --time-zone=Etc/UTC --http-method=POST \
+    --uri="https://run.googleapis.com/v2/projects/$PROJECT/locations/$REGION/jobs/ci-kit-bake-check:run" \
+    --oauth-service-account-email="$SA" > /dev/null
+  echo "deploy: bake check schedule ok (hourly at minute 23 UTC)"
 }
 
 COMMIT=$(git -C "$KIT" rev-parse HEAD)
@@ -346,18 +371,19 @@ alert_on_log() {
   rm -f "$file"
 }
 
-[ $# -gt 0 ] || set -- base network bake bake-schedule launcher launcher-schedule webhook alert
+[ $# -gt 0 ] || set -- base network bake bake-check bake-schedule launcher launcher-schedule webhook alert
 for part in "$@"; do
   case $part in
     base) base ;;
     network) network ;;
     bake) bake ;;
+    bake-check) bake_check ;;
     bake-schedule) bake_schedule ;;
     launcher) launcher ;;
     launcher-schedule) launcher_schedule ;;
     webhook) webhook ;;
     alert) alert ;;
     app-hook) app_hook ;;
-    *) die "unknown part $part (base, network, bake, bake-schedule, launcher, launcher-schedule, webhook, alert, app-hook)" ;;
+    *) die "unknown part $part (base, network, bake, bake-check, bake-schedule, launcher, launcher-schedule, webhook, alert, app-hook)" ;;
   esac
 done
