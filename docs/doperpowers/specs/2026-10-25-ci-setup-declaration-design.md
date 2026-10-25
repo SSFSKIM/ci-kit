@@ -37,27 +37,52 @@ Macs.
   ci-kit #139 (478facf; the keys, `setup/`, the hash; review fixes for Homebrew aliases and apt virtual names) and
   #140 (82c8d48; the gates workflow's step). `v1` = 82c8d48. Proofs: ci-kit-sandbox runs 40149966271 (own workflow
   on `setup@setup-m1`) and 40150585134 (`gates.yml@v1`), green on hosted Ubuntu, hosted macOS and the pool.
-- [ ] M2 — MAWS declares its environment (completed: MAWS #145, head df6986dfc, independent review clean, class 1a
-  green on the pool, run 40151266892; remaining: the two Mac runs of Concrete Steps, the mini's scratch-formula
-  check, the architect's merge).
-- [ ] M3 — Per-repo job images in the pool bake (completed: ci-kit #141 merged as d60bc8b after a high review, the
-  bake job deployed from it; ci-kit-sandbox's default branch declares `apt: [cowsay]` (sandbox #52); proof bake
-  `ci-kit-bake-k5dj8`, GCE half: `bake: SSFSKIM/ci-kit-sandbox setup 8ef8651a970b7e69: apply ok (metadata refused;
-  clone credentials absent); 38824480 bytes above base; warm ok`, image `ci-kit-runner-20261025-015921-32z9-d60bc8b7`
-  ready 02:25Z after 8 smoke VMs and a real sandbox job, labelled `ci-kit-setup-ssfskim-ci-kit-sandbox=8ef8651a970b7e69`;
-  remaining: the EC2 half and its records).
-- [ ] M4 — Pool jobs run on their repository's image (completed: ci-kit #144 merged as ffa08f8 after a high review
-  whose one finding, normalized-tag aliasing, added the `CI_KIT_REPO` label (Decision Log); launcher
-  `ci-kit-launcher-00026-xb8`, bake and check jobs deployed from it; remaining: a bake carrying it, then the
-  sandbox's matching and stale jobs).
-- [ ] M5 — Rebuild on a declaration change (completed: ci-kit #145 merged as 81368e7 after a high review with no
-  findings; `ci-kit-bake-check` and `ci-kit-bake-check-hourly` deployed; its first hourly run,
-  `ci-kit-bake-check-7ns4c` at 02:23Z, logged `bake: skipped; …/ci-kit-bake-k5dj8 still running`; remaining: the
-  sandbox's declaration change (sandbox #53) rebuilding by itself, then `bake: images current`).
-- [ ] M6 — The Mac guest from the declaration (completed: ci-kit #146 merged as bc9be38 after a medium review whose
-  two findings were fixed (Decision Log); remaining: the Mac refresh under the maintenance hold).
-- [ ] M7 — ci-kit forgets MAWS.
-- [ ] M8 — manim-master declares its environment; acceptance.
+- [x] (2026-10-25 13:31Z) M2 — MAWS declares its environment. MAWS #145 (independent review clean), landed by the
+  architect as d2c08806d. Proofs on its head df6986dfc: the full run 40152177905, green, its jobs on the pool (EC2 7,
+  GCE 2), the mini's own runner (30) and the guest (5), the setup step logging `installed nothing` in 1.5-1.8 s on
+  the host and installing Claude Code in 13.8-18.6 s in the guest (the image predated the declaration); the
+  guest-routed run of the 15 `MAC_VM_E2E` groups, 40156525992, green; the mini's scratch-formula check, run
+  40156593299 on `ci-kit-mac-mini`: `installed brew:hello in 7.8 s` (the formula removed afterwards).
+- [x] (2026-10-25 02:47Z) M3 — Per-repo job images in the pool bake. ci-kit #141 (d60bc8b, high review); proof bake
+  `ci-kit-bake-k5dj8` on both providers, each logging `apply ok (metadata refused; clone credentials absent)` for
+  ci-kit-sandbox and its job image 38.8 MB above the base. GCE image `ci-kit-runner-20261025-015921-32z9-d60bc8b7`
+  labelled `ci-kit-setup-ssfskim-ci-kit-sandbox=8ef8651a970b7e69`; AMI ami-0cf083c2830011f08 tagged
+  `ci-kit-setup:SSFSKIM/ci-kit-sandbox` with the same hash, its snapshot 9.243 GiB against 9.122 before; the bake
+  manifest's `repos` entry records the revision, the apply result and the size.
+- [x] (2026-10-25 04:51Z) M4 — Pool jobs run on their repository's image. ci-kit #144 (ffa08f8, high review; its one
+  finding added the `CI_KIT_REPO` label). On EC2: the sandbox's run 40161739985 logged `image matches setup
+  5157be5dbfc77c85 ... installed nothing in 0.0 s`, and a scratch branch declaring one more package, run
+  40161983809, logged the notice naming both hashes and `installed apt:figlet in 4.4 s`. On GCE: MAWS's `unit 4/4`
+  (run 40166852690) logged `job image ci-kit-runner:latest (repository image unavailable)` while MAWS had no job
+  image, the fallback as designed; once M7's bake made one, MAWS's GCE jobs logged `ci-kit gce job (up 5.72 s): job
+  image ci-kit-job/ssfskim-maws:latest` (16:54Z and 17:54Z serial consoles).
+- [x] (2026-10-25 07:23Z) M5 — Rebuild on a declaration change. ci-kit #145 (81368e7, high review clean). Sandbox
+  #53's merge (02:33Z) was followed by the 03:23Z check `ci-kit-bake-check-m7pdw`: `bake: stale
+  SSFSKIM/ci-kit-sandbox on gce: 8ef8651a970b7e69 -> 5157be5dbfc77c85` (and on EC2), and a bake with no dispatch.
+  Its GCE half failed on a 502 from an operation wait (Surprises); ci-kit #148 (dec0618) retries such waits, and the
+  next check rebuilt the stale provider by itself. 06:23Z logged `skipped; ... still running`; 07:23Z and every hour
+  to 13:23Z logged `bake: images current`.
+- [x] (2026-10-25 14:00Z) M6 — The Mac guest from the declaration. ci-kit #146 (bc9be38, medium review, two findings
+  fixed). The refresh under a maintenance hold (13:36-14:00Z, 24 minutes) baked `maws-vm-golden-20261025` from MAWS
+  master c8f97d5ac with M7's kit: `installed brew:poppler cask:libreoffice in 303.8 s`, Claude Code by the script,
+  `setup 735eb1d16da9ed56 applied with install`; the printed first-run step named LibreOffice, approved in the
+  guest; first run 12/12; trial run 40199576987 (document-app 20/20): `image matches setup 735eb1d16da9ed56 ...
+  installed nothing in 1.8 s`; promoted.
+- [x] (2026-10-25 15:29Z) M7 — ci-kit forgets MAWS. ci-kit #149 merged as b437a04 after MAWS #145 landed (medium
+  review, two findings fixed, Decision Log); launcher, bake and check jobs deployed from it. The Mac half: M6's
+  refresh ran no legacy step. The Linux half: the 14:23Z check (`ci-kit-bake-check-rlpkh`) found `stale SSFSKIM/MAWS
+  on gce: none -> 735eb1d16da9ed56` (and on EC2) and baked from caches the builders started empty, every repository
+  `apply ok (metadata refused; clone credentials absent)` and `warm ok` on both providers; GCE image
+  `ci-kit-runner-20261025-142421-xz3o-ca5ca792` ready 15:01Z, AMI ami-0f3f936af11ca2678 ready 15:29Z after its real
+  sandbox job. MAWS run 40216982884's pool job on it: `image matches setup 735eb1d16da9ed56 ... installed nothing in
+  0.0 s`.
+- [x] (2026-10-25 19:56Z) M8 — manim-master declares its environment; acceptance. manim-master #110 merged as
+  c357de3 (medium review clean); the 05:23Z check baked its job image by itself (`none -> e7ec7ad969f97049`, 201 MiB
+  above the base); run 40198350153 on EC2: `image matches setup e7ec7ad969f97049 ... installed nothing in 0.2-0.9
+  s`, where the same jobs installed for 18.5-22.1 s before the image. The acceptance section checked end to end
+  (Surprises). Follow-ups landed on the way: ci-kit #148 (GCE wait retry), #151 (the guest lane's memory floor,
+  the concurrency spec's), #152 (Caskroom paths; `v1` = 860c22b), #153 (the credential check's precision), #155
+  (images keep only the declaration for smoke).
 
 ## Glossary
 
@@ -698,6 +723,92 @@ acceptance item checked as written above, its evidence recorded in Surprises & D
   stay stale behind a "current" verdict.
   Evidence: ci-kit #145's tests over several accounts.
 
+- Observation: package names are per distribution, and GitHub's `ubuntu-latest` moved under the declaration: it is
+  Ubuntu 26.04.1, which has no `postgresql-16`, while the pool's image is 24.04-based.
+  Evidence: manim-master run 40162586790, all three hosted setup steps red (`Unable to locate package
+  postgresql-16`); the same declaration installs it on the pool in 18-22 s and creates the 16/main cluster.
+- Observation: a GCE operation wait can answer 502 after minutes pending, which failed a whole provider's bake.
+  Evidence: bake 20261025-032424-8cct, its second smoke VM's insert pending about 10 minutes in us-central1-b, then
+  502 from `/wait`; the image was deleted unready. ci-kit #148 retries a 5xx or timeout on the wait until the
+  operation's deadline.
+- Observation: an EC2 instance's console output is gone once it terminates, so a pool job's `job image` line cannot
+  be read after the job; the setup step's line is the durable evidence, since the base image records no setup hash
+  and only a repository's own image can match.
+  Evidence: `aws ec2 get-console-output` on i-06e777812c85b6288 after its job (run 40161739985) returned no output.
+- Observation: the bake's real-job check runs ci-kit's own `bake-check.yml`, which has no setup step, so a bake proves
+  its images boot and run a job but not that a repository's job picks its image; that needs a repository's run.
+  Evidence: the bake of the 04:23Z check (`ci-kit-bake-check-mn7gl`); M4's GCE evidence came from MAWS run
+  40166852690 instead.
+- Observation: Homebrew 7 lists a cask's app at its Caskroom path, a symlink to the app in `/Applications`, so the
+  guest's quarantine record names `/opt/homebrew/Caskroom/libreoffice/26.8.1/LibreOffice.app`; the first-run check
+  still works because `xattr` follows the link.
+  Evidence: the 10-25 refresh's `~/.ci-kit/quarantined-apps`; quarantine read 0181 before the approval and 01c1
+  after, through the link. ci-kit #150 resolves the path.
+- Observation: a Mac refresh baked from the declaration alone took 24 minutes of hold, the declaration's apply
+  303.8 s of it (Poppler and LibreOffice from Homebrew), and the guest's setup step then costs 1.8 s per job against
+  13.8-18.6 s on the image before it.
+  Evidence: hold 13:36:31-14:00:07Z; `refresh-bake.log`; trial run 40199576987; M2's run 40152177905.
+- Observation: once the job images exist, a pool job's setup costs under a second where it cost tens of seconds.
+  Evidence: manim-master's pool jobs 0.2-0.9 s (run 40198350153) against 18.5-22.1 s before its image (run
+  40162952880).
+
+- Observation: the bake keeps each served repository's depth-1 checkout on the image for the smoke VMs, and with
+  manim-master's 899 MB tree that is most of a 2.5 GiB growth in every pool VM's disk.
+  Evidence: EC2 snapshot 9.235 GiB with the sandbox's declaration alone (`ci-kit-bake-check-mn7gl`), 11.236 GiB
+  with manim-master's (`-dx5xf`, its layer 201 MiB), 11.698 GiB with MAWS's (`-rlpkh`, its layer 125 MiB); EC2
+  initialization $0.0222 to $0.0281 per volume. ci-kit #154; #155 keeps only the declaration's files for the smoke
+  (MAWS 1,484 bytes where its checkout was 426 MB, manim-master 9,760 where it was 1.33 GB), and the next bake,
+  `ci-kit-bake-82zpq`, wrote a 9.957 GiB snapshot ($0.0239 per volume) and a GCE image of 4.12 GiB archived against
+  5.26.
+- Observation: the EC2 bake's compaction can refuse at the start of its root copy and leave no reason behind.
+  Evidence: the weekly bake `ci-kit-bake-68gls` (2026-10-25 18:00Z): `compact-failed`, phase `root-copy`, exit 1
+  after 3 s (161-199 s when it works); partclone's own log stays on the terminated builder. The previous AMI stayed
+  newest, so no job met it, and the next bake compacted cleanly. ci-kit #156.
+
+- Observation: the acceptance section, checked end to end on 2026-10-25 after M7's bake and M6's refresh (kit
+  b437a04 to 860c22b on the Macs and the pool, `v1` 82c8d48 then 860c22b).
+  Evidence, by item:
+  1. `parseConfig` on main: a `setup`-only file (apt, brew, cask, script) gives zero gates; `zsh=5.9`, a non-list
+     `brew`, an absolute and a climbing script are refused naming `setup.apt`, `setup.brew`, `setup.script`.
+  2. ci-kit-sandbox run 40200889074 through `gates.yml@v1`, figlet declared: hosted Ubuntu `installed apt:cowsay
+     apt:hello apt:figlet in 13.3 s`, hosted macOS `installed brew:figlet in 4.2 s`, the pool (EC2) `installed
+     apt:figlet in 8.8 s`, each then `figlet ok`. Again on 860c22b before `v1` moved (run 40202985820).
+  3. Sandbox run 40203085506 (EC2): `image matches setup 5157be5dbfc77c85 ... installed nothing in 0.2 s`; MAWS
+     0.0-0.2 s (run 40221065179); manim-master 0.1-1.1 s (run 40221105986).
+  4. Pool: run 40200889074's EC2 job, `::notice::... image setup 5157be5dbfc77c85 differs from commit setup
+     047c3452d965a3b7` then the install. The macOS app exception: run 40202985820's hosted macOS job,
+     `::warning::ci-kit setup: /Applications/Rectangle.app is quarantined; it needs first-run approval`. Guest:
+     a scratch MAWS branch adding `hello` to `brew`, run 40221933191's
+     guest job: `::notice::ci-kit setup: image setup 735eb1d16da9ed56 differs from commit setup 5403d37c46878533`,
+     `installed brew:hello in 5.6 s`, document-app 20 passed.
+  5. Post-M7, on all three lanes: MAWS PR #148's run 40198527158 (host 27 jobs and guest 8 on the 10-25 golden and
+     kit, the pool 9), MAWS master's pool run 40221065179 (7 jobs on MAWS's own image), and the guest jobs of item 8.
+     Every one of the 27 `MAC_VM_E2E` groups has run in a guest on the 10-25 golden: the five not otherwise run
+     there went through run 40221919498 (`--lane vm`), where panel, presentations, side and transcript passed and
+     tools failed one test, `maws-tools.spec.ts:458`, reading an empty `fontFamily`, the signature it also showed on
+     the old guest on 10-24 (run 40124518939; host 9 of 9 since 10-22): a test race the slower guest meets, reported
+     to MAWS's architect, not an environment gap. The pre-M7 pair is M2's (40152177905, 40156525992), both green.
+  6. GCE image `ci-kit-runner-20261025-142421-xz3o-ca5ca792` labels `ci-kit-setup-ssfskim-maws=735eb1d16da9ed56`,
+     `-manim-master=e7ec7ad969f97049`, `-ci-kit-sandbox=5157be5dbfc77c85`; AMI ami-0f3f936af11ca2678 tags
+     `ci-kit-setup:SSFSKIM/MAWS` and the others with the same hashes; layers 125 MiB, 201 MiB, 38.8 MB above the
+     base. MAWS's GCE jobs log `job image ci-kit-job/ssfskim-maws:latest`; before its image, `ci-kit-runner:latest
+     (repository image unavailable)`.
+  7. MAWS #145's merge (13:31Z) was rebuilt by the 14:23Z check with no dispatch, ready 15:29Z; 16:23Z and 17:23Z
+     logged `bake: images current` (and 07:23-13:23Z before it, M5).
+  8. The 10-25 golden: Poppler, LibreOffice (first-run approved) and Claude Code from MAWS's declaration, its jobs
+     logging `image matches setup 735eb1d16da9ed56`; every one of wave 3's twelve groups green in a guest on it
+     since 14:00Z (49 guest jobs counted, among them agents, available, browser, browser-chrome, browser-comment,
+     browser-import, c12, composer, deliverables, design-systems, layout and supervisor).
+  9. Run 40156593299 on `ci-kit-mac-mini`: `installed brew:hello in 7.8 s` (the step's code is unchanged since);
+     the password cask's message by `test/setup.test.mjs`.
+  10. Main 860c22b: `pool/image/Dockerfile` without zsh or MAWS's fonts, `pool/bake/warm.mjs` gone, no repository
+      named in the manifest, `ec2/vm/job.mjs` or `gce/vm/smoke.sh`, no `store`, `libreoffice`, `poppler` or
+      `engine` step in `mac/vm/provision.sh`; the empty-cache bake of item 7 ready on both providers; item 5's runs.
+  11. manim-master run 40221105986 on master c357de3: forge, pipeline, runtime, platform and platform-e2e green on
+      EC2, each `image matches setup e7ec7ad969f97049 ... installed nothing`.
+  12. The 14:23Z bake's log, for each repository on each provider: `apply ok (metadata refused; clone credentials
+      absent)`; ci-kit #153 narrowed the credential check without admitting any form it refused (high review).
+
 ## Decision Log
 
 - Decision: M1 lands in two pull requests: action, schema and docs first, then the gates workflow's step, with the
@@ -798,6 +909,86 @@ acceptance item checked as written above, its evidence recorded in Surprises & D
   of #137); the medium review reproduced the bake stopping with ENOENT. Rejected: requiring #145 before any refresh.
   Date/Author: 2026-10-25, CI-opt (M6 medium review finding).
 
+- Decision: A GCE operation wait that answers 5xx or times out is retried until the operation's own deadline
+  (`settleAccepted` in `lib/gce.mjs`, ci-kit #148).
+  Rationale: the 502 of the 03:23Z check's bake (Surprises) came from the wait call, not the operation, which a later
+  wait can still see finish; failing there threw away a provider's bake and an hour. Rejected: leaving it to the
+  next hourly check, which did rebuild the provider, at the cost of a bake and an hour of stale images.
+  Date/Author: 2026-10-25, CI-opt (medium review clean).
+
+- Decision: manim-master's `pipeline` gate moves to the pool, and its hosted gates `protocol` and `catalog` take
+  `setup: false`.
+  Rationale: `ubuntu-latest` (26.04.1) cannot install the declared `postgresql-16`, and the pool starts a job only
+  21-22 s behind a hosted one. `protocol` and `catalog` use none of the declared tools and no history, and on hosted
+  runners the declaration cannot apply; `setup: false` also drops Node provisioning (`protocol` runs on the hosted
+  runner's Node 24.21.0) and the full-depth checkout, so they check out at depth 1 in 34-36 s against 16-20 s at
+  full depth, an accepted cost (run 40162773772). The package-created 16/main cluster is left in place, since
+  `policy-rc.d` keeps it from starting and the tests run their own server on 127.0.0.1:5499.
+  Rejected: an apt name per distribution in the declaration (no schema for it, and the hosted image will move
+  again).
+  Date/Author: 2026-10-25, CI-opt (M8 executor's decisions, medium review clean).
+
+- Decision: M7's removal also drops `mac/install.sh`'s LibreOffice prerequisite and the M6 fallback for a MAWS
+  revision without a declaration; Google Chrome, which the host bootstrap installs for desk-web on a fresh Mac, stays
+  out of MAWS's declaration.
+  Rationale: with the guest's LibreOffice coming from the declaration, a probe for `soffice` on the host only blocks
+  a fresh host's install (the medium review's finding); MAWS master has declared its environment since #145, so the
+  fallback has nothing left to serve. No Mac job runs desk-web, whose Chrome use is Darwin-only configuration, and
+  the architect chose to leave Chrome undeclared.
+  Date/Author: 2026-10-25, CI-opt (M7 medium review, architect).
+
+- Decision: The served repositories keep one shared VM disk; no per-repository disk split.
+  Rationale: the design split the disk only for a layer over about 1 GiB. Measured above the base: ci-kit-sandbox
+  38.8 MB, manim-master 201 MiB, MAWS 125 MiB (the 14:23Z check's bake, `ci-kit-bake-check-rlpkh`).
+  Date/Author: 2026-10-25, CI-opt.
+
+- Decision: `v1` moves to 860c22b, the merge of ci-kit #152, whose change to `setup/apply.mjs` makes the setup step
+  name a newly installed app at its real path (`/Applications/<App>.app`), not Homebrew's Caskroom link.
+  Rationale: it is the only change under `setup/`, `plan/` or the workflows since 82c8d48. Proven before the move by a
+  sandbox workflow on `setup@860c22b` on hosted Ubuntu, hosted macOS (a cask, Rectangle, quarantined and named at
+  its real path) and the pool (run 40202985820), and after it through `gates.yml@v1` (run 40203085506). Rollback:
+  82c8d48 by the same PATCH.
+  Date/Author: 2026-10-25, CI-opt.
+
 ## Outcomes & Retrospective
 
-Pending — written at finish.
+**What it delivered.** The three served repositories declare their CI environment in their own `.github/ci-kit.yml`,
+and every lane applies it after checkout: GitHub's hosted Ubuntu and macOS, the pool on EC2 and GCE, the Mac mini's
+own runner and the guest. Images are caches of it. The pool bake builds one job image per repository (125 MiB for
+MAWS, 201 MiB for manim-master, 38.8 MB for the sandbox, all on the one shared disk), an hourly check rebuilds them
+within the hour of a declaration change, and the guest's golden is baked from MAWS's declaration. ci-kit no longer
+carries a project's tool list (acceptance 10). The setup step costs 0.0-1.1 s on a matching pool image and 1.8 s in
+the guest, where manim-master's pool jobs spent 18.5-22.1 s installing and a guest job 13.8-18.6 s; a job on an
+older image prints the notice, installs the difference and passes. All twelve acceptance items were observed
+(Surprises, "the acceptance section, checked end to end"); the one red job among them, MAWS's tools group in a
+guest, is a test race that group showed on the old guest too.
+
+**What went differently, and the lessons.**
+- An apt name is a distribution's name. GitHub moved `ubuntu-latest` to 26.04.1 during M8, so manim-master's
+  `postgresql-16` cannot install on a hosted runner while the pool's 24.04 image has it; manim-master's gates that
+  need the declaration run on the pool, and its hosted gates opt out. A repository that wants one declaration
+  across hosted Linux and the pool has to pick packages both distributions carry, or pin its hosted gates' image.
+- A cloud API's wait call fails on its own. The GCE 502 on an operation wait threw away a provider's bake although
+  the operation could still finish; the wait now retries until the operation's deadline (#148).
+- Evidence has to outlive the machine. EC2 drops an instance's console output at termination, so the durable proof
+  that a job ran on its repository's image is the setup step's `image matches` line, which only a repository's
+  image can produce.
+- Measure the whole image after each repository joins, not only its layer. The bake's retained checkouts, harmless
+  for the sandbox, added about 2.2 GiB to every pool image once manim-master and MAWS joined; #155 took the EC2
+  snapshot from 11.698 to 9.957 GiB.
+- The critical path ran through other sessions. MAWS #145 was ready at 04:19Z and landed at 13:31Z: messages to
+  the architect from 01:50Z had been recorded in a log and never delivered (sminos's `<@address>` form; doperpowers
+  #304), then the night passed. Confirm a peer received a message, not that the command exited.
+- The guest lane's memory floor, sized in a morning window, stopped admitting guests once the owner's sessions
+  lowered the mini's idle figure; it surfaced only when the refresh's backlog queued behind it (ci-kit #151, the
+  concurrency spec's Decision Log).
+
+**Verification.** Each milestone's pull request had the review its rung named (high for M3-M5, medium for the
+rest), every finding fixed or recorded here; the follow-ups likewise: #148 (medium), #151 (low), #152 (medium),
+#153 (high) and #155 (high). There is no single branch for a whole-initiative review: the work landed as eleven pull
+requests across four repositories, each reviewed and each proven by a run on the lanes it changed.
+
+**Left open.** ci-kit #156 (keep partclone's log when a compaction refuses). In MAWS, the architect's: connectors
+and connectors-direct join the guest after their teardown race is fixed and they pass three guest runs; tools'
+font read is being made to retry; terminal's re-adopt flake stays on MAWS's debt list. The hosted-distribution
+drift is tracked in manim-master's friction tracker (#100).
