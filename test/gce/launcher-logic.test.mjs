@@ -292,7 +292,7 @@ test('a job VM: spot with a DELETE run limit, no service account, the JIT config
   assert.deepEqual(disk.initializeParams.labels, { 'ci-kit': 'gce', 'ci-kit-alloc': A(1) });
   assert.equal(disk.initializeParams.diskSizeGb, '50');
   assert.equal(disk.initializeParams.sourceImage, 'projects/ssfskim-ci-kit/global/images/ci-kit-runner-x');
-  assert.deepEqual(body.metadata.items, [{ key: 'enable-guest-attributes', value: 'TRUE' }, { key: 'ci-kit-jit', value: 'JITCONFIG' }]);
+  assert.deepEqual(body.metadata.items, [{ key: 'enable-guest-attributes', value: 'TRUE' }, { key: 'ci-kit-jit', value: 'JITCONFIG' }, { key: 'ci-kit-repo', value: SBX }]);
   assert.equal(body.networkInterfaces[0].subnetwork, 'regions/us-central1/subnetworks/ci-kit-us-central1');
   const std = jobInstance({ alloc: A(1), zone: 'us-central1-b', machine: 'c3d-highcpu-8', provisioning: 'standard', placement: CFG.placements[0], repo: SBX, cpus: 8, image: 'i', jit: 'j', cfg: CFG, config: 'bundled' });
   assert.equal(std.scheduling.provisioningModel, 'STANDARD');

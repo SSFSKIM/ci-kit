@@ -6,7 +6,7 @@ export const SMOKE_SCRIPT = '/opt/ci-kit/gce/vm/smoke.sh';
 // EC2 additionally requires IMDSv2 with hop limit 1 and disables metadata IPv6 at launch.
 export const METADATA_BLOCK = ['tcp', 'udp'].map((proto) => ['DOCKER-USER', '-d', '169.254.169.254/32', '-p', proto, '!', '--dport', '53', '-j', 'DROP']);
 
-export function jobRunArgs({ name, cpus, smoke }) {
+export function jobRunArgs({ name, cpus, smoke, image = IMAGE }) {
   return [
     'run', '--rm', '--name', name,
     '-e', `CI_KIT_CORES=0-${cpus - 1}`,
@@ -15,7 +15,7 @@ export function jobRunArgs({ name, cpus, smoke }) {
       ? ['-e', `CI_KIT_EXPECT_CPUS=${smoke.expectCpus}`, '-e', `CI_KIT_WORK=${workDir(name)}`,
         '-v', `${SMOKE_SCRIPT}:/usr/local/bin/ci-kit-smoke:ro`, '--entrypoint', '/usr/local/bin/ci-kit-smoke']
       : []),
-    IMAGE,
+    image,
   ];
 }
 

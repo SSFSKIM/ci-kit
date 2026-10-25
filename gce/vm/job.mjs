@@ -4,9 +4,10 @@
 // metadata, or, on the bake's smoke VM, the smoke check. The result goes to a guest attribute (ci-kit/job=exit:<code>,
 // or ci-kit/smoke=ok|failed:<check>); the unit powers the VM off when this exits, however it exits.
 // The JIT config reaches the container only through the docker CLI's environment, never a command line or a log.
+import { pathToFileURL } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
-import { prepareContainer, docker } from '../../pool/vm/container.mjs';
+import { prepareContainer, docker, selectJobImage } from '../../pool/vm/container.mjs';
 import { jobRunArgs, vmMode, smokeVerdict } from './run.mjs';
 import { smokeJobImages } from '../../pool/bake/job-images.mjs';
 
@@ -34,7 +35,7 @@ async function report(key, value) {
   }
 }
 
-async function main() {
+export async function runGuest({ meta, log, report, prepareContainer, docker, smokeJobImages, selectJobImage, cpus }) {
   const name = await meta('name');
   const mode = vmMode({ jit: await meta('attributes/ci-kit-jit'), smoke: await meta('attributes/ci-kit-smoke') });
   log(`${name}: ${mode.kind}`);
@@ -44,7 +45,6 @@ async function main() {
     return;
   }
   await prepareContainer(name);
-  const cpus = availableParallelism();
 
   if (mode.kind === 'smoke') {
     try { await smokeJobImages(); }
@@ -60,13 +60,18 @@ async function main() {
     return;
   }
   const jit = await meta('attributes/ci-kit-jit');
-  const { code } = await docker(jobRunArgs({ name, cpus }), { env: { CI_KIT_JIT: jit } });
+  const image = await selectJobImage(await meta('attributes/ci-kit-repo'));
+  log(`job image ${image}`);
+  const { code } = await docker(jobRunArgs({ name, cpus, image }), { env: { CI_KIT_JIT: jit } });
   log(`job container exited ${code}`);
   await report('job', `exit:${code}`);
 }
 
-main().catch(async (err) => {
-  log(`failed: ${err.message}`);
-  await report('job', 'failed:unit');
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  runGuest({ meta, log, report, prepareContainer, docker, smokeJobImages, selectJobImage, cpus: availableParallelism() })
+    .catch(async (err) => {
+      log(`failed: ${err.message}`);
+      await report('job', 'failed:unit');
+      process.exit(1);
+    });
+}

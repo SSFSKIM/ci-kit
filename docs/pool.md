@@ -718,6 +718,48 @@ not preserved with the source or committed into Docker. On both providers, the h
 socket or host credentials; the host launches them separately before the original base-image checks. **Normal jobs
 still start `ci-kit-runner:latest`**; selecting the repository image is a separate deployment milestone.
 
+### Selecting a repository's job image (M4)
+
+This completes the separate deployment described above. The launcher passes the job's `owner/name` as GCE
+metadata `ci-kit-repo` or EC2 user-data `repo`. Before starting the runner container, the VM inspects the local
+`ci-kit-job/<owner>-<repo>:latest` image (the bake's lowercase, punctuation-normalized name). If it exists, the
+job uses it; otherwise it uses `ci-kit-runner:latest`. No repository is also a base-image fallback, for VMs
+started by an older launcher. The Hetzner agent is unchanged. Smoke still checks the base container and each
+repository image separately.
+
+The VM logs `job image <name>` before starting Docker. This is in its **serial console**, before the Actions
+runner connects; the setup comparison and installation summary are in the **Actions job log**. Docker inherits
+`CI_KIT_SETUP_HASH` from the selected image, never from the host. A missing or older repository image is only a
+cache miss: the job's setup action applies its checked-out declaration.
+
+**Rollout and proof (coordinator only).** From merged main, deploy `gce/deploy.sh launcher` and execute a bake
+whose kit commit includes this change. Wait for ready images on both providers. Either order is safe:
+launcher-first VMs running old guest code keep using the base; image-first VMs receive no repository from the
+old launcher and use the base. A new guest on a disk lacking that repository's image also uses the base.
+No `v1` move is needed for this milestone; the setup action is already published.
+
+For a small proof, use a scratch ci-kit-sandbox branch from its default branch. Keep its declaration unchanged
+(`apt: [cowsay]`) and add a pool gate named `setup-proof` (`lane: pool`, `cpus: 2`, setup enabled) whose command is
+`/usr/games/cowsay setup-proof`. Commit and run `ci-gate . --gates setup-proof` in that worktree. Capture the
+runner name from `gh api repos/SSFSKIM/ci-kit-sandbox/actions/runs/<run>/jobs --jq '.jobs[] | [.name,.runner_name]'`.
+The VM console must name `job image ci-kit-job/ssfskim-ci-kit-sandbox:latest`; the Actions log must show
+`ci-kit setup: image matches setup <hash>`, then a summary with `installed nothing` in under 10 seconds.
+
+On the same scratch branch, change only the declaration to `apt: [cowsay, figlet]` and the gate command to
+`figlet setup-proof`. Commit and run the same gate again, without merging or baking the branch. Its VM must
+still name the sandbox job image. The Actions log must show
+`::notice::ci-kit setup: image setup <baked-hash> differs from commit setup <branch-hash>; applying declaration`
+and a summary naming `installed apt:figlet`, followed by the successful command. Inspect the raw job log if the
+Actions UI renders the notice as an annotation. `gh run view <run> -R SSFSKIM/ci-kit-sandbox --log` retrieves the
+setup output. MAWS on its default declaration is an equivalent matching-image proof.
+
+Capture VM console evidence while the VM exists: on GCE, `gcloud compute instances get-serial-port-output
+<runner-name> --zone=<zone> --project=ssfskim-ci-kit`; on EC2, `aws ec2 get-console-output --instance-id <id>
+--latest --region us-east-2 --profile ci-kit-ops` (the API's `Output` is base64). GCE's retained Cloud Logging
+query is documented below. Correlate each VM to the Actions runner name, not just its image generation; EC2
+instances have `ci-kit-alloc=<runner-name without ci-kit-ec2->`. A provider image becoming ready proves its
+smoke, not a job's hash comparison: retain both the console and Actions evidence.
+
 **Checking for leftovers.**
 
 ```

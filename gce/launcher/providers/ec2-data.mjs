@@ -35,7 +35,7 @@ export function launchResult(error, account) {
 export function jobRequest({ row, candidate: c, account, maxRunMinutes, jit, report, rootDevice = '/dev/sda1' }) {
   if (!row.client_token || !Number.isFinite(Date.parse(row.sent_at)) || row.zone !== c.zone) throw new Error('invalid persisted attempt coordinates');
   const sent = Date.parse(row.sent_at);
-  const userData = JSON.stringify({ v: 1, alloc: row.alloc, jit, deadline: iso(sent + maxRunMinutes * 60_000), report });
+  const userData = JSON.stringify({ v: 1, alloc: row.alloc, repo: row.repo, jit, deadline: iso(sent + maxRunMinutes * 60_000), report });
   if (Buffer.byteLength(userData) > 16 * 1024) throw new Error('user-data exceeds EC2 16 KiB limit');
   const resourceTags = tags({ 'ci-kit-pool': 'ec2', 'ci-kit-alloc': row.alloc, 'ci-kit-repo': row.repo.replace('/', '--'),
     'ci-kit-cpus': row.cpus, 'ci-kit-purpose': 'job', 'ci-kit-deadline': iso(sent + (maxRunMinutes + 15) * 60_000),

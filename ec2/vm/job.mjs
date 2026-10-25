@@ -123,7 +123,7 @@ export async function runGuest(deps) {
     }
     stopNotice = deps.watchNotice(notice => upload(deps, state, 'notice', { notice }));
     stage = 'container';
-    const result = await deps.runContainer({ name: `ci-kit-ec2-${data.alloc}`, jit: data.jit,
+    const result = await deps.runContainer({ name: `ci-kit-ec2-${data.alloc}`, repo: data.repo, jit: data.jit, log: deps.log,
       ...(data.smoke ? { smoke: { expectCpus: data.smoke } } : {}),
       onStarted: async () => {
         state.timings.container_start = stamp(deps);

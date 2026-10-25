@@ -416,7 +416,7 @@ export function jobInstance({ alloc, zone, machine, provisioning, placement, rep
     }],
     networkInterfaces: [networkInterface(placement, cfg.egress)],
     serviceAccounts: [],
-    metadata: { items: [{ key: 'enable-guest-attributes', value: 'TRUE' }, { key: 'ci-kit-jit', value: jit }] },
+    metadata: { items: [{ key: 'enable-guest-attributes', value: 'TRUE' }, { key: 'ci-kit-jit', value: jit }, { key: 'ci-kit-repo', value: repo }] },
     scheduling: provisioning === 'spot'
       ? { provisioningModel: 'SPOT', ...scheduling, onHostMaintenance: 'TERMINATE' }
       : { provisioningModel: 'STANDARD', ...scheduling },
