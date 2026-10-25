@@ -26,8 +26,8 @@
 #   `tart set --cpu 4 --memory <MB> --display 2560x1440pt --disk-size 60` before its first boot (--memory, 4096: V1's
 #   size; under 4096 is refused at once, the base image's minimum being 4 GiB); a run with the installed kit
 #   (CI_KIT_VM_KIT, ~/ci-kit-vm/kit) and the MAWS checkout (--maws, CI_KIT_VM_MAWS, ~/Developer/GitHub/MAWS) shared
-#   read-only; the guest's Claude Code version, the host user's own (~/.local/bin/claude; CI_KIT_VM_ENGINE for
-#   another), refused when there is none; provision.sh's steps through `tart exec` (the APFS container grown into
+#   read-only; project tools from the checkout's required declaration; provision.sh's steps through `tart exec`
+#   (the APFS container grown into
 #   the larger disk, indexing and the measured background services turned off, then the display mode set, each
 #   verified in the guest before the installs), the free space read after each
 #   (the lowest is printed, which the first refresh records; under CI_KIT_VM_DISK_FLOOR GB, 5, the bake stops); the
@@ -277,7 +277,7 @@ disk_follow() {
 }
 
 do_bake() {
-  local memory=4096 name='' golden version sha pnpm engine machine output quarantined
+  local memory=4096 name='' golden version sha pnpm machine output quarantined
   while (($# > 0)); do
     case $1 in
       --memory) (($# > 1)) || usage; memory=$2; shift ;;
@@ -311,12 +311,7 @@ do_bake() {
   fi
   pnpm=$(perl -MJSON::PP -e 'my $p = JSON::PP->new->decode(do { local $/; <STDIN> }); my ($v) = ($p->{packageManager} // "") =~ /^pnpm\@(\d+\.\d+\.\d+)/; print $v // ""' <"$maws/package.json" 2>/dev/null)
   [[ -n $pnpm ]] || refuse "the MAWS checkout's packageManager names no pnpm version ($maws/package.json)"
-  # The guest's engine is the host's: the version of this user's own Claude Code (the native installer's link, which
-  # the host lane's jobs launch), or CI_KIT_VM_ENGINE's.
-  engine=${CI_KIT_VM_ENGINE:-$("$HOME/.local/bin/claude" --version 2>/dev/null | sed -n 's/^\([0-9][0-9.]*\) (Claude Code)$/\1/p')}
-  [[ $engine =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
-    refuse "no Claude Code version for the guest: $HOME/.local/bin/claude answers none, and CI_KIT_VM_ENGINE names none (got '$engine')"
-  say "baking $name from $base: --cpu 4 --memory $memory --display 2560x1440pt --disk-size $guest_disk; runner $version, pnpm $pnpm, Claude Code $engine, guest machine $machine-vm"
+  say "baking $name from $base: --cpu 4 --memory $memory --display 2560x1440pt --disk-size $guest_disk; runner $version, pnpm $pnpm, guest machine $machine-vm"
   tart_call 1800 clone "$base" "$name" >/dev/null 2>&1 || die "tart clone $base $name failed"
   output=$(tart_call 300 set "$name" --cpu 4 --memory "$memory" --display 2560x1440pt --disk-size "$guest_disk" 2>&1) ||
     die "tart set $name failed${output:+ ($(tail -1 <<<"$output"))}; $name stays, stopped"
@@ -331,14 +326,6 @@ do_bake() {
   disk_follow
   in_guest "$provision_wait" "Node 22 and pnpm $pnpm (node)" /bin/bash "$provision" node "$pnpm"
   disk_follow
-  in_guest "$provision_wait" "the warm store (store)" /bin/bash "$provision" store
-  disk_follow
-  in_guest "$provision_wait" 'LibreOffice (libreoffice)' /bin/bash "$provision" libreoffice
-  disk_follow
-  in_guest "$provision_wait" 'Poppler (poppler)' /bin/bash "$provision" poppler
-  disk_follow
-  in_guest "$provision_wait" "Claude Code $engine (engine)" /bin/bash "$provision" engine "$engine"
-  disk_follow
   in_guest "$provision_wait" 'MAWS environment from its declaration (setup)' /bin/bash "$provision" setup
   disk_follow
   in_guest 900 "the runner $version (runner)" /bin/bash "$provision" runner "$version" "$sha" "$machine-vm"
@@ -348,8 +335,7 @@ do_bake() {
   in_guest 900 'the compiled helpers (helpers)' /bin/bash "$provision" helpers
   disk_follow
   quarantined=$(tart_call 30 exec "$run_vm" /bin/bash -c '
-    if [[ -e $HOME/.ci-kit/quarantined-apps ]]; then cat "$HOME/.ci-kit/quarantined-apps"
-    else echo /Applications/LibreOffice.app; fi') || {
+    cat "$HOME/.ci-kit/quarantined-apps"') || {
     end_vm
     die "$name: cannot read the setup step's quarantined-apps record"
   }
@@ -365,7 +351,7 @@ Screen Sharing from the MacBook (never VNC into the guest), with the maintenance
      A window opens and the guest logs in as admin by itself. Every boot of the lane drops the shared clipboard.
   2. In the guest's window, by clicks: open Terminal (Applications > Utilities > Terminal) and answer anything it
      asks on its first launch. Open each app below, answer its first-run dialogs, and quit it from its menu.
-     Nothing is typed or pasted into the guest. Apps (recorded quarantine, or legacy LibreOffice without a declaration):
+     Nothing is typed or pasted into the guest. Apps (recorded quarantine):
 ${quarantined:-     (none)}
   3. From the MacBook run:
        ssh mini '~/ci-kit-vm/kit/vm/bake.sh --first-run $name'
@@ -400,12 +386,7 @@ share='/Volumes/My Shared Files/maws'
 [[ -d $share && -f $share/package.json && -f $share/pnpm-lock.yaml ]] ||
   refuse "the MAWS share is not mounted at $share; start the candidate with the --dir=maws share as --bake prints"
 record=$HOME/.ci-kit/quarantined-apps
-if [[ -e $record ]]; then
-  apps=$(cat "$record") || refuse "the setup step's quarantined-apps record cannot be read at $record"
-else
-  # A checkout without a declaration retains the legacy provision steps and LibreOffice approval check.
-  apps=/Applications/LibreOffice.app
-fi
+apps=$(cat "$record") || refuse "the setup step's quarantined-apps record cannot be read at $record"
 while IFS= read -r app || [[ -n $app ]]; do
   [[ -n $app ]] || continue
   attrs=$(xattr "$app") || refuse "$app's quarantine cannot be read"

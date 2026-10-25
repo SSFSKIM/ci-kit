@@ -2,7 +2,7 @@
 // The guest bake's adapter: the shared applier plus records consumed by provision.sh and the first-run step.
 // The installed kit carries setup/, plan/ and vendor/ beside mac/'s contents, not a full repository checkout.
 import { execFileSync } from 'node:child_process';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -17,16 +17,12 @@ async function bakeSetup(kit, root) {
   const setup = config === null ? null : parseConfig(config, { isPrivate: true }).setup;
   const state = join(process.env.HOME, '.ci-kit');
   if (!setup || !hasDeclaration(setup)) {
-    // Until the project adopts setup, keep the legacy bake and its LibreOffice first-run check. A repeated
-    // provision must not leave a previous declaration's records claiming to describe this checkout.
-    for (const name of ['setup-hash', 'quarantined-apps']) await rm(join(state, name), { force: true });
-    console.log('provision: no setup declaration; skipping setup (legacy provisioning and first-run checks remain)');
-    return;
+    throw new Error('setup declaration required in .github/ci-kit.yml to bake the guest');
   }
   const { hash, quarantined } = await applySetup({ root, mode: 'bake', install: true });
   const apps = new Set(quarantined);
   // The applier reports newly installed casks. A base image or an earlier provision step may already have installed
-  // one without approving it (LibreOffice during the additive migration), so inspect every declared cask as well.
+  // one without approving it, so inspect every declared cask as well.
   if (setup.cask.length) {
     const artifacts = execFileSync('brew', ['list', '--cask', ...new Set(setup.cask)], { encoding: 'utf8' });
     for (const line of artifacts.split(/\r?\n/)) {

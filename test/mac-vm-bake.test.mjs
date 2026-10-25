@@ -348,8 +348,7 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.ok(f.calls().findIndex((call) => call.startsWith(`set ${CANDIDATE} `)) < f.calls().findIndex((call) => call.startsWith('run ')), f.calls().join('\n'));
     assert.deepEqual(text(join(f.vms, CANDIDATE, 'run.args')).trim().split('\n'), ['--no-graphics', '--no-clipboard', `--dir=kit:${mac}:ro`, `--dir=maws:${f.maws}:ro`, CANDIDATE]);
     const script = '/bin/bash /Volumes/My Shared Files/kit/vm/provision.sh';
-    assert.deepEqual(f.exec(CANDIDATE), [`${script} check`, `${script} disk 60`, `${script} quiet`, `${script} display`, `${script} node 11.23.0`, `${script} store`, `${script} libreoffice`, `${script} poppler`,
-      `${script} engine ${ENGINE}`, `${script} setup`, `${script} runner ${installPin('RUNNER_VERSION')} ${installPin('RUNNER_SHA256')} mini-vm`, `${script} workrepo`, `${script} helpers`]);
+    assert.deepEqual(f.exec(CANDIDATE), [`${script} check`, `${script} disk 60`, `${script} quiet`, `${script} display`, `${script} node 11.23.0`, `${script} setup`, `${script} runner ${installPin('RUNNER_VERSION')} ${installPin('RUNNER_SHA256')} mini-vm`, `${script} workrepo`, `${script} helpers`]);
     assert.match(result.stdout, /the seeded MAWS work repository \(workrepo\)/);
     assert.match(result.stdout, /MAWS.*declaration.*\(setup\)/);
     assert.match(result.stdout, /Open each app below/);
@@ -387,19 +386,12 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.match(g.run(['--bake', '--name', 'maws-vm-golden-x']).stderr, /--name takes maws-vm-candidate-<id>/);
   });
 
-  test('--bake: the guest\'s Claude Code is the host user\'s version, or CI_KIT_VM_ENGINE\'s; with neither, refused before a clone', () => {
-    const script = '/bin/bash /Volumes/My Shared Files/kit/vm/provision.sh';
+  test('--bake: project setup does not depend on a host engine install', () => {
     const f = fixture();
-    const result = f.run(['--bake', '--name', CANDIDATE], { extra: { CI_KIT_VM_ENGINE: '2.1.300' } });
+    rmSync(join(f.home, '.local/bin/claude'));
+    const result = f.run(['--bake', '--name', CANDIDATE]);
     assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.ok(f.exec(CANDIDATE).includes(`${script} engine 2.1.300`), f.exec(CANDIDATE).join('\n'));
-    assert.match(result.stdout, /Claude Code 2\.1\.300, guest machine mini-vm/);
-    const g = fixture();
-    rmSync(join(g.home, '.local/bin/claude'));
-    const refused = g.run(['--bake', '--name', CANDIDATE]);
-    assert.equal(refused.status, 1);
-    assert.match(refused.stderr, /refused: no Claude Code version for the guest: \S+\/\.local\/bin\/claude answers none/);
-    assert.ok(!g.calls().some((call) => call.startsWith('clone ')), g.calls().join('\n'));
+    assert.ok(f.exec(CANDIDATE).some(command => command.endsWith(' setup')));
   });
 
   test('--bake: a --memory under the base image\'s 4 GiB is refused before anything, with the image\'s reason', () => {
@@ -434,10 +426,10 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
 
   test('--bake: a provision step that fails stops the candidate, verified, and leaves it; a VM of the lane running refuses the bake', () => {
     const f = fixture();
-    f.flag('fail-store');
+    f.flag('fail-setup');
     const result = f.run(['--bake', '--name', CANDIDATE]);
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /maws-vm-candidate-20261022: the warm store \(store\) failed \(1: provision: store failed\)/);
+    assert.match(result.stderr, /maws-vm-candidate-20261022: MAWS environment from its declaration \(setup\) failed \(1: provision: setup failed\)/);
     assert.equal(f.state(CANDIDATE), 'stopped');
     assert.match(result.stdout, /its end is verified/);
     const g = fixture();
@@ -595,27 +587,18 @@ CI_KIT_SETUP_HASH=bdcec72c1fa875b3
     assert.match(stale.stdout, /installed brew:hello/);
   });
 
-  test('a declaration-free checkout keeps the legacy bake and leaves no setup hash', () => {
+  test('a declaration-free checkout fails the bake instead of relying on removed provision steps', () => {
     for (const config of [null, 'version: 1\ngates:\n  - name: test\n    run: echo ok\n']) {
       const f = setupBakeFixture();
       if (config === null) f.git('rm', '.github/ci-kit.yml');
       else writeFileSync(join(f.maws, '.github/ci-kit.yml'), config);
       f.git('commit', '-qam', 'no declaration');
-      writeFileSync(join(f.guest, '.ci-kit/setup-hash'), 'old-setup-hash\n');
       const result = f.run(['--bake', '--name', CANDIDATE]);
-      assert.equal(result.status, 0, result.stdout + result.stderr);
-      assert.match(result.stdout, /no setup declaration; skipping setup/);
-      assert.equal(text(join(f.guest, '.ci-kit/setup-hash')), null);
-      assert.equal(text(join(f.guest, '.ci-kit/quarantined-apps')), null);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stdout + result.stderr, /setup declaration required/);
       assert.equal(text(join(f.guest, 'setup-calls')), null);
-      assert.equal(text(join(f.guest, 'actions-runner-maws/.env')), `LANG=en_US.UTF-8
-ACTIONS_RUNNER_HOOK_JOB_STARTED=${f.guest}/ci-kit/vm/guest/hooks/job-started.sh
-ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${f.guest}/ci-kit/vm/guest/hooks/job-completed.sh
-CI_KIT_MACHINE=mini-vm
-CI_KIT_VM_GUEST=1
-`);
-      assert.ok(result.stdout.includes(join(f.guest, 'LibreOffice.app')));
-      assert.doesNotMatch(result.stdout, /Extra App.app/);
+      assert.equal(text(join(f.guest, '.ci-kit/setup-hash')), null);
+      assert.equal(existsSync(join(f.guest, 'maws-setup')), false);
       assert.equal(f.state(CANDIDATE), 'stopped');
     }
   });
@@ -740,18 +723,13 @@ else echo '01c1;date;Homebrew;uuid'; fi`);
     assert.equal(f.state(CANDIDATE), 'running');
   });
 
-  test('without a declaration record first-run still requires LibreOffice approval by name', () => {
+  test('first-run refuses a missing quarantine record rather than assuming a project app', () => {
     const f = firstRunFixture();
     rmSync(join(f.guest, '.ci-kit/quarantined-apps'));
-    writeFileSync(join(f.guest, 'quarantine'), '0181;date;Homebrew;uuid\n');
-    const blocked = f.run(['--first-run', CANDIDATE]);
-    assert.notEqual(blocked.status, 0);
-    assert.match(blocked.stdout + blocked.stderr, /LibreOffice.app.*not user-approved/);
+    const result = f.run(['--first-run', CANDIDATE]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout + result.stderr, /quarantined-apps record cannot be read/);
     assert.equal(f.commands(), '');
-    writeFileSync(join(f.guest, 'quarantine'), '01c1;date;Homebrew;uuid\n');
-    const approved = f.run(['--first-run', CANDIDATE]);
-    assert.equal(approved.status, 0, approved.stdout + approved.stderr);
-    assert.match(f.commands(), /pnpm e2e:deliverables/);
   });
 
   test('runs on the runner PATH with the heap raised, streams output before completion, removes the clone and verifies shutdown', async () => {
@@ -1321,24 +1299,6 @@ describe('the bake\'s provisioning in the guest (provision.sh)', macOnly, () => 
     const again = g.run(['display']);
     assert.equal(again.status, 0, again.stderr);
     assert.deepEqual(g.displayCalls().slice(3), ['list'], 'read, and nothing set');
-  });
-
-  test('engine: Claude Code already at the version through the installer\'s link is left as it is; a malformed version, or another layout, fails', () => {
-    const g = guest();
-    const versions = join(g.home, '.local/share/claude/versions');
-    for (const dir of [versions, join(g.home, '.local/bin')]) mkdirSync(dir, { recursive: true });
-    executable(join(versions, '2.1.309'), "echo '2.1.309 (Claude Code)'");
-    symlinkSync(join(versions, '2.1.309'), join(g.home, '.local/bin/claude'));
-    const result = g.run(['engine', '2.1.309']);
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /provision: Claude Code 2\.1\.309 at \S+\/\.local\/bin\/claude/);
-    assert.match(g.run(['engine', 'latest']).stderr, /provision: engine takes Claude Code's version \(got 'latest'\)/);
-    const copied = guest();
-    mkdirSync(join(copied.home, '.local/bin'), { recursive: true });
-    executable(join(copied.home, '.local/bin/claude'), "echo '2.1.309 (Claude Code)'");
-    const refused = copied.run(['engine', '2.1.309']);
-    assert.equal(refused.status, 1);
-    assert.match(refused.stderr, /is not the native installer's link to version 2\.1\.309 \(not a link\)/);
   });
 
   test('display: a set that does not take, or a mode that cannot be read, fails the step', () => {

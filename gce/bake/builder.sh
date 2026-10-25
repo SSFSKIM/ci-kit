@@ -53,9 +53,6 @@ export CI_KIT_BAKE_MANIFEST=/etc/ci-kit/bake-manifest.json
 curl -sf --max-time 10 -H 'Metadata-Flavor: Google' "$MD/attributes/ci-kit-bake-manifest" > "$CI_KIT_BAKE_MANIFEST"
 . /opt/ci-kit/pool/bake/prepare.sh
 
-# Unlike the Hetzner box, a GCE image is used only once its caches are whole: a cold image costs every job it serves.
-step=warm-check
-[ "$WARM_OK" = 1 ]
 
 step=unit
 install -m 0644 /opt/ci-kit/gce/vm/ci-kit-gce-job.service /opt/ci-kit/gce/vm/ci-kit-gce-instance.service /etc/systemd/system/

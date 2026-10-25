@@ -1,7 +1,7 @@
 #!/bin/bash
 # The bake's builder (spec §3 Bake): runs once on a fresh ubuntu-24.04 server through cloud-init, turns its disk
-# into the pool image, marks the result on its own server labels (ci-kit-bake=ok or failed-<step>, and
-# ci-kit-warm), and powers off. pool/bake/bake.mjs fills the placeholders, waits for `off`, and snapshots only a builder marked ok.
+# into the pool image, marks the result on its own server labels (ci-kit-bake=ok or failed-<step>),
+# and powers off. pool/bake/bake.mjs fills the placeholders, waits for `off`, and snapshots only a builder marked ok.
 # Secrets arrive in this user-data; nothing here echoes them, and cloud-init's copies and logs are removed
 # before the snapshot.
 set -euo pipefail
@@ -77,12 +77,8 @@ git clone --quiet https://github.com/SSFSKIM/ci-kit.git /opt/ci-kit
 git -C /opt/ci-kit checkout --quiet "$KIT_SHA"
 install -m 0600 /opt/ci-kit/pool/config/pool.json /etc/ci-kit/pool.json
 
-# Node, the kit's dependencies, the runner image and the caches: the half every provider's bake shares. Warming is
-# best effort: a cache that cannot be warmed is fetched by the first job instead. The token comes from the baked App.
-warm_token() { node /opt/ci-kit/pool/bake/app-token.mjs; }
+# Node, dependencies, the base runner image and cache directories; this dormant pool has no served declarations.
 . /opt/ci-kit/pool/bake/prepare.sh
-# The bake's log shows which caches were warmed (label values: [a-z0-9._-], ≤ 63 characters).
-label ci-kit-warm "$(jq -r '[to_entries[] | select(.value.ok | not) | .key] | if length == 0 then "ok" else "failed-" + join(".") end' "$CACHE/warm.json" 2>/dev/null | cut -c1-63 || echo unknown)"
 
 step=smoke
 # The image runs, a cpuset bounds nproc, and the baked Node runs inside a job container.

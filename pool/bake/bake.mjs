@@ -77,7 +77,7 @@ export async function snapshotBuilder(hc, builder, { sha, runId, sleep, log, now
     if (now() - start > OFF_TIMEOUT) throw new Error(`ci-kit: builder ${builder.id} did not power off within 30 min`);
   }
   const mark = s.labels['ci-kit-bake'];
-  log(`builder off after ${Math.round((now() - start) / 1000)} s, marked ${mark ?? '(nothing)'}; caches warmed: ${s.labels['ci-kit-warm'] ?? 'unknown'}; peak memory + swap ${s.labels['ci-kit-mem-peak'] ?? '?'} MB`);
+  log(`builder off after ${Math.round((now() - start) / 1000)} s, marked ${mark ?? '(nothing)'}; peak memory + swap ${s.labels['ci-kit-mem-peak'] ?? '?'} MB`);
   if (mark !== 'ok') throw new Error(`ci-kit: the builder did not finish (${mark ?? 'no mark: it failed before it could label itself'})`);
 
   await ownedBuilder(hc, builder.id, runId);

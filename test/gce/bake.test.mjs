@@ -18,8 +18,8 @@ import { fakeGce, fakeSandbox, instanceShape, imageShape, FOREIGN } from './fake
 
 const CFG = ONE_REGION_CFG;
 const SHA = 'a'.repeat(40);
-const MANIFEST = { v:1, kit_commit:SHA, node:{22:'v22.20.0',24:'v24.10.0'}, maws:{revision:'b'.repeat(40),lock_sha256:'c'.repeat(64)},runner_version:'2.338.0' };
-const BAKED = {...MANIFEST,warm:{'maws-files':{ok:true,detail:''},'pnpm-fetch':{ok:true,detail:''}}};
+const MANIFEST = { v:1, kit_commit:SHA, node:{22:'v22.20.0',24:'v24.10.0'}, repos:{},runner_version:'2.338.0' };
+const BAKED = {...MANIFEST};
 const RUN = '20261016-094500-k3x9';
 const SUBNET = 'regions/us-central1/subnetworks/ci-kit-us-central1';
 const MIN = 60_000;
@@ -268,8 +268,8 @@ test('under gce.json\'s egress "nat", no VM of the bake (builder, smoke, check) 
 });
 
 test('a builder that reports a failed step makes no image and is deleted', async () => {
-  const gce = fakeGce({ scripts: { builder: [{ status: 'RUNNING' }, { status: 'RUNNING', attrs: { 'ci-kit/bake': 'failed:warm-check' } }] } });
-  await assert.rejects(bake(gce), /failed:warm-check/);
+  const gce = fakeGce({ scripts: { builder: [{ status: 'RUNNING' }, { status: 'RUNNING', attrs: { 'ci-kit/bake': 'failed:job-images' } }] } });
+  await assert.rejects(bake(gce), /failed:job-images/);
   assert.ok(!gce.calls.some((c) => c.startsWith('insert image')));
   assert.deepEqual(leftInstances(gce), []);
 });

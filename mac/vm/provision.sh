@@ -12,15 +12,6 @@
 #                                        from its tap), read back: `tart set --display` does not reach the guest's
 #                                        mode, and the mode set here persists into every clone
 #   node <pnpm version>                  Node 22 (Homebrew's node@22) and pnpm through corepack, on the runner's PATH
-#   store                                the pnpm store and Electron's download cache warmed: a scratch clone of the
-#                                        read-only maws share, `pnpm install --frozen-lockfile`, then the clone removed
-#   libreoffice                          LibreOffice (cask), for the document groups
-#   poppler                              Poppler's pdfinfo, pdftoppm, pdftotext and pdffonts in /opt/homebrew/bin, where
-#                                        MAWS's export groups read the PDFs they make (design, presentations, dashboard)
-#   engine <version>                     Claude Code at <version> (bake.sh passes the host's own), through Anthropic's
-#                                        native installer: ~/.local/bin/claude, its link into
-#                                        ~/.local/share/claude/versions/<version>, which is where MAWS finds the
-#                                        installed engine (connectors-direct and delivery launch it with no login)
 #   setup                                the shared MAWS declaration applied in bake mode, with install, in a scratch
 #                                        clone; ~/.ci-kit holds its setup-hash and quarantined-apps for first-run
 #   runner <version> <sha256> <machine>  the runner at install.sh's pin in ~/actions-runner-maws, its .env and .path
@@ -259,40 +250,6 @@ sys.exit(0 if valid else 1)' <<<"$indexing" || fail "Spotlight indexing is not v
     [[ $(pnpm --version) == "$1" ]] || fail "pnpm is $(pnpm --version), not $1"
     say "node $(node --version), pnpm $(pnpm --version)"
     ;;
-  store)
-    [[ -f $vm_shares/maws/package.json && -f $vm_shares/maws/pnpm-lock.yaml ]] || fail "no MAWS checkout at $vm_shares/maws"
-    scratch=$HOME/maws-bake
-    rm -rf "$scratch"
-    # The share's files are the host user's: git would otherwise refuse the clone's source as of dubious ownership.
-    git -c safe.directory='*' clone --quiet --no-hardlinks "$vm_shares/maws" "$scratch"
-    (cd "$scratch" && CI=1 pnpm install --frozen-lockfile)
-    rm -rf "$scratch"
-    say "the pnpm store ($(pnpm store path)) and Electron's download cache are warm"
-    ;;
-  libreoffice)
-    [[ -d /Applications/LibreOffice.app ]] || brew install --cask libreoffice
-    [[ -x /Applications/LibreOffice.app/Contents/MacOS/soffice ]] || fail 'LibreOffice did not install'
-    say 'LibreOffice installed'
-    ;;
-  poppler)
-    brew list poppler >/dev/null 2>&1 || brew install poppler
-    for tool in pdfinfo pdftoppm pdftotext pdffonts; do
-      [[ -x /opt/homebrew/bin/$tool ]] || fail "Poppler's $tool did not install"
-    done
-    say "Poppler installed ($(/opt/homebrew/bin/pdfinfo -v 2>&1 | head -1))"
-    ;;
-  engine)
-    # Anthropic's documented installer (code.claude.com/docs/en/setup, "Install a specific version") checks the binary
-    # against its release's manifest; MAWS resolves ~/.local/bin/claude (e2e/support/p1-live.ts, installedEngine).
-    [[ ${1:-} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "engine takes Claude Code's version (got '${1:-}')"
-    engine=$HOME/.local/bin/claude
-    engine_version() { "$engine" --version 2>/dev/null | sed -n 's/^\([0-9][0-9.]*\) (Claude Code)$/\1/p'; }
-    [[ $(engine_version) == "$1" ]] || curl -fsSL https://claude.ai/install.sh | bash -s "$1"
-    [[ $(engine_version) == "$1" ]] || fail "Claude Code at $engine is '$(engine_version)', not $1"
-    [[ $(readlink "$engine") == "$HOME/.local/share/claude/versions/$1" ]] ||
-      fail "$engine is not the native installer's link to version $1 ($(readlink "$engine" || echo 'not a link'))"
-    say "Claude Code $1 at $engine"
-    ;;
   setup)
     [[ -f $vm_shares/kit/setup/apply.mjs ]] || fail "no setup applier in the installed kit at $vm_shares/kit (refresh with mac/install.sh --vm)"
     scratch=$HOME/maws-setup
@@ -384,6 +341,6 @@ print(os.path.join(runner, work))' "$vm_runner" "$runner_work") || fail 'cannot 
     say "$name registered with $labels; its identity is in the identity-$slot share, and none is left in $vm_runner"
     ;;
   *)
-    fail "unknown step '${step}' (check, disk, quiet, display, node, store, libreoffice, poppler, engine, setup, runner, workrepo, env, helpers, register)"
+    fail "unknown step '${step}' (check, disk, quiet, display, node, setup, runner, workrepo, env, helpers, register)"
     ;;
 esac

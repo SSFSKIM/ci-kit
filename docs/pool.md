@@ -76,7 +76,7 @@ _NPROCESSORS_ONLN` reports the host's cores. Size worker pools from `nproc`.
 
 | Credential | Where | Used by |
 |---|---|---|
-| GitHub App `ci-kit-runners` (id 5337915), owned by SSFSKIM, installed on MAWS, ci-kit-sandbox and ci-kit; Administration rw, Actions rw, Contents r, Issues rw | private key in secrets `CI_KIT_APP_KEY` (kit, sandbox), id in `CI_KIT_APP_ID`; baked to `/etc/ci-kit/app.pem`, `/etc/ci-kit/app_id` | the agent (runners, schedules, ledger), the watchdog (ledger), the guard, the bake (cache warming) |
+| GitHub App `ci-kit-runners` (id 5337915), owned by SSFSKIM, installed on MAWS, ci-kit-sandbox and ci-kit; Administration rw, Actions rw, Contents r, Issues rw | private key in secrets `CI_KIT_APP_KEY` (kit, sandbox), id in `CI_KIT_APP_ID`; baked to `/etc/ci-kit/app.pem`, `/etc/ci-kit/app_id` | the agent (runners, schedules, ledger), the watchdog (ledger), the guard |
 | Hetzner token | `~/.config/claude-secrets/HETZNER_API_TOKEN`; secret `HCLOUD_TOKEN` in the kit and every caller; baked to `/etc/ci-kit/hcloud_token` | ensure, agent, watchdog, guard, bake |
 
 Everything under `/etc/ci-kit` is root-only, and job containers never mount it.
@@ -101,9 +101,8 @@ It waits while a pool box is up (see "The project's core limit" below), then cre
 whose user-data
 (`pool/bake/builder.sh`) writes `/etc/ci-kit/`, installs Docker, clones the kit at the run's commit, and runs the
 provider-neutral half of the bake that the GCE bake shares (`pool/bake/prepare.sh`): Node, the runner image
-(`pool/image/Dockerfile`), and the warmed caches (`pool/bake/warm.mjs`, given an installation token that
-`pool/bake/app-token.mjs` mints from the baked App, narrowed to reading MAWS; it records what it did in
-`/var/lib/ci-kit/cache/warm.json` on the image, readable by jobs). It then smoke-tests a cpuset container, marks itself
+(`pool/image/Dockerfile`), and writable cache directories. This dormant Hetzner pool serves no repositories;
+project cache warming belongs to declarations in the multi-cloud bake below. It then smoke-tests a cpuset container, marks itself
 `ci-kit-bake=ok` and powers off. The workflow then snapshots it (`ci-kit=pool-image`, `ci-kit-commit=<sha>`),
 deletes it, and keeps the two newest snapshots. A builder that fails marks itself `ci-kit-bake=failed-<step>`,
 and the run fails naming the step. A failed or cancelled bake leaves the previous snapshots in place, and its
@@ -112,10 +111,9 @@ last step deletes its builder and any snapshot it left unfinished; the guard del
 Bump the runner image's pinned version in `pool/image/Dockerfile` when GitHub releases a new runner, so jobs do
 not pay a runner self-update at start.
 
-The job image also carries `zsh` and the fonts `fonts-noto-cjk`, `fonts-inter` and `fonts-jetbrains-mono` (Ubuntu
-noble, main and universe), which MAWS's jobs used to apt-install at job time: zsh on its static and unit jobs, zsh and
-the fonts on its pool e2e. That took about 35 s on each job's critical path and depended on Launchpad, whose 503 once
-failed a unit shard outright. The GCE smoke check proves them (`zsh`, `fonts`).
+The base image carries build tools, xvfb and the libraries Electron and Chromium need, not a project's packages.
+On GCE and EC2, each served repository's declaration supplies its tools in a per-repository job image and its
+`setup.install` warms the shared caches. A base-only job installs its declaration at job time.
 
 ## Reading the ledger
 
@@ -200,7 +198,7 @@ The box has no inbound access and no ssh key. Two ways in:
 
 On the box: `journalctl -u ci-kit-agent -f` (the agent logs every container it starts and retires, every state
 change, and every skipped tick), `systemctl list-timers ci-kit-watchdog.timer`, `journalctl -u ci-kit-watchdog`,
-`docker ps --filter label=ci-kit-job`, `cat /var/lib/ci-kit/warm.json /var/lib/ci-kit/kit-commit`.
+`docker ps --filter label=ci-kit-job`, `cat /var/lib/ci-kit/kit-commit`.
 
 **A box by hand.** For a test, create the server as ensure does, with user-data to change the box at boot (a
 shell script that cloud-init runs once): for example writing a wrong key to `/etc/ci-kit/app.pem` and running
@@ -659,7 +657,7 @@ CI_KIT_COMMIT=$(git rev-parse HEAD) node gce/bake/bake.mjs     # default commit:
    share one; on demand: `e2-standard-4`, else `n2d-standard-4` when E2 is refused, on `pd-balanced`; the placements
    and their zones in `gce.json` order) from `ubuntu-2404-lts-amd64`. Its startup script (`gce/bake/builder.sh`)
    installs Docker, clones the kit at the commit, runs `pool/bake/prepare.sh` (Node, the runner image, the caches),
-   requires every cache warmed, installs and enables `ci-kit-gce-job.service`, cleans the disk, reports
+   requires every declared package/script apply to succeed (cache warming is best effort), installs and enables `ci-kit-gce-job.service`, cleans the disk, reports
    `ci-kit/bake=ok` (or `failed:<step>`) as a guest attribute, and powers off. GCE deletes a builder still running at
    45 min.
 3. Only on `ok` and power-off within 30 min, it images the builder's disk into the family, labelled
@@ -672,9 +670,8 @@ CI_KIT_COMMIT=$(git rev-parse HEAD) node gce/bake/bake.mjs     # default commit:
    bake. An image that does not boot on a machine family of `gce.json` is never ready: every family needs a smoke VM of
    that family to pass in at least one placement (a smoke proves the machine it booted, not the rest of its
    placement's map), so a family whose every placement was skipped fails the bake. The job
-   unit runs `gce/vm/smoke.sh` in a job container: vCPUs, user, isolation, the runner, zsh and MAWS's fonts, Node 22
-   and 24, every warmed
-   cache, the work directory, DNS, egress, and the metadata server refused. It reports
+   unit runs `gce/vm/smoke.sh` in a job container: vCPUs, user, isolation, the runner, Node 22
+   and 24, the work directory, DNS, egress, and the metadata server refused. It reports
    `ci-kit/smoke=ok|failed:<check>` and powers off.
 5. It runs the real job on a VM booted from the image in the first placement that takes it. When every family's
    smoke and the real job passed, the image is labelled `ci-kit-ready=true`; the launcher uses only ready images (never
@@ -702,14 +699,19 @@ version fails rather than using a different runtime. pnpm shims are private to t
 The first container applies packages and the script and is committed as `ci-kit-job/<owner>-<repo>:latest` with
 `CI_KIT_SETUP_HASH` in its environment and label. The runner entrypoint and working directory are restored on commit.
 The second container also runs `setup.install` to warm shared caches and is never committed; its failure is best effort.
-An apply failure fails that provider's bake. The existing MAWS cache warmer and all its required checks remain.
+An apply failure fails that provider's bake. No separate project-specific warmer or warm-record requirement remains.
 
 Each manifest entry records `apply: {ok, image_bytes}` (`image_bytes` is additional bytes above the shared base)
 and `warm: {ok}`. Only the resolved inputs must match between providers, not layer sizes or warm results. Builders
 log total and additional sizes; orchestrator logs include the additional bytes and apply/warm outcome. More than
 1 GiB above base is a signal to consider separate VM disks, not an automatic rejection.
 GCE records `ci-kit-setup-<owner>-<repo>=<hash>` labels (lowercase, punctuation normalized to `-`); AMIs also record
-`ci-kit-setup:<owner>/<repo>=<hash>` tags. Legacy MAWS records remain until the separate removal milestone.
+`ci-kit-setup:<owner>/<repo>=<hash>` tags. The manifest and cloud records contain infrastructure pins and per-repository declarations only.
+Older ready images remain usable: launcher selection depends on provider readiness, not removed manifest fields.
+The VM code ships inside its image; new host checks tolerate older manifests, and missing repository images fall
+back to `ci-kit-runner`. The setup action then installs any missing declaration at job time. Base smoke checks only
+ci-kit infrastructure; each declared job image is smoked separately by reapplying its declaration in job mode and
+requiring no installs. Warm failures may make the first job slower but do not invalidate an otherwise satisfied image.
 
 Pristine shallow checkouts are retained under `/var/lib/ci-kit/setup-sources/`, outside the job images and shared
 cache, for boot smoke. Build/install/smoke use disposable copies under the cache's `work/`, so install artifacts are

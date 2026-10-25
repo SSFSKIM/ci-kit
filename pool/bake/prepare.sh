@@ -3,9 +3,8 @@
 # dependencies, the pool runner image, and the warmed caches.
 # Sourced, not run: the builder has installed docker.io, git, jq, curl and xz-utils, checked the kit out at
 # /opt/ci-kit, and set CACHE. `step` is set as each part starts, for the builder's failure report. The builder also
-# defines warm_token, which prints a GitHub token that can read MAWS's contents; the token reaches warm.mjs only
-# through its environment. Warming is best effort here: warm.mjs records each cache in $CACHE/warm.json, WARM_OK is 1
-# only when every cache was warmed, and the builder decides what a partial warm means.
+# defines warm_token for the multi-cloud bake's credential-free repository clones. A declaration's install warms
+# shared caches best effort; its package/script apply is required to succeed.
 
 step=node
 mkdir -p "$CACHE/toolcache/node"
@@ -37,16 +36,11 @@ step=deps
 step=image
 docker build --quiet -t ci-kit-runner:latest /opt/ci-kit/pool/image
 
-step=warm
+step=caches
 mkdir -p "$CACHE"/{npm,pnpm-store,corepack,ms-playwright,electron,work}
-WARM_OK=1
-CI_KIT_GH_TOKEN="$(warm_token)" node /opt/ci-kit/pool/bake/warm.mjs || {
-  WARM_OK=0
-  echo "ci-kit bake: warming was partial"
-}
 chown -R 1001:1001 "$CACHE"
 
-# The multi-cloud manifest owns the served declarations. Hetzner remains on its existing base/warmer path.
+# Only the multi-cloud bake has served declarations. The dormant Hetzner pool keeps the base image.
 if [ -n "${CI_KIT_BAKE_MANIFEST:-}" ]; then
   step=job-images
   CI_KIT_GH_TOKEN="$(warm_token)" node /opt/ci-kit/pool/bake/job-images.mjs

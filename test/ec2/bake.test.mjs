@@ -1,77 +1,52 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import * as manifestApi from '../../pool/bake/manifest.mjs';
 
-import * as warmApi from '../../pool/bake/warm.mjs';
 
 const sha = 'a'.repeat(40), revision = 'b'.repeat(40);
-const lock = 'lockfileVersion: 9\n';
-const hash = createHash('sha256').update(lock).digest('hex');
-const base = { v: 1, kit_commit: sha, node: { 22: 'v22.20.0', 24: 'v24.10.0' }, maws: { revision, lock_sha256: hash }, runner_version: '2.338.0' };
-const warm = { 'maws-files': { ok: true, detail: 'package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc' }, 'pnpm-fetch': { ok: true, detail: '' } };
+const base = { v: 1, kit_commit: sha, node: { 22: 'v22.20.0', 24: 'v24.10.0' }, runner_version: '2.338.0', repos: {} };
+const built = { ...base, repos: { 'owner/project': { revision, setup_hash: 'c'.repeat(16), apply: {ok:true,image_bytes:100}, warm:{ok:false} } } };
+const pins = { ...base, repos: { 'owner/project': { revision, setup_hash: 'c'.repeat(16) } } };
 
-test('one manifest resolves moving inputs once and fetches the lock at the resolved revision', async () => {
-  const paths = [];
-  const gh = { request: async (_method, path) => {
-    paths.push(path);
-    if (path.endsWith('/commits/HEAD')) return { sha: revision };
-    if (path.includes('pnpm-lock.yaml')) { assert.ok(path.endsWith(`?ref=${revision}`)); return lock; }
-    throw Error(path);
-  } };
+test('a base-only bake resolves infrastructure pins without reading any repository', async () => {
+  const gh = { request: async () => assert.fail('no served repository') };
   const reads = [];
   const manifest = await manifestApi.resolveManifest({ sha, gh, fetch: async (url, options) => {
     reads.push(url);
-    assert.equal(options.headers?.authorization, undefined, 'public reads must not use the MAWS-only token');
+    assert.equal(options.headers?.authorization, undefined, 'public reads must not use the installation token');
     return { ok: true, json: async () => [{version:'v24.10.0'}, {version:'v22.20.0'}, {version:'v22.19.0'}], text: async () => 'FROM ghcr.io/actions/actions-runner:2.338.0@sha256:deadbeef\n' };
   } });
-  assert.deepEqual(manifest, { ...base, repos: {} });
+  assert.deepEqual(manifest, base);
   assert.deepEqual(reads, ['https://nodejs.org/dist/index.json',`https://raw.githubusercontent.com/SSFSKIM/ci-kit/${sha}/pool/image/Dockerfile`]);
-  assert.equal(paths.length, 2);
 });
 
-test('warm evidence rejects changed pins, failed warming and parity mismatch before promotion', () => {
-  const actual = { ...base, warm };
-  assert.deepEqual(manifestApi.verifyManifest(actual, base), actual);
-  assert.throws(() => manifestApi.verifyManifest({ ...actual, kit_commit: 'c'.repeat(40) }, base), /manifest/);
-  assert.throws(() => manifestApi.verifyManifest({ ...actual, warm: { ...warm, electron: {ok:false} } }, base), /warm/);
-  assert.throws(() => manifestApi.verifyManifest(actual, { ...base, warm: { ...warm, electron: {ok:true, detail:'44'} } }), /warm/);
-  assert.throws(() => manifestApi.verifyManifest({ ...base, warm: {} }, base), /warm/);
+test('manifest evidence rejects changed pins before promotion; cache warming is best effort', () => {
+  assert.deepEqual(manifestApi.verifyManifest(built, pins), built);
+  assert.throws(() => manifestApi.verifyManifest({ ...built, kit_commit: 'c'.repeat(40) }, pins), /manifest/);
+  assert.throws(() => manifestApi.verifyManifest({ ...base, repos: {} }, pins), /manifest/);
 });
 
-test('cloud labels preserve full hashes, match across providers and change with warm results', () => {
-  const labels = manifestApi.manifestLabels({ ...base, warm });
+test('cloud labels preserve setup identities within provider limits', () => {
+  const labels = manifestApi.manifestLabels(built);
   assert.equal(labels['ci-kit-commit'], sha);
-  assert.equal(labels['ci-kit-maws-lock-a'] + labels['ci-kit-maws-lock-b'], hash);
+  assert.equal(labels['ci-kit-setup-owner-project'], 'c'.repeat(16));
   for (const [key,value] of Object.entries(labels)) { assert.ok(key.length <= 63); assert.match(value, /^[a-z0-9_-]{1,63}$/); }
-  const changed = manifestApi.manifestLabels({ ...base, warm: { ...warm, electron: {ok:true,detail:'44'} } });
-  assert.notEqual(labels['ci-kit-warm-a'], changed['ci-kit-warm-a']);
-});
-
-test('warm reads every file at one revision and refuses a changed lock before fetching packages', async () => {
-  const paths = [];
-  const gh = { request: async (_method, path) => { paths.push(path); return path.includes('pnpm-lock.yaml') ? lock : '{}'; } };
-  const files = await warmApi.warmFiles(gh, base);
-  assert.equal(files['pnpm-lock.yaml'], lock);
-  assert.equal(paths.length, 4);
-  assert.ok(paths.every((p) => p.endsWith(`?ref=${revision}`)));
-  await assert.rejects(warmApi.warmFiles(gh, { ...base, maws: { ...base.maws, lock_sha256: '0'.repeat(64) } }), /lockfile/);
 });
 
 test('provider stages share one resolution, including after a provider fails', async () => {
   let resolutions = 0;
-  const inputs = [], actual = { ...base, warm };
+  const inputs = [], actual = built;
   await assert.rejects(manifestApi.bakeProviders({
-    resolve: async () => { resolutions++; return base; },
+    resolve: async () => { resolutions++; return pins; },
     gce: async (m) => { inputs.push(m); return { manifest: actual }; },
     accounts: ['a', 'b'], ec2: async (account, m) => { inputs.push(m); if (account === 'a') throw Error('account a'); return {manifest:m}; },
   }), /account a/);
   assert.equal(resolutions, 1);
-  assert.deepEqual(inputs, [base, actual, actual]);
+  assert.deepEqual(inputs, [pins, actual, actual]);
 });
 
 // Fake only the external SDK boundary; the bake performs its own polling, promotion and cleanup.
-async function ec2Fixture({ smoke = 'ok', job = 'success', warmResult = warm, lostLaunch = false, refuseFirstSmoke = false, reportMissing = false, snapshotBytes = 12 * 2**30, promote = true, otherImages = [], lostSnapshot = false, lostRegistration = false } = {}) {
+async function ec2Fixture({ smoke = 'ok', job = 'success', applyOk = true, lostLaunch = false, refuseFirstSmoke = false, reportMissing = false, snapshotBytes = 12 * 2**30, promote = true, otherImages = [], lostSnapshot = false, lostRegistration = false } = {}) {
   const api = await import('../../ec2/bake/bake.mjs');
   const calls = [], instances = [], images = [], snapshots = [];
   const tags = (x) => Object.fromEntries((x.Tags ?? []).map((t) => [t.Key,t.Value]));
@@ -106,7 +81,7 @@ async function ec2Fixture({ smoke = 'ok', job = 'success', warmResult = warm, lo
     if (name === 'GetObjectCommand') {
       if (reportMissing && input.Key.includes('smoke/exit')) throw Object.assign(Error('missing'),{name:'NoSuchKey'});
       let data;
-      if (input.Key.endsWith('/builder.json')) data = { value:'ok', manifest:{...base,warm:warmResult} };
+      if (input.Key.endsWith('/builder.json')) data = { value:'ok', manifest:{...built,repos:{'owner/project':{...built.repos['owner/project'],apply:{ok:applyOk,image_bytes:100}}}} };
       else data = {kind:'terminal',value:'exit:0',smoke};
       return { Body: { transformToString: async () => JSON.stringify(data) } };
     }
@@ -123,7 +98,7 @@ async function ec2Fixture({ smoke = 'ok', job = 'success', warmResult = warm, lo
   };
   const cfg = {account:'123456789012',region:'us-east-2',disk_gb:50,initialization_mibps:200,security_group:'sg-pool',report_bucket:'reports',placements:[{zone:'us-east-2c',subnet:'subnet-c'},{zone:'us-east-2a',subnet:'subnet-a'},{zone:'us-east-2b',subnet:'subnet-b'}]};
   let time = 0;
-  const run = () => api.runEc2Bake(aws, { runtimeAws:{ec2:{send:(c)=>send(c,'launcher')}}, cfg, manifest:base, promote, runId:'20261023-120000-abcd',token:'warm-token',gh,script:'#!/bin/bash\n__MANIFEST__\n__TOKEN__\n__REPORT__\n__KIT_SHA__',now:()=>time,sleep:async (ms)=>{time+=ms;} });
+  const run = () => api.runEc2Bake(aws, { runtimeAws:{ec2:{send:(c)=>send(c,'launcher')}}, cfg, manifest:pins, promote, runId:'20261023-120000-abcd',token:'warm-token',gh,script:'#!/bin/bash\n__MANIFEST__\n__TOKEN__\n__REPORT__\n__KIT_SHA__',now:()=>time,sleep:async (ms)=>{time+=ms;} });
   return {run,calls,images,tags};
 }
 
@@ -150,7 +125,7 @@ test('EC2 bake stops an on-demand Canonical builder, proves smoke and real job, 
   assert.ok(ready > lastLaunch);
   assert.equal(f.tags(f.images[0])['ci-kit-snapshot-gib'],'12');
   assert.equal(result.initializationUsd,0.0288);
-  assert.deepEqual(result.manifest,{...base,warm});
+  assert.deepEqual(result.manifest,built);
 });
 
 test('bake snapshots only the fresh equal-sized destination and preserves Canonical boot attributes', async () => {
@@ -212,7 +187,7 @@ test('failed candidate is removed rather than retained for promotion', async () 
   assert.ok(f.calls.some(([n, v]) => n === 'DeleteSnapshotCommand' && v.SnapshotId === 'snap-new'));
 });
 
-for (const failure of [{smoke:'failed:metadata'}, {job:'failure'}, {warmResult:{...warm,'pnpm-fetch':{ok:false}}}]) test(`EC2 failed proof leaves image unready and deletes its snapshots: ${JSON.stringify(failure)}`, async () => {
+for (const failure of [{smoke:'failed:metadata'}, {job:'failure'}, {applyOk:false}]) test(`EC2 failed proof leaves image unready and deletes its snapshots: ${JSON.stringify(failure)}`, async () => {
   const f = await ec2Fixture(failure);
   await assert.rejects(f.run());
   assert.ok(!f.calls.some(([n,v]) => n === 'CreateTagsCommand' && v.Tags.some((t) => t.Key==='ci-kit-ready' && t.Value==='true')));
@@ -234,11 +209,11 @@ test('GCE images carry the same manifest labels and reject a mismatched builder 
   const { fakeGce, fakeSandbox } = await import('../gce/fake-gce.mjs');
   const { ONE_REGION_CFG } = await import('../gce/config-fixtures.mjs');
   const runId='20261023-120000-abcd';
-  for (const actual of [{...base,warm},{...base,kit_commit:'d'.repeat(40),warm}]) {
+  for (const actual of [built,{...built,kit_commit:'d'.repeat(40)}]) {
     const gce = fakeGce({scripts:{builder:[{status:'TERMINATED',attrs:{'ci-kit/bake':'ok','ci-kit/manifest':JSON.stringify(actual)}}],smoke:[{status:'TERMINATED',attrs:{'ci-kit/smoke':'ok'}}],check:[{status:'TERMINATED',attrs:{'ci-kit/job':'exit:0'}}]}});
     const gh = fakeSandbox({run:[{status:'completed',conclusion:'success',ranOn:true}]});
     let time=0;
-    const pending = runBake(gce,{cfg:ONE_REGION_CFG,sha,runId,token:'token',gh,script:'#!/bin/bash',manifest:base,now:()=>time,sleep:async(ms)=>{time+=ms;}});
+    const pending = runBake(gce,{cfg:ONE_REGION_CFG,sha,runId,token:'token',gh,script:'#!/bin/bash',manifest:pins,now:()=>time,sleep:async(ms)=>{time+=ms;}});
     if (actual.kit_commit !== sha) await assert.rejects(pending,/manifest/);
     else {
       const result=await pending;
@@ -366,10 +341,10 @@ curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat >> "$TEST_ROOT/report.j
   try {
     for (const p of ['etc/apt/preferences.d','etc/systemd/system','etc/netplan','etc/cloud','var/log','var/lib/ci-kit','opt/ci-kit/pool/bake','opt/ci-kit/ec2','run/systemd/system','tmp']) await mkdir(join(root,p),{recursive:true});
     await symlink(new URL('../../ec2/vm',import.meta.url).pathname,join(root,'opt/ci-kit/ec2/vm'));
-    await writeFile(join(root,'opt/ci-kit/pool/bake/prepare.sh'),'WARM_OK=1\n');
+    await writeFile(join(root,'opt/ci-kit/pool/bake/prepare.sh'),':\n');
     const template=await readFile(new URL('../../ec2/bake/builder.sh',import.meta.url),'utf8');
     const builder=join(root,'builder.sh');
-    await writeFile(builder,relocate(fillEc2Builder(template,{manifest:{...base,warm},token:'fixture-token',report:'https://reports.invalid/builder'})));
+    await writeFile(builder,relocate(fillEc2Builder(template,{manifest:built,token:'fixture-token',report:'https://reports.invalid/builder'})));
     run(builder);
     assert.equal(await present('report.jsonl'),false,'userdata must not report success before cloud-final exits');
     assert.equal(await present('poweroff'),false,'userdata must return, not interrupt cloud-final');
@@ -398,7 +373,7 @@ echo compact >> "$TEST_ROOT/compacted"
     await checkImage(root);
     const report=JSON.parse(await readFile(join(root,'report.jsonl'),'utf8'));
     assert.equal(report.value,'ok');
-    assert.deepEqual(report.manifest,{...base,warm});
+    assert.deepEqual(report.manifest,built);
     assert.deepEqual(report.compact,{elapsed_seconds:360,exit_status:0,phases:{
       'source-inventory':{elapsed_seconds:47,exit_status:0,bound_seconds:300},
       'root-copy':{elapsed_seconds:114,exit_status:0,bound_seconds:480},
@@ -411,11 +386,11 @@ echo compact >> "$TEST_ROOT/compacted"
 
     // A failed preparation must still power off and report, never enqueue a success finalizer.
     for (const p of ['report.jsonl','poweroff','systemctl','curl-calls']) await rm(join(root,p),{force:true});
-    await writeFile(join(root,'opt/ci-kit/pool/bake/prepare.sh'),'WARM_OK=0\n');
+    await writeFile(join(root,'opt/ci-kit/pool/bake/prepare.sh'),'step=job-images; false\n');
     assert.throws(()=>run(builder));
     assert.equal(await present('poweroff'),true);
     assert.equal(await present('report.jsonl'),false);
-    assert.match(await readFile(join(root,'curl-calls'),'utf8'),/failed:warm-check/);
+    assert.match(await readFile(join(root,'curl-calls'),'utf8'),/failed:job-images/);
     assert.doesNotMatch(await readFile(join(root,'systemctl'),'utf8'),/start ci-kit-bake-finalize/);
 
     // The finalizer's self-check is authoritative: a bad manifest cannot produce ok, even with clean state.
@@ -448,7 +423,7 @@ echo compact >> "$TEST_ROOT/compacted"
       for (const p of ['report.jsonl','poweroff','curl-calls']) await rm(join(root,p),{force:true});
       await mkdir(join(root,'run/ci-kit-bake'),{recursive:true});
       await writeFile(join(root,'run/ci-kit-bake/report-url'),'https://reports.invalid/builder');
-      await writeFile(join(root,'etc/ci-kit/bake-manifest.json'),JSON.stringify({...base,warm}));
+      await writeFile(join(root,'etc/ci-kit/bake-manifest.json'),JSON.stringify(built));
       const writeHandoff = handoff === null ? '' : `printf '%s' '${handoff}' > "$CI_KIT_COMPACT_DIAGNOSTIC"\n`;
       const writeTrace = trace === null ? '' : `printf '%s' '${trace}' > "$CI_KIT_COMPACT_TRACE"\n`;
       await writeFile(compact, `#!/bin/bash\n${writeHandoff}${writeTrace}exit 7\n`);
