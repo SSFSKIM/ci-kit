@@ -8,7 +8,7 @@ step=report-input
 compact_report() {
   node --input-type=module -e "
     import { readFile } from 'node:fs/promises';
-    import { formatDiagnostic, formatCompactTrace } from '/opt/ci-kit/ec2/vm/diagnostics.mjs';
+    import { formatDiagnostic, formatCompactTrace, boundCompactLogTail } from '/opt/ci-kit/ec2/vm/diagnostics.mjs';
     const status = Number(process.argv[1]);
     const fallback = { elapsed_seconds: Number(process.argv[2]), exit_status: status, phases: {} };
     const trace = { ...fallback, phases: {} };
@@ -28,14 +28,18 @@ compact_report() {
       const manifest = JSON.parse(await readFile('/etc/ci-kit/bake-manifest.json', 'utf8'));
       console.log(JSON.stringify({ value: 'ok', manifest, compact }));
     } else {
-      let diagnostic = formatDiagnostic({ reason: 'compact-failed', phase: 'compact', exit_status: status });
+      let diagnostic = JSON.parse(formatDiagnostic({ reason: 'compact-failed', phase: 'compact', exit_status: status }));
       try {
-        const failure = JSON.parse(await readFile('/run/ci-kit-bake/compact-diagnostic', 'utf8'));
-        try { failure.log_tail = await readFile('/run/ci-kit-bake/compact-diagnostic.log', 'utf8'); } catch {}
-        const inner = formatDiagnostic(failure);
-        if (JSON.parse(inner).reason === 'compact-failed') diagnostic = inner;
+        const inner = JSON.parse(formatDiagnostic(JSON.parse(await readFile('/run/ci-kit-bake/compact-diagnostic', 'utf8'))));
+        if (inner.reason === 'compact-failed') {
+          diagnostic = inner;
+          try {
+            const log_tail = boundCompactLogTail(await readFile('/run/ci-kit-bake/compact-diagnostic.log', 'utf8'));
+            if (log_tail) diagnostic.log_tail = log_tail;
+          } catch {}
+        }
       } catch {}
-      console.log(JSON.stringify({ value: 'failed:compact', diagnostic: JSON.parse(diagnostic), compact }));
+      console.log(JSON.stringify({ value: 'failed:compact', diagnostic, compact }));
     }
   " "$1" "$((SECONDS-COMPACT_STARTED))"
 }

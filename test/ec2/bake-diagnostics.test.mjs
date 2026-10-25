@@ -111,31 +111,31 @@ test('bake does not reflect arbitrary report diagnostic, outcome, or smoke conte
   }
 });
 
-test('builder copy refusal exposes only its sanitized tool tail, never the report manifest', async () => {
-  const message = await failedBake({value:'failed:compact', diagnostic: {
-    reason:'compact-failed', phase:'root-copy', exit_status:1,
-    log_tail:'\x1b[31mPartclone: bitmap count mismatch\x1b[0m\nhttps://reports.invalid/?signature=private',
-  }, manifest:{secret:'manifest-private'}, stdout:'unrelated-private'}, {builder:true});
-  assert.equal(message, 'builder failed: failed:compact '+JSON.stringify({reason:'compact-failed',phase:'root-copy',exit_status:1,
-    log_tail:'Partclone: bitmap count mismatch\n[redacted-url]'}));
-});
 
-// Construct synthetic credentials so the test exercises their shape without storing real credentials.
-const credentials = [
-  ...['ghs_', 'ghp_', 'gho_', 'ghu_', 'ghr_', 'github_pat_'].map(prefix => [prefix, prefix + 'A'.repeat(36), '[redacted-credential]']),
-  ['git userinfo', 'x-access-token:' + 'fixture-password', 'x-access-token:[redacted-credential]'],
-  ['basic auth', 'AUTHORIZATION: basic ' + Buffer.from('x-access-token:fixture-password').toString('base64'), 'AUTHORIZATION: basic [redacted-credential]'],
-  ['bearer auth', 'Authorization: Bearer ' + 'opaque-fixture', 'Authorization: Bearer [redacted-credential]'],
-  ...['AKIA', 'ASIA'].map(prefix => [prefix, prefix + 'A'.repeat(16), '[redacted-credential]']),
-  ...['X-Amz-Credential', 'X-Amz-Signature', 'X-Amz-Security-Token'].map(key =>
-    [key, `${key}=fixture%2Fprivate&next=ok`, `${key}=[redacted-credential]&next=ok`]),
-  ['security token header', 'x-amz-security-token: fixture/session+token=', 'x-amz-security-token: [redacted-credential]'],
+const logLocation = 's3://report-bucket/reports/bake-diagnostic-test-290475840169/builder.json';
+const baseDiagnostic = {reason:'compact-failed', phase:'root-copy', exit_status:1};
+// The report is access-controlled; no free text from it may cross into the controller log.
+const tails = [
+  ['ordinary refusal', 'Partclone: bitmap count mismatch'],
+  ...['ghs_', 'ghp_', 'gho_', 'github_pat_'].map(prefix => [prefix, prefix + 'A'.repeat(36)]),
+  ['serialized auth', JSON.stringify({Authorization:'Basic '+Buffer.from('x-access-token:'+'ghs_'+'A'.repeat(36)).toString('base64')})],
+  ['serialized AWS token', JSON.stringify({'X-Amz-Security-Token':'private-session-value'})],
+  ['straddled URL', 'uilder.json?X-Amz-Credential=private-value&X-Amz-Signature=private-signature'],
+  ['arbitrary controls', '\x1b[31m\u202eprivate output\x00'],
 ];
-for (const [label, credential, redacted] of credentials) test(`controller redacts ${label} from a tool log without hiding the refusal`, async () => {
+for (const [label, tail] of tails) test(`controller points to ${label} in S3 without echoing any tail text`, async () => {
   const message = await failedBake({value:'failed:compact', diagnostic: {
-    reason:'compact-failed', phase:'root-copy', exit_status:1,
-    log_tail:`Partclone: bitmap count mismatch\n${credential}`,
+    ...baseDiagnostic, log_tail:tail, log_location:'untrusted-location',
+  }, manifest:{private:'manifest-contents'}, stderr:'unrelated-output'}, {builder:true});
+  assert.equal(message, 'builder failed: failed:compact '+JSON.stringify({...baseDiagnostic,log_tail:`${logLocation} (1 line)`}));
+});
+test('controller reports the bounded tail line count, including a trailing newline', async () => {
+  const message = await failedBake({value:'failed:compact', diagnostic: {
+    ...baseDiagnostic, log_tail:'private-line\n'.repeat(100),
   }}, {builder:true});
-  assert.equal(message, 'builder failed: failed:compact '+JSON.stringify({reason:'compact-failed',phase:'root-copy',exit_status:1,
-    log_tail:`Partclone: bitmap count mismatch\n${redacted}`}));
+  assert.equal(message, 'builder failed: failed:compact '+JSON.stringify({...baseDiagnostic,log_tail:`${logLocation} (40 lines)`}));
+});
+for (const log_tail of [undefined, null, {}, [], 5, '', 'x'.repeat(9000)]) test(`controller omits pointers for absent, invalid or wholly oversized tails (${typeof log_tail})`, async () => {
+  const message = await failedBake({value:'failed:compact', diagnostic:{...baseDiagnostic,log_tail}}, {builder:true});
+  assert.equal(message, 'builder failed: failed:compact '+JSON.stringify(baseDiagnostic));
 });
