@@ -37,8 +37,6 @@ export CI_KIT_BAKE_MANIFEST=/etc/ci-kit/bake-manifest.json
 printf '%s' '__MANIFEST__' | base64 -d > "$CI_KIT_BAKE_MANIFEST"
 . /opt/ci-kit/pool/bake/prepare.sh
 unset WARM_TOKEN
-step=warm-check
-[ "$WARM_OK" = 1 ]
 step=unit
 install -m 0644 /opt/ci-kit/ec2/vm/ci-kit-ec2-job.service /etc/systemd/system/
 systemctl daemon-reload

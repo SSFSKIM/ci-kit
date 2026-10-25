@@ -196,8 +196,7 @@ export async function checkImage(root = '/') {
   try { manifest = JSON.parse(raw); }
   catch { throw new ImageCheckError('manifest-invalid', manifestPath); }
   if (manifest?.v !== 1 || !manifest.kit_commit || !manifest.node?.[22] || !manifest.node?.[24] ||
-      !manifest.maws?.revision || !manifest.maws?.lock_sha256 || !manifest.runner_version ||
-      !Object.keys(manifest.warm ?? {}).length || !Object.values(manifest.warm).every(step => step?.ok)) {
+      !manifest.runner_version) {
     throw new ImageCheckError('manifest-incomplete', manifestPath);
   }
   try { verifyRepoResults(manifest.repos); }

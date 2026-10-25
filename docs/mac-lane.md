@@ -115,9 +115,9 @@ gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token
   ([the VM lane](#the-vm-lane), "Install, enable, remove"). Without it, `install.sh` installs and reads nothing of the
   lane.
 - **Prerequisites** checked on the PATH jobs get: Node ≥ 22.12 (MAWS's `engines`), corepack, the Xcode command line
-  tools' `clang` (native modules such as `node-pty`), `python3` (node-gyp), git, and LibreOffice's `soffice` (the
-  document groups), found but not launched. MAWS's setup action installs its own Node 22 and pnpm per job into the
-  runner's tool cache; the system Node runs MAWS's plan job when it lands here (`GATE_RUNNER=macos`) and the hooks. A
+  tools' `clang` (native modules such as `node-pty`), `python3` (node-gyp), and git. Project applications are not
+  registration prerequisites: jobs apply their repository's declaration after checkout. MAWS's setup action installs
+  its own Node 22 and pnpm per job into the runner's tool cache; the system Node runs MAWS's plan job when it lands here (`GATE_RUNNER=macos`) and the hooks. A
   Homebrew install that asks no password closes a gap; anything that needs one goes to the human.
 - **The runner version** is pinned with its checksum in `install.sh` for the first install; after that the runner
   updates itself, as GitHub requires.
@@ -506,7 +506,7 @@ into per machine (`install.sh --vm`), and a Mac without it has none of what foll
 |---|---|
 | Launcher | `mac/vm/lane.sh`, the program of the LaunchAgent `com.ssfskim.ci-kit.vm-lane` (RunAtLoad, KeepAlive, Aqua session only, `ProcessType` Interactive), run from the installed kit. It is the only automated way a guest starts: it reads the queue every 15 s, decides admission, boots a job clone, follows it through its one job and deletes it. Its header has the lifecycle, the boot rule, the guard and every input. |
 | Installed kit | `~/ci-kit-vm/kit`, a copy of `mac/` plus `setup/`, `plan/` and `vendor/` (the setup applier and its imports) that `install.sh` publishes with the hooks' staged swap, so the checkout can move on. Every clone is shown it read-only, so a hook change needs no image refresh. |
-| Golden image | the local Tart VM `~/ci-kit-vm/golden` names (`maws-vm-golden-<id>`): the macOS 27 base (`ghcr.io/cirruslabs/macos-golden-gate-base`) with Node 22, pnpm, the warm store, LibreOffice, Poppler, Claude Code at the host's version, the runner, its seeded MAWS work repository and the compiled helpers baked in. It is never run for a job; only the [maintenance procedure](#the-vm-lanes-maintenance) makes or replaces it. |
+| Golden image | the local Tart VM `~/ci-kit-vm/golden` names (`maws-vm-golden-<id>`): the macOS 27 base (`ghcr.io/cirruslabs/macos-golden-gate-base`) with ci-kit's Node 22, pnpm, runner, seeded work repository and compiled helpers, plus the tools and warmed caches supplied by the project's declaration. It is never run for a job; only the [maintenance procedure](#the-vm-lanes-maintenance) makes or replaces it. |
 | Job clone | `maws-vm-job-vm-<time>`, an APFS copy of the golden image (seconds; it holds only what the job writes), run with `tart run --no-graphics --no-clipboard` (its pasteboard is never the host's) and four directory shares: the kit and this clone's JIT directory read-only, its `out/` and `cache/` read-write. |
 | Slot | `~/ci-kit-vm/vm/`: `jit/<clone>/` (a 0700 directory holding the 0600 one-use config and cleanup record, removed at teardown), `out/` (what the guest writes back: its markers, `_diag`, its hooks log), `cache/` (MAWS's e2e build cache). The trial slot, `~/ci-kit-vm/vm-trial/`, is the same for a candidate's trial and serves nothing else. |
 | In the guest | `mac/vm/guest/`: `kickoff.sh` (run by `tart exec`, which is gRPC to the Tart guest agent, never the guest's address) makes the clone the slot's runner and starts `wrapper.sh`, which supplies the JIT config to `run.sh` through its masked secret input environment, writes the `out/` markers (its header is the protocol), answers the idle stop and powers the guest off; `hooks/` is the guest's start and end, cut down: the display and dialog check, Terminal in front, the posture line with `vm=` and `clone=`, no sweep, no alert, no `gh`. |
@@ -786,11 +786,7 @@ booking.
    Spotlight indexing and the measured background services turned off (`quiet`, below); the display set to
    2560x1440 with scaling on through `displayplacer` and read back, since `tart set --display` does not reach the
    guest's mode; Node 22 and the checkout's pnpm
-   through corepack; the warm store from a scratch clone; LibreOffice; Poppler (the PDF readers MAWS's export groups
-   call at `/opt/homebrew/bin`); Claude Code at the host user's own version (`~/.local/bin/claude --version` on the
-   host, `CI_KIT_VM_ENGINE` for another; the bake is refused before the clone when neither names one) through
-   Anthropic's native installer, which leaves `~/.local/bin/claude` linked into `~/.local/share/claude/versions/`,
-   where MAWS finds the installed engine; the runner at `install.sh`'s pin in
+   through corepack; the project's declaration applied with its install command in a scratch clone; the runner at `install.sh`'s pin in
    `~/actions-runner-maws`, its `.env` naming the hooks through `~/ci-kit` → the kit share, `CI_KIT_MACHINE=mini-vm`,
    `CI_KIT_VM_GUEST=1` and `LANG=en_US.UTF-8`, and its `.path`; the seeded MAWS work repository (`workrepo`, below);
    the compiled helpers in `~/ci-kit-helpers/`), and verifies its stop. `--memory` is the guest's size in MB, 4096 by
@@ -801,15 +797,14 @@ booking.
    current. The coordinator updates it before the bake and checks its branch and commit against GitHub's master.
    The bake does not fetch the host checkout or check its freshness against GitHub.
 
-   **The project supplies its environment.** After the legacy `store`, `libreoffice`, `poppler` and `engine` steps
-   (kept during the additive migration), `setup` makes a scratch clone of the share's committed master at
-   `~/maws-setup`. On the guest's Node 22 it applies `.github/ci-kit.yml` in `bake` mode: formulas and casks, the
+   **The project supplies its environment.** The `setup` step makes a scratch clone of the share's committed master
+   at `~/maws-setup`. On the guest's Node 22 it applies `.github/ci-kit.yml` in `bake` mode: formulas and casks, the
    declared script, then the declared `install`, warming the pnpm store and Electron cache. The clone is removed on
    success or failure; the declaration's installed tools and home-directory caches stay in the golden. A failed apply
    stops the bake before the runner is installed; it never records the failed declaration's hash. A checkout with
-   no `.github/ci-kit.yml`, or a config without a setup declaration, instead logs `no setup declaration; skipping
-   setup`, leaves no setup hash, and keeps the legacy provisioning and LibreOffice first-run check. This lets a
-   refresh precede the project's adoption of the declaration; it does not suppress errors in a declaration present.
+   no `.github/ci-kit.yml`, or a config without a setup declaration, fails the bake: no legacy provision step supplies
+   project tools. MAWS's declaration supplies Poppler, LibreOffice and the native engine on macOS, and its install
+   fills the caches. ci-kit neither picks an engine version nor requires an engine on the host to bake the guest.
 
    The bake prints `MAWS environment from its declaration (setup)`, the clone's commit, the applier's summary and
    `provision: setup <hash> applied with install; records in /Users/admin/.ci-kit`. The setup hash is stored in
@@ -821,8 +816,8 @@ booking.
    A job on an older golden instead prints a `::notice::` naming both hashes and installs the missing tools. That
    notice is a coordinator refresh trigger, not an automatic guest rebuild.
 
-   `~/.ci-kit/quarantined-apps` records one app path per line, including apps already installed by the base or legacy
-   steps that still carry quarantine. Homebrew's `~/Applications/...` artifact paths are expanded to absolute guest
+   `~/.ci-kit/quarantined-apps` records one app path per line, including apps already installed by the base that
+   still carry quarantine. A missing record fails both the bake and `--first-run`; an empty record means no apps need approval. Homebrew's `~/Applications/...` artifact paths are expanded to absolute guest
    paths before inspection and recording. The bake's printed window step lists every app (LibreOffice today).
    A new cask installed at job time is the exception to stale images being transparent: the setup action names its
    quarantined app in a `::warning::`, and tests launching it can fail until this refresh's first-run approval.
@@ -908,9 +903,9 @@ booking.
    `--first-run` requires the maintenance hold, a running candidate with its guest agent answering, and the MAWS
    share mounted at `/Volumes/My Shared Files/maws`. It reads `~/.ci-kit/quarantined-apps` and refuses while any
    recorded app's quarantine flags lack the user-approved bit (`0x40`), naming that app. An absent quarantine
-   attribute or an approved one passes; an unreadable app, flags or existing record refuses. With no record (a
-   declaration-free bake), it checks `/Applications/LibreOffice.app` by name as before. On 10-23, answering LibreOffice's
-   Gatekeeper "Open" changed `0181` to `01c1`. The group launches `soffice`, so that window step comes first.
+   attribute or an approved one passes; an unreadable app or flags refuses. The declaration-backed bake must have
+   written the record: a missing or unreadable record refuses; an empty record means no app needs approval.
+   On 10-23, answering LibreOffice's Gatekeeper "Open" changed `0181` to `01c1`. The group launches `soffice`, so that window step comes first.
 
    The shell part runs through `tart exec` in the guest's login session. It reads the runner's PATH from
    `~/actions-runner-maws/.path` (the baked Node 22 is keg-only; a fresh Terminal finds Node 24 and no pnpm), makes
@@ -1200,9 +1195,8 @@ defaults -currentHost write com.apple.screensaver idleTime -int 0
 
 ```bash
 host=<host> name=<name>
-ssh $host '/opt/homebrew/bin/brew install node corepack git gh python jq poppler'
-ssh $host '/opt/homebrew/bin/brew install --cask google-chrome libreoffice betterdisplay'
-ssh $host 'curl -fsSL https://claude.ai/install.sh | bash'
+ssh $host '/opt/homebrew/bin/brew install node corepack git gh python jq'
+ssh $host '/opt/homebrew/bin/brew install --cask betterdisplay'
 ssh $host 'git clone https://github.com/SSFSKIM/ci-kit ~/Developer/GitHub/ci-kit'
 ssh $host '~/Developer/GitHub/ci-kit/mac/install.sh --check'
 gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token \
@@ -1215,12 +1209,9 @@ ssh $host 'GH_TOKEN=$(cat ~/.config/ci-kit/alert-token) /opt/homebrew/bin/gh iss
 
 - `corepack` is its own formula: Homebrew's `node` (26) ships without it, and `--check` requires it. The mini's comes
   from a Node.js package in `/usr/local`.
-- Google Chrome because MAWS's desk-web e2e drives the installed Chrome on a Mac; LibreOffice for the document groups;
-  Poppler because MAWS's export groups read their PDFs with its `pdfinfo`, `pdftoppm`, `pdftotext` and `pdffonts`;
-  BetterDisplay for the display (step 3).
-- Claude Code's native installer puts `claude` in `~/.local/bin`. MAWS's live groups launch the engine with a login;
-  class 1's `connectors-direct` and `delivery` launch it with none (the connector probe), so the guest image carries
-  it too, at the version the host's own runs when the image is baked.
+- BetterDisplay is ci-kit's display prerequisite (step 3). Project tools are installed by the project's
+  `.github/ci-kit.yml` and its declared script, not by this host bootstrap. Run the setup action on the host before
+  acceptance; approve any apps it reports quarantined through the human's first-run procedure.
 - `--disabled` registers the runner and installs the hooks with the agent left off, so no MAWS job lands before step 3;
   step 4 turns it on. It also starts the [dialog watcher](#the-dialog-watcher), so from here a prompt left up for more
   than a minute, step 3's included, opens an alert that names the machine. It closes about three minutes after the

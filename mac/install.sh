@@ -261,10 +261,9 @@ vm_before=
 if vm_installed; then vm_before=1; fi
 [[ -n $vm ]] || vm=${vm_before:-0}
 
-# 1. Prerequisites (MAWS's gate-offload plan §3.6): Node >= 22.12 on the PATH jobs get (MAWS's engines; its plan job and
-# the hooks run node from PATH), pnpm through corepack, a compiler for native modules such as node-pty, and LibreOffice
-# for the document groups. LibreOffice is found, not run: a first launch can raise a Gatekeeper prompt, which is the
-# human's to answer.
+# 1. Runner infrastructure: Node >= 22.12 on the PATH jobs and hooks get, pnpm through corepack,
+# a native compiler, Python and git. Project applications belong to the repository's setup declaration,
+# which jobs apply after registration; requiring them here would prevent a fresh host from reaching setup.
 gaps=()
 probe() { # <name> <command…>: prints the command's first line, or records a gap
   local name=$1 out
@@ -278,8 +277,6 @@ probe corepack corepack --version
 probe 'Xcode command line tools (clang)' xcrun clang --version
 probe python3 python3 --version
 probe git git --version
-probe 'LibreOffice (soffice)' bash -c 'command -v soffice && test -x /Applications/LibreOffice.app/Contents/MacOS/soffice ||
-  { echo "soffice or /Applications/LibreOffice.app missing"; exit 1; }'
 # The VM lane's launcher runs Tart from the PATH its LaunchAgent gives it: Tart's own directory, first.
 tart_dir=
 if ((vm == 1)); then

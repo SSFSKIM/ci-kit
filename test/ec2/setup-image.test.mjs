@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkImage } from '../../ec2/vm/job.mjs';
 
-test('host image check accepts repo records beside legacy fields and rejects incomplete applies without leaking repo text',async t=>{
+test('host image check accepts old and new manifests and rejects incomplete applies without leaking repo text',async t=>{
   const root=await mkdtemp(join(tmpdir(),'ci-kit-image-')); t.after(()=>rm(root,{recursive:true,force:true}));
   await mkdir(join(root,'etc/ci-kit'),{recursive:true}); await mkdir(join(root,'etc/cloud'),{recursive:true});
   await writeFile(join(root,'etc/cloud/cloud-init.disabled'),'');
@@ -19,5 +19,6 @@ test('host image check accepts repo records beside legacy fields and rejects inc
     assert.equal(error.message,'manifest-incomplete'); assert.doesNotMatch(JSON.stringify(error),/private-name/); return true;
   });
   delete manifest.repos; await save(); await checkImage(root);
-  delete manifest.maws; await save(); await assert.rejects(checkImage(root),/manifest-incomplete/);
+  delete manifest.maws; delete manifest.warm; manifest.repos = {}; await save(); await checkImage(root);
+  delete manifest.runner_version; await save(); await assert.rejects(checkImage(root),/manifest-incomplete/);
 });
