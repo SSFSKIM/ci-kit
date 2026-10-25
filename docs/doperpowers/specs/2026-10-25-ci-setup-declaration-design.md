@@ -378,8 +378,11 @@ Interfaces produced: the config fields, `setupHash`, the action with its inputs 
 Decisions: the action is `node24`, not composite, so it needs no Node on the PATH (a pool container has none before
 `setup-node`). The gates workflow calls it as `SSFSKIM/ci-kit/setup@v1` (a `uses:` cannot take an expression, and a
 second kit checkout in the gate's workspace would show up in the repository's own tree), so `gates.yml` and the
-action move together with `v1`; the step's absence for an empty declaration is what makes moving `v1` safe for
-every current adopter. It imports the config parser and `vendor/yaml` by relative path, as `pool-ensure` does for
+action move together with `v1`. Actions resolves every `uses:` of a job before any step runs, whatever its condition
+(run 40148841436 failed setting up on `setup@v1` before v1 had the action), so M1 lands in two pull requests: the
+action, schema and docs first, after which the coordinator moves `v1`; then the gates workflow's step, after which
+`v1` moves again. The first move is safe for adopters because it only adds a directory and accepts new keys; the
+second because the step is skipped for an empty declaration. It imports the config parser and `vendor/yaml` by relative path, as `pool-ensure` does for
 its module. Presence checks run once per list, not per package. The test seam for the package managers is an
 environment override naming the commands (as `mac/vm/provision.sh`'s tests use `CI_KIT_VM_DISKUTIL`), so unit tests
 run no real apt or brew. The cask password message is recognized from the installer's failure output (`sudo`,
@@ -642,6 +645,19 @@ acceptance item checked as written above, its evidence recorded in Surprises & D
 (none yet)
 
 ## Decision Log
+
+- Decision: M1 lands in two pull requests: action, schema and docs first, then the gates workflow's step, with the
+  coordinator moving `v1` after each merge. GitHub Actions resolves every job's `uses:` before running any step,
+  including steps whose conditions are false. The first M1 ci-gate run,
+  [40148841436](https://github.com/SSFSKIM/ci-kit/actions/runs/40148841436), failed preparing the gate because
+  `setup@v1` did not yet contain `setup/action.yml`; no tests ran. The action is first proven through
+  `setup@setup-m1` on the sandbox's hosted Ubuntu, hosted macOS and pool jobs. The second pull request's ci-gate run
+  proves the gates step resolves at the published `v1`.
+  Rejected: a second kit checkout in the gate's workspace, which would appear in the repository's own tree.
+  Rationale: the condition makes an already-published action safe for an empty declaration, not an unpublished
+  action resolvable. Two additive releases keep each pull request independently verifiable without moving `v1`
+  before merge.
+  Date/Author: 2026-10-25, CI-opt, from the M1 executor's report.
 
 - Decision: Verification. This spec gets an adversarial design review and an adversarial buildability review of
   its execution section before execution. Each milestone's branch gets doperpowers:review-code: `reviewer-medium`

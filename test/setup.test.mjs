@@ -226,23 +226,6 @@ test('the action manifest uses the runner Node and a resolvable entrypoint', () 
   assert.deepEqual(Object.keys(action.outputs).sort(), ['hash', 'installed', 'stale']);
 });
 
-test('the gates workflow applies only actual declarations and respects setup false, between tools and install', () => {
-  const workflow = parse(readFileSync(new URL('../.github/workflows/gates.yml', import.meta.url), 'utf8'));
-  const steps = workflow.jobs.gate.steps;
-  const at = steps.findIndex((s) => s.uses === 'SSFSKIM/ci-kit/setup@v1');
-  assert.ok(at > steps.findIndex((s) => s.name === 'Enable pnpm'));
-  assert.ok(at < steps.findIndex((s) => s.name === 'Install'));
-  // The condition's operators and join have the same behavior here as GitHub's expression language; exercise it
-  // against the planner's real output, including the disabled gate's setup rather than a handwritten matrix.
-  const enabled = (gate) => Boolean(Function('matrix', 'join', `return (${steps[at].if});`)({ gate }, (list, sep) => (list ?? []).join(sep)));
-  for (const declaration of ['', 'apt: [cowsay]', 'brew: [hello]', 'cask: [app]', 'script: setup.sh']) {
-    const config = parseConfig(`version: 1\nsetup: {node: "22"${declaration ? ', ' + declaration : ''}}\ngates: [{name: yes, run: "true"}, {name: no, run: "true", setup: false}]`, { isPrivate: true });
-    const [yes, no] = planOutput(config, config.gates).gates;
-    assert.equal(enabled(yes), Boolean(declaration), declaration);
-    assert.equal(enabled(no), false, declaration);
-  }
-});
-
 test('a setup-only file produces a successful empty plan', () => {
   const config = parseConfig('version: 1\nsetup: {apt: [cowsay]}', { isPrivate: false });
   assert.deepEqual(planOutput(config, config.gates), { gates: [], pool: false, note: 'no gates selected', cache_write: false });
