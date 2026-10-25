@@ -203,11 +203,11 @@ gates:
   - {name: lint, run: pnpm lint}
 `);
   const env = { CI_KIT_CONFIG: 'private-config/ci-kit.yml', CI_KIT_PRIVATE: 'true', CI_KIT_REF: 'refs/pull/7/merge', CI_KIT_DEFAULT_BRANCH: 'main' };
-  const setup = { node: '22', pnpm: true, install: 'pnpm install', fetch_depth: 1 };
+  const setup = { node: '22', pnpm: true, install: 'pnpm install', fetch_depth: 1, apt: [], brew: [], cask: [], script: '' };
   const unit = { name: 'unit', run: 'pnpm test', runs_on: ['self-hosted', 'ci-kit-pool', 'cpus-8'], timeout: 30, setup, artifacts: [], env: {}, build_cache: null };
   const e2e = {
     name: 'e2e', run: 'pnpm e2e', runs_on: ['self-hosted', 'macOS', 'ARM64', 'ci-kit-mac'], timeout: 30,
-    setup: { node: '', pnpm: false, install: '', fetch_depth: 1 }, artifacts: [], env: { E2E: '1' }, build_cache: null,
+    setup: { node: '', pnpm: false, install: '', fetch_depth: 1, apt: [], brew: [], cask: [], script: '' }, artifacts: [], env: { E2E: '1' }, build_cache: null,
   };
   const lint = { name: 'lint', run: 'pnpm lint', runs_on: ['ubuntu-latest'], timeout: 30, setup, artifacts: [], env: {}, build_cache: null };
   const pr = plan({ ...env, CI_KIT_EVENT: 'pr' });

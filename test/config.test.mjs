@@ -17,7 +17,7 @@ function errorsOf(text, opts = priv) {
 
 test('a minimal config gets every default', () => {
   const c = parseConfig('version: 1\ngates:\n  - name: unit\n    run: npm test\n', pub);
-  assert.deepEqual(c.setup, { node: '', pnpm: false, install: '', fetch_depth: 1 });
+  assert.deepEqual(c.setup, { node: '', pnpm: false, install: '', fetch_depth: 1, apt: [], brew: [], cask: [], script: '' });
   assert.deepEqual(c.gates, [
     {
       name: 'unit', run: 'npm test', lane: 'hosted', cpus: null, timeout: 30, paths: [],
@@ -46,7 +46,7 @@ gates:
     setup: false
     env: {FOO: bar}
 `, priv);
-  assert.deepEqual(c.setup, { node: '24', pnpm: true, install: 'pnpm install --frozen-lockfile', fetch_depth: 0 });
+  assert.deepEqual(c.setup, { node: '24', pnpm: true, install: 'pnpm install --frozen-lockfile', fetch_depth: 0, apt: [], brew: [], cask: [], script: '' });
   assert.deepEqual(c.gates[0], {
     name: 'unit', run: 'npm test', lane: 'pool', cpus: 8, timeout: 15, paths: ['src/**'],
     on: ['pr', 'ci-ref'], artifacts: ['test-results/**'], setup: false, env: { FOO: 'bar' }, build_cache: null,
@@ -139,3 +139,47 @@ test('every error is reported, not only the first', () => {
     'gate "b": timeout: must be a whole number of minutes from 1 to 360',
   ]);
 });
+
+test('an environment declaration needs no gates, or may explicitly have none', () => {
+  const text = `version: 1
+setup:
+  apt: [zsh, fonts-noto-cjk, libstdc++6]
+  brew: [poppler, postgresql@16, owner/tap/name]
+  cask: [libreoffice, owner/tap/app]
+  script: .github/ci-setup.sh
+`;
+  for (const suffix of ['', 'gates: []\n']) {
+    const config = parseConfig(text + suffix, pub);
+    assert.deepEqual(config.gates, []);
+    assert.deepEqual(config.setup, {
+      node: '', pnpm: false, install: '', fetch_depth: 1,
+      apt: ['zsh', 'fonts-noto-cjk', 'libstdc++6'],
+      brew: ['poppler', 'postgresql@16', 'owner/tap/name'],
+      cask: ['libreoffice', 'owner/tap/app'], script: '.github/ci-setup.sh',
+    });
+  }
+  for (const declaration of ['apt: [zsh]', 'brew: [hello]', 'cask: [app]', 'script: setup.sh']) {
+    assert.deepEqual(parseConfig(`version: 1\nsetup: {${declaration}}`, pub).gates, []);
+  }
+});
+
+test('empty or legacy-only setup still needs gates; a declaration cannot hide malformed gates', () => {
+  for (const setup of ['{}', '{apt: [], brew: [], cask: []}', '{node: "22", install: npm ci}']) {
+    assert.ok(errorsOf(`version: 1\nsetup: ${setup}`).includes('gates: required, a non-empty list'));
+  }
+  for (const gates of ['null', '{}', 'unit']) {
+    assert.ok(errorsOf(`version: 1\nsetup: {apt: [zsh]}\ngates: ${gates}`).includes('gates: required, a non-empty list'));
+  }
+});
+
+for (const [key, values] of Object.entries({
+  apt: ['zsh', '["zsh=5.9"]', '["-zsh"]', '["pkg;id"]', '[2]', 'null', '[""]', '["owner/pkg"]'],
+  brew: ['hello', '["hello=1"]', '["--debug"]', '["a/b/c/d"]', '[true]', 'null'],
+  cask: ['app', '["app=1"]', '["app;id"]', '[{}]', 'null'],
+  script: ['"/tmp/setup.sh"', '"../setup.sh"', '"dir/../setup.sh"', '"dir\\\\setup.sh"', 'true', '""', 'null'],
+})) {
+  for (const value of values) test(`rejects malformed setup.${key}: ${value}`, () => {
+    const messages = errorsOf(`version: 1\nsetup: {${key}: ${value}}\ngates: [{name: unit, run: true}]`);
+    assert.ok(messages.some((m) => m.startsWith(`setup.${key}:`)), messages.join('\n'));
+  });
+}

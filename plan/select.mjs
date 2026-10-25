@@ -8,7 +8,7 @@ const RUNS_ON = {
   pool: (gate) => ['self-hosted', 'ci-kit-pool', `cpus-${gate.cpus}`],
   mac: () => ['self-hosted', 'macOS', 'ARM64', 'ci-kit-mac'],
 };
-const NO_SETUP = { node: '', pnpm: false, install: '', fetch_depth: DEFAULT_FETCH_DEPTH };
+const NO_SETUP = { node: '', pnpm: false, install: '', fetch_depth: DEFAULT_FETCH_DEPTH, apt: [], brew: [], cask: [], script: '' };
 
 export function splitList(text) {
   return text.split(',').map((s) => s.trim()).filter(Boolean);

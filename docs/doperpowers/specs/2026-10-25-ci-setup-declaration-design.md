@@ -149,8 +149,12 @@ through `plan/config.mjs`'s parser (the same validation as the plan), then:
    `ci-kit setup: image matches setup <hash>`. Different or absent: it proceeds the same way, and when an image hash
    was present it emits a `::notice::` naming both hashes, which is the signal that the image is older than the
    commit.
-2. Checks each package of its platform for presence (`dpkg-query` on Linux, `brew list --formula` / `--cask` on
-   macOS), all in one call per list.
+2. Checks each package of its platform for presence in one inventory call per list: on Linux `dpkg-query`, counting
+   the names installed packages provide as present (a virtual name such as `libasound2` is satisfied by
+   `libasound2t64`); on macOS `brew info --json=v2 --installed` for formulas and casks, matching declared names
+   against each installed item's name, aliases and old names (so `pkg-config` is satisfied by `pkgconf` and never
+   triggers an upgrade). A name the inventory does not know stays missing, and its install reports Homebrew's or
+   apt's own error.
 3. Installs only the missing ones: `sudo -n apt-get update` then `sudo -n apt-get install -y --no-install-recommends`
    with `DEBIAN_FRONTEND=noninteractive` on Linux; `brew install` and `brew install --cask` on macOS. A failed install
    fails the step naming the package. A cask install that fails asking for a password or `sudo` fails with a
@@ -378,8 +382,11 @@ Interfaces produced: the config fields, `setupHash`, the action with its inputs 
 Decisions: the action is `node24`, not composite, so it needs no Node on the PATH (a pool container has none before
 `setup-node`). The gates workflow calls it as `SSFSKIM/ci-kit/setup@v1` (a `uses:` cannot take an expression, and a
 second kit checkout in the gate's workspace would show up in the repository's own tree), so `gates.yml` and the
-action move together with `v1`; the step's absence for an empty declaration is what makes moving `v1` safe for
-every current adopter. It imports the config parser and `vendor/yaml` by relative path, as `pool-ensure` does for
+action move together with `v1`. Actions resolves every `uses:` of a job before any step runs, whatever its condition
+(run 40148841436 failed setting up on `setup@v1` before v1 had the action), so M1 lands in two pull requests: the
+action, schema and docs first, after which the coordinator moves `v1`; then the gates workflow's step, after which
+`v1` moves again. The first move is safe for adopters because it only adds a directory and accepts new keys; the
+second because the step is skipped for an empty declaration. It imports the config parser and `vendor/yaml` by relative path, as `pool-ensure` does for
 its module. Presence checks run once per list, not per package. The test seam for the package managers is an
 environment override naming the commands (as `mac/vm/provision.sh`'s tests use `CI_KIT_VM_DISKUTIL`), so unit tests
 run no real apt or brew. The cask password message is recognized from the installer's failure output (`sudo`,
@@ -642,6 +649,19 @@ acceptance item checked as written above, its evidence recorded in Surprises & D
 (none yet)
 
 ## Decision Log
+
+- Decision: M1 lands in two pull requests: action, schema and docs first, then the gates workflow's step, with the
+  coordinator moving `v1` after each merge. GitHub Actions resolves every job's `uses:` before running any step,
+  including steps whose conditions are false. The first M1 ci-gate run,
+  [40148841436](https://github.com/SSFSKIM/ci-kit/actions/runs/40148841436), failed preparing the gate because
+  `setup@v1` did not yet contain `setup/action.yml`; no tests ran. The action is first proven through
+  `setup@setup-m1` on the sandbox's hosted Ubuntu, hosted macOS and pool jobs. The second pull request's ci-gate run
+  proves the gates step resolves at the published `v1`.
+  Rejected: a second kit checkout in the gate's workspace, which would appear in the repository's own tree.
+  Rationale: the condition makes an already-published action safe for an empty declaration, not an unpublished
+  action resolvable. Two additive releases keep each pull request independently verifiable without moving `v1`
+  before merge.
+  Date/Author: 2026-10-25, CI-opt, from the M1 executor's report.
 
 - Decision: Verification. This spec gets an adversarial design review and an adversarial buildability review of
   its execution section before execution. Each milestone's branch gets doperpowers:review-code: `reviewer-medium`
