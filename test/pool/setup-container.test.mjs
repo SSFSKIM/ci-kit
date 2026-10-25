@@ -8,7 +8,7 @@ import { parseConfig } from '../../plan/config.mjs';
 import { setupHash } from '../../setup/hash.mjs';
 const entry = new URL('../../pool/bake/setup-container.mjs',import.meta.url);
 
-async function fixture(t) {
+async function fixture(t, { missingPackage = false } = {}) {
   const dir=await mkdtemp(join(tmpdir(),'ci-kit-setup-container-'));
   t.after(()=>rm(dir,{recursive:true,force:true}));
   const root=join(dir,'repo'),tools=join(dir,'tools'),bin=join(dir,'bin');
@@ -21,14 +21,19 @@ async function fixture(t) {
   await writeFile(join(nodeBin,'corepack'),'#!/bin/sh\ntest "$1" = enable || exit 2\nprintf "#!/bin/sh\\necho pnpm-ok\\n" > "$3/pnpm"\nchmod +x "$3/pnpm"\n',{mode:0o755});
   await writeFile(join(bin,'curl'),'#!/bin/sh\nexit "${METADATA_REACHABLE:-7}"\n',{mode:0o755});
   const script=Buffer.from('set -eu\nnode -p \'"node-ok"\' >> proof\npnpm --version >> proof\n');
-  const config='version: 1\nsetup:\n  node: "22"\n  pnpm: true\n  script: .github/setup.sh\n  install: node -p \'"install-node"\' >> proof && pnpm --version >> proof\n';
+  const config='version: 1\nsetup:\n  node: "22"\n  pnpm: true\n  script: .github/setup.sh\n  install: node -p \'"install-node"\' >> proof && pnpm --version >> proof\n' +
+    (missingPackage ? '  apt: [fixture-missing]\n  brew: [fixture-missing]\n' : '');
+  await writeFile(join(bin,'dpkg-query'),'#!/bin/sh\nexit 0\n',{mode:0o755});
+  await writeFile(join(bin,'sudo'),'#!/bin/sh\nexit 0\n',{mode:0o755});
+  await writeFile(join(bin,'brew'),'#!/bin/sh\necho \'{"formulae":[]}\'\n',{mode:0o755});
   await writeFile(join(root,'.github/ci-kit.yml'),config);
   await writeFile(join(root,'.github/setup.sh'),script);
   execFileSync('git',['init','--quiet',root]);
   execFileSync('git',['-C',root,'remote','add','origin','https://github.com/SSFSKIM/fixture.git']);
   const hash=setupHash(parseConfig(config,{isPrivate:true}).setup,script);
   return {root,hash,run:(phase,extra={})=>spawnSync(process.execPath,[entry.pathname,phase,root,hash],{
-    encoding:'utf8',env:{...process.env,PATH:`${bin}:${process.env.PATH}`,RUNNER_TOOL_CACHE:tools,...extra},timeout:20000,
+    encoding:'utf8',env:{...process.env,PATH:`${bin}:${process.env.PATH}`,RUNNER_TOOL_CACHE:tools,
+      CI_KIT_SETUP_DPKG_QUERY:join(bin,'dpkg-query'),CI_KIT_SETUP_SUDO:join(bin,'sudo'),CI_KIT_SETUP_BREW:join(bin,'brew'),...extra},timeout:20000,
   })};
 }
 
@@ -63,4 +68,11 @@ test('changed pinned declaration and stale image fail smoke even when packages w
   const changed=f.run('apply');
   assert.notEqual(changed.status,0); assert.match(changed.stderr,/hash/);
   await assert.rejects(readFile(join(f.root,'proof')),/ENOENT/);
+});
+
+test('a matching hash cannot hide a missing package: smoke rejects an install even if it succeeds',async t=>{
+  const f=await fixture(t,{missingPackage:true});
+  const result=f.run('smoke',{CI_KIT_SETUP_HASH:f.hash});
+  assert.notEqual(result.status,0);
+  assert.match(result.stderr,/job image is not satisfied: installed (apt|brew):fixture-missing/);
 });
