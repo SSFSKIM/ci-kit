@@ -18,6 +18,7 @@ cleanup() {
   set +e
   # Record before cleanup so its errors cannot hide the original helper failure.
   compact_record_failure "$status"
+  compact_record_log
   if [ "$source_mounted" = 1 ]; then umount "$work/source" || cleanup_status=1; fi
   if [ "$target_mounted" = 1 ]; then umount "$work/target" || cleanup_status=1; fi
   if [ -n "$loop" ]; then losetup --detach "$loop" || cleanup_status=1; fi
@@ -56,8 +57,10 @@ inventory "$work/source" "$work/source.sha256"
 umount "$work/source"
 source_mounted=0
 # Unwritten EBS bytes may be pseudorandom: write every allocated block, including all-zero data.
+compact_log=$work/partclone.log
 timeout --kill-after=10s 8m "$copier" --dev-to-dev --quiet \
   --logfile "$work/partclone.log" --source "$loop" --output "$target"
+compact_log=
 sync
 check "$target"
 mount -t "$kind" -o "$options" "$target" "$work/target"

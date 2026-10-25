@@ -95,3 +95,12 @@ test('unknown properties and serialization hooks are never emitted or invoked', 
   assert.equal(formatDiagnostic(value), '{"reason":"cloud-init-log","path":"/var/log"}');
   assert.equal(formatDiagnostic({ reason: 'unexpected', message: 'x'.repeat(100_000) }), '{"reason":"unexpected"}');
 });
+
+
+test('structured diagnostic formatting never admits tool text without a trusted report location', () => {
+  const base = {reason:'compact-failed',phase:'root-copy',exit_status:1};
+  for (const log_tail of ['Partclone failed', 'ghs_'+'A'.repeat(36), JSON.stringify({Authorization:'Basic private'})]) {
+    assert.equal(formatDiagnostic({...base,log_tail}), JSON.stringify(base));
+  }
+  assert.equal(formatDiagnostic({...base,phase:'forged',log_tail:'private'}, {logLocation:'s3://trusted/report'}), '{"reason":"unexpected"}');
+});

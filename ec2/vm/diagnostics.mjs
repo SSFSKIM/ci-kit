@@ -1,4 +1,21 @@
 // Shared log rendering for the guest and bake reader. S3 report fields are data, not trusted error text.
+// This free text belongs only in the access-controlled report, never in controller logs.
+// Keep complete diagnostic lines within both the byte and line limits.
+export function boundCompactLogTail(value) {
+  if (typeof value !== 'string') return '';
+  let bytes = Buffer.from(value);
+  if (bytes.length > 8192) {
+    let start = bytes.length - 8192;
+    if (bytes[start - 1] !== 10) {
+      const newline = bytes.indexOf(10, start);
+      if (newline === -1) return '';
+      start = newline + 1;
+    }
+    bytes = bytes.subarray(start);
+  }
+  const text = bytes.toString('utf8');
+  return text.split('\n').slice(text.endsWith('\n') ? -41 : -40).join('\n');
+}
 const manifest = '/etc/ci-kit/bake-manifest.json';
 const pathsByReason = new Map([
   ['manifest-missing', [manifest]],
@@ -39,13 +56,16 @@ export function formatCompactTrace(value) {
   return JSON.stringify({ elapsed_seconds: value.elapsed_seconds, exit_status: value.exit_status, phases });
 }
 
-// The finite vocabulary bounds the output. Never stringify the original object, including its extra fields.
-export function formatDiagnostic(value) {
+// Only structured fields enter logs. logLocation comes from the controller, never from report data.
+export function formatDiagnostic(value, { logLocation } = {}) {
   const unexpected = '{"reason":"unexpected"}';
   if (!value || typeof value !== 'object' || Array.isArray(value)) return unexpected;
   if (value.reason === 'compact-failed') {
     if (!compactPhases.has(value.phase) || !Number.isInteger(value.exit_status) || value.exit_status < 1 || value.exit_status > 255) return unexpected;
-    return JSON.stringify({ reason: 'compact-failed', phase: value.phase, exit_status: value.exit_status });
+    const tail = logLocation ? boundCompactLogTail(value.log_tail) : '';
+    const lines = tail ? tail.split('\n').length - Number(tail.endsWith('\n')) : 0;
+    return JSON.stringify({ reason: 'compact-failed', phase: value.phase, exit_status: value.exit_status,
+      ...(lines ? { log_tail: `${logLocation} (${lines} ${lines === 1 ? 'line' : 'lines'})` } : {}) });
   }
   if (!pathsByReason.get(value.reason)?.includes(value.path)) return unexpected;
   if (value.code !== undefined && !codesByReason.get(value.reason)?.has(value.code)) return unexpected;

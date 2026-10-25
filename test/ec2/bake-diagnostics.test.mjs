@@ -110,3 +110,32 @@ test('bake does not reflect arbitrary report diagnostic, outcome, or smoke conte
     for (const marker of ['jit-private', 'signature=', 'artifact-contents', 'private-warm-token']) assert.ok(!message.includes(marker), message);
   }
 });
+
+
+const logLocation = 's3://report-bucket/reports/bake-diagnostic-test-290475840169/builder.json';
+const baseDiagnostic = {reason:'compact-failed', phase:'root-copy', exit_status:1};
+// The report is access-controlled; no free text from it may cross into the controller log.
+const tails = [
+  ['ordinary refusal', 'Partclone: bitmap count mismatch'],
+  ...['ghs_', 'ghp_', 'gho_', 'github_pat_'].map(prefix => [prefix, prefix + 'A'.repeat(36)]),
+  ['serialized auth', JSON.stringify({Authorization:'Basic '+Buffer.from('x-access-token:'+'ghs_'+'A'.repeat(36)).toString('base64')})],
+  ['serialized AWS token', JSON.stringify({'X-Amz-Security-Token':'private-session-value'})],
+  ['straddled URL', 'uilder.json?X-Amz-Credential=private-value&X-Amz-Signature=private-signature'],
+  ['arbitrary controls', '\x1b[31m\u202eprivate output\x00'],
+];
+for (const [label, tail] of tails) test(`controller points to ${label} in S3 without echoing any tail text`, async () => {
+  const message = await failedBake({value:'failed:compact', diagnostic: {
+    ...baseDiagnostic, log_tail:tail, log_location:'untrusted-location',
+  }, manifest:{private:'manifest-contents'}, stderr:'unrelated-output'}, {builder:true});
+  assert.equal(message, 'builder failed: failed:compact '+JSON.stringify({...baseDiagnostic,log_tail:`${logLocation} (1 line)`}));
+});
+test('controller reports the bounded tail line count, including a trailing newline', async () => {
+  const message = await failedBake({value:'failed:compact', diagnostic: {
+    ...baseDiagnostic, log_tail:'private-line\n'.repeat(100),
+  }}, {builder:true});
+  assert.equal(message, 'builder failed: failed:compact '+JSON.stringify({...baseDiagnostic,log_tail:`${logLocation} (40 lines)`}));
+});
+for (const log_tail of [undefined, null, {}, [], 5, '', 'x'.repeat(9000)]) test(`controller omits pointers for absent, invalid or wholly oversized tails (${typeof log_tail})`, async () => {
+  const message = await failedBake({value:'failed:compact', diagnostic:{...baseDiagnostic,log_tail}}, {builder:true});
+  assert.equal(message, 'builder failed: failed:compact '+JSON.stringify(baseDiagnostic));
+});

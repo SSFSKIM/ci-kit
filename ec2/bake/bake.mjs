@@ -137,7 +137,10 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
     const built = await wait('builder',30*MINUTE,async () => {
       const i = await instance(builder), r = await report('builder');
       if (!i || !owned(i,run)) throw new Error('builder missing or no longer owned');
-      if (r && r.value !== 'ok') throw new Error(`builder failed: ${safeOutcome(r.value)} ${formatDiagnostic(r.diagnostic)}`);
+      if (r && r.value !== 'ok') {
+        const diagnostic = formatDiagnostic(r.diagnostic, { logLocation: `s3://${cfg.report_bucket}/${prefix}/builder.json` });
+        throw new Error(`builder failed: ${safeOutcome(r.value)} ${diagnostic}`);
+      }
       if (i.State.Name === 'terminated') throw new Error('builder terminated before snapshot');
       return i.State.Name === 'stopped' && r ? {report:r,instance:i} : null;
     });

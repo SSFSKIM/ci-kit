@@ -15,7 +15,10 @@ cleanup() {
   compact_record_failure "$status"
   compact_record_phase "$status"
   phase=copy-root-cleanup phase_started=$SECONDS
-  if [ "$frozen" = 1 ]; then fsfreeze -u "$source_mount" || cleanup_status=1; fi
+  if [ "$frozen" = 1 ]; then
+    if fsfreeze -u "$source_mount"; then frozen=0; else cleanup_status=1; fi
+  fi
+  if [ "$frozen" = 0 ]; then compact_record_log; fi
   if [ "$mounted" = 1 ]; then umount "$work/root" || cleanup_status=1; fi
   if [ "$source_mounted" = 1 ]; then umount "$work/source" || cleanup_status=1; fi
   if [ -n "$loop" ]; then losetup --detach "$loop" || cleanup_status=1; fi
@@ -59,8 +62,10 @@ compact_phase source-inventory
 inventory "$work/source" "$work/source.sha256" source
 # /run is tmpfs: the default logfile on root would deadlock. Bound the copy so failure can thaw root.
 compact_phase root-copy
+compact_log=$work/partclone.log
 timeout --kill-after=10s 8m partclone.ext4 --dev-to-dev --ignore_fschk --quiet \
   --logfile "$work/partclone.log" --source "$loop" --output "$target"
+compact_log=
 compact_phase root-recovery
 fsfreeze -u "$source_mount"
 frozen=0

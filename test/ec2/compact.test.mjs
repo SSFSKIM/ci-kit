@@ -34,7 +34,7 @@ mount() {
 umount() { echo "CALL umount $*" >&3; READONLY=0; export READONLY; }
 rmdir() {
   command rmdir "$@"
-  if [[ "$*" != *boot-fixture* ]]; then case "$CASE" in cleanup-failure|copy-timeout-cleanup-failure) return 29;; esac; fi
+  if [[ "$*" != *boot-fixture* ]]; then case "$CASE" in cleanup-failure|copy-timeout-cleanup-failure|diagnostic-timeout-cleanup) return 29;; esac; fi
 }
 udevadm() { :; }
 sgdisk() { echo "CALL sgdisk $*"; if [[ "$*" == *'-v'* ]]; then [ "$CASE" != disk-verify-failure ] || return 13; echo 'No problems found.'; fi; }
@@ -73,16 +73,52 @@ find() {
   if [ "\${FROZEN:-0}" = 0 ] && [ "$CASE" = extra-file ]; then echo 'extra-hash  ./extra'; fi
   return 0
 }
-fsfreeze() { echo "CALL fsfreeze $*" >&3; if [ "$1" = -f ]; then FROZEN=1; else FROZEN=0; fi; export FROZEN; }
+fsfreeze() { echo "CALL fsfreeze $*" >&3; if [ "$CASE" = diagnostic-thaw-failure ] && [ "$1" = -u ]; then return 1; fi; if [ "$1" = -f ]; then FROZEN=1; else FROZEN=0; fi; export FROZEN; }
+write_log() {
+  local log=
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --logfile ]; then log=$2; break; fi
+    shift
+  done
+  [ -n "$log" ] || return 1
+  case "$CASE" in
+    diagnostic-*)
+      if [ "$CASE" = diagnostic-missing ]; then return 0; fi
+      if [ "$CASE" = diagnostic-empty ]; then : > "$log"; return 0; fi
+      if [ "$CASE" = diagnostic-straddling ]; then
+        { printf '%s\\n' 'https://reports.invalid/builder.json?X-Amz-Credential=PRIVATE-CREDENTIAL&X-Amz-Signature=PRIVATE-SIGNATURE'; printf '%8130s\\n' x; } > "$log"
+        return 0
+      fi
+      if [ "$CASE" = diagnostic-boundary ]; then
+        { printf '%s\\n' preceding; printf '%8191s\\n' x; } > "$log"
+        return 0
+      fi
+      if [ "$CASE" = diagnostic-long ]; then printf '%20000sEND\\n' x > "$log"; return 0; fi
+      local i; for ((i=1; i<=50; i++)); do printf 'partclone line %s\\n' "$i"; done > "$log" ;;
+  esac
+}
+tail() {
+  echo "CALL tail frozen=\${FROZEN:-0}" >&3
+  [ "\${FROZEN:-0}" = 0 ] || return 99
+  command tail "$@"
+}
 partclone.fat() {
   echo "CALL partclone.fat $*"
+  if [ "$CASE" = diagnostic-boot ]; then write_log "$@"; return 27; fi
   [ "$CASE" != boot-fat-copy-failure ] || return 27
 }
 partclone.ext4() {
   echo "CALL partclone.ext4 $*"
-  if [[ "$*" == *loop16* ]]; then [ "$CASE" != boot-ext4-copy-failure ] || return 28; return 0; fi
+  if [[ "$*" == *loop16* ]]; then
+    if [ "$CASE" = diagnostic-boot-ext4 ]; then write_log "$@"; return 28; fi
+    [ "$CASE" != boot-ext4-copy-failure ] || return 28; return 0; fi
   [ "\${FROZEN:-0}" = 1 ] || return 2
   if [ "$CASE" = timed-copy ]; then node -e 'setTimeout(() => {}, 1100)'; fi
+  case "$CASE" in
+    diagnostic-later) write_log "$@"; return 0;;
+    diagnostic-timeout-cleanup) write_log "$@"; return 124;;
+    diagnostic-*) write_log "$@"; return 1;;
+  esac
   case "$CASE" in copy-failure) return 1;; copy-timeout|copy-timeout-cleanup-failure) return 124;; esac
 }
 timeout() {
@@ -99,14 +135,14 @@ timeout() {
 e2image() { echo "CALL e2image $*"; }
 e2fsck() {
   echo "CALL e2fsck $*"
-  if [[ "$*" == *nvme1n1p1 ]] && [ "$CASE" = corrupt ]; then return 4; fi
+  if [[ "$*" == *nvme1n1p1 ]] && { [ "$CASE" = corrupt ] || [ "$CASE" = diagnostic-later ]; }; then return 4; fi
   if [[ "$*" == *loop16* ]] && [ "$CASE" = boot-source-fsck-failure ]; then return 4; fi
   if [[ "$*" == *nvme1n1p16* ]] && [ "$CASE" = boot-target-fsck-failure ]; then return 4; fi
   return 0
 }
 fsck.fat() { echo "CALL fsck.fat $*"; }
 # Run the real nested Bash processes, with only their Linux command boundary replaced.
-export -f find mount umount rmdir mktemp losetup sync fsfreeze timeout partclone.ext4 partclone.fat e2fsck fsck.fat lsblk
+export -f write_log tail find mount umount rmdir mktemp losetup sync fsfreeze timeout partclone.ext4 partclone.fat e2fsck fsck.fat lsblk
 . "$1"
 `;
 const script = new URL('../../ec2/bake/compact.sh', import.meta.url).pathname;
@@ -122,6 +158,7 @@ const run = (scenario = 'ok', handoff = 'enabled') => {
     });
     const rootOutput = result.stdout.slice(result.stdout.indexOf('CALL mount --bind'));
     return { ...result, rootOutput, diagnostic: existsSync(diagnostic) ? JSON.parse(readFileSync(diagnostic, 'utf8')) : undefined,
+      logTail: existsSync(`${diagnostic}.log`) ? readFileSync(`${diagnostic}.log`, 'utf8') : undefined,
       trace: existsSync(trace) ? readFileSync(trace, 'utf8').trim().split('\n').map(line => {
         const [phase, elapsed, status] = line.split(' ');
         return { phase, elapsed_seconds: Number(elapsed), exit_status: Number(status) };
@@ -325,3 +362,59 @@ for (const scenario of ['boot-fat-copy-failure', 'boot-ext4-copy-failure', 'boot
     assert.doesNotMatch(r.stdout, /CALL fsfreeze/);
   });
 }
+
+for (const scenario of ['diagnostic-root', 'diagnostic-boot', 'diagnostic-boot-ext4']) test(`${scenario} preserves only the failing copier log tail before cleanup`, () => {
+  const r = run(scenario);
+  assert.notEqual(r.status, 0);
+  assert.equal(r.logTail, Array.from({length:40}, (_, i) => `partclone line ${i + 11}\n`).join(''));
+  assert.doesNotMatch(r.stdout, /CALL tail frozen=1/);
+  if (scenario === 'diagnostic-root') {
+    assert.ok(r.stdout.indexOf('CALL fsfreeze -u /') < r.stdout.indexOf('CALL tail'));
+    assert.equal(r.diagnostic.phase, 'root-copy');
+  } else assert.equal(r.diagnostic.phase, 'boot-copy');
+});
+test('a single huge log line is omitted rather than admitting an unrecognizable credential suffix', () => {
+  const r = run('diagnostic-long');
+  assert.equal(r.status, 1);
+  assert.ok(Buffer.byteLength(r.logTail) <= 8192);
+  assert.equal(r.logTail, '');
+});
+for (const scenario of ['diagnostic-missing', 'diagnostic-empty']) test(`${scenario} retains the original failure without inventing output`, () => {
+  const r = run(scenario);
+  assert.equal(r.status, 1);
+  assert.equal(r.diagnostic.phase, 'root-copy');
+  assert.ok(!r.logTail);
+});
+
+test('a successful copy log is not attributed to a later fsck failure', () => {
+  const r = run('diagnostic-later');
+  assert.equal(r.status, 4);
+  assert.equal(r.diagnostic.phase, 'root-fsck');
+  assert.equal(r.logTail, undefined);
+});
+test('cleanup failure preserves the original timeout and its log', () => {
+  const r = run('diagnostic-timeout-cleanup');
+  assert.equal(r.status, 1);
+  assert.equal(r.diagnostic.exit_status, 124);
+  assert.equal(r.diagnostic.phase, 'root-copy');
+  assert.match(r.logTail, /partclone line 50\n$/);
+});
+test('a failed thaw never forks a tail reader while root remains frozen', () => {
+  const r = run('diagnostic-thaw-failure');
+  assert.equal(r.status, 1);
+  assert.equal(r.diagnostic.phase, 'root-copy');
+  assert.equal(r.logTail, undefined);
+  assert.doesNotMatch(r.stdout, /CALL tail/);
+});
+
+test('a URL straddling the byte cutoff is omitted whole, never admitted without its scheme', () => {
+  const r = run('diagnostic-straddling');
+  assert.equal(r.status, 1);
+  assert.equal(r.logTail, ' '.repeat(8129) + 'x\n');
+  assert.doesNotMatch(r.logTail, /PRIVATE|X-Amz|builder/);
+});
+test('a full line exactly at the byte bound is preserved', () => {
+  const r = run('diagnostic-boundary');
+  assert.equal(r.status, 1);
+  assert.equal(r.logTail, ' '.repeat(8190) + 'x\n');
+});
