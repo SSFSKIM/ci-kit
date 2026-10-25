@@ -40,7 +40,7 @@ if [[ $1 == bootstrap && $3 == *${runnerAgent}*.plist ]]; then log=\${3##*/}; lo
   fake('plutil', 'exit 0');
   fake('pgrep', 'exit 1');
   fake('uname', 'if [[ $1 == -m ]]; then echo arm64; else echo Darwin; fi');
-  for (const name of ['node', 'corepack', 'git', 'soffice']) fake(name, 'echo fixture-tool');
+  for (const name of ['node', 'corepack', 'git']) fake(name, 'echo fixture-tool');
   // Never download/register a runner or invoke any real compiler or desktop tool.
   fake('curl', 'echo "$*" >> "$HOME/curl.calls"\nexit 90');
   // FAIL_COMPILE names the helpers whose compile fails, leaving partial output behind as a failed compiler may.
@@ -58,11 +58,10 @@ exec /bin/cp "$@"`);
   symlinkSync(python, join(bin, 'python3'));
   const env = { HOME: home, PATH: `${bin}:/usr/bin:/bin` };
   // Production intentionally ignores the installer's PATH for prerequisites. Redirect that boundary in this copy,
-  // including its LibreOffice existence probe, so the fixture never relies on the machine's installed tools.
+  // so the fixture never relies on the machine's installed tools or project applications.
   const install = join(kit, 'mac/install.sh');
   writeFileSync(install, readFileSync(install, 'utf8')
-    .replace(/^RUNNER_PATH=.*$/m, `RUNNER_PATH=${env.PATH}`)
-    .replace('test -x /Applications/LibreOffice.app/Contents/MacOS/soffice', 'true'));
+    .replace(/^RUNNER_PATH=.*$/m, `RUNNER_PATH=${env.PATH}`));
   const runner = join(home, 'actions-runner-maws');
   mkdirSync(join(runner, 'bin'), { recursive: true });
   // A registration records its arguments and whether the token came through the environment, then writes .runner.
@@ -115,6 +114,19 @@ function assertNewHooks(f, { compiled = helpers } = {}) {
   }
   assert.match(readFileSync(join(f.runner, '.env'), 'utf8'), new RegExp(`ACTIONS_RUNNER_HOOK_JOB_STARTED=${f.hooks}/job-started.sh`));
 }
+
+test('a fresh host can check and register before a job installs project applications', macOnly, () => {
+  const f = fixture({ registered: null });
+  const before = f.snapshot();
+  const check = f.run(undefined, ['--check']);
+  assert.equal(check.status, 0, check.stdout + check.stderr);
+  assert.deepEqual(f.snapshot(), before);
+  assert.equal(existsSync(join(f.home, 'config.args')), false);
+  const install = f.run(undefined, ['--disabled', '--name', 'ci-kit-mac-rental'], {}, 'registration-token-123\n');
+  assert.equal(install.status, 0, install.stdout + install.stderr);
+  assert.equal(JSON.parse(readFileSync(join(f.runner, '.runner'), 'utf8').replace(/^\uFEFF/, '')).agentName, 'ci-kit-mac-rental');
+  assertNewHooks(f);
+});
 
 test('a partial hook copy leaves the complete old hooks and environment untouched', macOnly, () => {
   const f = fixture();

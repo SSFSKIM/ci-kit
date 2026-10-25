@@ -115,9 +115,9 @@ gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token
   ([the VM lane](#the-vm-lane), "Install, enable, remove"). Without it, `install.sh` installs and reads nothing of the
   lane.
 - **Prerequisites** checked on the PATH jobs get: Node ≥ 22.12 (MAWS's `engines`), corepack, the Xcode command line
-  tools' `clang` (native modules such as `node-pty`), `python3` (node-gyp), git, and LibreOffice's `soffice` (the
-  document groups), found but not launched. MAWS's setup action installs its own Node 22 and pnpm per job into the
-  runner's tool cache; the system Node runs MAWS's plan job when it lands here (`GATE_RUNNER=macos`) and the hooks. A
+  tools' `clang` (native modules such as `node-pty`), `python3` (node-gyp), and git. Project applications are not
+  registration prerequisites: jobs apply their repository's declaration after checkout. MAWS's setup action installs
+  its own Node 22 and pnpm per job into the runner's tool cache; the system Node runs MAWS's plan job when it lands here (`GATE_RUNNER=macos`) and the hooks. A
   Homebrew install that asks no password closes a gap; anything that needs one goes to the human.
 - **The runner version** is pinned with its checksum in `install.sh` for the first install; after that the runner
   updates itself, as GitHub requires.
@@ -903,9 +903,9 @@ booking.
    `--first-run` requires the maintenance hold, a running candidate with its guest agent answering, and the MAWS
    share mounted at `/Volumes/My Shared Files/maws`. It reads `~/.ci-kit/quarantined-apps` and refuses while any
    recorded app's quarantine flags lack the user-approved bit (`0x40`), naming that app. An absent quarantine
-   attribute or an approved one passes; an unreadable app, flags or existing record refuses. With no record (a
-   declaration-free bake), it checks `/Applications/LibreOffice.app` by name as before. On 10-23, answering LibreOffice's
-   Gatekeeper "Open" changed `0181` to `01c1`. The group launches `soffice`, so that window step comes first.
+   attribute or an approved one passes; an unreadable app or flags refuses. The declaration-backed bake must have
+   written the record: a missing or unreadable record refuses; an empty record means no app needs approval.
+   On 10-23, answering LibreOffice's Gatekeeper "Open" changed `0181` to `01c1`. The group launches `soffice`, so that window step comes first.
 
    The shell part runs through `tart exec` in the guest's login session. It reads the runner's PATH from
    `~/actions-runner-maws/.path` (the baked Node 22 is keg-only; a fresh Terminal finds Node 24 and no pnpm), makes
