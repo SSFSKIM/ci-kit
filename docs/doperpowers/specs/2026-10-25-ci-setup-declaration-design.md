@@ -33,9 +33,16 @@ Macs.
 - [x] (2026-10-25 00:3xZ) Design approved by the owner (declaration in `.github/ci-kit.yml`, mini host installs).
 - [x] (2026-10-25 01:2xZ) Spec reviewed: adversarial design review and buildability review, two rounds; findings
   folded (Decision Log, review revision and second round).
-- [ ] M1 — The declaration and the setup step.
-- [ ] M2 — MAWS declares its environment.
-- [ ] M3 — Per-repo job images in the pool bake.
+- [x] (2026-10-25 01:3xZ) M1 — The declaration and the setup step. Two PRs around a `v1` move (Decision Log):
+  ci-kit #139 (478facf; the keys, `setup/`, the hash; review fixes for Homebrew aliases and apt virtual names) and
+  #140 (82c8d48; the gates workflow's step). `v1` = 82c8d48. Proofs: ci-kit-sandbox runs 40149966271 (own workflow
+  on `setup@setup-m1`) and 40150585134 (`gates.yml@v1`), green on hosted Ubuntu, hosted macOS and the pool.
+- [ ] M2 — MAWS declares its environment (completed: MAWS #145, head df6986dfc, independent review clean, class 1a
+  green on the pool, run 40151266892; remaining: the two Mac runs of Concrete Steps, the mini's scratch-formula
+  check, the architect's merge).
+- [ ] M3 — Per-repo job images in the pool bake (completed: ci-kit #141 merged as d60bc8b after a high review, the
+  bake job deployed from it; ci-kit-sandbox's default branch declares `apt: [cowsay]` (sandbox #52); remaining: the
+  proof bake on both providers and its records).
 - [ ] M4 — Pool jobs run on their repository's image.
 - [ ] M5 — Rebuild on a declaration change.
 - [ ] M6 — The Mac guest from the declaration.
@@ -648,7 +655,26 @@ acceptance item checked as written above, its evidence recorded in Surprises & D
 
 ## Surprises & Discoveries
 
-(none yet)
+- Observation: Actions resolves every `uses:` of a job before any step runs, whatever the step's condition, so a
+  workflow cannot reference an action that its own tag does not hold yet.
+  Evidence: run 40148841436 failed at job setup on `SSFSKIM/ci-kit/setup@v1` ("Can't find action.yml") while the
+  step's `if:` was false; ci-kit #68.
+- Observation: the setup step costs nothing measurable when nothing is missing, and seconds when something is.
+  Evidence: first apply `installed apt:cowsay` in 7.0 s (hosted Ubuntu), 3.8 s (hosted macOS, brew), 4.5 s (pool,
+  EC2); re-applies 0.0 s on Linux, 0.5 s on macOS (run 40149966271); MAWS's six pool jobs 0.1-0.6 s (run 40151266892).
+- Observation: presence by declared name is wrong for Homebrew aliases and old names and for Debian virtual
+  packages; the inventory has to resolve them.
+  Evidence: `brew install --dry-run pkg-config` proposed upgrading the installed `pkgconf`; `libasound2` is only
+  provided by `libasound2t64` on Ubuntu 24.04 (pool run 40150924865). Fixed in #139 (062434a).
+- Observation: Node's `fs.cp` rewrites relative symlinks into absolute paths unless `verbatimSymlinks: true`, which
+  would point a bake container's copy back outside its mount.
+  Evidence: real-copy tests RED 3/3 before the option, GREEN after (ci-kit #141, 5d540bf).
+- Observation: MAWS's Linux jobs need neither the installed engine nor LibreOffice, and only desk-web uses
+  Playwright's Chromium, on Linux only.
+  Evidence: MAWS master b51430679: LINUX_E2E `library artifacts available tools agents desk-web`; installedEngine's
+  callers are the connector, delivery and live suites; LIBREOFFICE_E2E `document presentations` (Mac groups);
+  desk-web's Playwright config uses Chromium on Linux and the installed Chrome on Darwin. A Linux native install of
+  Claude Code measured 9.1-13.2 s per job before it was made Darwin-only (run 40150847990).
 
 ## Decision Log
 
@@ -697,6 +723,24 @@ acceptance item checked as written above, its evidence recorded in Surprises & D
   are resolved; the two remaining points are fixed in place: the declaration's Node and pnpm are on the PATH for the
   script in the bake's first run as well as for `install` in its second, and M4's proof waits for a bake from merged
   main, because a VM runs the job code baked into its image. The review has converged; no further round.
+  Date/Author: 2026-10-25, CI-opt.
+
+- Decision: LibreOffice stays out of MAWS's `apt`.
+  Rationale: no Linux pool job installs it (its groups run on the Macs), so moving it into the image saves no job
+  time while every MAWS VM would boot 333.6 MiB more: on the pool, `apt-get update` 4 s, writer and impress 11 s,
+  67 packages, 341,574 KiB installed (ci-kit-sandbox run 40150924865). Revisit if `document` or `presentations`
+  gains a Linux lane. Rejected: baking it in "in case", which costs every EC2 job its initialization time.
+  Date/Author: 2026-10-25, CI-opt.
+
+- Decision: In MAWS's declaration, Claude Code installs on macOS only and Playwright's Chromium on Linux only
+  (`pnpm --filter desk-web exec playwright install chromium`, desk-web being its one consumer).
+  Rationale: the Surprises entry above; installing either where no job uses it costs every job on that lane.
+  Date/Author: 2026-10-25, CI-opt (M2 executor's findings).
+
+- Decision: ci-kit-sandbox is the test repository for M3-M5: its default branch declares `apt: [cowsay]`, so the
+  bake has a declaration to build before MAWS #145 lands, and M5's check is proven by changing that line.
+  Rationale: a proof that waited on MAWS's merge would wait on the Mac lanes; the sandbox is ours and already a
+  served repository. Rejected: deploying M3 and proving it only after #145 merges.
   Date/Author: 2026-10-25, CI-opt.
 
 ## Outcomes & Retrospective
