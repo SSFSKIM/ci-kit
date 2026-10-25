@@ -212,9 +212,45 @@ and by the coordinator's holds, and the design below says what is read and when.
   - [x] (2026-10-24 17:05–18:47Z) Step 4 wave 2b on 20261024a: `dashboard` 3/3 green, its longest job 5.4 min
     (1.30x the host's); `presentations` 2/3, a hang in a non-export test in run 1 (Surprises); the MAWS architect
     judges it against the test's host history.
-  - [ ] Step 4 wave 3 (browser, browser-comment, delivery). The host tools MAWS's groups run were checked against
-    the image first (2026-10-24, the Poppler gap's lesson, Decision Log): no other gap. That check missed a
-    home-relative one, the engine at `~/.local/bin/claude` (Decision Log, 2026-10-24 23:5xZ).
+  - [x] (2026-10-24 23:40Z) JIT runners per guest clone (ci-kit #135, cb77e76; Decision Log 2026-10-24), installed
+    under a 40 s hold (23:39:58-23:40:38Z). The first JIT guest, `maws-vm-job-vm-20261024T234140Z`, booted 23:41:43Z
+    and took run 40140642786's job at 23:42:12Z; green; its runner (3297) was gone from GitHub by 23:45:16Z. The
+    persistent registrations 2351 and 2352 were deleted.
+  - [x] (2026-10-25 05:11Z) Step 4 wave 3: 19 groups three times each on `maws-vm-golden-20261024a` (scratch
+    e7c25384f; runs 40140642786, 40146601191, 40157558847). Twelve passed 3/3 and MAWS #148 (master 2c2455c92)
+    added them to `MAC_VM_E2E`, 27 groups in all: agents, available, browser, browser-chrome, browser-comment,
+    browser-import, c12, composer, deliverables, design-systems, layout, supervisor. Held: artifacts, browser-cua and
+    terminal (2/3 each); connectors, connectors-direct, connectors-oauth and delivery 0/3 on the engine the image
+    lacked (`~/.local/bin/claude`, Decision Log 2026-10-24 23:5xZ). The host tools MAWS's groups run were checked
+    against the image before the wave (the Poppler gap's lesson); that check missed the home-relative engine.
+  - [x] (2026-10-25 14:00Z) The fifth refresh, the first golden baked from MAWS's own declaration (the setup
+    declaration spec, `2026-10-25-ci-setup-declaration-design.md`, M6 and M7): hold 13:36:31-14:00:07Z;
+    `maws-vm-candidate-20261025` baked with Poppler, LibreOffice and Claude Code from the declaration (its apply
+    303.8 s); first run 12/12 after LibreOffice's Gatekeeper approval through cua in the guest; trial run
+    40199576987 (document-app 20/20, the setup step 1.8 s); promoted to `maws-vm-golden-20261025`.
+    `maws-vm-golden-20261024a` retired after the first green production job from it (run 40198527158,
+    `e2e:supervisor`, 14:22Z).
+  - [x] (2026-10-25 14:18Z) The memory floor moved to 57 (ci-kit #151, Decision Log); the lane had booted no guest
+    since the refresh's release, the idle mini reading 57-59 %.
+  - [x] (2026-10-25 18:20Z) Step 4 wave 4: the seven held groups three times each on the 10-25 golden (runs
+    40200261879, 40212720841, 40216462062). delivery, connectors-oauth, artifacts and browser-cua passed 3/3 and go
+    to `MAC_VM_E2E` in the architect's PR; connectors and connectors-direct 2/3, both failures a guest-only
+    `ENOTEMPTY` in the connector scene's cleanup, which the architect is fixing before three more runs; terminal 2/3
+    (`terminal.spec.ts:490`), held on MAWS's debt list. Every `MAC_VM_E2E` group has now run in a guest on the
+    10-25 golden; tools' one red there is a test race (Surprises).
+  - [x] (2026-10-25 20:1xZ) Step 5, read from production rather than a staged set: every successful host job since
+    10-23 against the lane's guest intervals (125 guests, 296 runs; `host-beside-guest.py` in the coordinator's
+    analysis directory). Of 37 host groups, 24 ran beside a guest with their median inside their own solo p10-p90; 13
+    ran slower, by 0.1-0.9 min (side the clearest: 1.8 min solo, 2.4 beside, 10 of its 13 beside runs above its solo
+    maximum; browser-cua 0.9 to 1.8, panel 1.6 to 2.3). No host job failed for running beside a guest. The mode stays
+    `always`.
+  - [x] (2026-10-24 13Z) Step 10, the journal hour with the lane on: 12 boots, 12 memory pauses, 6 floor refusals,
+    no guest given up and no critical stop.
+  - [x] (2026-10-25 20:1xZ) Lost jobs since JIT went live (2026-10-24 23:40Z): none. On 10-25, 140 guest jobs and
+    218 host jobs completed, and no job was cancelled unacquired on a `ci-kit-mac*` label.
+  - [ ] Still open: step 6's untimed hold with the lane taking jobs (VA1) and an overlapping second owner (VA4),
+    step 7's recovery (VA10), step 8's legacy workflow (VA9), step 9's slot reuse (VA11), step 11's rollback
+    rehearsal, and step 12's verdict record once those land.
 - [ ] V5 — Widen the proven-VM set; the second guest, if memory ever allows it.
 
 ## Design
@@ -2067,6 +2103,20 @@ hold-aware plan send them to the guest, which this spec leaves open.
     timeout), and the stall sample shows no job process left, so a hang in the guest's graphics stack may sit under
     both. ci-kit #130 bounds the halt's cost to the 60 s power-off wait either way.
   - The Poppler exports passed in every run.
+
+- 2026-10-25, **Mac capacity is the bottleneck.** MAWS's Mac jobs on 10-25 00:00-20:00Z: the host 218 jobs, 8.5 h
+  busy; the guest 138 jobs, 7.4 h (46 % of the Mac job-hours), 3.9 h of them beside a host job. A Mac job was waiting
+  for 12.2 h of the 20; a guest-routed job waited a median 50 min (p90 121), a host one 20 min (p90 72). Without the
+  coordinator's own validation runs (waves 3 and 4, the trial, the setup spec's acceptance): host 7.4 h, guest 2.9 h,
+  1.8 h at once, a job waiting 8.1 h. The guest boots only on an idle host (the floor), and the 16 GB mini holds
+  one; Apple's virtualization allows two macOS guests per Mac. The owner was asked about a second Mac.
+- 2026-10-25, **guest-only test races, by group** (wave 4 and the setup spec's acceptance on the 10-25 golden):
+  connectors and connectors-direct, `ENOTEMPTY` removing the scene's mkdtemp root at
+  `e2e/support/connector-scene.ts:399` while something still writes into it (host 7/7 and 7/8 since 10-22); tools,
+  `maws-tools.spec.ts:483` reading an empty `fontFamily` from a node re-rendered between locate and evaluate (the
+  same on the old guest on 10-24; host 9/9), fixed by an `expect.poll` (MAWS 97db96417); terminal,
+  `terminal.spec.ts:490` re-adopt line count, 2 of 6 guest passes. A slower 4 GB guest widens a window the host
+  rarely meets; none was an image gap.
 
 ## Outcomes & Retrospective
 
