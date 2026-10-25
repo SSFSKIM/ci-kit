@@ -105,6 +105,12 @@ function answer() {
     return 0;
   }
   if (verb === 'run services add-iam-policy-binding') return 0;
+  if (verb === 'run jobs deploy') return change(() => { (state.jobs ??= {})[words[3]] = args; });
+  if (verb === 'run jobs add-iam-policy-binding') return state.jobs?.[words[3]] ? 0 : 1;
+  if (verb === 'scheduler jobs describe') return state.schedules?.[words[3]] ? 0 : 1;
+  if (verb === 'scheduler jobs create' || verb === 'scheduler jobs update') {
+    return change(() => { (state.schedules ??= {})[words[4]] = args; });
+  }
   if (call.startsWith('secrets describe')) return 0;
   if (call.startsWith('secrets get-iam-policy')) {
     console.log('serviceAccount:ci-kit-webhook@ssfskim-ci-kit.iam.gserviceaccount.com');

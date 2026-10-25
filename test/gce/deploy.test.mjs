@@ -43,6 +43,49 @@ function deploy(part, state) {
   }
 }
 
+test('bake-check deploys an additive job with the bake timeout, its invoker and viewers on both jobs', () => {
+  const ordinary = deploy('bake', {});
+  assert.equal(ordinary.status, 0, ordinary.stderr);
+  const run = deploy('bake-check', ordinary.state);
+  assert.equal(run.status, 0, run.stderr);
+  const [job] = verb(run.calls, 'run', 'jobs', 'deploy', 'ci-kit-bake-check');
+  assert.ok(job.includes('--set-env-vars=CI_KIT_BAKE_IF_STALE=1'));
+  assert.ok(job.includes('--args=node,gce/bake/bake.mjs'));
+  assert.ok(job.includes('--service-account=ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com'));
+  for (const flag of ['--task-timeout=', '--tasks=', '--max-retries=']) {
+    assert.equal(job.find(a => a.startsWith(flag)), ordinary.state.jobs['ci-kit-bake'].find(a => a.startsWith(flag)));
+  }
+  assert.deepEqual(run.state.jobs['ci-kit-bake'], ordinary.state.jobs['ci-kit-bake'], 'the existing job is not redeployed');
+  const grants = verb(run.calls, 'run', 'jobs', 'add-iam-policy-binding');
+  assert.deepEqual(grants.map(c => [c[3], c.find(a => a.startsWith('--role='))]).sort(), [
+    ['ci-kit-bake', '--role=roles/run.viewer'],
+    ['ci-kit-bake-check', '--role=roles/run.invoker'],
+    ['ci-kit-bake-check', '--role=roles/run.viewer'],
+  ]);
+  assert.ok(grants.every(c => c.includes('--member=serviceAccount:ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com')));
+  assert.deepEqual(run.calls.filter(c => c[0] === 'scheduler'), []);
+});
+
+test('bake-schedule creates or updates both schedules without changing the weekly cadence or target', () => {
+  for (const state of [{}, { schedules: { 'ci-kit-bake-weekly': [], 'ci-kit-bake-check-hourly': [] } }]) {
+    const run = deploy('bake-schedule', state);
+    assert.equal(run.status, 0, run.stderr);
+    const calls = verb(run.calls, 'scheduler', 'jobs', state.schedules ? 'update' : 'create');
+    assert.equal(calls.length, 2);
+    const weekly = run.state.schedules['ci-kit-bake-weekly'];
+    assert.ok(weekly.includes('--schedule=0 18 * * 0'));
+    assert.ok(weekly.includes('--uri=https://run.googleapis.com/v2/projects/ssfskim-ci-kit/locations/us-central1/jobs/ci-kit-bake:run'));
+    const hourly = run.state.schedules['ci-kit-bake-check-hourly'];
+    assert.ok(hourly.includes('--schedule=23 * * * *'));
+    assert.ok(hourly.includes('--uri=https://run.googleapis.com/v2/projects/ssfskim-ci-kit/locations/us-central1/jobs/ci-kit-bake-check:run'));
+    for (const schedule of [weekly, hourly]) {
+      assert.ok(schedule.includes('--time-zone=Etc/UTC'));
+      assert.ok(schedule.includes('--http-method=POST'));
+      assert.ok(schedule.includes('--oauth-service-account-email=ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com'));
+    }
+  }
+});
+
 const network = (state) => deploy('network', state);
 const verb = (calls, ...words) => calls.filter((c) => words.every((w, i) => c[i] === w));
 
