@@ -2,7 +2,7 @@
 // The guest bake's adapter: the shared applier plus records consumed by provision.sh and the first-run step.
 // The installed kit carries setup/, plan/ and vendor/ beside mac/'s contents, not a full repository checkout.
 import { execFileSync } from 'node:child_process';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -29,7 +29,8 @@ async function bakeSetup(kit, root) {
       const artifact = /^((?:\/|~\/).*\.app)(?: \(|$)/.exec(line)?.[1];
       if (!artifact) continue;
       // Homebrew's printable_target abbreviates an app installed beneath the user's home.
-      const app = artifact.startsWith('~/') ? join(process.env.HOME, artifact.slice(2)) : artifact;
+      // Homebrew 7 may list a Caskroom symlink rather than the installed app.
+      const app = await realpath(artifact.startsWith('~/') ? join(process.env.HOME, artifact.slice(2)) : artifact);
       const attrs = execFileSync('xattr', [app], { encoding: 'utf8' });
       if (attrs.split(/\r?\n/).includes('com.apple.quarantine')) apps.add(app);
     }
