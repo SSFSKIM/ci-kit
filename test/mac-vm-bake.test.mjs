@@ -2,7 +2,7 @@ import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -115,6 +115,15 @@ case $command in
     if [[ $1 == /bin/bash && $2 == */kit/vm/provision.sh ]]; then
       step=$3
       [[ ! -e $t/fail-$step ]] || { echo "provision: $step failed" >&2; exit 1; }
+      if [[ -e $HOME/guest/real-provision ]]; then
+        case $step in
+          setup|runner|env)
+            shift 2
+            export HOME=$HOME/guest
+            export CI_KIT_VM_SHARES=$HOME/shares
+            exec /bin/bash "$HOME/shares/kit/vm/provision.sh" "$@" ;;
+        esac
+      fi
       if [[ $step == register ]]; then
         [[ -n $interactive ]] || { echo 'provision: no registration token on stdin' >&2; exit 1; }
         IFS= read -r token; printf '%s %s\\n' "$4" "$token" >> "$t/tokens"
@@ -181,6 +190,8 @@ function fixture({ hold = 'maintenance since 2026-10-22T09:00:00Z', disk = 120, 
   writeFileSync(join(maws, 'package.json'), JSON.stringify({ name: 'maws', packageManager: 'pnpm@11.23.0+sha512.abc', engines: { node: '>=22.12' } }));
   writeFileSync(join(maws, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
   writeFileSync(join(vmHome, 'golden'), `${OLD}\n`);
+  mkdirSync(join(home, 'guest/.ci-kit'), { recursive: true });
+  writeFileSync(join(home, 'guest/.ci-kit/quarantined-apps'), '/Applications/LibreOffice.app\n/Applications/Extra App.app\n');
   executable(join(bin, 'tart'), fakeTart);
   executable(join(bin, 'gh'), fakeGh);
   mkdirSync(join(home, '.local/bin'), { recursive: true });
@@ -338,8 +349,11 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.deepEqual(text(join(f.vms, CANDIDATE, 'run.args')).trim().split('\n'), ['--no-graphics', '--no-clipboard', `--dir=kit:${mac}:ro`, `--dir=maws:${f.maws}:ro`, CANDIDATE]);
     const script = '/bin/bash /Volumes/My Shared Files/kit/vm/provision.sh';
     assert.deepEqual(f.exec(CANDIDATE), [`${script} check`, `${script} disk 60`, `${script} quiet`, `${script} display`, `${script} node 11.23.0`, `${script} store`, `${script} libreoffice`, `${script} poppler`,
-      `${script} engine ${ENGINE}`, `${script} runner ${installPin('RUNNER_VERSION')} ${installPin('RUNNER_SHA256')} mini-vm`, `${script} workrepo`, `${script} helpers`]);
+      `${script} engine ${ENGINE}`, `${script} setup`, `${script} runner ${installPin('RUNNER_VERSION')} ${installPin('RUNNER_SHA256')} mini-vm`, `${script} workrepo`, `${script} helpers`]);
     assert.match(result.stdout, /the seeded MAWS work repository \(workrepo\)/);
+    assert.match(result.stdout, /MAWS.*declaration.*\(setup\)/);
+    assert.match(result.stdout, /Open each app below/);
+    assert.match(result.stdout, /\/Applications\/Extra App.app/);
     // Its end verified before the step reports done: a stop, then Tart's list.
     const calls = f.calls();
     assert.ok(calls.indexOf(`stop ${CANDIDATE} --timeout 5`) > calls.lastIndexOf(`exec ${CANDIDATE} ${script} helpers`), calls.join('\n'));
@@ -475,14 +489,173 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
 
 });
 
+// Run the real setup/applier and both .env writers within a whole bake. Only downloads and OS provisioning are
+// stand-ins; the scratch clone, declaration, package inventories, script, install and records are real subprocesses.
+function setupBakeFixture() {
+  const f = fixture();
+  const guest = join(f.home, 'guest'), kit = join(guest, 'shares/kit'), bin = join(guest, 'bin');
+  mkdirSync(bin);
+  cpSync(mac, kit, { recursive: true });
+  for (const dir of ['setup', 'plan', 'vendor']) cpSync(join(mac, '..', dir), join(kit, dir), { recursive: true });
+  symlinkSync(f.maws, join(guest, 'shares/maws'));
+  writeFileSync(join(guest, 'real-provision'), '');
+  symlinkSync(process.execPath, join(bin, 'node'));
+  // No host Homebrew, downloads, runner tarball or system writes in this fixture.
+  const runnerPath = `${bin}:/usr/bin:/bin:/usr/sbin:/sbin`;
+  const script = join(kit, 'vm/provision.sh');
+  writeFileSync(script, readFileSync(script, 'utf8').replace(/^runner_path=.*$/m, `runner_path=${runnerPath}`));
+  executable(join(bin, 'curl'), 'printf fake-runner > "$3"');
+  executable(join(bin, 'shasum'), 'cat >/dev/null');
+  executable(join(bin, 'tar'), '[[ $1 == -xzf && $3 == -C ]] || exit 64; mkdir -p "$4/bin"');
+  executable(join(bin, 'brew'), `
+case "$*" in
+  'info --json=v2 --installed --formula') echo '{"formulae":[{"name":"poppler","full_name":"poppler","aliases":[],"oldnames":[],"tap":"homebrew/core","installed":[{"version":"1"}]}]}' ;;
+  'info --json=v2 --installed --cask')
+    extra=''
+    [[ ! -f $HOME/brew-installs ]] || extra=',{"token":"extra-app","full_token":"extra-app","old_tokens":[],"tap":"homebrew/cask","installed":"1"}'
+    printf '{"casks":[{"token":"libreoffice","full_token":"libreoffice","old_tokens":[],"tap":"homebrew/cask","installed":"1"}%s]}\\n' "$extra" ;;
+  'install hello') echo hello >> "$HOME/brew-installs" ;;
+  'install --cask extra-app') echo extra-app >> "$HOME/brew-installs" ;;
+  'list --cask extra-app') echo '/Applications/Extra App.app (1 MB)' ;;
+  'list --cask libreoffice extra-app') printf '/Applications/LibreOffice.app (1 MB)\\n/Applications/Extra App.app (1 MB)\\n' ;;
+  *) echo "unexpected brew: $*" >&2; exit 64 ;;
+esac`);
+  executable(join(bin, 'xattr'), `if [[ $1 == -p ]]; then echo '0181;date;Homebrew;uuid'; else echo com.apple.quarantine; fi`);
+  const git = (...args) => {
+    const r = spawnSync('/usr/bin/git', ['-C', f.maws, ...args], { encoding: 'utf8', env: { ...process.env,
+      GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+      GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' } });
+    assert.equal(r.status, 0, r.stderr);
+  };
+  mkdirSync(join(f.maws, '.github'));
+  writeFileSync(join(f.maws, '.github/ci-kit.yml'), `version: 1
+setup:
+  node: "22"
+  pnpm: true
+  brew: [poppler]
+  cask: [libreoffice, extra-app]
+  script: .github/ci-setup.sh
+  install: 'echo "install:$CI:$CI_KIT_SETUP_MODE" >> "$HOME/setup-calls"'
+`);
+  writeFileSync(join(f.maws, '.github/ci-setup.sh'), `set -eu
+[ ! -e dirty ]
+[ ! -e "$HOME/fail-script" ]
+echo "script:$CI:$CI_KIT_SETUP_MODE" >> "$HOME/setup-calls"
+`);
+  git('init', '-b', 'master'); git('add', '.'); git('commit', '-qm', 'declaration');
+  writeFileSync(join(f.maws, 'dirty'), 'host-only uncommitted file');
+  git('config', 'http.https://github.com/.extraheader', 'AUTHORIZATION: host-secret');
+  const run = (step, ...args) => spawnSync('/bin/bash', [script, step, ...args], { encoding: 'utf8', env: {
+    HOME: guest, CI_KIT_VM_SHARES: join(guest, 'shares'), PATH: runnerPath,
+  } });
+  return { ...f, guest, kit, git, runProvision: run };
+}
+
+describe('the declaration in a whole guest bake', macOnly, () => {
+  test('the final runner .env keeps the applied hash, including after env is repeated; all quarantined apps are recorded', () => {
+    const f = setupBakeFixture();
+    const result = f.run(['--bake', '--name', CANDIDATE]);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(text(join(f.guest, 'setup-calls')), 'script:true:bake\ninstall:true:bake\n');
+    assert.equal(text(join(f.guest, 'brew-installs')), 'extra-app\n');
+    const hash = text(join(f.guest, '.ci-kit/setup-hash'));
+    assert.equal(hash, 'bdcec72c1fa875b3\n');
+    const expected = `LANG=en_US.UTF-8
+ACTIONS_RUNNER_HOOK_JOB_STARTED=${f.guest}/ci-kit/vm/guest/hooks/job-started.sh
+ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${f.guest}/ci-kit/vm/guest/hooks/job-completed.sh
+CI_KIT_MACHINE=mini-vm
+CI_KIT_VM_GUEST=1
+CI_KIT_SETUP_HASH=bdcec72c1fa875b3
+`;
+    assert.equal(text(join(f.guest, 'actions-runner-maws/.env')), expected);
+    const again = f.runProvision('env', 'mini-vm');
+    assert.equal(again.status, 0, again.stderr);
+    assert.equal(text(join(f.guest, 'actions-runner-maws/.env')), expected);
+    assert.equal(text(join(f.guest, '.ci-kit/quarantined-apps')), '/Applications/Extra App.app\n/Applications/LibreOffice.app\n');
+    assert.match(result.stdout, /\/Applications\/LibreOffice.app/);
+    assert.match(result.stdout, /\/Applications\/Extra App.app/);
+    assert.equal(existsSync(join(f.guest, 'maws-setup')), false, 'scratch removed after success');
+    assert.equal(f.state(CANDIDATE), 'stopped');
+    // A job consumes the final runner environment, not the provisioning process's transient environment.
+    rmSync(join(f.maws, 'dirty'));
+    const imageEnv = Object.fromEntries(expected.trim().split('\n').map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
+    const job = () => spawnSync(process.execPath, [join(f.kit, 'setup/apply.mjs'), '--root', f.maws], {
+      encoding: 'utf8', env: { ...imageEnv, HOME: f.guest, PATH: `${f.guest}/bin:/usr/bin:/bin`,
+        CI_KIT_SETUP_BREW: join(f.guest, 'bin/brew'), CI_KIT_SETUP_XATTR: join(f.guest, 'bin/xattr') },
+    });
+    const matched = job();
+    assert.equal(matched.status, 0, matched.stdout + matched.stderr);
+    assert.match(matched.stdout, /image matches setup bdcec72c1fa875b3/);
+    assert.match(matched.stdout, /installed nothing/);
+    const config = join(f.maws, '.github/ci-kit.yml');
+    writeFileSync(config, readFileSync(config, 'utf8').replace('brew: [poppler]', 'brew: [poppler, hello]'));
+    const stale = job();
+    assert.equal(stale.status, 0, stale.stdout + stale.stderr);
+    assert.match(stale.stdout, /::notice::.*image setup bdcec72c1fa875b3 differs from commit setup [a-f0-9]{16}/);
+    assert.match(stale.stdout, /installed brew:hello/);
+  });
+
+  test('a declaration-free checkout keeps the legacy bake and leaves no setup hash', () => {
+    for (const config of [null, 'version: 1\ngates:\n  - name: test\n    run: echo ok\n']) {
+      const f = setupBakeFixture();
+      if (config === null) f.git('rm', '.github/ci-kit.yml');
+      else writeFileSync(join(f.maws, '.github/ci-kit.yml'), config);
+      f.git('commit', '-qam', 'no declaration');
+      writeFileSync(join(f.guest, '.ci-kit/setup-hash'), 'old-setup-hash\n');
+      const result = f.run(['--bake', '--name', CANDIDATE]);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.match(result.stdout, /no setup declaration; skipping setup/);
+      assert.equal(text(join(f.guest, '.ci-kit/setup-hash')), null);
+      assert.equal(text(join(f.guest, '.ci-kit/quarantined-apps')), null);
+      assert.equal(text(join(f.guest, 'setup-calls')), null);
+      assert.equal(text(join(f.guest, 'actions-runner-maws/.env')), `LANG=en_US.UTF-8
+ACTIONS_RUNNER_HOOK_JOB_STARTED=${f.guest}/ci-kit/vm/guest/hooks/job-started.sh
+ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${f.guest}/ci-kit/vm/guest/hooks/job-completed.sh
+CI_KIT_MACHINE=mini-vm
+CI_KIT_VM_GUEST=1
+`);
+      assert.ok(result.stdout.includes(join(f.guest, 'LibreOffice.app')));
+      assert.doesNotMatch(result.stdout, /Extra App.app/);
+      assert.equal(f.state(CANDIDATE), 'stopped');
+    }
+  });
+
+  test('home-relative Homebrew app artifacts are expanded before quarantine inspection and recording', () => {
+    const f = setupBakeFixture();
+    const brew = join(f.guest, 'bin/brew');
+    writeFileSync(brew, readFileSync(brew, 'utf8').replaceAll('/Applications/Extra App.app', '~/Applications/Extra App.app'));
+    executable(join(f.guest, 'bin/xattr'), `printf '%s\\n' "$*" >> "$HOME/xattr-calls"
+if [[ $1 == -p ]]; then echo '0181;date;Homebrew;uuid'; else echo com.apple.quarantine; fi`);
+    const result = f.runProvision('setup');
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(text(join(f.guest, '.ci-kit/quarantined-apps')), `/Applications/LibreOffice.app\n${f.guest}/Applications/Extra App.app\n`);
+    assert.ok(text(join(f.guest, 'xattr-calls')).split('\n').includes(`${f.guest}/Applications/Extra App.app`));
+    assert.doesNotMatch(text(join(f.guest, 'xattr-calls')), /~\//);
+  });
+
+  test('a failed declaration stops the bake, cleans its clone and records no successful setup hash', () => {
+    const f = setupBakeFixture();
+    writeFileSync(join(f.guest, 'fail-script'), '');
+    const result = f.run(['--bake', '--name', CANDIDATE]);
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout + result.stderr, /setup.script.*failed/);
+    assert.equal(text(join(f.guest, '.ci-kit/setup-hash')), null);
+    assert.equal(text(join(f.guest, 'setup-calls')), null);
+    assert.equal(existsSync(join(f.guest, 'maws-setup')), false);
+    assert.equal(f.state(CANDIDATE), 'stopped');
+    assert.ok(!f.exec(CANDIDATE).some((call) => /provision.sh runner/.test(call)));
+  });
+});
+
 // Execute the actual first-run shell in a scratch guest; only external tools and the guest's absolute paths are fake.
 function firstRunFixture() {
   const f = fixture();
   const guest = join(f.home, 'guest');
-  for (const dir of ['bin', 'runner-bin', 'share', 'LibreOffice.app', 'actions-runner-maws']) mkdirSync(join(guest, dir), { recursive: true });
+  for (const dir of ['bin', 'runner-bin', 'share', 'LibreOffice.app', 'actions-runner-maws', '.ci-kit']) mkdirSync(join(guest, dir), { recursive: true });
   writeFileSync(join(guest, 'share/package.json'), '{}');
   writeFileSync(join(guest, 'share/pnpm-lock.yaml'), 'lockfileVersion: 9');
   writeFileSync(join(guest, 'actions-runner-maws/.path'), `${guest}/runner-bin:${guest}/bin:/usr/bin:/bin\n`);
+  writeFileSync(join(guest, '.ci-kit/quarantined-apps'), `${guest}/LibreOffice.app\n`);
   writeFileSync(join(guest, 'quarantine'), '01c1;6718b124;Homebrew Cask;uuid\n');
   executable(join(guest, 'bin/xattr'), `if [[ $1 == -p ]]; then cat "$HOME/quarantine"; else [[ ! -f $HOME/quarantine ]] || echo com.apple.quarantine; fi`);
   executable(join(guest, 'bin/git'), `printf 'git %s\\n' "$*" >> "$HOME/commands"
@@ -551,6 +724,34 @@ describe('the first-run shell (bake.sh --first-run)', macOnly, () => {
       assert.equal(f.commands(), '', 'no clone or pnpm before the checks');
       assert.ok(!f.calls().some((call) => /sudo|^stop /.test(call)), 'a refusal leaves the guest up');
     }
+  });
+
+  test('checks every recorded app, including spaces, before running any repository code', () => {
+    const f = firstRunFixture();
+    writeFileSync(join(f.guest, '.ci-kit/quarantined-apps'), `${f.guest}/LibreOffice.app\n/Applications/Extra App.app\n`);
+    executable(join(f.guest, 'bin/xattr'), `
+if [[ $1 != -p ]]; then echo com.apple.quarantine
+elif [[ $3 == '/Applications/Extra App.app' ]]; then echo '0181;date;Homebrew;uuid'
+else echo '01c1;date;Homebrew;uuid'; fi`);
+    const result = f.run(['--first-run', CANDIDATE]);
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout + result.stderr, /Extra App.app.*not user-approved/);
+    assert.equal(f.commands(), '');
+    assert.equal(f.state(CANDIDATE), 'running');
+  });
+
+  test('without a declaration record first-run still requires LibreOffice approval by name', () => {
+    const f = firstRunFixture();
+    rmSync(join(f.guest, '.ci-kit/quarantined-apps'));
+    writeFileSync(join(f.guest, 'quarantine'), '0181;date;Homebrew;uuid\n');
+    const blocked = f.run(['--first-run', CANDIDATE]);
+    assert.notEqual(blocked.status, 0);
+    assert.match(blocked.stdout + blocked.stderr, /LibreOffice.app.*not user-approved/);
+    assert.equal(f.commands(), '');
+    writeFileSync(join(f.guest, 'quarantine'), '01c1;date;Homebrew;uuid\n');
+    const approved = f.run(['--first-run', CANDIDATE]);
+    assert.equal(approved.status, 0, approved.stdout + approved.stderr);
+    assert.match(f.commands(), /pnpm e2e:deliverables/);
   });
 
   test('runs on the runner PATH with the heap raised, streams output before completion, removes the clone and verifies shutdown', async () => {

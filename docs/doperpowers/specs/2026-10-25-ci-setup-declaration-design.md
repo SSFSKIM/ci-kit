@@ -743,6 +743,15 @@ acceptance item checked as written above, its evidence recorded in Surprises & D
   served repository. Rejected: deploying M3 and proving it only after #145 merges.
   Date/Author: 2026-10-25, CI-opt.
 
+- Decision: The Mac bake inventories every declared cask after apply and install, recording every app that still
+  carries quarantine, including apps already installed by the base or the legacy provision steps. The shared
+  applier's `quarantined` result alone lists only newly installed casks, so using it alone would omit LibreOffice
+  during the additive migration and let `--first-run` skip its approval check.
+  Rationale: the spec's first-run contract covers every declared app left unapproved, regardless of which step
+  installed it. The fixture bake covers already-installed LibreOffice beside a newly installed app with spaces in
+  its path; both enter the record and the printed window step.
+  Date/Author: 2026-10-25, CI-opt (M6 executor's discovery; coordinator approved).
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.

@@ -21,6 +21,8 @@
 #                                        native installer: ~/.local/bin/claude, its link into
 #                                        ~/.local/share/claude/versions/<version>, which is where MAWS finds the
 #                                        installed engine (connectors-direct and delivery launch it with no login)
+#   setup                                the shared MAWS declaration applied in bake mode, with install, in a scratch
+#                                        clone; ~/.ci-kit holds its setup-hash and quarantined-apps for first-run
 #   runner <version> <sha256> <machine>  the runner at install.sh's pin in ~/actions-runner-maws, its .env and .path
 #                                        (env below), and ~/ci-kit -> the kit share, which keeps a space out of the
 #                                        hook paths
@@ -155,6 +157,9 @@ write_env() { # <machine>
     echo "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=$HOME/ci-kit/vm/guest/hooks/job-completed.sh"
     echo "CI_KIT_MACHINE=$1"
     echo CI_KIT_VM_GUEST=1
+    if [[ -f $HOME/.ci-kit/setup-hash ]]; then
+      printf 'CI_KIT_SETUP_HASH=%s\n' "$(cat "$HOME/.ci-kit/setup-hash")"
+    fi
   } >"$vm_runner/.env"
   echo "$runner_path" >"$vm_runner/.path"
   ln -sfn "$vm_shares/kit" "$HOME/ci-kit"
@@ -288,6 +293,16 @@ sys.exit(0 if valid else 1)' <<<"$indexing" || fail "Spotlight indexing is not v
       fail "$engine is not the native installer's link to version $1 ($(readlink "$engine" || echo 'not a link'))"
     say "Claude Code $1 at $engine"
     ;;
+  setup)
+    [[ -f $vm_shares/kit/setup/apply.mjs ]] || fail "no setup applier in the installed kit at $vm_shares/kit (refresh with mac/install.sh --vm)"
+    scratch=$HOME/maws-setup
+    trap 'rm -rf "$scratch"' EXIT
+    rm -rf "$scratch"
+    # Read committed master, not the host's edits or its git config. The clone owns its objects, not share hardlinks.
+    git -c safe.directory='*' clone --quiet --no-local --depth=1 --single-branch --branch master --no-tags "$vm_shares/maws" "$scratch"
+    say "MAWS declaration at $(git -C "$scratch" rev-parse HEAD) (setup)"
+    node "$here/setup.mjs" "$vm_shares/kit" "$scratch"
+    ;;
   runner)
     version=${1:-} sha=${2:-}
     [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && $sha =~ ^[0-9a-f]{64}$ ]] || fail 'runner takes <version> <sha256> <machine>'
@@ -369,6 +384,6 @@ print(os.path.join(runner, work))' "$vm_runner" "$runner_work") || fail 'cannot 
     say "$name registered with $labels; its identity is in the identity-$slot share, and none is left in $vm_runner"
     ;;
   *)
-    fail "unknown step '${step}' (check, disk, quiet, display, node, store, libreoffice, poppler, engine, runner, workrepo, env, helpers, register)"
+    fail "unknown step '${step}' (check, disk, quiet, display, node, store, libreoffice, poppler, engine, setup, runner, workrepo, env, helpers, register)"
     ;;
 esac
