@@ -159,11 +159,11 @@ test('a script needing other repository files fails smoke rather than skipping t
   assert.doesNotMatch(result.stdout,/installed nothing|smoke setup .*: ok/);
 });
 
-test('retention materializes in-tree script symlinks without keeping their unrelated directory',async t=>{
-  const f=await fixture(t);
+test('retention materializes executable in-tree scripts without keeping their unrelated directory',async t=>{
+  const f=await fixture(t,{extraScript:'test -x "$0"\n'});
   const bytes=await readFile(join(f.root,'.github/setup.sh'));
   await mkdir(join(f.root,'scripts'));
-  await writeFile(join(f.root,'scripts/tooling.sh'),bytes);
+  await writeFile(join(f.root,'scripts/tooling.sh'),bytes,{mode:0o755});
   await rm(join(f.root,'.github/setup.sh'));
   await symlink('../scripts/tooling.sh',join(f.root,'.github/setup.sh'));
   await retain(f.root);
