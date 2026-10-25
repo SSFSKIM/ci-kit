@@ -87,7 +87,8 @@ pins (`zsh=5.9` is rejected). `apt` names use lowercase letters, digits, `+`, `.
 `@` (for named formulas such as `postgresql@16`), `_` and tap-qualified names. Lists must be lists of strings. A
 project requiring an exact tool version installs and checks it in the script instead.
 
-The setup step checks presence, not versions: one `dpkg-query` on Linux, one `brew list` per declared macOS list.
+The setup step checks presence, not versions: one `dpkg-query` on Linux (including installed virtual-package
+providers), one `brew info --json=v2 --installed` per declared macOS list (including aliases and old names).
 It installs only the missing names (`sudo -n apt-get` on Linux, `brew install` on macOS), then runs the script with
 bash from the repository root, with `CI=true` and `CI_KIT_SETUP_MODE=job` (or `bake` in an image build). The script
 runs **every time**, even on a matching image. Make it idempotent and fast when satisfied: check a command or its

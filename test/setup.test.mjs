@@ -57,10 +57,10 @@ let out = '', err = '', code = 0;
 if (name === 'dpkg-query') { out = state.dpkg ?? ''; code = state.queryCode ?? 0; }
 if (name === 'apt-get') { if (args[0] === 'install') { err = state.aptError ?? ''; code = err ? 1 : 0; } }
 if (name === 'brew') {
-  if (args[0] === 'list' && args.includes('--full-name')) out = args.includes('--formula') ? (state.formula ?? '') : (state.cask ?? '');
+  if (args[0] === 'info') out = JSON.stringify({formulae: state.formulae ?? [], casks: state.casks ?? []});
   else if (args[0] === 'list') out = state.artifacts ?? '';
   else if (args[0] === 'install') { err = state.brewError ?? ''; code = err ? 1 : 0; }
-  if (args[0] === 'list' && state.queryCode) code = state.queryCode;
+  if (['list', 'info'].includes(args[0]) && state.queryCode) code = state.queryCode;
 }
 if (name === 'xattr') { code = (state.quarantined ?? []).includes(args.at(-1)) ? 0 : 1; out = code ? '' : '0081;test'; }
 process.stdout.write(out); process.stderr.write(err); process.exit(code);
@@ -128,7 +128,11 @@ test('a stale image names both hashes and still installs the difference', (t) =>
 test('macOS checks each list once, understands full names, and reports quarantined newly installed apps', (t) => {
   const app = '/Applications/New App.app';
   const f = fixture(t, { apt: ['zsh'], brew: ['hello', 'owner/tap/tool', 'homebrew/core/poppler'], cask: ['old-app', 'new-app'] }, {
-    formula: 'owner/tap/tool\npoppler\n', cask: 'old-app\n',
+    formulae: [
+      { name: 'tool', full_name: 'owner/tap/tool', tap: 'owner/tap', aliases: [], oldnames: [], installed: [{ version: '1.0' }] },
+      { name: 'poppler', full_name: 'poppler', tap: 'homebrew/core', aliases: [], oldnames: [], installed: [{ version: '1.0' }] },
+    ],
+    casks: [{ token: 'old-app', full_token: 'old-app', tap: 'homebrew/cask', old_tokens: [], installed: '1.0' }],
     artifacts: `==> App\n${app} (12 files, 2MB)\n/Applications/Approved.app (3 files)\n==> Binary\n/usr/local/bin/new-app\n`, quarantined: [app],
   });
   const r = f.run({ platform: 'darwin' });
@@ -136,7 +140,7 @@ test('macOS checks each list once, understands full names, and reports quarantin
   assert.equal(r.result.installed, 'brew:hello cask:new-app');
   assert.deepEqual(r.result.quarantined, [app]);
   const calls = f.calls();
-  assert.equal(calls.filter((c) => c.name === 'brew' && c.args.includes('--full-name')).length, 2);
+  assert.equal(calls.filter((c) => c.name === 'brew' && c.args[0] === 'info').length, 2);
   assert.deepEqual(calls.filter((c) => c.name === 'brew' && c.args[0] === 'install').map((c) => c.args), [['install', 'hello'], ['install', '--cask', 'new-app']]);
   assert.ok(calls.filter((c) => c.name === 'brew' && c.args[0] === 'install').every((c) => c.noninteractive === '1'));
   assert.equal(calls.filter((c) => ['dpkg-query', 'apt-get', 'sudo'].includes(c.name)).length, 0);
@@ -229,4 +233,62 @@ test('the action manifest uses the runner Node and a resolvable entrypoint', () 
 test('a setup-only file produces a successful empty plan', () => {
   const config = parseConfig('version: 1\nsetup: {apt: [cowsay]}', { isPrivate: false });
   assert.deepEqual(planOutput(config, config.gates), { gates: [], pool: false, note: 'no gates selected', cache_write: false });
+});
+
+test('installed apt providers satisfy virtual names, including versioned Provides, without update or install', (t) => {
+  const f = fixture(t, { apt: ['awk', 'libasound2'] }, {
+    dpkg: 'mawk\tinstalled\tawk\nlibasound2t64\tinstalled\tlibasound2 (= 1.2.11-1), libasound2-virtual\n',
+  });
+  const r = f.run();
+  successful(r);
+  assert.equal(r.result.installed, '');
+  assert.deepEqual(f.calls().map((c) => c.name), ['dpkg-query']);
+  assert.ok(f.calls()[0].args.some((arg) => arg.includes('${Provides}')));
+  assert.match(r.stdout, /installed nothing/);
+});
+
+test('residual apt provider configuration does not satisfy its virtual names', (t) => {
+  const f = fixture(t, { apt: ['awk'] }, { dpkg: 'mawk\tconfig-files\tawk\n' });
+  const r = f.run();
+  successful(r);
+  assert.equal(r.result.installed, 'apt:awk');
+});
+
+const pkgconf = {
+  name: 'pkgconf', full_name: 'pkgconf', tap: 'homebrew/core', aliases: ['pkg-config'], oldnames: ['old-pkgconf'],
+  installed: [{ version: '2.1.0', used_options: [], built_as_bottle: true, poured_from_bottle: true, runtime_dependencies: [], installed_as_dependency: false, installed_on_request: true }],
+  versions: { stable: '2.4.3', head: 'HEAD', bottle: true }, outdated: true,
+};
+
+test('Homebrew aliases and old names of an outdated installed formula and cask cause no upgrade', (t) => {
+  const f = fixture(t, { brew: ['pkgconf', 'pkg-config', 'old-pkgconf', 'homebrew/core/pkg-config'], cask: ['new-app', 'old-app', 'homebrew/cask/old-app'] }, {
+    formulae: [pkgconf],
+    casks: [{ token: 'new-app', full_token: 'new-app', tap: 'homebrew/cask', old_tokens: ['old-app'], installed: '1.0', version: '2.0', outdated: true }],
+  });
+  const r = f.run({ platform: 'darwin' });
+  successful(r);
+  assert.equal(r.result.installed, '');
+  assert.deepEqual(f.calls().map((c) => [c.name, c.args]), [
+    ['brew', ['info', '--json=v2', '--installed', '--formula']],
+    ['brew', ['info', '--json=v2', '--installed', '--cask']],
+  ]);
+});
+
+test('an unknown Homebrew name stays missing while an installed alias in the same list stays untouched', (t) => {
+  const f = fixture(t, { brew: ['pkg-config', 'no-such-name'] }, {
+    formulae: [pkgconf], brewError: 'No available formula with the name "no-such-name"',
+  });
+  const r = f.run({ platform: 'darwin' });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /No available formula with the name "no-such-name"/);
+  assert.deepEqual(f.calls().filter((c) => c.args[0] === 'install').map((c) => c.args), [['install', 'no-such-name']]);
+});
+
+test('Homebrew qualified aliases retain their tap identity', (t) => {
+  const f = fixture(t, { brew: ['owner/tap/tool-alias', 'tool-alias', 'other/tap/tool-alias'] }, {
+    formulae: [{ name: 'tool', full_name: 'owner/tap/tool', tap: 'owner/tap', aliases: ['tool-alias'], oldnames: [], installed: [{ version: '1.0' }], outdated: false }],
+  });
+  const r = f.run({ platform: 'darwin' });
+  successful(r);
+  assert.equal(r.result.installed, 'brew:other/tap/tool-alias');
 });

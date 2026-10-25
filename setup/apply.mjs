@@ -72,8 +72,18 @@ export async function applySetup({ root = process.env.GITHUB_WORKSPACE || proces
   if (apt.length) {
     // Query the database once (not one potentially failing query per missing package). Residual configuration is
     // not an installed package. ${Package} omits multiarch suffixes, matching the declaration's Debian names.
-    const output = await run(bin('DPKG_QUERY', 'dpkg-query'), ['-W', '-f=${Package}\t${db:Status-Status}\n'], 'apt presence query');
-    const present = new Set(lines(output).filter((line) => line.endsWith('\tinstalled')).map((line) => line.split('\t')[0]));
+    const output = await run(bin('DPKG_QUERY', 'dpkg-query'), ['-W', '-f=${Package}\t${db:Status-Status}\t${Provides}\n'], 'apt presence query');
+    const present = new Set();
+    for (const line of lines(output)) {
+      const [name, status, provides = ''] = line.split('\t');
+      if (status !== 'installed') continue;
+      present.add(name);
+      // A virtual dependency is satisfied by its installed provider, including versioned Provides entries.
+      for (const entry of provides.split(',')) {
+        const provided = entry.trim().split(/[\s(]/)[0];
+        if (provided) present.add(provided);
+      }
+    }
     const missing = apt.filter((name) => !present.has(name));
     if (missing.length) {
       const sudo = bin('SUDO', 'sudo'), aptGet = bin('APT_GET', 'apt-get');
@@ -87,13 +97,23 @@ export async function applySetup({ root = process.env.GITHUB_WORKSPACE || proces
   for (const [kind, names, flag] of [['brew', brew, '--formula'], ['cask', cask, '--cask']]) {
     if (!names.length) continue;
     const executable = bin('BREW', 'brew');
-    const output = await run(executable, ['list', flag, '--full-name', '-1'], `${kind} presence list`);
-    const present = new Set(lines(output));
-    // Homebrew prints core formulae/casks without their tap, other taps with it. Unqualified names resolve to an
-    // installed package of that name; qualified names must match their tap (not another tap's same-name package).
-    const canonical = (name) => name.replace(kind === 'brew' ? /^homebrew\/core\// : /^homebrew\/cask\//, '');
-    const missing = names.filter((name) => !present.has(canonical(name))
-      && (name.includes('/') || ![...present].some((full) => full.endsWith(`/${name}`))));
+    // Query installed metadata once per list. Querying the declared names instead would let one unknown name
+    // abort the whole info read, hiding installed aliases beside it. Unknown names here simply remain missing.
+    const output = await run(executable, ['info', '--json=v2', '--installed', flag], `${kind} presence query`);
+    const info = JSON.parse(output);
+    const present = new Set();
+    for (const entry of kind === 'brew' ? info.formulae : info.casks) {
+      if (!entry.installed?.length) continue;
+      const identities = kind === 'brew'
+        ? [entry.name, ...entry.aliases, ...entry.oldnames]
+        : [entry.token, ...entry.old_tokens];
+      present.add(kind === 'brew' ? entry.full_name : entry.full_token);
+      for (const name of identities) {
+        present.add(name);
+        if (entry.tap && !name.includes('/')) present.add(`${entry.tap}/${name}`);
+      }
+    }
+    const missing = names.filter((name) => !present.has(name));
     if (!missing.length) continue;
     try {
       await run(executable, ['install', ...(kind === 'cask' ? ['--cask'] : []), ...missing], `${kind} install ${missing.join(', ')}`, true);
