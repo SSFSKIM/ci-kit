@@ -664,10 +664,11 @@ The booking a session makes through CI-opt says which kind it needs:
   guest's jobs keep CI going through it.
 
 **The memory guard and the disk reserve.** A boot needs memory pressure at level 1
-(`kern.memorystatus_vm_pressure_level`), at least `CI_KIT_VM_MEMORY_FLOOR` % available (`kern.memorystatus_level`, 60,
-from V1's samples on the mini: a busy 4 GB guest moved the figure at most 8 points, 24 with a host e2e job beside it,
-and pressure 2 began at 35–41 %, so a boot at 60 keeps the host above that with a host job beside, while a 3 GB surge,
-which left 53 %, blocks a boot), swap not grown over 60 s (`vm.swapusage`), and `CI_KIT_VM_DISK_RESERVE`
+(`kern.memorystatus_vm_pressure_level`), at least `CI_KIT_VM_MEMORY_FLOOR` % available (`kern.memorystatus_level`, 57;
+V1's samples on the mini: a busy 4 GB guest moved the figure at most 8 points, 24 with a host e2e job beside it, and
+pressure 2 began at 35–41 %, while a 3 GB surge left 53 %, which blocks a boot. V1's 60 stopped admitting once the idle
+mini read 57–59 % (2026-10-25: a host e2e job reads 51–56 %), so the floor moved to 57, where a boot comes when the host
+is idle), swap not grown over 60 s (`vm.swapusage`), and `CI_KIT_VM_DISK_RESERVE`
 GB free on the volume of `~/.tart` (40); a read that fails admits nothing. From `tart run` to the clone's verified end
 the launcher samples every 15 s into `vm-lane.log`: warning on two samples gives up a guest that holds no job (through
 the idle stop) and pauses the next boot 2 min behind one that does; critical on one sample, or free space under 5 GB,

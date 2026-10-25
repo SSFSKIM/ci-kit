@@ -1762,6 +1762,20 @@ hold-aware plan send them to the guest, which this spec leaves open.
   in every guest job from MAWS's workflow (a download per job, and a MAWS change for an image gap); Homebrew's cask
   (it links `/opt/homebrew/bin/claude`, not the installer's link MAWS resolves); `latest` at bake time (a version
   the host may not run yet).
+- 2026-10-25 14:2xZ (CI-opt; V4, the owner's evening and overnight load): **`CI_KIT_VM_MEMORY_FLOOR` moves from 60 to
+  57.** V1 sized 60 in a 07-08Z window and left the owner's load unmeasured. From 10-24 22Z the mini's idle figure
+  read 57-59 % (6.0 GB wired, the owner's Claude sessions and their spares), so the lane logged `no boot: memory
+  available 59%, under the floor of 60%` through whole idle hours and booted only when a reading touched 60: after
+  the 10-25 refresh, three runs' guest jobs waited with the host idle between its jobs. A host e2e job reads 51-56 %
+  and the 3 GB surge V1 saw left 53 %, so 57 boots on an idle host and still refuses beside a surge. Of the 222
+  guests booted since 10-23 07Z, every one at 60 or above, 31 met pressure 2 (57 of 3,137 samples, at 27-44 %
+  available), each answered by the guard's pause, and none met pressure 4; a boot three points lower shifts that
+  by at most three points, and the runtime guard, not the floor, answers a surge after a boot. Bridged on
+  the mini by `CI_KIT_VM_MEMORY_FLOOR=57` in the lane's LaunchAgent, reloaded while the lane was idle, until the next
+  install writes the template back (a `launchctl setenv` over ssh lands in the ssh session's domain, not the GUI
+  session's, so the agent never saw it).
+  **Rejected:** keeping 60 and asking the owner to close sessions on the mini (the floor would starve again at the
+  next drift); a lower floor such as 50 (it admits a boot beside a host job's surge, the case V1 drew the floor for).
 
 ## Surprises & Discoveries
 

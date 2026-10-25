@@ -529,7 +529,7 @@ exec /bin/mv "$@"`);
     { name: '4, a maintenance VM running', before: (m) => m.vm('maws-vm-candidate-20261021', 'running'),
       refusal: /no boot: maws-vm-candidate-20261021 runs$/m, lift: (m) => m.vm('maws-vm-candidate-20261021', 'stopped') },
     { name: '5, memory pressure', options: { memory: { pressure: 2 } }, refusal: /no boot: memory pressure 2, not 1 \(pressure 2, available 60%, swap 500 MB\)$/m, lift: (m) => m.memory() },
-    { name: '5, available memory under the floor (60 by default: V1\'s)', options: { memory: { available: 59 } }, refusal: /no boot: memory available 59%, under the floor of 60%$/m, lift: (m) => m.memory({ available: 60 }) },
+    { name: '5, available memory under the floor (57 by default)', options: { memory: { available: 56 } }, refusal: /no boot: memory available 56%, under the floor of 57%$/m, lift: (m) => m.memory({ available: 57 }) },
     { name: '5, swap growing', before: (m) => writeFileSync(join(m.home, 'swap-grow'), '500\n'), refusal: /no boot: swap grew from \d+ MB to \d+ MB in \d+ s$/m,
       lift: (m) => rmSync(join(m.home, 'swap-grow')) },
     { name: '5, a memory read that fails', options: { memory: { pressure: 'fail' } }, refusal: /no boot: memory unknown \(the read failed\)$/m, lift: (m) => m.memory() },
