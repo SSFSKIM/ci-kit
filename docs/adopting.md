@@ -60,9 +60,13 @@ version: 1                  # required; must be 1
 setup:                      # optional; applied to every gate unless the gate sets setup: false
   node: "24"                # optional; an actions/setup-node version spec, quoted
   pnpm: false               # optional; true → corepack enable (pnpm's version from package.json packageManager)
-  install: npm ci           # optional; shell command run after checkout
+  install: npm ci           # optional; shell command run after the packages and setup script
   fetch_depth: 1            # optional; actions/checkout depth for gate jobs; 0 = full history; default 1
-gates:                      # required; non-empty
+  apt: [zsh, fonts-noto-cjk] # optional; Debian/Ubuntu package names, Linux only
+  brew: [poppler]           # optional; Homebrew formulas, macOS only (owner/tap/name allowed)
+  cask: [libreoffice]        # optional; Homebrew apps, macOS only
+  script: .github/ci-setup.sh # optional; relative POSIX path, no .. segment; bash on both platforms
+gates:                      # non-empty, unless setup declares packages or a script
   - name: unit              # required; [a-z0-9][a-z0-9-]*; unique; not "plan" or "verdict"
     run: npm test           # required; run with bash -eo pipefail at the repo root
     lane: hosted            # hosted | hosted-macos | pool | mac ; default hosted
@@ -74,6 +78,73 @@ gates:                      # required; non-empty
     setup: true             # optional; false skips the shared setup
     env: {FOO: bar}         # optional; string values (quote numbers); CI_KIT_* names are the kit's
     build_cache: gha        # optional; hosted only; the GitHub Actions cache for this gate's docker builds
+```
+
+### The CI environment declaration
+
+`apt`, `brew`, `cask` and `script` are the repository's CI environment. Declare packages by name, without version
+pins (`zsh=5.9` is rejected). `apt` names use lowercase letters, digits, `+`, `.` and `-`; Homebrew also accepts
+`@` (for named formulas such as `postgresql@16`), `_` and tap-qualified names. Lists must be lists of strings. A
+project requiring an exact tool version installs and checks it in the script instead.
+
+The setup step checks presence, not versions: one `dpkg-query` on Linux, one `brew list` per declared macOS list.
+It installs only the missing names (`sudo -n apt-get` on Linux, `brew install` on macOS), then runs the script with
+bash from the repository root, with `CI=true` and `CI_KIT_SETUP_MODE=job` (or `bake` in an image build). The script
+runs **every time**, even on a matching image. Make it idempotent and fast when satisfied: check a command or its
+version before downloading it. The action supplies no secrets. Scripts may use tools already available on the
+runner; the action itself needs no Node on PATH, but it does not provision the declaration's Node or pnpm. The gates
+workflow sets those up first; a custom workflow must do so when its script or install command needs them.
+
+Package installs and scripts that fail fail the step, naming the package or script. An image hash is only a cache
+hint: `CI_KIT_SETUP_HASH` matching the declaration produces `ci-kit setup: image matches setup <hash>`; a differing
+hash produces a notice naming both, and the job still installs what is missing. Hosted runners and the Mac mini's
+own runner normally have no image hash. Each run prints a summary naming the packages installed and the elapsed
+seconds. Installs on the mini persist on the owner's machine.
+
+**macOS apps have a first-run exception.** A newly installed app carrying `com.apple.quarantine` is named in a
+warning. It needs a human's first-run approval on that lane before tests can launch it; the action never removes
+quarantine or approves dialogs. A cask installer asking for a password or sudo fails with a message saying it needs
+an administrator and a manual install. It does not prompt interactively.
+
+#### Repositories with their own workflow
+
+A repository may keep its jobs in its own workflow and use `.github/ci-kit.yml` only for this declaration:
+
+```yaml
+version: 1
+setup:
+  apt: [cowsay]
+  brew: [cowsay]
+  script: .github/ci-setup.sh
+  install: npm ci
+```
+
+Omit `gates`, or set `gates: []`: the planner produces zero gates. A file with neither gates nor a nonempty package
+list or script is still an error (`node` or `install` alone does not constitute an environment declaration).
+
+After checkout (and any project Node/pnpm setup), call:
+
+```yaml
+- uses: SSFSKIM/ci-kit/setup@v1
+  id: environment
+  with:
+    install: true
+```
+
+Inputs: `root` defaults to the workspace; `install` defaults to `false`. With `true`, the declared install command
+runs after the script. The gates workflow uses the default because it keeps its own Install step, and skips the
+action altogether for an empty declaration or a gate with `setup: false`.
+
+Outputs: `hash`, the commit's setup hash (`none` without a declaration); `installed`, space-separated `apt:<name>`,
+`brew:<name>`, `cask:<name>` entries (empty if nothing was installed); `stale`, `true` only when an image hash was
+present and differed. The hash includes the canonical package lists, Node, pnpm, install command, script path and
+script bytes, but not checkout depth or lockfiles. Images are caches of this identity, never a correctness
+requirement.
+
+The same applier is available to image builds, with the kit checkout and its vendored parser alongside it:
+
+```bash
+node setup/apply.mjs --mode bake --root /path/to/clone [--install]
 ```
 
 ### Lanes
@@ -117,7 +188,8 @@ about a minute for it (`ci-gate` prints `WAIT` after 2 minutes). Inside the job,
 ### Gate jobs
 
 Each selected gate is one job, named after the gate. It checks out the tested commit (a PR's merge commit), applies
-`setup` (Node through `actions/setup-node`, `corepack enable` when `pnpm`, then `install`), exports the gate's `env`,
+`setup` (Node through `actions/setup-node`, `corepack enable` when `pnpm`, packages and the setup script, then
+`install`), exports the gate's `env`,
 and runs `run`. When the gate fails, its `artifacts` are uploaded as an artifact named after the gate.
 
 The checkout holds `setup.fetch_depth` commits of history: the tested commit alone by default, everything with `0`.

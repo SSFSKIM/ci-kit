@@ -19,7 +19,14 @@ export const BUILD_CACHES = ['gha'];
 // The reusable workflow's own jobs: a gate with one of these names would be indistinguishable from them in checks.
 const RESERVED = ['plan', 'verdict'];
 const TOP_KEYS = ['version', 'setup', 'gates'];
-const SETUP_KEYS = ['node', 'pnpm', 'install', 'fetch_depth'];
+const SETUP_KEYS = ['node', 'pnpm', 'install', 'fetch_depth', 'apt', 'brew', 'cask', 'script'];
+const PACKAGE_RE = {
+  apt: /^[a-z0-9][a-z0-9+.-]*$/,
+  brew: /^[a-z0-9][a-z0-9@+._-]*(\/[a-z0-9][a-z0-9@+._-]*){0,2}$/,
+  cask: /^[a-z0-9][a-z0-9@+._-]*(\/[a-z0-9][a-z0-9@+._-]*){0,2}$/,
+};
+
+export const hasDeclaration = (setup) => Boolean(setup.script || setup.apt?.length || setup.brew?.length || setup.cask?.length);
 // actions/checkout's depth when setup does not say: the tested commit alone.
 export const DEFAULT_FETCH_DEPTH = 1;
 const GATE_KEYS = ['name', 'run', 'lane', 'cpus', 'timeout', 'paths', 'on', 'artifacts', 'setup', 'env', 'build_cache'];
@@ -38,7 +45,7 @@ function unknownKeys(obj, allowed, where, errors) {
 }
 
 function readSetup(raw, errors) {
-  const setup = { node: '', pnpm: false, install: '', fetch_depth: DEFAULT_FETCH_DEPTH };
+  const setup = { node: '', pnpm: false, install: '', fetch_depth: DEFAULT_FETCH_DEPTH, apt: [], brew: [], cask: [], script: '' };
   if (raw === undefined || raw === null) return setup;
   if (!isMapping(raw)) {
     errors.push('setup: must be a mapping');
@@ -60,6 +67,19 @@ function readSetup(raw, errors) {
   if (raw.fetch_depth !== undefined) {
     if (Number.isInteger(raw.fetch_depth) && raw.fetch_depth >= 0) setup.fetch_depth = raw.fetch_depth;
     else errors.push('setup.fetch_depth: must be a whole number of commits, 0 for full history');
+  }
+  for (const key of ['apt', 'brew', 'cask']) {
+    if (raw[key] === undefined) continue;
+    if (!isStringList(raw[key])) errors.push(`setup.${key}: must be a list of package names`);
+    else if (raw[key].some((name) => !PACKAGE_RE[key].test(name))) {
+      errors.push(`setup.${key}: invalid package name (names only, no version pins): ${raw[key].filter((name) => !PACKAGE_RE[key].test(name)).join(', ')}`);
+    } else setup[key] = raw[key];
+  }
+  if (raw.script !== undefined) {
+    if (typeof raw.script !== 'string' || raw.script.trim() === '' || raw.script.startsWith('/')
+        || raw.script.includes('\\') || raw.script.includes('\0') || raw.script.split('/').includes('..')) {
+      errors.push('setup.script: must be a relative POSIX path with no .. segment');
+    } else setup.script = raw.script;
   }
   return setup;
 }
@@ -180,7 +200,9 @@ export function parseConfig(text, { isPrivate }) {
   const setup = readSetup(raw.setup, errors);
 
   const gates = [];
-  if (!Array.isArray(raw.gates) || raw.gates.length === 0) {
+  if (hasDeclaration(setup) && (raw.gates === undefined || (Array.isArray(raw.gates) && raw.gates.length === 0))) {
+    // A repository with its own workflow may use this file only for its environment.
+  } else if (!Array.isArray(raw.gates) || raw.gates.length === 0) {
     errors.push('gates: required, a non-empty list');
   } else {
     const seen = new Set();

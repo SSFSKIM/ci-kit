@@ -1,0 +1,21 @@
+name: ci-kit setup
+description: Apply the repository's declared CI environment, installing only missing packages.
+inputs:
+  root:
+    description: Repository root (defaults to the workspace)
+    required: false
+    default: ${{ github.workspace }}
+  install:
+    description: Also run setup.install after the packages and script
+    required: false
+    default: 'false'
+outputs:
+  hash:
+    description: This commit's setup hash (none without a declaration)
+  installed:
+    description: Space-separated apt:name, brew:name and cask:name packages installed by this step
+  stale:
+    description: true when an image setup hash was present and differed from the commit's
+runs:
+  using: node24
+  main: index.mjs
