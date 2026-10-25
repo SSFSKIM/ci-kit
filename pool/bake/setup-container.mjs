@@ -20,8 +20,19 @@ async function main() {
     if (result.error || ![7, 28].includes(result.status)) throw new Error('metadata reachable or probe failed');
   }
   console.log('ci-kit bake: metadata refused (IPv4, IPv6, IMDSv2)');
-  const config = execFileSync('git', ['-C', root, 'config', '--local', '--list'], { encoding: 'utf8' });
-  if (/extraheader|credential|https?:\/\/[^/\s]+@/i.test(config)) throw new Error('clone git config contains a credential');
+  // NUL records and newline key/value separators preserve '=' in URL scopes and multiline values.
+  const config = execFileSync('git', ['-C', root, 'config', '--local', '--null', '--list'], { encoding: 'utf8' });
+  for (const record of config.split('\0').filter(Boolean)) {
+    const separator = record.indexOf('\n');
+    const key = separator < 0 ? record : record.slice(0, separator);
+    const value = separator < 0 ? '' : record.slice(separator + 1);
+    // --local does not expand includes. Refuse them rather than attest to config we have not inspected.
+    if (/^include(?:if)?\./i.test(key)) throw new Error('clone git config has an ambiguous include');
+    if (/^credential\./i.test(key) || (/^http\./i.test(key) && /\.extraheader$/i.test(key)) ||
+        /[a-z][a-z0-9+.-]*:\/\/[^/\s]+@/i.test(key) || /[a-z][a-z0-9+.-]*:\/\/[^/\s]+@/i.test(value)) {
+      throw new Error('clone git config contains a credential');
+    }
+  }
   console.log('ci-kit bake: clone credentials absent');
 
   const { setup } = parseConfig(await readFile(join(root, '.github/ci-kit.yml'), 'utf8'), { isPrivate: true });
