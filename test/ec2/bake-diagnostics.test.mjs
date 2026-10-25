@@ -110,3 +110,12 @@ test('bake does not reflect arbitrary report diagnostic, outcome, or smoke conte
     for (const marker of ['jit-private', 'signature=', 'artifact-contents', 'private-warm-token']) assert.ok(!message.includes(marker), message);
   }
 });
+
+test('builder copy refusal exposes only its sanitized tool tail, never the report manifest', async () => {
+  const message = await failedBake({value:'failed:compact', diagnostic: {
+    reason:'compact-failed', phase:'root-copy', exit_status:1,
+    log_tail:'\x1b[31mPartclone: bitmap count mismatch\x1b[0m\nhttps://reports.invalid/?signature=private',
+  }, manifest:{secret:'manifest-private'}, stdout:'unrelated-private'}, {builder:true});
+  assert.equal(message, 'builder failed: failed:compact '+JSON.stringify({reason:'compact-failed',phase:'root-copy',exit_status:1,
+    log_tail:'Partclone: bitmap count mismatch\n[redacted-url]'}));
+});

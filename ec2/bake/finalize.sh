@@ -30,7 +30,9 @@ compact_report() {
     } else {
       let diagnostic = formatDiagnostic({ reason: 'compact-failed', phase: 'compact', exit_status: status });
       try {
-        const inner = formatDiagnostic(JSON.parse(await readFile('/run/ci-kit-bake/compact-diagnostic', 'utf8')));
+        const failure = JSON.parse(await readFile('/run/ci-kit-bake/compact-diagnostic', 'utf8'));
+        try { failure.log_tail = await readFile('/run/ci-kit-bake/compact-diagnostic.log', 'utf8'); } catch {}
+        const inner = formatDiagnostic(failure);
         if (JSON.parse(inner).reason === 'compact-failed') diagnostic = inner;
       } catch {}
       console.log(JSON.stringify({ value: 'failed:compact', diagnostic: JSON.parse(diagnostic), compact }));

@@ -95,3 +95,17 @@ test('unknown properties and serialization hooks are never emitted or invoked', 
   assert.equal(formatDiagnostic(value), '{"reason":"cloud-init-log","path":"/var/log"}');
   assert.equal(formatDiagnostic({ reason: 'unexpected', message: 'x'.repeat(100_000) }), '{"reason":"unexpected"}');
 });
+
+// Dropping the tail or reflecting report objects/control sequences breaks these boundary guarantees.
+test('compact tool output is bounded, sanitized, and optional; unrelated report fields stay private', () => {
+  const base = { reason:'compact-failed', phase:'root-copy', exit_status:1 };
+  const input = { ...base, log_tail:'\x1b[31mRead bitmap failed\x1b[0m\r\n\x00See https://reports.invalid/?signature=private\u202e', manifest:{secret:'manifest-private'} };
+  assert.equal(formatDiagnostic(input), JSON.stringify({...base,log_tail:'Read bitmap failed\nSee [redacted-url]'}));
+  for (const log_tail of [undefined, null, [], {}, 42, '', '\x00']) assert.equal(formatDiagnostic({...base,log_tail}), JSON.stringify(base));
+  const lines = Array.from({length:100}, (_, i) => `line ${i}`).join('\n');
+  assert.equal(JSON.parse(formatDiagnostic({...base,log_tail:lines})).log_tail, lines.split('\n').slice(-40).join('\n'));
+  const huge = JSON.parse(formatDiagnostic({...base,log_tail:'é'.repeat(20000)+'END'})).log_tail;
+  assert.ok(Buffer.byteLength(huge) <= 8192);
+  assert.ok(huge.endsWith('END'));
+  assert.equal(formatDiagnostic({...base,log_tail:huge}), JSON.stringify({...base,log_tail:huge}));
+});

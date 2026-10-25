@@ -1,4 +1,16 @@
 // Shared log rendering for the guest and bake reader. S3 report fields are data, not trusted error text.
+import { stripVTControlCharacters } from 'node:util';
+
+// Tool logs are the only free text admitted here, never the report/manifest or arbitrary objects.
+// Strip terminal controls and URL capabilities; JSON serialization escapes the remaining newlines.
+function compactLogTail(value) {
+  if (typeof value !== 'string') return '';
+  const clean = stripVTControlCharacters(value).replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\p{Cf}\u2028\u2029]/gu, '')
+    .replace(/https?:\/\/\S+/gi, '[redacted-url]').trimEnd();
+  // Drop a UTF-8 character split at the byte boundary rather than growing the bound on decoding.
+  return Buffer.from(clean).subarray(-8192).toString('utf8').replace(/^\ufffd+/u, '').split('\n').slice(-40).join('\n');
+}
 const manifest = '/etc/ci-kit/bake-manifest.json';
 const pathsByReason = new Map([
   ['manifest-missing', [manifest]],
@@ -39,13 +51,15 @@ export function formatCompactTrace(value) {
   return JSON.stringify({ elapsed_seconds: value.elapsed_seconds, exit_status: value.exit_status, phases });
 }
 
-// The finite vocabulary bounds the output. Never stringify the original object, including its extra fields.
+// A finite vocabulary plus an optional bounded tool tail. Never stringify the original object or its extra fields.
 export function formatDiagnostic(value) {
   const unexpected = '{"reason":"unexpected"}';
   if (!value || typeof value !== 'object' || Array.isArray(value)) return unexpected;
   if (value.reason === 'compact-failed') {
     if (!compactPhases.has(value.phase) || !Number.isInteger(value.exit_status) || value.exit_status < 1 || value.exit_status > 255) return unexpected;
-    return JSON.stringify({ reason: 'compact-failed', phase: value.phase, exit_status: value.exit_status });
+    const log_tail = compactLogTail(value.log_tail);
+    return JSON.stringify({ reason: 'compact-failed', phase: value.phase, exit_status: value.exit_status,
+      ...(log_tail ? { log_tail } : {}) });
   }
   if (!pathsByReason.get(value.reason)?.includes(value.path)) return unexpected;
   if (value.code !== undefined && !codesByReason.get(value.reason)?.has(value.code)) return unexpected;

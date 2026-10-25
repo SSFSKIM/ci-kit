@@ -409,8 +409,11 @@ echo compact >> "$TEST_ROOT/compacted"
     const fallback = { reason:'compact-failed',phase:'compact',exit_status:7 };
     const secret = 'secret https://reports.invalid/?signature=private';
     const partialTrace = 'copy-root-setup 1 0\nsource-inventory 47 0\nroot-copy 480 124\ncopy-root-cleanup 3 0\ncopy-root-setup 533 7\ncompact 533 0\nprivate-phase 1 1\n';
-    for (const [handoff, diagnostic, trace = partialTrace] of [
+    for (const [handoff, diagnostic, trace = partialTrace, logTail] of [
       [null, fallback],
+      [JSON.stringify({reason:'compact-failed',phase:'root-copy',exit_status:1}),
+        {reason:'compact-failed',phase:'root-copy',exit_status:1,log_tail:'Partclone: bitmap count mismatch'},
+        partialTrace, 'Partclone: bitmap count mismatch'],
       [JSON.stringify({reason:'compact-failed',phase:'root-copy',exit_status:124,stderr:secret,url:secret}),
         {reason:'compact-failed',phase:'root-copy',exit_status:124}],
       [JSON.stringify({reason:'compact-failed',phase:secret,exit_status:7}), fallback],
@@ -426,7 +429,8 @@ echo compact >> "$TEST_ROOT/compacted"
       await writeFile(join(root,'etc/ci-kit/bake-manifest.json'),JSON.stringify(built));
       const writeHandoff = handoff === null ? '' : `printf '%s' '${handoff}' > "$CI_KIT_COMPACT_DIAGNOSTIC"\n`;
       const writeTrace = trace === null ? '' : `printf '%s' '${trace}' > "$CI_KIT_COMPACT_TRACE"\n`;
-      await writeFile(compact, `#!/bin/bash\n${writeHandoff}${writeTrace}exit 7\n`);
+      const writeLog = logTail === undefined ? '' : `printf '%s' '${logTail}' > "$CI_KIT_COMPACT_DIAGNOSTIC.log"\n`;
+      await writeFile(compact, `#!/bin/bash\n${writeHandoff}${writeTrace}${writeLog}exit 7\n`);
       assert.throws(()=>run(finalizer), error => error.status === 7);
       const actual = JSON.parse(await readFile(join(root,'report.jsonl'),'utf8'));
       const {compact:timings,...failure} = actual;
