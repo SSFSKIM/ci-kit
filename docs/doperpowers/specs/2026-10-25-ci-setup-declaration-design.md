@@ -324,7 +324,9 @@ lower-case letters, digits, `-` and `_`, up to 63 characters) = `<hash>`. AMI ta
 **The bake manifest** (`pool/bake/manifest.mjs`). Beside its current fields it carries
 `repos: { "<owner>/<repo>": { revision: <40 hex>, setup_hash: <hash> } }` for every served repository with a
 declaration, resolved once by the orchestrator and handed to both builders. After the build each entry gains
-`apply: { ok, image_bytes }` and `warm: { ok }` from its builder; verification requires every entry's `apply.ok`,
+`apply: { ok, image_bytes }` and `warm: { ok }` from its builder. `image_bytes` is the job image's size above
+`ci-kit-runner` (Docker image sizes subtracted), the 1 GiB split-trigger metric; the builder logs the total too.
+Only repository/revision/setup-hash pins must match across providers; sizes and warm results may differ. Verification requires every entry's `apply.ok`,
 and `warm` stays best effort, as today's warming is. The EC2 VM's image check accepts a manifest with `repos`. The
 `maws` field, its labels and the `maws-files`/`pnpm-fetch` requirements stay, produced as now, until M7 removes
 them together.

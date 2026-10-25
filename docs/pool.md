@@ -606,7 +606,7 @@ the label again before it acts.
   `ci-kit-webhook@ssfskim-ci-kit.iam.gserviceaccount.com`; creating and rotating it are the owner's (The webhook,
   above).
 - No VM gets a service account or a key. The builder gets a one-hour installation token, narrowed to reading
-  MAWS's contents (`WARM_SCOPE` in `pool/bake/warm.mjs`), in its metadata; the image is made from its disk, never
+  the served repositories' contents (`bakeScope` in `pool/bake/manifest.mjs`), in its metadata; the image is made from its disk, never
   from its metadata.
 
 **The network.** Every builder, smoke VM and job VM sits on its placement's subnetwork of the VPC `ci-kit`
@@ -689,6 +689,34 @@ deploys it, and `gce/deploy.sh bake-schedule` adds the weekly run (Sunday 18:00 
 `gcloud run jobs execute ci-kit-bake --region=us-central1 --project=ssfskim-ci-kit`. The first ready image,
 `ci-kit-runner-20261016-100502-b4fc88e2`, was baked from the Mac (2026-10-16, 12.5 min: builder 8 min, image 1 min,
 smoke 2.5 min).
+
+**Per-repository job images (GCE and EC2).** The orchestrator resolves each served repository's default revision
+and setup hash once, into `repos` in `/etc/ci-kit/bake-manifest.json`. Both builders fetch those exact commits with
+a contents-read token scoped to the served repositories. The Docker metadata firewall is installed before these
+clones; each container proves IPv4/IPv6 metadata and the IMDSv2 token endpoint unreachable and the clone's git config
+credential-free before applying any repository code. The token exists only in the host's fetch environment.
+
+`pool/bake/job-images.mjs` runs each declaration as `runner`, using the runner's bundled Node 24 for the applier.
+The declaration's Node comes from the pinned tool cache (major 22/24 or the exact cached version); an unsupported
+version fails rather than using a different runtime. pnpm shims are private to the container, backed by corepack.
+The first container applies packages and the script and is committed as `ci-kit-job/<owner>-<repo>:latest` with
+`CI_KIT_SETUP_HASH` in its environment and label. The runner entrypoint and working directory are restored on commit.
+The second container also runs `setup.install` to warm shared caches and is never committed; its failure is best effort.
+An apply failure fails that provider's bake. The existing MAWS cache warmer and all its required checks remain.
+
+Each manifest entry records `apply: {ok, image_bytes}` (`image_bytes` is additional bytes above the shared base)
+and `warm: {ok}`. Only the resolved inputs must match between providers, not layer sizes or warm results. Builders
+log total and additional sizes; orchestrator logs include the additional bytes and apply/warm outcome. More than
+1 GiB above base is a signal to consider separate VM disks, not an automatic rejection.
+GCE records `ci-kit-setup-<owner>-<repo>=<hash>` labels (lowercase, punctuation normalized to `-`); AMIs also record
+`ci-kit-setup:<owner>/<repo>=<hash>` tags. Legacy MAWS records remain until the separate removal milestone.
+
+Pristine shallow checkouts are retained under `/var/lib/ci-kit/setup-sources/`, outside the job images and shared
+cache, for boot smoke. Build/install/smoke use disposable copies under the cache's `work/`, so install artifacts are
+not preserved with the source or committed into Docker. On both providers, the host launches each job image with
+`gce/vm/smoke.sh --setup`: setup in job mode must match its hash and install nothing. These containers have no Docker
+socket or host credentials; the host launches them separately before the original base-image checks. **Normal jobs
+still start `ci-kit-runner:latest`**; selecting the repository image is a separate deployment milestone.
 
 **Checking for leftovers.**
 

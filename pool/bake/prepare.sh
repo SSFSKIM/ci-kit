@@ -45,3 +45,9 @@ CI_KIT_GH_TOKEN="$(warm_token)" node /opt/ci-kit/pool/bake/warm.mjs || {
   echo "ci-kit bake: warming was partial"
 }
 chown -R 1001:1001 "$CACHE"
+
+# The multi-cloud manifest owns the served declarations. Hetzner remains on its existing base/warmer path.
+if [ -n "${CI_KIT_BAKE_MANIFEST:-}" ]; then
+  step=job-images
+  CI_KIT_GH_TOKEN="$(warm_token)" node /opt/ci-kit/pool/bake/job-images.mjs
+fi
