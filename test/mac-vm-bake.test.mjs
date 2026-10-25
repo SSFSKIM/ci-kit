@@ -352,7 +352,7 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
       `${script} engine ${ENGINE}`, `${script} setup`, `${script} runner ${installPin('RUNNER_VERSION')} ${installPin('RUNNER_SHA256')} mini-vm`, `${script} workrepo`, `${script} helpers`]);
     assert.match(result.stdout, /the seeded MAWS work repository \(workrepo\)/);
     assert.match(result.stdout, /MAWS.*declaration.*\(setup\)/);
-    assert.match(result.stdout, /Open each recorded app/);
+    assert.match(result.stdout, /Open each app below/);
     assert.match(result.stdout, /\/Applications\/Extra App.app/);
     // Its end verified before the step reports done: a stop, then Tart's list.
     const calls = f.calls();
@@ -548,7 +548,7 @@ echo "script:$CI:$CI_KIT_SETUP_MODE" >> "$HOME/setup-calls"
   const run = (step, ...args) => spawnSync('/bin/bash', [script, step, ...args], { encoding: 'utf8', env: {
     HOME: guest, CI_KIT_VM_SHARES: join(guest, 'shares'), PATH: runnerPath,
   } });
-  return { ...f, guest, kit, runProvision: run };
+  return { ...f, guest, kit, git, runProvision: run };
 }
 
 describe('the declaration in a whole guest bake', macOnly, () => {
@@ -593,6 +593,44 @@ CI_KIT_SETUP_HASH=bdcec72c1fa875b3
     assert.equal(stale.status, 0, stale.stdout + stale.stderr);
     assert.match(stale.stdout, /::notice::.*image setup bdcec72c1fa875b3 differs from commit setup [a-f0-9]{16}/);
     assert.match(stale.stdout, /installed brew:hello/);
+  });
+
+  test('a declaration-free checkout keeps the legacy bake and leaves no setup hash', () => {
+    for (const config of [null, 'version: 1\ngates:\n  - name: test\n    run: echo ok\n']) {
+      const f = setupBakeFixture();
+      if (config === null) f.git('rm', '.github/ci-kit.yml');
+      else writeFileSync(join(f.maws, '.github/ci-kit.yml'), config);
+      f.git('commit', '-qam', 'no declaration');
+      writeFileSync(join(f.guest, '.ci-kit/setup-hash'), 'old-setup-hash\n');
+      const result = f.run(['--bake', '--name', CANDIDATE]);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.match(result.stdout, /no setup declaration; skipping setup/);
+      assert.equal(text(join(f.guest, '.ci-kit/setup-hash')), null);
+      assert.equal(text(join(f.guest, '.ci-kit/quarantined-apps')), null);
+      assert.equal(text(join(f.guest, 'setup-calls')), null);
+      assert.equal(text(join(f.guest, 'actions-runner-maws/.env')), `LANG=en_US.UTF-8
+ACTIONS_RUNNER_HOOK_JOB_STARTED=${f.guest}/ci-kit/vm/guest/hooks/job-started.sh
+ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${f.guest}/ci-kit/vm/guest/hooks/job-completed.sh
+CI_KIT_MACHINE=mini-vm
+CI_KIT_VM_GUEST=1
+`);
+      assert.ok(result.stdout.includes(join(f.guest, 'LibreOffice.app')));
+      assert.doesNotMatch(result.stdout, /Extra App.app/);
+      assert.equal(f.state(CANDIDATE), 'stopped');
+    }
+  });
+
+  test('home-relative Homebrew app artifacts are expanded before quarantine inspection and recording', () => {
+    const f = setupBakeFixture();
+    const brew = join(f.guest, 'bin/brew');
+    writeFileSync(brew, readFileSync(brew, 'utf8').replaceAll('/Applications/Extra App.app', '~/Applications/Extra App.app'));
+    executable(join(f.guest, 'bin/xattr'), `printf '%s\\n' "$*" >> "$HOME/xattr-calls"
+if [[ $1 == -p ]]; then echo '0181;date;Homebrew;uuid'; else echo com.apple.quarantine; fi`);
+    const result = f.runProvision('setup');
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(text(join(f.guest, '.ci-kit/quarantined-apps')), `/Applications/LibreOffice.app\n${f.guest}/Applications/Extra App.app\n`);
+    assert.ok(text(join(f.guest, 'xattr-calls')).split('\n').includes(`${f.guest}/Applications/Extra App.app`));
+    assert.doesNotMatch(text(join(f.guest, 'xattr-calls')), /~\//);
   });
 
   test('a failed declaration stops the bake, cleans its clone and records no successful setup hash', () => {
@@ -700,10 +738,20 @@ else echo '01c1;date;Homebrew;uuid'; fi`);
     assert.match(result.stdout + result.stderr, /Extra App.app.*not user-approved/);
     assert.equal(f.commands(), '');
     assert.equal(f.state(CANDIDATE), 'running');
+  });
+
+  test('without a declaration record first-run still requires LibreOffice approval by name', () => {
+    const f = firstRunFixture();
     rmSync(join(f.guest, '.ci-kit/quarantined-apps'));
-    const missing = f.run(['--first-run', CANDIDATE]);
-    assert.notEqual(missing.status, 0);
-    assert.match(missing.stdout + missing.stderr, /quarantined-apps/);
+    writeFileSync(join(f.guest, 'quarantine'), '0181;date;Homebrew;uuid\n');
+    const blocked = f.run(['--first-run', CANDIDATE]);
+    assert.notEqual(blocked.status, 0);
+    assert.match(blocked.stdout + blocked.stderr, /LibreOffice.app.*not user-approved/);
+    assert.equal(f.commands(), '');
+    writeFileSync(join(f.guest, 'quarantine'), '01c1;date;Homebrew;uuid\n');
+    const approved = f.run(['--first-run', CANDIDATE]);
+    assert.equal(approved.status, 0, approved.stdout + approved.stderr);
+    assert.match(f.commands(), /pnpm e2e:deliverables/);
   });
 
   test('runs on the runner PATH with the heap raised, streams output before completion, removes the clone and verifies shutdown', async () => {

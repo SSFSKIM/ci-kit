@@ -347,7 +347,9 @@ do_bake() {
   disk_follow
   in_guest 900 'the compiled helpers (helpers)' /bin/bash "$provision" helpers
   disk_follow
-  quarantined=$(tart_call 30 exec "$run_vm" /bin/bash -c 'cat "$HOME/.ci-kit/quarantined-apps"') || {
+  quarantined=$(tart_call 30 exec "$run_vm" /bin/bash -c '
+    if [[ -e $HOME/.ci-kit/quarantined-apps ]]; then cat "$HOME/.ci-kit/quarantined-apps"
+    else echo /Applications/LibreOffice.app; fi') || {
     end_vm
     die "$name: cannot read the setup step's quarantined-apps record"
   }
@@ -362,8 +364,8 @@ Screen Sharing from the MacBook (never VNC into the guest), with the maintenance
        tart run --no-clipboard --dir=maws:$maws:ro $name
      A window opens and the guest logs in as admin by itself. Every boot of the lane drops the shared clipboard.
   2. In the guest's window, by clicks: open Terminal (Applications > Utilities > Terminal) and answer anything it
-     asks on its first launch. Open each recorded app below, answer its first-run dialogs, and quit it from its
-     menu. Nothing is typed or pasted into the guest. Recorded apps (quarantined at bake time):
+     asks on its first launch. Open each app below, answer its first-run dialogs, and quit it from its menu.
+     Nothing is typed or pasted into the guest. Apps (recorded quarantine, or legacy LibreOffice without a declaration):
 ${quarantined:-     (none)}
   3. From the MacBook run:
        ssh mini '~/ci-kit-vm/kit/vm/bake.sh --first-run $name'
@@ -398,7 +400,12 @@ share='/Volumes/My Shared Files/maws'
 [[ -d $share && -f $share/package.json && -f $share/pnpm-lock.yaml ]] ||
   refuse "the MAWS share is not mounted at $share; start the candidate with the --dir=maws share as --bake prints"
 record=$HOME/.ci-kit/quarantined-apps
-[[ -f $record && -r $record ]] || refuse "the setup step's quarantined-apps record cannot be read at $record; bake with setup first"
+if [[ -e $record ]]; then
+  apps=$(cat "$record") || refuse "the setup step's quarantined-apps record cannot be read at $record"
+else
+  # A checkout without a declaration retains the legacy provision steps and LibreOffice approval check.
+  apps=/Applications/LibreOffice.app
+fi
 while IFS= read -r app || [[ -n $app ]]; do
   [[ -n $app ]] || continue
   attrs=$(xattr "$app") || refuse "$app's quarantine cannot be read"
@@ -409,7 +416,7 @@ while IFS= read -r app || [[ -n $app ]]; do
     (( (16#$flags & 0x40) != 0 )) ||
       refuse "$app is not user-approved: open it in the guest's window, answer its first-run dialogs and quit it from its menu before --first-run"
   fi
-done <"$record"
+done <<<"$apps"
 PATH=$(cat "$HOME/actions-runner-maws/.path") || refuse "the runner's PATH cannot be read from ~/actions-runner-maws/.path"
 [[ -n $PATH ]] || refuse "the runner's PATH is empty"
 export PATH

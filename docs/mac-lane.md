@@ -806,7 +806,10 @@ booking.
    `~/maws-setup`. On the guest's Node 22 it applies `.github/ci-kit.yml` in `bake` mode: formulas and casks, the
    declared script, then the declared `install`, warming the pnpm store and Electron cache. The clone is removed on
    success or failure; the declaration's installed tools and home-directory caches stay in the golden. A failed apply
-   stops the bake before the runner is installed; it never records the failed declaration's hash.
+   stops the bake before the runner is installed; it never records the failed declaration's hash. A checkout with
+   no `.github/ci-kit.yml`, or a config without a setup declaration, instead logs `no setup declaration; skipping
+   setup`, leaves no setup hash, and keeps the legacy provisioning and LibreOffice first-run check. This lets a
+   refresh precede the project's adoption of the declaration; it does not suppress errors in a declaration present.
 
    The bake prints `MAWS environment from its declaration (setup)`, the clone's commit, the applier's summary and
    `provision: setup <hash> applied with install; records in /Users/admin/.ci-kit`. The setup hash is stored in
@@ -819,7 +822,8 @@ booking.
    notice is a coordinator refresh trigger, not an automatic guest rebuild.
 
    `~/.ci-kit/quarantined-apps` records one app path per line, including apps already installed by the base or legacy
-   steps that still carry quarantine. The bake's printed window step lists every one of them (LibreOffice today).
+   steps that still carry quarantine. Homebrew's `~/Applications/...` artifact paths are expanded to absolute guest
+   paths before inspection and recording. The bake's printed window step lists every app (LibreOffice today).
    A new cask installed at job time is the exception to stale images being transparent: the setup action names its
    quarantined app in a `::warning::`, and tests launching it can fail until this refresh's first-run approval.
    No code clears quarantine or answers a permission dialog.
@@ -904,7 +908,8 @@ booking.
    `--first-run` requires the maintenance hold, a running candidate with its guest agent answering, and the MAWS
    share mounted at `/Volumes/My Shared Files/maws`. It reads `~/.ci-kit/quarantined-apps` and refuses while any
    recorded app's quarantine flags lack the user-approved bit (`0x40`), naming that app. An absent quarantine
-   attribute or an approved one passes; an unreadable app, flags or record refuses. On 10-23, answering LibreOffice's
+   attribute or an approved one passes; an unreadable app, flags or existing record refuses. With no record (a
+   declaration-free bake), it checks `/Applications/LibreOffice.app` by name as before. On 10-23, answering LibreOffice's
    Gatekeeper "Open" changed `0181` to `01c1`. The group launches `soffice`, so that window step comes first.
 
    The shell part runs through `tart exec` in the guest's login session. It reads the runner's PATH from
