@@ -2,7 +2,7 @@
 // Apply a repository's CI environment in a job or a bake. No dependencies beyond the kit's vendored parser:
 // the action runs on the runner's own Node, before a project has installed any tooling.
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -125,11 +125,12 @@ export async function applySetup({ root = process.env.GITHUB_WORKSPACE || proces
     }
     installed.push(...missing.map((name) => `${kind}:${name}`));
     if (kind === 'cask') {
-      // brew list <casks> prints installed artifact paths, including a moved app's actual target, followed by its
-      // size in parentheses. Do not assume /Applications or strip quarantine: first-run approval belongs to a human.
+      // brew list <casks> prints artifact paths (possibly Caskroom symlinks), followed by their size in parentheses.
+      // Resolve them before inspection and reporting; do not strip quarantine: first-run approval belongs to a human.
       const artifacts = await run(executable, ['list', '--cask', ...missing], `cask artifacts for ${missing.join(', ')}`);
       const apps = unique(lines(artifacts).map((line) => /^(\/.*\.app)(?: \(|$)/.exec(line)?.[1]).filter(Boolean));
-      for (const app of apps) {
+      for (const artifact of apps) {
+        const app = await realpath(artifact);
         const result = await command(bin('XATTR', 'xattr'), ['-p', 'com.apple.quarantine', app], context);
         if (result.code === 0) {
           quarantined.push(app);

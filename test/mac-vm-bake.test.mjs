@@ -487,6 +487,11 @@ function setupBakeFixture() {
   const f = fixture();
   const guest = join(f.home, 'guest'), kit = join(guest, 'shares/kit'), bin = join(guest, 'bin');
   mkdirSync(bin);
+  for (const [cask, app] of [['libreoffice', 'LibreOffice'], ['extra-app', 'Extra App']]) {
+    mkdirSync(join(guest, `Applications/${app}.app`), { recursive: true });
+    mkdirSync(join(guest, `Caskroom/${cask}/1`), { recursive: true });
+    symlinkSync(join(guest, `Applications/${app}.app`), join(guest, `Caskroom/${cask}/1/${app}.app`));
+  }
   cpSync(mac, kit, { recursive: true });
   for (const dir of ['setup', 'plan', 'vendor']) cpSync(join(mac, '..', dir), join(kit, dir), { recursive: true });
   symlinkSync(f.maws, join(guest, 'shares/maws'));
@@ -508,11 +513,12 @@ case "$*" in
     printf '{"casks":[{"token":"libreoffice","full_token":"libreoffice","old_tokens":[],"tap":"homebrew/cask","installed":"1"}%s]}\\n' "$extra" ;;
   'install hello') echo hello >> "$HOME/brew-installs" ;;
   'install --cask extra-app') echo extra-app >> "$HOME/brew-installs" ;;
-  'list --cask extra-app') echo '/Applications/Extra App.app (1 MB)' ;;
-  'list --cask libreoffice extra-app') printf '/Applications/LibreOffice.app (1 MB)\\n/Applications/Extra App.app (1 MB)\\n' ;;
+  'list --cask extra-app') echo '${guest}/Caskroom/extra-app/1/Extra App.app (1 MB)' ;;
+  'list --cask libreoffice extra-app') printf '${guest}/Caskroom/libreoffice/1/LibreOffice.app (1 MB)\\n${guest}/Caskroom/extra-app/1/Extra App.app (1 MB)\\n' ;;
   *) echo "unexpected brew: $*" >&2; exit 64 ;;
 esac`);
-  executable(join(bin, 'xattr'), `if [[ $1 == -p ]]; then echo '0181;date;Homebrew;uuid'; else echo com.apple.quarantine; fi`);
+  executable(join(bin, 'xattr'), `printf '%s\\n' "$*" >> "$HOME/xattr-calls"
+if [[ $1 == -p ]]; then echo '0181;date;Homebrew;uuid'; else echo com.apple.quarantine; fi`);
   const git = (...args) => {
     const r = spawnSync('/usr/bin/git', ['-C', f.maws, ...args], { encoding: 'utf8', env: { ...process.env,
       GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
@@ -563,9 +569,11 @@ CI_KIT_SETUP_HASH=bdcec72c1fa875b3
     const again = f.runProvision('env', 'mini-vm');
     assert.equal(again.status, 0, again.stderr);
     assert.equal(text(join(f.guest, 'actions-runner-maws/.env')), expected);
-    assert.equal(text(join(f.guest, '.ci-kit/quarantined-apps')), '/Applications/Extra App.app\n/Applications/LibreOffice.app\n');
+    assert.equal(text(join(f.guest, '.ci-kit/quarantined-apps')), `${f.guest}/Applications/Extra App.app\n${f.guest}/Applications/LibreOffice.app\n`);
     assert.match(result.stdout, /\/Applications\/LibreOffice.app/);
     assert.match(result.stdout, /\/Applications\/Extra App.app/);
+    assert.doesNotMatch(result.stdout, /Caskroom/);
+    assert.doesNotMatch(text(join(f.guest, 'xattr-calls')), /Caskroom/);
     assert.equal(existsSync(join(f.guest, 'maws-setup')), false, 'scratch removed after success');
     assert.equal(f.state(CANDIDATE), 'stopped');
     // A job consumes the final runner environment, not the provisioning process's transient environment.
@@ -606,12 +614,12 @@ CI_KIT_SETUP_HASH=bdcec72c1fa875b3
   test('home-relative Homebrew app artifacts are expanded before quarantine inspection and recording', () => {
     const f = setupBakeFixture();
     const brew = join(f.guest, 'bin/brew');
-    writeFileSync(brew, readFileSync(brew, 'utf8').replaceAll('/Applications/Extra App.app', '~/Applications/Extra App.app'));
+    writeFileSync(brew, readFileSync(brew, 'utf8').replaceAll(`${f.guest}/Caskroom/extra-app/1/Extra App.app`, '~/Applications/Extra App.app'));
     executable(join(f.guest, 'bin/xattr'), `printf '%s\\n' "$*" >> "$HOME/xattr-calls"
 if [[ $1 == -p ]]; then echo '0181;date;Homebrew;uuid'; else echo com.apple.quarantine; fi`);
     const result = f.runProvision('setup');
     assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.equal(text(join(f.guest, '.ci-kit/quarantined-apps')), `/Applications/LibreOffice.app\n${f.guest}/Applications/Extra App.app\n`);
+    assert.equal(text(join(f.guest, '.ci-kit/quarantined-apps')), `${f.guest}/Applications/Extra App.app\n${f.guest}/Applications/LibreOffice.app\n`);
     assert.ok(text(join(f.guest, 'xattr-calls')).split('\n').includes(`${f.guest}/Applications/Extra App.app`));
     assert.doesNotMatch(text(join(f.guest, 'xattr-calls')), /~\//);
   });

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -126,19 +126,30 @@ test('a stale image names both hashes and still installs the difference', (t) =>
 });
 
 test('macOS checks each list once, understands full names, and reports quarantined newly installed apps', (t) => {
-  const app = '/Applications/New App.app';
   const f = fixture(t, { apt: ['zsh'], brew: ['hello', 'owner/tap/tool', 'homebrew/core/poppler'], cask: ['old-app', 'new-app'] }, {
     formulae: [
       { name: 'tool', full_name: 'owner/tap/tool', tap: 'owner/tap', aliases: [], oldnames: [], installed: [{ version: '1.0' }] },
       { name: 'poppler', full_name: 'poppler', tap: 'homebrew/core', aliases: [], oldnames: [], installed: [{ version: '1.0' }] },
     ],
     casks: [{ token: 'old-app', full_token: 'old-app', tap: 'homebrew/cask', old_tokens: [], installed: '1.0' }],
-    artifacts: `==> App\n${app} (12 files, 2MB)\n/Applications/Approved.app (3 files)\n==> Binary\n/usr/local/bin/new-app\n`, quarantined: [app],
   });
+  const app = join(f.root, 'Applications/New App.app');
+  const approved = join(f.root, 'Applications/Approved.app');
+  const link = join(f.root, 'Caskroom/new-app/1/New App.app');
+  mkdirSync(app, { recursive: true });
+  mkdirSync(approved, { recursive: true });
+  mkdirSync(join(f.root, 'Caskroom/new-app/1'), { recursive: true });
+  symlinkSync(app, link);
+  const state = JSON.parse(readFileSync(join(f.root, 'state.json'), 'utf8'));
+  writeFileSync(join(f.root, 'state.json'), JSON.stringify({ ...state,
+    artifacts: `==> App\n${link} (12 files, 2MB)\n${approved} (3 files)\n==> Binary\n/usr/local/bin/new-app\n`, quarantined: [app],
+  }));
   const r = f.run({ platform: 'darwin' });
   successful(r);
   assert.equal(r.result.installed, 'brew:hello cask:new-app');
   assert.deepEqual(r.result.quarantined, [app]);
+  assert.deepEqual(f.calls().filter((c) => c.name === 'xattr').map((c) => c.args.at(-1)), [app, approved]);
+  assert.doesNotMatch(r.stdout, /Caskroom/);
   const calls = f.calls();
   assert.equal(calls.filter((c) => c.name === 'brew' && c.args[0] === 'info').length, 2);
   assert.deepEqual(calls.filter((c) => c.name === 'brew' && c.args[0] === 'install').map((c) => c.args), [['install', 'hello'], ['install', '--cask', 'new-app']]);
