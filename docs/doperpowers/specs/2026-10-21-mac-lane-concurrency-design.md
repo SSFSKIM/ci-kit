@@ -260,7 +260,7 @@ and by the coordinator's holds, and the design below says what is read and when.
     without releasing the second timed hold; the launcher returned at 22:24:59Z, maintenance released, then
     `CI-opt-t2` at 22:25:29Z. A floor refusal at 54% came first; at 22:30:09Z the queued VM job booted
     `maws-vm-job-vm-20261025T223006Z`, `holds none`; the host returned at 22:30:19Z. `bake.sh`'s `reservation stands`
-    refusal was not shown live; `test/mac-vm-bake.test.mjs` covers it. Evidence: the 22:30Z entry in the
+    refusal was not shown live in this window; phase 3 below supplies it. Evidence: the 22:30Z entry in the
     coordinator's `~/Developer/ci-analysis/STATE.md` (STATE below),
     `/tmp/ci-analysis/v4r-b1.log` and `v4r-b2.log` (the latter records dispatch, not a final job result).
   - [x] (2026-10-25 21:16Z) Step 7, VA10: run 40233219063 (fd2562c69, document-app and dashboard, `Lane: vm`)
@@ -312,29 +312,53 @@ and by the coordinator's holds, and the design below says what is read and when.
     no job id ... no trial job ran`. The pointer stayed `maws-vm-golden-20261025`, the golden untouched;
     `--retire` deleted the candidate and no trial registration remained at GitHub. Evidence: STATE's 22:30Z entry;
     the promoted refreshes are recorded in steps 2 and 4 above, promote's repeat-safety in V2's pointer tests.
-  - [x] (2026-10-25) Step 12, the operating verdict: `MAC_VM_E2E` is 33 groups on MAWS master 3f5e7119f, through
-    MAWS #135, #148 and #149; of the trial candidates, only terminal and design stay off. The mode stays `always`
+  - [x] (2026-10-25) Step 12, the operating verdict: `MAC_VM_E2E` is 33 groups through MAWS #135, #148 and #149
+    (merge 3f5e7119f). The later master commits 3d83b1dc7 (wave 4's comment naming the three connectors guest
+    runs) and e333b92a4 (gate-offload Decision Log 105) preserve that count; CI-opt's origin/master read at
+    e654db0cb counted 33 and confirmed 3f5e7119f as an ancestor (`/tmp/ci-analysis/v4r-p3-extra.txt`). Of the trial
+    candidates, only terminal and design stay off. The mode stays `always`
     on step 5's production reading, not a new staged comparison. The launcher has been on since
     2026-10-23 07:26Z, apart from the recorded holds and maintenance windows. The mini now runs ci-kit 861acf2:
     `install.sh --vm --disabled` at 22:20Z removed the floor-57 plist bridge, and the installed kit's default is
     57. Release explicitly enabled and bootstrapped the launcher at 22:24:59Z; recovery read no job clone and no
     reservation, then waited on maintenance and `CI-opt-t2` until their release. This records the verdict, not
     completion of every VA in V4's Proof line.
-  - [ ] (2026-10-25) V4's remaining proof is VA2, VA3, VA4, VA5, VA6, VA11 and VA12. VA2 needs the idle-host and
-    busy-host `ci-kit-mac-solo` assignments paired with their boot-rule reads; the held-host run proves VA1, and
-    the forced-VM runs do not prove this routing choice. VA3 has the measured wait, claim and green job in step 7,
-    but no recorded comparison of its timings with its solo spread. VA4 has the overlapping holds and two live
-    bake refusals, but needs the `reservation stands` refusal on the mini; tests alone are not the live proof.
-    VA5 has production floor refusals and warning pauses (step 10 and the floor decision, plus phase 1), but no
-    critical-pressure stop and alert on the mini. VA6 needs the recorded guest credential/`gh` and host-to-guest
-    transport audit of `out/` and the launcher log; the design and tests are not that read. VA11 has distinct JIT
-    clones, serialized jobs, a fresh job after the forced stop and remote-DELETE retries; still needed are a live
-    mint-failure/no-boot read, guest registration label readback on the mini, and post-teardown local config removal
-    with only nonsecret pending metadata during a failed DELETE. VA12 needs the under-reserve boot and bake
-    refusals, disk-floor stop with alert and failed marker-write/stricter-state evidence on the mini; the bake's
-    free-space peak and V2's fake tests do not show them live. VA1 and VA9 are shown by steps 6 and 8, VA8 by the
-    promoted refreshes and step 11's rollback (its interface tested in V2), and VA10 by step 7 with the boot-case
-    substitution stated there. V4 stays unticked; no live fault injection is claimed by this documentation record.
+  - [x] (2026-10-25 22:43–22:50Z) Phase 3, VA2, VA4, VA6 and VA11's remaining live reads: run 40241550857
+    (453b54604, document-app, widgets and to-human, all `ci-kit-mac-solo`, no `Lane:`), host idle at the start,
+    all green. The host `ci-kit-mac-mini` took document-app and later widgets; at 22:45:54Z the lane booted
+    `maws-vm-job-vm-20261025T224551Z` for `2 ci-kit-mac-solo jobs queued, more than the host's exclusive instance
+    takes`, and the clone took to-human. The idle-host refusal was not logged in this run: the host took the job
+    between polls. Production supplies both explicit reads: at 2026-10-24 08:32:15Z, `no boot: a ci-kit-mac-solo
+    job queued, but the host's exclusive instance is idle and takes it first`; at 2026-10-25 18:22:06Z,
+    `maws-vm-job-vm-20261025T182203Z` booted because the exclusive instance was busy, then took run 40219930934
+    at 18:22:47Z. At 22:47:01Z, `CI_KIT_VM_HOLD_WAIT=1 hold.sh hold CI-opt maintenance` kept its hold after
+    `not clear after 1 s: a reservation stands`; `bake.sh --trial maws-vm-candidate-va4r` refused that standing
+    reservation at 22:47:02Z (exit 1), then the hold was released at 22:47:03Z. The guest read through `tart exec`
+    had `/opt/homebrew/bin/gh` but no `/Users/admin/.config/gh` and no `GH_TOKEN` or `GITHUB_TOKEN` in its login
+    environment. Its kept `out/` had `_diag`, assigned, done, job, listening, mac-runner-hooks.log, stop-refused,
+    stop-request and wrapper.log, with zero files naming a `gh` call; the clone's launcher lines show the Tart
+    lifecycle, no SSH to the guest. GitHub read its JIT runner online with only `[ci-kit-mac-solo,ci-kit-mac-vm]`,
+    no self-hosted/macOS/ARM64, while the host carried `[self-hosted,macOS,ARM64,ci-kit-mac,ci-kit-mac-solo]`.
+    The slot's `jit/` held one directory named for the running clone; after teardown both `jit/` and `jit-pending/`
+    were empty. Phase 2's failed-DELETE retries remain the live failure read; its private-config boundary and mint
+    failure are accepted on tests (Decision Log). Evidence: `/tmp/ci-analysis/v4r-p3.log`, `v4r-p3-lane.log`,
+    `v4r-p3-extra.txt`; the read commands are in `v4r-p3.sh`.
+  - [x] (2026-10-25) VA3's first timing comparison read: step 7's measured presentations-drag run 40233476445
+    met its bound, `the agent trials' best move → frame p95 19.1 ms against 24 ms at load 2.7: met`. Per-trial
+    p95 was 19.0–20.1 ms on control trials and 19.1–19.9 on agent trials, at load 1.91–2.88. The earlier solo run
+    39758746459 (2026-10-22, an older master) read 17.9–18.7 control and 19.0–19.3 agent, load 2.55–3.3; its
+    best agent p95 was 19 ms against 24 ms, met. No guest ran during the measured part of 40233476445: settle
+    released after verified teardown and its claim kept the next clone out. The reference is one older-tree run,
+    not a reliable solo spread, and the new trial ranges extend beyond it; a green bound does not establish
+    VA3's inside-spread clause. Evidence: `/tmp/ci-analysis/v4r-p3-extra.txt`, `va3-40233476445.log` and
+    `va3-39758746459.log`.
+  - [ ] (2026-10-25) V4's remaining proof is VA3's timing comparison against same-tree solo controls; its wait
+    and claim are shown in step 7. VA1 is shown by step 6; VA2 and VA6 by phase 3 (VA2 also uses production
+    reads); VA4 by step 6 and phase 3's reservation refusal; VA5 by the live floor/warning paths and the
+    injected-fault decision; VA8 by the promoted refreshes and step 11's rollback (its interface tested in V2);
+    VA9 by step 8; VA10 by step 7 with its stated boot-case substitution; VA11 by steps 9 and phase 3 plus the
+    fault tests; VA12 by the fault-test decision. V4 stays unticked pending VA3; the accepted injected-fault
+    evidence is not represented as live production faults.
 - [ ] V5 — Widen the proven-VM set; the second guest, if memory ever allows it.
 
 ## Design
@@ -1289,7 +1313,8 @@ In windows CI-opt books, outside holds and measured windows:
    else `hold-only`, recorded with the evidence; the launcher enabled for good; every run's id, group, clone, memory
    samples and timings in Surprises & Discoveries.
 
-Proof: VA1–VA6 and VA8–VA12 shown on the mini and recorded.
+Proof: VA1–VA6 and VA8–VA12 shown on the mini and recorded, except the injected-fault clauses accepted on V2's
+tests by CI-opt's 2026-10-25 Decision Log entry and VA10's stated boot-case evidence substitution.
 
 ### V5 — Widen the proven-VM set; the second guest
 
@@ -1309,7 +1334,7 @@ hold-aware plan send them to the guest, which this spec leaves open.
   then three P1s and one P2 on maintenance and the reservation fence, all taken, Decision Log). V1: its verdict
   against its criteria, by CI-opt. V2: `doperpowers:reviewer-medium`, ci-gate, and the interleaving tests Design
   names. V3: the MAWS architect. V4: VA1–VA6 and VA8–VA12 on the mini, checked by CI-opt against the launcher's log,
-  the procedure's transcript and the run logs.
+  the procedure's transcript and the run logs, with the 2026-10-25 evidence substitutions recorded in the Decision Log.
 
 ## Decision Log
 
@@ -1905,6 +1930,37 @@ hold-aware plan send them to the guest, which this spec leaves open.
   the continuity read is accepted for the boot case, and the missing measured waiter is explicit in Progress.
   This does not waive VA3's solo-spread comparison or V4's other missing live proofs.
 
+- 2026-10-25 (CI-opt; V4's injected faults): **Accept VA5's forced critical stop and alert, VA11's mint and
+  remote-DELETE failures, and VA12's reserve, floor and full-volume faults on V2's tests, not injections into the
+  live mini.** The tests run the same scripts against their fake reads and services. The named cases in
+  `test/mac-vm-lane.test.mjs` are:
+  - `memory critical on one sample, running: the guest is stopped, alerted, counted, and the lane pauses`
+    (also generated for booting, kicking, session, listening and preparing);
+  - `the guard through recovery: an adopted job is left to finish under a warning, and stopped at critical`;
+  - `the boot rule, 5, free disk under the reserve: no boot while it fails alone, and a boot once it holds`;
+  - `free disk under the floor while a job runs: the guest is stopped, alerted for disk and counted`;
+  - `free disk under half the reserve while a job runs: the job goes on, and the disk pause holds the next boot
+    until the space is back`;
+  - `a reservation write on a full volume (a small disk image mounted for the state directory) is no boot; with
+    space back the clone boots`;
+  - `each clone mints one private config, shares only it, and deletes its registration on teardown`;
+  - `a failed runner delete revokes the config and releases the reservation; another clone boots while cleanup
+    retries`;
+  - `recovery cleans a mint whose response was lost before a VM or reservation remained, by exact clone name`;
+  - `a mint failure refuses the boot with its reason and retries without an image pause`.
+  The bake side is `the reserve: under CI_KIT_VM_DISK_RESERVE free, no bake, no registration and no trial; the
+  figure is printed` in `test/mac-vm-bake.test.mjs`. The full-volume test requires `/usr/bin/hdiutil`: it runs
+  on macOS and is skipped without it, including Linux ci-gate; this decision accepts its test coverage, not a
+  claim that a green Linux gate executed it. The live warning path is already in step 10, the floor decision and
+  phase 3's give-up/stop-refused race. At the floor decision's snapshot, 31 of 222 production guests had met
+  pressure 2 and none pressure 4; the later lane-log count in `v4r-p3-extra.txt` still read zero pressure-4 lines.
+  No critical stop is claimed in production. **Rejected:** running the production launcher under its test seams
+  (fake sysctl and df reads), stopping a real guest and opening real alerts on the only Mac carrying every MAWS
+  Mac job, to exercise paths those tests already drive through the same scripts. Phase 2 happened to show a
+  real remote-DELETE failure and nonblocking retries; tests supply the private-config/metadata boundary that
+  live record did not inspect. This changes the evidence accepted for these fault clauses only, not their
+  required behavior or VA3's solo-spread criterion.
+
 ## Surprises & Discoveries
 
 - 2026-10-21, M1 (ci-kit #67), from its reviews:
@@ -2245,6 +2301,18 @@ hold-aware plan send them to the guest, which this spec leaves open.
   pressure 1, available 34–60%, swap 1382–1560 MB, disk free 116–118 GB. Neither phase showed critical pressure
   or a disk-floor stop. Evidence: `/tmp/ci-analysis/v4r-p1-samples.log`, `v4r-p1-lane.log`,
   `v4r-p2-samples.log`.
+
+- 2026-10-25, V4 phase 3, **the memory give-up met a newly assigned job and lost nothing.** During kickoff of
+  `maws-vm-job-vm-20261025T224551Z`, two pressure-2 samples caused `given up for memory; asked the wrapper to
+  stop (out/stop-request)` at 22:46:32Z. At 22:46:35Z the wrapper refused because the listener had taken a job;
+  its folded `out/assigned` also dates the assignment at 22:46:35Z. The lane left that job to finish under the
+  warning, with the 120 s next-boot pause; to-human in run 40241550857 was green at 22:48:15Z, the clone deleted
+  22:48:26Z, the pause line naming expiry 22:50:19Z. This is the live handshake race path, not a staged warning
+  or a job killed by the memory guard. Evidence: `/tmp/ci-analysis/v4r-p3-lane.log` and `v4r-p3.log`.
+- 2026-10-25 22:5xZ, **the unused persistent guest identities were removed from the mini.**
+  `~/ci-kit-vm/vm/identity` (runner 2351) and `~/ci-kit-vm/vm-trial/identity` (2352) had been unused since JIT;
+  the runner registrations were deleted at GitHub on 10-24. The new read lists only cache, jit, jit-pending and
+  out in each slot, and zero of those two runner IDs at GitHub. Evidence: `/tmp/ci-analysis/v4r-p3-extra.txt`.
 
 ## Outcomes & Retrospective
 
