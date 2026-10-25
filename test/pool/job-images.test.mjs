@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, symlink, readlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as api from '../../pool/bake/job-images.mjs';
@@ -11,7 +11,14 @@ async function fixture(t,failPhase) {
   const manifest={repos:{'SSFSKIM/one':{revision:'a'.repeat(40),setup_hash:'b'.repeat(16)}}};
   const exec=async(bin,args,options={})=>{
     calls.push({bin,args,options});
-    if(bin==='git' && args[0]==='init') { await mkdir(args.at(-1),{recursive:true}); await writeFile(join(args.at(-1),'source'),'pinned'); }
+    if(bin==='git' && args[0]==='init') {
+      await mkdir(args.at(-1),{recursive:true}); await writeFile(join(args.at(-1),'source'),'pinned');
+      await symlink('source',join(args.at(-1),'source-link'));
+    }
+    if(bin==='docker' && args[0]==='run') {
+      assert.equal(await readlink(join(dir,'cache','work','ci-kit-setup-ssfskim-one','source-link')),'source',
+        'relative links must still resolve inside the mounted work copy, not to a host-only source path');
+    }
     if(bin==='docker' && args[0]==='run' && args.includes(failPhase)) throw Error('fixture failure');
     if(bin==='docker' && args[0]==='image') {
       if(args.includes('{{.Size}}')) return args.at(-1)==='ci-kit-runner:latest'?'1000':'1250';

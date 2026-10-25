@@ -45,7 +45,7 @@ async function workCopy(repo, { sources, cache, exec }) {
   const root = join(cache, 'work', `ci-kit-setup-${repoSlug(repo)}`);
   await rm(root, { recursive: true, force: true });
   await mkdir(join(cache, 'work'), { recursive: true });
-  await cp(join(sources, repoSlug(repo)), root, { recursive: true });
+  await cp(join(sources, repoSlug(repo)), root, { recursive: true, verbatimSymlinks: true });
   await exec('chown', ['-R', '1001:1001', cache]);
   return root;
 }
