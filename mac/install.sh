@@ -42,8 +42,8 @@
 #
 # --vm installs the VM lane (docs/mac-lane.md, the VM lane): the launcher's LaunchAgent com.ssfskim.ci-kit.vm-lane
 # (mac/vm/com.ssfskim.ci-kit.vm-lane.plist), the slots' directories under ~/ci-kit-vm (vm and vm-trial, each with
-# jit/, out/ and cache/, and trials/), and the installed kit ~/ci-kit-vm/kit, a copy of this mac/ directory
-# published with the hooks' staged swap, which the launcher runs from and every clone is shown read-only. Every host
+# jit/, out/ and cache/, and trials/), and the installed kit ~/ci-kit-vm/kit, a copy of this mac/ directory plus
+# setup/, plan/ and vendor/ (the applier and its imports), published with the hooks' staged swap, which the launcher runs from and every clone is shown read-only. Every host
 # instance's .env gains CI_KIT_VM_RESERVATION (the absolute vm-reserved path, for MAWS's verdict-time load read), and an
 # exclusive instance registered now carries ci-kit-mac-solo too; an existing registration's labels are changed by hand
 # (the docs say how). The launcher's agent is installed disabled; a re-run keeps the state launchd has for it, as a
@@ -440,10 +440,13 @@ if ((vm == 1)); then
   mkdir -p "$VM_HOME"
   kit_staged=$(mktemp -d "$VM_HOME/.kit.XXXXXX")
   cp -R "$here/." "$kit_staged/"
+  # The guest sees only this installed kit. Keep the applier's relative imports intact beside mac/'s contents.
+  for dir in setup plan vendor; do cp -R "$here/../$dir" "$kit_staged/$dir"; done
   find "$kit_staged/hooks" "$kit_staged/vm" -name '*.sh' -exec chmod +x {} +
   for file in vm/lane.sh vm/lane-reads.sh vm/tart.sh vm/bake.sh vm/hold.sh vm/provision.sh vm/guest/guest.sh vm/guest/diag.sh \
     vm/guest/kickoff.sh vm/guest/wrapper.sh vm/guest/hooks/common.sh vm/guest/hooks/job-started.sh \
     vm/guest/hooks/job-completed.sh vm/guest/hooks/desktop-check.sh hooks/cursor-park.swift hooks/window-list.swift \
+    vm/setup.mjs setup/apply.mjs setup/hash.mjs plan/config.mjs plan/glob.mjs vendor/yaml/dist/index.js \
     install.sh "${hook_files[@]/#/hooks/}"; do
     [[ -f $kit_staged/$file && -r $kit_staged/$file ]] || die "staged kit file missing or unreadable: $file"
   done

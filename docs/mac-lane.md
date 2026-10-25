@@ -505,7 +505,7 @@ into per machine (`install.sh --vm`), and a Mac without it has none of what foll
 | | |
 |---|---|
 | Launcher | `mac/vm/lane.sh`, the program of the LaunchAgent `com.ssfskim.ci-kit.vm-lane` (RunAtLoad, KeepAlive, Aqua session only, `ProcessType` Interactive), run from the installed kit. It is the only automated way a guest starts: it reads the queue every 15 s, decides admission, boots a job clone, follows it through its one job and deletes it. Its header has the lifecycle, the boot rule, the guard and every input. |
-| Installed kit | `~/ci-kit-vm/kit`, a copy of `mac/` that `install.sh` publishes with the hooks' staged swap, so the checkout can move on. Every clone is shown it read-only, so a hook change needs no image refresh. |
+| Installed kit | `~/ci-kit-vm/kit`, a copy of `mac/` plus `setup/`, `plan/` and `vendor/` (the setup applier and its imports) that `install.sh` publishes with the hooks' staged swap, so the checkout can move on. Every clone is shown it read-only, so a hook change needs no image refresh. |
 | Golden image | the local Tart VM `~/ci-kit-vm/golden` names (`maws-vm-golden-<id>`): the macOS 27 base (`ghcr.io/cirruslabs/macos-golden-gate-base`) with Node 22, pnpm, the warm store, LibreOffice, Poppler, Claude Code at the host's version, the runner, its seeded MAWS work repository and the compiled helpers baked in. It is never run for a job; only the [maintenance procedure](#the-vm-lanes-maintenance) makes or replaces it. |
 | Job clone | `maws-vm-job-vm-<time>`, an APFS copy of the golden image (seconds; it holds only what the job writes), run with `tart run --no-graphics --no-clipboard` (its pasteboard is never the host's) and four directory shares: the kit and this clone's JIT directory read-only, its `out/` and `cache/` read-write. |
 | Slot | `~/ci-kit-vm/vm/`: `jit/<clone>/` (a 0700 directory holding the 0600 one-use config and cleanup record, removed at teardown), `out/` (what the guest writes back: its markers, `_diag`, its hooks log), `cache/` (MAWS's e2e build cache). The trial slot, `~/ci-kit-vm/vm-trial/`, is the same for a candidate's trial and serves nothing else. |
@@ -733,8 +733,8 @@ The golden image is made, tried and replaced by one procedure, the coordinator's
 `mac/vm/bake.sh` under a full hold of the mini with the launcher's agent booted out, so nothing automated boots,
 recovers or releases while it runs. It is run on invalidation, never on a schedule: a runner the image's is behind
 (`vm-lane.log` says `refresh trigger: the runner updated itself` per job), MAWS's Node or pnpm pins, a stale store
-(a job's `pnpm install` past 60 s in `vm-out/<clone>/`), a growing checkout delta from a long-unrefreshed work
-repository, the mini's macOS moving, a new Electron bundle id or LibreOffice version wanting its first-run window
+(a job's `pnpm install` past 60 s in `vm-out/<clone>/`), a setup step's `::notice::` that the image's declaration
+hash differs from the commit's, a growing checkout delta from a long-unrefreshed work repository, the mini's macOS moving, a new Electron bundle id or LibreOffice version wanting its first-run window
 again. Every job starts from the image's repository, not the preceding job's fetched commits, so a stale golden
 makes each job fetch the accumulated delta again. A refresh takes the mini for its length, as a timed hold does.
 
@@ -796,10 +796,33 @@ booking.
    the compiled helpers in `~/ci-kit-helpers/`), and verifies its stop. `--memory` is the guest's size in MB, 4096 by
    default (V1's size); under 4096 is refused at once, the base image's minimum being 4 GiB.
 
-   **Before baking, bring the mini's shared MAWS checkout to current master.** Both the warm store and the work
+   **Before baking, bring the mini's shared MAWS checkout to current master.** The declaration, warm store and work
    repository depend on it. The first refresh found it 2168 commits behind; a `gh` login alone does not keep it
    current. The coordinator updates it before the bake and checks its branch and commit against GitHub's master.
    The bake does not fetch the host checkout or check its freshness against GitHub.
+
+   **The project supplies its environment.** After the legacy `store`, `libreoffice`, `poppler` and `engine` steps
+   (kept during the additive migration), `setup` makes a scratch clone of the share's committed master at
+   `~/maws-setup`. On the guest's Node 22 it applies `.github/ci-kit.yml` in `bake` mode: formulas and casks, the
+   declared script, then the declared `install`, warming the pnpm store and Electron cache. The clone is removed on
+   success or failure; the declaration's installed tools and home-directory caches stay in the golden. A failed apply
+   stops the bake before the runner is installed; it never records the failed declaration's hash.
+
+   The bake prints `MAWS environment from its declaration (setup)`, the clone's commit, the applier's summary and
+   `provision: setup <hash> applied with install; records in /Users/admin/.ci-kit`. The setup hash is stored in
+   `~/.ci-kit/setup-hash`; both `runner` and `env` always read it into the runner's `.env` as
+   `CI_KIT_SETUP_HASH=<hash>`. After the whole bake, in a clone, check that `grep CI_KIT_SETUP_HASH
+   ~/actions-runner-maws/.env` matches `cat ~/.ci-kit/setup-hash` and MAWS master's declaration hash. The hash is
+   computed by `setup/hash.mjs` from the declaration and its script bytes (including `install`, not the lockfile).
+   The trial job's setup log must say `ci-kit setup: image matches setup <hash>` and `installed nothing`.
+   A job on an older golden instead prints a `::notice::` naming both hashes and installs the missing tools. That
+   notice is a coordinator refresh trigger, not an automatic guest rebuild.
+
+   `~/.ci-kit/quarantined-apps` records one app path per line, including apps already installed by the base or legacy
+   steps that still carry quarantine. The bake's printed window step lists every one of them (LibreOffice today).
+   A new cask installed at job time is the exception to stale images being transparent: the setup action names its
+   quarantined app in a `::warning::`, and tests launching it can fail until this refresh's first-run approval.
+   No code clears quarantine or answers a permission dialog.
 
    **The image quiets the guest's boot, not its macOS desktop.** `provision.sh quiet` runs after `disk` and before
    `display` and the installs, so the bake's own dependency and checkout writes are not indexed either. It runs
@@ -864,10 +887,10 @@ booking.
       a one-shot Aqua LaunchAgent works without typing into the mini's Terminal (the second refresh, 2026-10-23).
       The human can also run it in the mini's Terminal over Screen Sharing from the MacBook. Never VNC into the
       guest, which would connect to its address. The guest logs in as admin by itself; its clipboard is not shared.
-   2. Open Terminal and LibreOffice in the guest, either by clicks or through `tart exec <cand> open -a Terminal`
-      and `tart exec <cand> open -a LibreOffice` from the MacBook over ssh to the mini. Answer any first-run
-      prompts by clicks in the guest's Tart window, and quit LibreOffice from its menu. Launching an app through
-      `tart exec` does not answer its prompt. Nothing is typed or pasted into the guest.
+   2. Open Terminal and every app listed by the bake in the guest (LibreOffice today), either by clicks or through
+      `tart exec <cand> open -a Terminal` and `tart exec <cand> open '<app path>'` from the MacBook over ssh to the
+      mini. Answer any first-run prompts by clicks in the guest's Tart window, and quit each app from its menu.
+      Launching an app through `tart exec` does not answer its prompt. Nothing is typed or pasted into the guest.
    3. From the MacBook run:
 
       ```bash
@@ -879,9 +902,10 @@ booking.
       prompt came up, and neither the guest's nor the mini's preferences had an Electron entry.
 
    `--first-run` requires the maintenance hold, a running candidate with its guest agent answering, and the MAWS
-   share mounted at `/Volumes/My Shared Files/maws`. It refuses while LibreOffice's quarantine flags lack the
-   user-approved bit (`0x40`): on 10-23, answering Gatekeeper's "Open" changed `0181` to `01c1`. The group launches
-   `soffice`, so that window step comes first.
+   share mounted at `/Volumes/My Shared Files/maws`. It reads `~/.ci-kit/quarantined-apps` and refuses while any
+   recorded app's quarantine flags lack the user-approved bit (`0x40`), naming that app. An absent quarantine
+   attribute or an approved one passes; an unreadable app, flags or record refuses. On 10-23, answering LibreOffice's
+   Gatekeeper "Open" changed `0181` to `01c1`. The group launches `soffice`, so that window step comes first.
 
    The shell part runs through `tart exec` in the guest's login session. It reads the runner's PATH from
    `~/actions-runner-maws/.path` (the baked Node 22 is keg-only; a fresh Terminal finds Node 24 and no pnpm), makes

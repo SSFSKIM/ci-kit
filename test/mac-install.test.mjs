@@ -24,7 +24,7 @@ function fixture({ registered = 'ci-kit-mac-mini' } = {}) {
   const kit = join(home, 'kit');
   const bin = join(home, 'bin');
   mkdirSync(bin);
-  for (const dir of ['mac', 'host']) cpSync(join(repo, dir), join(kit, dir), { recursive: true });
+  for (const dir of ['mac', 'host', 'setup', 'plan', 'vendor']) cpSync(join(repo, dir), join(kit, dir), { recursive: true });
   const executable = (path, body) => { writeFileSync(path, `#!/bin/bash\n${body}\n`); chmodSync(path, 0o755); };
   const fake = (name, body) => executable(join(bin, name), body);
   // A runner bootstrapped reports in its log.
@@ -607,7 +607,12 @@ test('--vm installs the launcher disabled, the kit laid out as mac/ is, the slot
   assert.match(result.stdout, /ci-kit-mac-mini keeps its labels: add ci-kit-mac-solo to its registration by hand/);
   // The kit: a copy of mac/, with its scripts executable, and no staging left beside it.
   const kit = join(f.home, 'ci-kit-vm/kit');
-  assert.deepEqual(tree(kit), tree(join(f.kit, 'mac')));
+  assert.deepEqual(tree(kit), [...tree(join(f.kit, 'mac')), ...['setup', 'plan', 'vendor'].flatMap((dir) => tree(join(f.kit, dir)).map((file) => join(dir, file)))].sort());
+  // Import from the published copy, not the source checkout: every transitive dependency must ship too.
+  const imported = spawnSync(process.execPath, ['--input-type=module', '-e',
+    'const path = process.argv.pop(); const { applySetup } = await import(path); console.log(typeof applySetup)', join(kit, 'setup/apply.mjs')], { encoding: 'utf8' });
+  assert.equal(imported.status, 0, imported.stderr);
+  assert.equal(imported.stdout, 'function\n');
   for (const file of tree(join(f.kit, 'mac'))) assert.equal(readFileSync(join(kit, file), 'utf8'), readFileSync(join(f.kit, 'mac', file), 'utf8'), file);
   for (const file of ['vm/lane.sh', 'vm/bake.sh', 'vm/hold.sh', 'vm/guest/kickoff.sh', 'vm/guest/hooks/job-started.sh', 'vm/guest/hooks/desktop-check.sh', 'hooks/desktop-posture.sh']) {
     assert.ok(statSync(join(kit, file)).mode & 0o111, file);

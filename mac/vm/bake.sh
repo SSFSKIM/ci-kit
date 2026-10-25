@@ -34,8 +34,9 @@
 #   verified stop. It then prints the first-run window step: clicks by the human, or CI-opt through cua in the guest;
 #   the shell part from the MacBook through --first-run. No script answers a prompt.
 # - --first-run: the candidate already running in a window, its agent answering and its MAWS share mounted;
-#   LibreOffice's quarantine absent or user-approved (the window step first). Through tart exec, a scratch clone of
-#   the share at ~/maws-firstrun, pnpm install, then e2e:deliverables with a 3 GB heap, on the runner's PATH, streamed.
+#   every app in ~/.ci-kit/quarantined-apps absent from quarantine or user-approved (the window step first). Through
+#   tart exec, a scratch clone of the share at ~/maws-firstrun, pnpm install, then e2e:deliverables with a 3 GB heap,
+#   on the runner's PATH, streamed.
 #   A guest-side deadline ends the shell work after CI_KIT_VM_FIRST_RUN_WAIT s (1200); the scratch clone is removed
 #   on success, failure or expiry. Every run first stops scratch processes (argv or cwd, detached Electron included)
 #   and removes leftovers from a cancelled exec (which can kill the EXIT cleanup shell). Failure leaves the guest
@@ -276,7 +277,7 @@ disk_follow() {
 }
 
 do_bake() {
-  local memory=4096 name='' golden version sha pnpm engine machine output
+  local memory=4096 name='' golden version sha pnpm engine machine output quarantined
   while (($# > 0)); do
     case $1 in
       --memory) (($# > 1)) || usage; memory=$2; shift ;;
@@ -338,12 +339,18 @@ do_bake() {
   disk_follow
   in_guest "$provision_wait" "Claude Code $engine (engine)" /bin/bash "$provision" engine "$engine"
   disk_follow
+  in_guest "$provision_wait" 'MAWS environment from its declaration (setup)' /bin/bash "$provision" setup
+  disk_follow
   in_guest 900 "the runner $version (runner)" /bin/bash "$provision" runner "$version" "$sha" "$machine-vm"
   disk_follow
   in_guest "$provision_wait" 'the seeded MAWS work repository (workrepo)' /bin/bash "$provision" workrepo
   disk_follow
   in_guest 900 'the compiled helpers (helpers)' /bin/bash "$provision" helpers
   disk_follow
+  quarantined=$(tart_call 30 exec "$run_vm" /bin/bash -c 'cat "$HOME/.ci-kit/quarantined-apps"') || {
+    end_vm
+    die "$name: cannot read the setup step's quarantined-apps record"
+  }
   end_vm || die "$name is baked, but its stop is not verified"
   say "baked: $name, stopped; the lowest free space during the bake was $lowest GB"
   cat <<EOF
@@ -355,8 +362,9 @@ Screen Sharing from the MacBook (never VNC into the guest), with the maintenance
        tart run --no-clipboard --dir=maws:$maws:ro $name
      A window opens and the guest logs in as admin by itself. Every boot of the lane drops the shared clipboard.
   2. In the guest's window, by clicks: open Terminal (Applications > Utilities > Terminal) and answer anything it
-     asks on its first launch. Open LibreOffice from Applications, answer its first-run dialogs, and quit it from
-     its menu. Nothing is typed or pasted into the guest.
+     asks on its first launch. Open each recorded app below, answer its first-run dialogs, and quit it from its
+     menu. Nothing is typed or pasted into the guest. Recorded apps (quarantined at bake time):
+${quarantined:-     (none)}
   3. From the MacBook run:
        ssh mini '~/ci-kit-vm/kit/vm/bake.sh --first-run $name'
      This runs pnpm e2e:deliverables through tart exec. When macOS asks whether Electron may send notifications,
@@ -365,7 +373,7 @@ Screen Sharing from the MacBook (never VNC into the guest), with the maintenance
      On success the scratch clone is removed and the guest shuts down, its stop verified; on failure it stays up
      for inspection. Rerun --first-run until it passes; it cleans any interrupted run first and shuts the guest
      down itself only after a pass. Keep the maintenance hold until the procedure is done.
-Only after --first-run passes and the stop is verified: bake.sh --register $name (first refresh only, tokens on stdin), bake.sh --trial $name, bake.sh --promote $name.
+Only after --first-run passes and the stop is verified: bake.sh --trial $name, bake.sh --promote $name.
 EOF
 }
 
@@ -389,15 +397,19 @@ refuse() { printf 'refused: %s\n' "$*" >&2; exit 1; }
 share='/Volumes/My Shared Files/maws'
 [[ -d $share && -f $share/package.json && -f $share/pnpm-lock.yaml ]] ||
   refuse "the MAWS share is not mounted at $share; start the candidate with the --dir=maws share as --bake prints"
-app=/Applications/LibreOffice.app
-attrs=$(xattr "$app") || refuse "LibreOffice's quarantine cannot be read at $app"
-if grep -qx com.apple.quarantine <<<"$attrs"; then
-  quarantine=$(xattr -p com.apple.quarantine "$app") || refuse "LibreOffice's quarantine cannot be read"
-  flags=${quarantine%%;*}
-  [[ $flags =~ ^[[:xdigit:]]{1,8}$ ]] || refuse "LibreOffice's quarantine flags cannot be read: $flags"
-  (( (16#$flags & 0x40) != 0 )) ||
-    refuse "LibreOffice is not user-approved: open it in the guest's window, answer its first-run dialogs and quit it from its menu before --first-run"
-fi
+record=$HOME/.ci-kit/quarantined-apps
+[[ -f $record && -r $record ]] || refuse "the setup step's quarantined-apps record cannot be read at $record; bake with setup first"
+while IFS= read -r app || [[ -n $app ]]; do
+  [[ -n $app ]] || continue
+  attrs=$(xattr "$app") || refuse "$app's quarantine cannot be read"
+  if grep -qx com.apple.quarantine <<<"$attrs"; then
+    quarantine=$(xattr -p com.apple.quarantine "$app") || refuse "$app's quarantine cannot be read"
+    flags=${quarantine%%;*}
+    [[ $flags =~ ^[[:xdigit:]]{1,8}$ ]] || refuse "$app's quarantine flags cannot be read: $flags"
+    (( (16#$flags & 0x40) != 0 )) ||
+      refuse "$app is not user-approved: open it in the guest's window, answer its first-run dialogs and quit it from its menu before --first-run"
+  fi
+done <"$record"
 PATH=$(cat "$HOME/actions-runner-maws/.path") || refuse "the runner's PATH cannot be read from ~/actions-runner-maws/.path"
 [[ -n $PATH ]] || refuse "the runner's PATH is empty"
 export PATH
