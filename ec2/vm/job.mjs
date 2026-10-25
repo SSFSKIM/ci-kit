@@ -8,6 +8,8 @@ import { pathToFileURL } from 'node:url';
 import { prepareContainer, runContainer } from '../../pool/vm/container.mjs';
 import { smokeVerdict } from '../../pool/vm/run.mjs';
 import { formatDiagnostic } from './diagnostics.mjs';
+import { verifyRepoResults } from '../../pool/bake/manifest.mjs';
+import { smokeJobImages } from '../../pool/bake/job-images.mjs';
 
 const sh = promisify(execFile);
 const STATE = '/run/ci-kit-ec2/state.json';
@@ -198,6 +200,8 @@ export async function checkImage(root = '/') {
       !Object.keys(manifest.warm ?? {}).length || !Object.values(manifest.warm).every(step => step?.ok)) {
     throw new ImageCheckError('manifest-incomplete', manifestPath);
   }
+  try { verifyRepoResults(manifest.repos); }
+  catch { throw new ImageCheckError('manifest-incomplete', manifestPath); }
   if (!await exists('etc/cloud/cloud-init.disabled')) throw new ImageCheckError('cloud-init-marker-missing', 'etc/cloud/cloud-init.disabled');
   if (await exists('var/lib/cloud/instance')) throw new ImageCheckError('cloud-init-identity', 'var/lib/cloud/instance');
   // Cloud-init is disabled on these images: persisted state is from the builder, not this guest's boot.
@@ -222,7 +226,8 @@ function runtime() {
   const md = imdsClient();
   return {
     now: () => new Date(), log,
-    readUserData: () => md.read('user-data'), putReport, armDeadline, runContainer, checkImage,
+    readUserData: () => md.read('user-data'), putReport, armDeadline, runContainer,
+    checkImage: async () => { await checkImage(); await smokeJobImages(); },
     prepareContainer: name => prepareContainer(name, { blockIpv6: true }),
     watchNotice: callback => watchNotice(md, callback),
     saveState: async state => {

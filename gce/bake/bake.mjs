@@ -17,9 +17,8 @@ import { fileURLToPath } from 'node:url';
 import { createGce, accessToken, GceError } from '../../lib/gce.mjs';
 import { createAppTokens } from '../../lib/github-app.mjs';
 import { createGitHub } from '../../lib/github.mjs';
-import { WARM_SCOPE } from '../../pool/bake/warm.mjs';
 import { parseGceConfig, parseEc2Config } from '../launcher/config.mjs';
-import { resolveManifest, verifyManifest, manifestLabels, bakeProviders } from '../../pool/bake/manifest.mjs';
+import { resolveManifest, verifyManifest, manifestLabels, bakeProviders, bakeScope, logRepoResults } from '../../pool/bake/manifest.mjs';
 import {
   reportOutcome, checkOutcome, ownsBakeInstance, ownsBakeImage, refusedOutright, staleBakeInstances, staleBakeRunners, imagesToPrune, placements,
   smokeMachines, refusal, bakeRunId, bakeNames, builderInstance, smokeInstance, checkInstance, checkJitRequest, imageBody, fillBuilderScript,
@@ -172,6 +171,7 @@ export async function runBake(gce, { cfg, sha, manifest, runId, token, gh, scrip
     const built = await awaitReport(gce, builder, 'ci-kit/bake', BAKE_TIMEOUT_MS, wait);
     if (!built.ok) throw new Error(`ci-kit: the builder did not finish: ${built.reason}`);
     const actualManifest = verifyManifest(JSON.parse(built.manifest), manifest);
+    logRepoResults(actualManifest, log);
 
     // The disk is consistent: the guest powered off after reporting. Re-check ownership right before imaging it.
     const owned = await gce.instance(builder.zone, builder.name);
@@ -308,8 +308,9 @@ async function main() {
   const runId = process.env.CI_KIT_BAKE_RUN || bakeRunId(new Date());
   const gce = createGce({ project: cfg.project, token: accessToken() });
   const app = { appId: (await gce.secret('ci-kit-app-id')).trim(), pem: await gce.secret('ci-kit-app-key'), owner: 'SSFSKIM' };
-  // The builder's token: one hour, MAWS's contents only (the cache warming reads its lockfile).
-  const token = await createAppTokens({ ...app, scope: WARM_SCOPE })();
+  // One-hour builder tokens: contents read on the served repositories, never the real-job credentials.
+  const scope = bakeScope(cfg.repos);
+  const token = await createAppTokens({ ...app, scope })();
   // The real job's: ci-kit-sandbox only, minted as needed, so it is fresh after a long build.
   const gh = createGitHub(createAppTokens({ ...app, scope: CHECK_SCOPE }));
   const script = fillBuilderScript(await readFile(new URL('./builder.sh', import.meta.url), 'utf8'), { sha });
@@ -320,7 +321,7 @@ async function main() {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   log(`bake ${runId}: kit ${sha.slice(0, 8)}, project ${cfg.project}, ${accounts.length} EC2 accounts`);
   await bakeProviders({
-    resolve: () => resolveManifest({ sha, gh: createGitHub(token) }),
+    resolve: () => resolveManifest({ sha, gh: createGitHub(token), repos: cfg.repos }),
     gce: (manifest) => runBake(gce, { cfg, sha, manifest, runId, token, gh, script, sleep, log }),
     accounts,
     ec2: async (account, manifest) => {
@@ -330,7 +331,7 @@ async function main() {
       const aws = createAws({ roleArn: account.roles.bake, region: account.region, log });
       const runtimeAws = createAws({ roleArn: account.roles.launcher, region: account.region, log });
       return runEc2Bake(aws, { runtimeAws, cfg: account, manifest, runId,
-        token: await createAppTokens({ ...app, scope: WARM_SCOPE })(), gh,
+        token: await createAppTokens({ ...app, scope })(), gh,
         script: await readFile(new URL('../../ec2/bake/builder.sh', import.meta.url), 'utf8'), sleep, log });
     },
   });

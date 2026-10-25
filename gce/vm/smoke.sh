@@ -3,6 +3,10 @@
 # the runner, on a VM booted from the image with no JIT config, so it sees what a job would see. One line per check,
 # then `ci-kit smoke: ok` or `ci-kit smoke: failed:<check>` at the first failure.
 set -uo pipefail
+# Per-repository smoke is launched separately by the host, never through a Docker socket in a job container.
+if [ "${1:-}" = --setup ]; then
+  exec /home/runner/externals/node24/bin/node /opt/ci-kit/pool/bake/setup-container.mjs smoke "$2" "$3"
+fi
 C=/var/lib/ci-kit/cache
 
 check() {

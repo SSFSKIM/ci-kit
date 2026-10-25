@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
 import { prepareContainer, docker } from '../../pool/vm/container.mjs';
 import { jobRunArgs, vmMode, smokeVerdict } from './run.mjs';
+import { smokeJobImages } from '../../pool/bake/job-images.mjs';
 
 const MD = 'http://169.254.169.254/computeMetadata/v1/instance';
 const log = (...a) => console.log(`ci-kit gce job (up ${readFileSync('/proc/uptime', 'utf8').split(' ')[0]} s):`, ...a);
@@ -46,6 +47,12 @@ async function main() {
   const cpus = availableParallelism();
 
   if (mode.kind === 'smoke') {
+    try { await smokeJobImages(); }
+    catch (error) {
+      log(error.message);
+      await report('smoke', 'failed:setup-images');
+      return;
+    }
     const { code, out } = await docker(jobRunArgs({ name, cpus, smoke: { expectCpus: mode.expectCpus } }), { capture: true });
     const verdict = smokeVerdict(out, code);
     log(`smoke: ${verdict}`);

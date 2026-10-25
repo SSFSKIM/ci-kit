@@ -5,7 +5,7 @@ import {
 } from '@aws-sdk/client-ec2';
 import { GetParameterCommand } from '@aws-sdk/client-ssm';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
-import { manifestLabels, verifyManifest } from '../../pool/bake/manifest.mjs';
+import { manifestTags, verifyManifest, logRepoResults } from '../../pool/bake/manifest.mjs';
 import { CHECK, checkJitRequest, checkOutcome } from '../../gce/bake/plan.mjs';
 import { formatDiagnostic } from '../vm/diagnostics.mjs';
 
@@ -142,7 +142,8 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
       return i.State.Name === 'stopped' && r ? {report:r,instance:i} : null;
     });
     const actual = verifyManifest(built.report.manifest,manifest);
-    const labels = { ...pool,...manifestLabels(actual),'ci-kit-ready':'false' };
+    logRepoResults(actual, log);
+    const labels = { ...pool,...manifestTags(actual),'ci-kit-ready':'false' };
     const target = built.instance.BlockDeviceMappings?.find(d => d.DeviceName === '/dev/sdf')?.Ebs?.VolumeId;
     if (!target) throw new Error('builder compacted destination volume missing');
     const snapshot = await ec2.send(new CreateSnapshotCommand({VolumeId:target,Description:`ci-kit compacted root ${run}`,

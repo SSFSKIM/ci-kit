@@ -25,7 +25,7 @@ test('one manifest resolves moving inputs once and fetches the lock at the resol
     assert.equal(options.headers?.authorization, undefined, 'public reads must not use the MAWS-only token');
     return { ok: true, json: async () => [{version:'v24.10.0'}, {version:'v22.20.0'}, {version:'v22.19.0'}], text: async () => 'FROM ghcr.io/actions/actions-runner:2.338.0@sha256:deadbeef\n' };
   } });
-  assert.deepEqual(manifest, base);
+  assert.deepEqual(manifest, { ...base, repos: {} });
   assert.deepEqual(reads, ['https://nodejs.org/dist/index.json',`https://raw.githubusercontent.com/SSFSKIM/ci-kit/${sha}/pool/image/Dockerfile`]);
   assert.equal(paths.length, 2);
 });
