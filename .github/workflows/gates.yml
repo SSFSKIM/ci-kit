@@ -183,6 +183,10 @@ jobs:
         if: matrix.gate.setup.pnpm
         run: corepack enable
 
+      - name: Apply CI environment
+        if: join(matrix.gate.setup.apt, '') != '' || join(matrix.gate.setup.brew, '') != '' || join(matrix.gate.setup.cask, '') != '' || matrix.gate.setup.script != ''
+        uses: SSFSKIM/ci-kit/setup@v1
+
       # build_cache: gha (docs/adopting.md, "Build cache"). The runner hands the cache service's token and URLs to JS
       # actions only, never to run: steps, so this step exports them for the rest of the job: what buildx fills a
       # type=gha cache's token, url, url_v2 and version from (docker/buildx build/opt.go, addGithubToken). The hosted
