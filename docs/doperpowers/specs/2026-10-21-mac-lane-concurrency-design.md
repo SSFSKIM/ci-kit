@@ -1110,7 +1110,7 @@ Proof: class 1a green; one Mac set at the head green, scheduled through CI-opt; 
 Before any window, two PRs carry V1's verdict, and neither needs the mini:
 - **ci-kit** (`vm-lane-v4-prep`): `provision.sh` sets the guest's display with `displayplacer`
   (`2560x1440 scaling:on`), and the guest's wrapper refuses a job when the mode it reads at boot is not that; the
-  bake grows the guest's disk; `CI_KIT_VM_MEMORY_FLOOR` defaults to 60; `bake.sh` refuses a `--memory` under 4096.
+  bake grows the guest's disk; `CI_KIT_VM_MEMORY_FLOOR` defaults to 60 (57 since 2026-10-25, Decision Log); `bake.sh` refuses a `--memory` under 4096.
 - **MAWS**: a guest-eligible e2e job does not build out/ (Decision Log, "out/ is built on the pool"). The plan adds a
   pool job, `e2e-build`, which builds the out/ variants the run's guest-eligible groups need at the tested sha and
   uploads them as artifacts keyed by that sha and the variant. A guest-eligible job, on either desktop, downloads
