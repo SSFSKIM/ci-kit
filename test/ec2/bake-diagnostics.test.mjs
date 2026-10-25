@@ -119,3 +119,23 @@ test('builder copy refusal exposes only its sanitized tool tail, never the repor
   assert.equal(message, 'builder failed: failed:compact '+JSON.stringify({reason:'compact-failed',phase:'root-copy',exit_status:1,
     log_tail:'Partclone: bitmap count mismatch\n[redacted-url]'}));
 });
+
+// Construct synthetic credentials so the test exercises their shape without storing real credentials.
+const credentials = [
+  ...['ghs_', 'ghp_', 'gho_', 'ghu_', 'ghr_', 'github_pat_'].map(prefix => [prefix, prefix + 'A'.repeat(36), '[redacted-credential]']),
+  ['git userinfo', 'x-access-token:' + 'fixture-password', 'x-access-token:[redacted-credential]'],
+  ['basic auth', 'AUTHORIZATION: basic ' + Buffer.from('x-access-token:fixture-password').toString('base64'), 'AUTHORIZATION: basic [redacted-credential]'],
+  ['bearer auth', 'Authorization: Bearer ' + 'opaque-fixture', 'Authorization: Bearer [redacted-credential]'],
+  ...['AKIA', 'ASIA'].map(prefix => [prefix, prefix + 'A'.repeat(16), '[redacted-credential]']),
+  ...['X-Amz-Credential', 'X-Amz-Signature', 'X-Amz-Security-Token'].map(key =>
+    [key, `${key}=fixture%2Fprivate&next=ok`, `${key}=[redacted-credential]&next=ok`]),
+  ['security token header', 'x-amz-security-token: fixture/session+token=', 'x-amz-security-token: [redacted-credential]'],
+];
+for (const [label, credential, redacted] of credentials) test(`controller redacts ${label} from a tool log without hiding the refusal`, async () => {
+  const message = await failedBake({value:'failed:compact', diagnostic: {
+    reason:'compact-failed', phase:'root-copy', exit_status:1,
+    log_tail:`Partclone: bitmap count mismatch\n${credential}`,
+  }}, {builder:true});
+  assert.equal(message, 'builder failed: failed:compact '+JSON.stringify({reason:'compact-failed',phase:'root-copy',exit_status:1,
+    log_tail:`Partclone: bitmap count mismatch\n${redacted}`}));
+});

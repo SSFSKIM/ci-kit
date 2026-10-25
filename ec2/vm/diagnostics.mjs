@@ -2,12 +2,18 @@
 import { stripVTControlCharacters } from 'node:util';
 
 // Tool logs are the only free text admitted here, never the report/manifest or arbitrary objects.
-// Strip terminal controls and URL capabilities; JSON serialization escapes the remaining newlines.
+// Strip terminal controls, URL capabilities, and recognizable GitHub/AWS credentials.
+// JSON serialization escapes the remaining newlines.
 function compactLogTail(value) {
   if (typeof value !== 'string') return '';
   const clean = stripVTControlCharacters(value).replace(/\r\n?/g, '\n')
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\p{Cf}\u2028\u2029]/gu, '')
-    .replace(/https?:\/\/\S+/gi, '[redacted-url]').trimEnd();
+    .replace(/https?:\/\/\S+/gi, '[redacted-url]')
+    .replace(/(\bauthorization\s*:\s*(?:basic|bearer)\s+)[^\s"'<>]+/gi, '$1[redacted-credential]')
+    .replace(/(\bx-access-token\s*:\s*)[^\s"'<>@]+/gi, '$1[redacted-credential]')
+    .replace(/(\bX-Amz-(?:Credential|Signature|Security-Token)\s*[:=]\s*)[^\s&"'<>]+/gi, '$1[redacted-credential]')
+    .replace(/\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+/g, '[redacted-credential]')
+    .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, '[redacted-credential]').trimEnd();
   // Drop a UTF-8 character split at the byte boundary rather than growing the bound on decoding.
   return Buffer.from(clean).subarray(-8192).toString('utf8').replace(/^\ufffd+/u, '').split('\n').slice(-40).join('\n');
 }

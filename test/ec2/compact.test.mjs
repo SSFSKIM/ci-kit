@@ -85,6 +85,14 @@ write_log() {
     diagnostic-*)
       if [ "$CASE" = diagnostic-missing ]; then return 0; fi
       if [ "$CASE" = diagnostic-empty ]; then : > "$log"; return 0; fi
+      if [ "$CASE" = diagnostic-straddling ]; then
+        { printf '%s\\n' 'https://reports.invalid/builder.json?X-Amz-Credential=PRIVATE-CREDENTIAL&X-Amz-Signature=PRIVATE-SIGNATURE'; printf '%8130s\\n' x; } > "$log"
+        return 0
+      fi
+      if [ "$CASE" = diagnostic-boundary ]; then
+        { printf '%s\\n' preceding; printf '%8191s\\n' x; } > "$log"
+        return 0
+      fi
       if [ "$CASE" = diagnostic-long ]; then printf '%20000sEND\\n' x > "$log"; return 0; fi
       local i; for ((i=1; i<=50; i++)); do printf 'partclone line %s\\n' "$i"; done > "$log" ;;
   esac
@@ -365,11 +373,11 @@ for (const scenario of ['diagnostic-root', 'diagnostic-boot', 'diagnostic-boot-e
     assert.equal(r.diagnostic.phase, 'root-copy');
   } else assert.equal(r.diagnostic.phase, 'boot-copy');
 });
-test('a single huge log line is byte bounded without losing its end', () => {
+test('a single huge log line is omitted rather than admitting an unrecognizable credential suffix', () => {
   const r = run('diagnostic-long');
   assert.equal(r.status, 1);
   assert.ok(Buffer.byteLength(r.logTail) <= 8192);
-  assert.match(r.logTail, /END\n$/);
+  assert.equal(r.logTail, '');
 });
 for (const scenario of ['diagnostic-missing', 'diagnostic-empty']) test(`${scenario} retains the original failure without inventing output`, () => {
   const r = run(scenario);
@@ -397,4 +405,16 @@ test('a failed thaw never forks a tail reader while root remains frozen', () => 
   assert.equal(r.diagnostic.phase, 'root-copy');
   assert.equal(r.logTail, undefined);
   assert.doesNotMatch(r.stdout, /CALL tail/);
+});
+
+test('a URL straddling the byte cutoff is omitted whole, never admitted without its scheme', () => {
+  const r = run('diagnostic-straddling');
+  assert.equal(r.status, 1);
+  assert.equal(r.logTail, ' '.repeat(8129) + 'x\n');
+  assert.doesNotMatch(r.logTail, /PRIVATE|X-Amz|builder/);
+});
+test('a full line exactly at the byte bound is preserved', () => {
+  const r = run('diagnostic-boundary');
+  assert.equal(r.status, 1);
+  assert.equal(r.logTail, ' '.repeat(8190) + 'x\n');
 });

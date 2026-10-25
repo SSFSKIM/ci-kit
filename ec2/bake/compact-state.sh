@@ -11,7 +11,15 @@ compact_record_failure() {
 # that recorded the first failure owns its log; outer cleanup must not replace it.
 compact_record_log() {
   if [ -n "${compact_failed_log:-}" ] && [ -f "$compact_failed_log" ]; then
-    tail -c 8192 "$compact_failed_log" | tail -n 40 > "$CI_KIT_COMPACT_DIAGNOSTIC.log" || true
+    local bytes
+    bytes=$(wc -c < "$compact_failed_log") || return 0
+    if [ "$bytes" -gt 8192 ]; then
+      # Include the preceding byte, then drop the partial first line. A cut URL/token must
+      # never reach the sanitizer without its recognizable prefix. Oversized lines are omitted.
+      tail -c 8193 "$compact_failed_log" | sed '1d' | tail -n 40
+    else
+      tail -n 40 "$compact_failed_log"
+    fi > "$CI_KIT_COMPACT_DIAGNOSTIC.log" || true
   fi
 }
 compact_record_phase() {
