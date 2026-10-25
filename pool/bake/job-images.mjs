@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { CACHE, CACHE_ENV, IMAGE } from '../agent/docker.mjs';
 import { METADATA_BLOCK } from '../vm/run.mjs';
 import { repoSlug, jobImage } from './manifest.mjs';
+import { retainSmokeSource } from './smoke-source.mjs';
 
 const KIT = '/opt/ci-kit', SOURCES = '/var/lib/ci-kit/setup-sources';
 const NODE = '/home/runner/externals/node24/bin/node';
@@ -68,8 +69,11 @@ export async function bakeJobImages({ manifest, token, kit = KIT, cache = CACHE,
         GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`,
       } });
       await exec('git', ['-C', source, 'checkout', '--quiet', '--detach', 'FETCH_HEAD']);
-      // Retain the pristine pinned checkout for boot smoke; installs only change a disposable cache/work copy.
+      // Apply and warm keep the full clone; only pristine declaration inputs survive on the VM image.
       root = await workCopy(repo, { sources, cache, exec });
+      step = 'retain smoke inputs';
+      const { before, after } = await retainSmokeSource(source, { exec });
+      log(`ci-kit bake: ${repo} retained smoke inputs: ${after} bytes (was ${before}; removed ${before - after})`);
       step = 'apply';
       log(`ci-kit bake: ${repo} apply ${entry.setup_hash}`);
       await exec('docker', containerArgs({ repo, phase: 'apply', hash: entry.setup_hash, kit, cache }));
@@ -113,7 +117,7 @@ export async function smokeJobImages({ manifest, kit = KIT, cache = CACHE, sourc
       await exec('docker', containerArgs({ repo, phase: 'smoke', hash: entry.setup_hash, kit, cache }));
       log(`ci-kit smoke: ${repo} setup ${entry.setup_hash}: installed nothing`);
     } catch (error) {
-      throw new Error(`${repo} smoke: ${error.message}`);
+      throw new Error(`${repo} smoke: ${error.message}; smoke retains only .github/ci-kit.yml and setup.script (no other repository files)`);
     } finally {
       await exec('docker', ['rm', '--force', name]).catch(() => {});
       await rm(root, { recursive: true, force: true });

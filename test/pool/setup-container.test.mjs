@@ -6,9 +6,11 @@ import { join } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { parseConfig } from '../../plan/config.mjs';
 import { setupHash } from '../../setup/hash.mjs';
+import { retainSmokeSource } from '../../pool/bake/smoke-source.mjs';
+const retain = root => retainSmokeSource(root,{exec:async(bin,args)=>execFileSync(bin,args)});
 const entry = new URL('../../pool/bake/setup-container.mjs',import.meta.url);
 
-async function fixture(t, { missingPackage = false } = {}) {
+async function fixture(t, { missingPackage = false, extraScript = '' } = {}) {
   const dir=await mkdtemp(join(tmpdir(),'ci-kit-setup-container-'));
   t.after(()=>rm(dir,{recursive:true,force:true}));
   const root=join(dir,'repo'),tools=join(dir,'tools'),bin=join(dir,'bin');
@@ -20,7 +22,7 @@ async function fixture(t, { missingPackage = false } = {}) {
   // External corepack boundary: executable shim produced by enable, so PATH must work for both commands.
   await writeFile(join(nodeBin,'corepack'),'#!/bin/sh\ntest "$1" = enable || exit 2\nprintf "#!/bin/sh\\necho pnpm-ok\\n" > "$3/pnpm"\nchmod +x "$3/pnpm"\n',{mode:0o755});
   await writeFile(join(bin,'curl'),'#!/bin/sh\nexit "${METADATA_REACHABLE:-7}"\n',{mode:0o755});
-  const script=Buffer.from('set -eu\nnode -p \'"node-ok"\' >> proof\npnpm --version >> proof\n');
+  const script=Buffer.from('set -eu\nnode -p \'"node-ok"\' >> proof\npnpm --version >> proof\n'+extraScript);
   const config='version: 1\nsetup:\n  node: "22"\n  pnpm: true\n  script: .github/setup.sh\n  install: node -p \'"install-node"\' >> proof && pnpm --version >> proof\n' +
     (missingPackage ? '  apt: [fixture-missing]\n  brew: [fixture-missing]\n' : '');
   await writeFile(join(bin,'dpkg-query'),'#!/bin/sh\nexit 0\n',{mode:0o755});
@@ -92,11 +94,14 @@ for (const [name,key,value] of [
   test(`local git config rejects ${name} before repository code runs`,async t=>{
     const f=await fixture(t);
     execFileSync('git',['-C',f.root,'config','--local',key,value]);
-    const result=f.run('apply');
-    assert.notEqual(result.status,0,result.stdout);
-    assert.match(result.stderr,/credential|ambiguous/);
-    assert.doesNotMatch(result.stderr,/secret/);
-    await assert.rejects(readFile(join(f.root,'proof')),/ENOENT/);
+    for(const phase of ['apply','smoke']) {
+      if(phase==='smoke') await retain(f.root);
+      const result=f.run(phase,{CI_KIT_SETUP_HASH:f.hash});
+      assert.notEqual(result.status,0,result.stdout);
+      assert.match(result.stderr,/credential|ambiguous/);
+      assert.doesNotMatch(result.stderr,/secret/);
+      await assert.rejects(readFile(join(f.root,'proof')),/ENOENT/);
+    }
   });
 }
 
@@ -112,6 +117,7 @@ test('valueless authentication keys cannot bypass the local config guard',async 
 
 test('changed pinned declaration and stale image fail smoke even when packages would be present',async t=>{
   const f=await fixture(t);
+  await retain(f.root);
   const stale=f.run('smoke',{CI_KIT_SETUP_HASH:'0'.repeat(16)});
   assert.notEqual(stale.status,0); assert.match(stale.stderr,/hash/);
   await writeFile(join(f.root,'.github/setup.sh'),'echo changed\n');
@@ -122,7 +128,54 @@ test('changed pinned declaration and stale image fail smoke even when packages w
 
 test('a matching hash cannot hide a missing package: smoke rejects an install even if it succeeds',async t=>{
   const f=await fixture(t,{missingPackage:true});
+  await retain(f.root);
   const result=f.run('smoke',{CI_KIT_SETUP_HASH:f.hash});
   assert.notEqual(result.status,0);
   assert.match(result.stderr,/job image is not satisfied: installed (apt|brew):fixture-missing/);
+});
+
+test('retained inputs run real job-mode setup, preserve its hash and skip install',async t=>{
+  const f=await fixture(t,{extraScript:'test "$CI_KIT_SETUP_MODE" = job\n'});
+  await writeFile(join(f.root,'package.json'),'{}');
+  await retain(f.root);
+  await assert.rejects(readFile(join(f.root,'package.json')),/ENOENT/);
+  const result=f.run('smoke',{CI_KIT_SETUP_HASH:f.hash});
+  assert.equal(result.status,0,result.stderr);
+  assert.match(result.stdout,/clone credentials absent/);
+  assert.match(result.stdout,new RegExp(`image matches setup ${f.hash}`));
+  assert.match(result.stdout,/installed nothing/);
+  assert.deepEqual((await readFile(join(f.root,'proof'),'utf8')).trim().split('\n'),['node-ok','pnpm-ok']);
+});
+
+test('a script needing other repository files fails smoke rather than skipping the script or fetching a clone',async t=>{
+  const f=await fixture(t,{extraScript:'cat package.json\n'});
+  await writeFile(join(f.root,'package.json'),'{}');
+  const apply=f.run('apply');
+  assert.equal(apply.status,0,apply.stderr);
+  await retain(f.root);
+  const result=f.run('smoke',{CI_KIT_SETUP_HASH:f.hash});
+  assert.notEqual(result.status,0);
+  assert.match(result.stderr,/setup.script.*failed.*package.json/);
+  assert.doesNotMatch(result.stdout,/installed nothing|smoke setup .*: ok/);
+});
+
+test('retention materializes executable in-tree scripts without keeping their unrelated directory',async t=>{
+  const f=await fixture(t,{extraScript:'test -x "$0"\n'});
+  const bytes=await readFile(join(f.root,'.github/setup.sh'));
+  await mkdir(join(f.root,'scripts'));
+  await writeFile(join(f.root,'scripts/tooling.sh'),bytes,{mode:0o755});
+  await rm(join(f.root,'.github/setup.sh'));
+  await symlink('../scripts/tooling.sh',join(f.root,'.github/setup.sh'));
+  await retain(f.root);
+  await assert.rejects(readFile(join(f.root,'scripts/tooling.sh')),/ENOENT/);
+  assert.deepEqual(await readFile(join(f.root,'.github/setup.sh')),bytes);
+  const result=f.run('smoke',{CI_KIT_SETUP_HASH:f.hash});
+  assert.equal(result.status,0,result.stderr);
+});
+
+for(const path of ['.github/ci-kit.yml','.github/setup.sh']) test(`retention refuses ${path} symlinks outside the clone before reading host bytes`,async t=>{
+  const f=await fixture(t);
+  await rm(join(f.root,path));
+  await symlink(process.execPath,join(f.root,path));
+  await assert.rejects(retain(f.root),/smoke input .* escapes the checkout/);
 });

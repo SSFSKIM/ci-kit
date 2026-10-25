@@ -713,12 +713,29 @@ back to `ci-kit-runner`. The setup action then installs any missing declaration 
 ci-kit infrastructure; each declared job image is smoked separately by reapplying its declaration in job mode and
 requiring no installs. Warm failures may make the first job slower but do not invalidate an otherwise satisfied image.
 
-Pristine shallow checkouts are retained under `/var/lib/ci-kit/setup-sources/`, outside the job images and shared
-cache, for boot smoke. Build/install/smoke use disposable copies under the cache's `work/`, so install artifacts are
-not preserved with the source or committed into Docker. On both providers, the host launches each job image with
-`gce/vm/smoke.sh --setup`: setup in job mode must match its hash and install nothing. These containers have no Docker
-socket or host credentials; the host launches them separately before the original base-image checks. **Normal jobs
-still start `ci-kit-runner:latest`**; selecting the repository image is a separate deployment milestone.
+Only pristine smoke inputs are retained under `/var/lib/ci-kit/setup-sources/<owner>-<repo>/`, outside the job
+images and shared cache: the exact `.github/ci-kit.yml`, the declared `setup.script` bytes at that path (if any),
+and an empty Git repository carrying the clone's original local config for the credential audit. No cloned objects,
+index, history, other source files or install artifacts survive there. In-tree input symlinks are materialized as
+bytes; links outside the checkout fail the bake rather than reading the builder's files. Apply and warm still share
+a **full disposable checkout** under the cache's `work/`; smoke gets a disposable copy of the retained inputs.
+
+This set covers what `applySetup` reads in job mode without `install`, and preserves the setup hash: normalized
+package lists, Node, pnpm, install command, script path and script bytes. The install command is hashed but not run
+by smoke; package manifests and lockfiles are not hash inputs. A script still runs in smoke. If it needs other
+repository files in job mode, smoke **fails** rather than skipping the script, fetching another clone or keeping the
+whole repository. Keep its satisfied check self-contained (put dependency installation in `setup.install`); otherwise
+its unhashed dependencies would not be covered by the image identity. Apply/warm may use the full repository.
+
+On both providers, the host launches each job image with `gce/vm/smoke.sh --setup`: the retained declaration and
+image environment/label must match the manifest hash, and setup in job mode must install nothing. These containers
+have no Docker socket or host credentials; the host launches them separately before the original base-image checks.
+A builder logs `ci-kit bake: <repo> retained smoke inputs: <after> bytes (was <before>; removed <difference>)`
+(logical file bytes, including Git packs before trimming), followed by the usual layer sizes and apply/warm results.
+Each smoke VM must still log `ci-kit smoke: <repo> setup <hash>: installed nothing` for every declaration. For #154,
+compare EC2's `snapshot full written size` with 11.698 GiB: removing the retained full checkouts should save about
+2.2 GiB (roughly 9.5 GiB afterwards), with job layers and warmed caches unchanged. Snapshot allocation/compression
+means the source-byte log is not an exact prediction; measure both providers' next bake before claiming that saving.
 
 ### Selecting a repository's job image (M4)
 
