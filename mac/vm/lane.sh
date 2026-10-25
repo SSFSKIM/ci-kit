@@ -76,10 +76,11 @@
 #      the desktop lock: clear only when it exits 0 and prints nothing);
 #   4. no guest exists: vm-reserved absent, and Tart lists no maws-vm-* running (a maintenance VM keeps the lane shut,
 #      logged once per change and alerted after CI_KIT_VM_MAINTENANCE_ALERT s, 600);
-#   5. the memory guard and the disk reserve admit: pressure 1, available at least CI_KIT_VM_MEMORY_FLOOR % (60, V1's
+#   5. the memory guard and the disk reserve admit: pressure 1, available at least CI_KIT_VM_MEMORY_FLOOR % (57. V1's
 #      measure on the mini: a busy 4 GB guest moved the available figure at most 8 points, 24 with a host e2e job
-#      beside it, and pressure 2 began at 35-41 %, so a boot at 60 keeps the host above the warn boundary with a host
-#      job beside; a 3 GB surge beside the guest left 53 %, which 60 keeps from booting, as the floor is meant to),
+#      beside it, and pressure 2 began at 35-41 %; a 3 GB surge beside the guest left 53 %, which the floor keeps from
+#      booting. V1 set 60; by 2026-10-25 the idle mini read 57-59 % and a host e2e job 51-56 %, so 60 admitted almost
+#      no boot, and 57 boots at idle and still not beside a host job's surge),
 #      swap not grown since the last read at least CI_KIT_VM_SWAP_GAP s (60) older, and the volume of ~/.tart
 #      (CI_KIT_VM_TART_HOME) with at least CI_KIT_VM_DISK_RESERVE GB (40) free; a read that fails admits nothing;
 #   6. the host's main display is at @2x (cursor-park --describe through CI_KIT_CURSOR_PARK, the exclusive instance's
@@ -176,7 +177,7 @@ stop_timeout=$(whole "${CI_KIT_VM_STOP_TIMEOUT:-}" 30)
 spawn_check=$(whole "${CI_KIT_VM_SPAWN_CHECK:-}" 1)
 sample_every=$(whole "${CI_KIT_VM_SAMPLE:-}" 15)
 swap_gap=$(whole "${CI_KIT_VM_SWAP_GAP:-}" 60)
-memory_floor=$(whole "${CI_KIT_VM_MEMORY_FLOOR:-}" 60)
+memory_floor=$(whole "${CI_KIT_VM_MEMORY_FLOOR:-}" 57)
 warn_pause=$(whole "${CI_KIT_VM_WARN_PAUSE:-}" 120)
 critical_pause=$(whole "${CI_KIT_VM_CRITICAL_PAUSE:-}" 600)
 disk_reserve=$(whole "${CI_KIT_VM_DISK_RESERVE:-}" 40)
