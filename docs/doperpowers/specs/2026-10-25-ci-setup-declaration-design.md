@@ -31,8 +31,8 @@ Macs.
 ## Progress
 
 - [x] (2026-10-25 00:3xZ) Design approved by the owner (declaration in `.github/ci-kit.yml`, mini host installs).
-- [x] (2026-10-25 01:1xZ) Spec reviewed: adversarial design review and buildability review; findings folded
-  (Decision Log, 2026-10-25 review revision).
+- [x] (2026-10-25 01:2xZ) Spec reviewed: adversarial design review and buildability review, two rounds; findings
+  folded (Decision Log, review revision and second round).
 - [ ] M1 — The declaration and the setup step.
 - [ ] M2 — MAWS declares its environment.
 - [ ] M3 — Per-repo job images in the pool bake.
@@ -211,9 +211,10 @@ design ("new GUI apps still need the one-time click").
   Mounted: the clone, read-write and owned by 1001; the cache directory as jobs mount it, owned by 1001 before the
   run (today ownership is fixed only after warming); and the kit's `setup/` code with what it imports, read-only.
   The applier runs on the runner's own bundled Node (`/home/runner/externals/`, the runtime the action itself runs
-  on), so the container needs no Node on its PATH; for `install`, the declaration's `node` and `pnpm` are put on the
-  PATH from the mounted tool cache (`prepare.sh` installs Node 22 and 24 there), as `actions/setup-node` and
-  `corepack enable` do in a job.
+  on), so the container needs no Node on its PATH for the applier. For the repository's own commands, the script in
+  the first run and `install` in the second, the declaration's `node` and `pnpm` are put on the PATH from the mounted
+  tool cache (`prepare.sh` installs Node 22 and 24 there) before either runs, as `actions/setup-node` and `corepack
+  enable` do before the setup step in a job, so a script may call Node or pnpm in a bake as it may in a job.
 - **Two runs, one committed.** The first run applies the packages and the script and is committed as
   `ci-kit-job/<owner>-<repo>:latest`, with `CI_KIT_SETUP_HASH` in its environment and as a label. The second runs a
   throwaway container from that new image, runs the declaration's `install` in the clone with the cache mounted, and
@@ -454,7 +455,8 @@ each, and `docs/pool.md`.
 Interfaces consumed: the bake CLI and `setupHash` (M1). Produced: the manifest's `repos`, the job images and their
 names, the image records.
 
-Decisions: the bake reads the served repositories from the `gce.json` bundled with the bake job, as it does today.
+Decisions: the bake reads the served repositories from the `gce.json` bundled with the bake job, as it does today. A
+test pins a bake fixture whose script calls `node` and `pnpm`, in the first run as well as the second.
 The metadata block is installed by the builder before the first clone and stays for the bake's life. EC2's image
 compaction (`ec2/bake/compact.sh`, `copy-root.sh`) copies Docker's data like the rest of the root filesystem: measure
 the new image size against the 9.12 GiB candidate and record it in Surprises & Discoveries.
@@ -489,7 +491,10 @@ as `job image <name>` before the container starts.
 Does not touch: the bake.
 
 Proves acceptance 3, 4's pool comparison (a scratch branch of ci-kit-sandbox declaring one package more than its
-default branch), and 6's job half. The launcher deploy is the coordinator's, from merged main.
+default branch), and 6's job half. The VM's code ships inside the provider image (`gce/vm/ci-kit-gce-job.service`
+runs `/opt/ci-kit/gce/vm/job.mjs`, checked out at the bake's kit commit), so after merge the coordinator deploys the
+launcher and runs a bake from merged main, and the proof waits for ready images on both providers; either order is
+safe, by the no-repository fallback above.
 
 ### M5 — Rebuild on a declaration change
 
@@ -614,7 +619,8 @@ aws ec2 describe-images --image-ids <newest ready AMI> --query 'Images[0].Tags' 
 # and in the bake's log: the metadata check from inside a bake container failing as required, each job image's size
 ```
 
-**M4**, after the coordinator deploys the launcher: a MAWS pool job's log shows `job image ci-kit-job/ssfskim-maws:latest`
+**M4**, after the coordinator deploys the launcher and a bake from merged main has made ready images on both
+providers: a MAWS pool job's log shows `job image ci-kit-job/ssfskim-maws:latest`
 and `ci-kit setup: image matches setup <hash>`; a ci-kit-sandbox job on a branch declaring one more package shows the
 notice and the install.
 
@@ -663,6 +669,12 @@ acceptance item checked as written above, its evidence recorded in Surprises & D
   `pool/bake/manifest.mjs` `verifyManifest`, `ec2/vm/job.mjs` `checkImage`, `gce/vm/smoke.sh`,
   `mac/vm/provision.sh`'s `runner` step, `gce/deploy.sh`'s bake grants) and held. Rejected: keeping `install` out of
   the hash by committing its side effects anyway (a hash that says "matches" for a different image).
+  Date/Author: 2026-10-25, CI-opt.
+
+- Decision: Second review round. Six of the design review's seven findings and all four buildability findings
+  are resolved; the two remaining points are fixed in place: the declaration's Node and pnpm are on the PATH for the
+  script in the bake's first run as well as for `install` in its second, and M4's proof waits for a bake from merged
+  main, because a VM runs the job code baked into its image. The review has converged; no further round.
   Date/Author: 2026-10-25, CI-opt.
 
 ## Outcomes & Retrospective
