@@ -248,9 +248,93 @@ and by the coordinator's holds, and the design below says what is read and when.
     no guest given up and no critical stop.
   - [x] (2026-10-25 20:1xZ) Lost jobs since JIT went live (2026-10-24 23:40Z): none. On 10-25, 140 guest jobs and
     218 host jobs completed, and no job was cancelled unacquired on a `ci-kit-mac*` label.
-  - [ ] Still open: step 6's untimed hold with the lane taking jobs (VA1) and an overlapping second owner (VA4),
-    step 7's recovery (VA10), step 8's legacy workflow (VA9), step 9's slot reuse (VA11), step 11's rollback
-    rehearsal, and step 12's verdict record once those land.
+  - [x] (2026-10-25 22:03:40–22:30:19Z) Step 6, VA1 and VA4: the untimed hold left the host offline and the lane
+    on. MAWS run 40238457203 (e9d7e46c7, document-app, no `Lane:`, `ci-kit-mac-solo`) booted
+    `maws-vm-job-vm-20261025T220631Z` at 22:06:34Z because the exclusive instance was offline, with no lane hold;
+    job 121305384582 was green on `ci-kit-mac-mini-maws-vm-job-vm-20261025T220631Z`, its guest-desktop-check and
+    start posture both `display=2560x1440@2x`, the latter naming `vm=vm` and the clone. Deleted 22:10:29Z; no job
+    clone in `tart list`. `CI-opt-t` timed at 22:11:25Z kept run 40239031384 (widgets, `Lane: vm`) queued; the lane
+    read `held: CI-opt-t`, `no boot: CI-opt-t` at 22:11:32Z. `CI-opt-t2` added at 22:19:07Z and the first hold
+    released left `held: CI-opt-t2` at 22:19:20Z, no boot. With maintenance held but the launcher still loaded,
+    `bake.sh --trial` refused `the launcher's agent is loaded` (exit 1). Maintenance and the install intervened
+    without releasing the second timed hold; the launcher returned at 22:24:59Z, maintenance released, then
+    `CI-opt-t2` at 22:25:29Z. A floor refusal at 54% came first; at 22:30:09Z the queued VM job booted
+    `maws-vm-job-vm-20261025T223006Z`, `holds none`; the host returned at 22:30:19Z. `bake.sh`'s `reservation stands`
+    refusal was not shown live; `test/mac-vm-bake.test.mjs` covers it. Evidence: the 22:30Z entry in the
+    coordinator's `~/Developer/ci-analysis/STATE.md` (STATE below),
+    `/tmp/ci-analysis/v4r-b1.log` and `v4r-b2.log` (the latter records dispatch, not a final job result).
+  - [x] (2026-10-25 21:16Z) Step 7, VA10: run 40233219063 (fd2562c69, document-app and dashboard, `Lane: vm`)
+    and measured presentations-drag run 40233476445 (8dcc698c3) both green. The first clone,
+    `maws-vm-job-vm-20261025T210021Z`, took document-app at 21:01:03Z; `kickstart -k` at 21:02:14Z restarted the
+    launcher while the measured job waited. Recovery adopted it at 21:02:17Z; its runner ended 21:04:26Z, Tart's
+    stopped state and no `tart run` were verified 21:04:37Z, delete and release 21:04:40Z. Settle released only at
+    21:05:33Z (`settled in 242 s`, start `vm=reserved`, release `vm=none`); the claim kept the next clone out until
+    the end hook removed it at 21:08:08Z. During the next boot, `maws-vm-job-vm-20261025T210819Z`, `kickstart -k`
+    at 21:08:31Z left the reservation standing; recovery stopped the clone whose wrapper had not started, verified
+    its end 21:08:44Z, deleted and released 21:08:47Z. The boot case had no measured job waiting at settle: a
+    settle claim blocks boots, so only a settle that starts during a boot can meet it. Reservation continuity,
+    not a second observed settle wait, is the boot-case evidence accepted here (Decision Log). Dashboard then
+    passed in `maws-vm-job-vm-20261025T210942Z`; the final Tart read had no job clone and no guest registration
+    remained at GitHub. Evidence: `v4r-p1.log`, `v4r-p1-lane.log`, `v4r-p1-hooks.log`, `v4r-p1-tart.txt`,
+    `v4r-g1.log`, `v4r-m1.log` in `/tmp/ci-analysis`, and STATE's 21:16Z entry. This proves VA3's wait and claim,
+    not its timing comparison against a solo spread.
+  - [x] (2026-10-25 22:01Z) Step 8, VA9: legacy run 39694759772 attempt 2, design at ff3945fcc9, was
+    `vm-safe: unknown (no contract line in .github/workflows/gate.yml at ff3945fcc942)` at 21:32:42Z. Its hook
+    raised the claim and waited on `maws-vm-job-vm-20261025T213050Z` (dashboard of run 40235684332, 0ce340a21);
+    `no guest runs after 288 s` followed delete and release at 21:37:29Z. The queued presentations job booted no
+    clone while the claim stood; the end hook removed it at 21:39:31Z, and
+    `maws-vm-job-vm-20261025T213934Z` booted at 21:39:37Z. The legacy job succeeded. Contract run 40236624832
+    (299fbc38a, design on the host) read `vm-safe: yes (contract 1)` at 21:41:20Z beside that clone and succeeded;
+    both guest jobs succeeded too. Evidence: `v4r-p2.log`, `v4r-p2-hooks.log`, `v4r-p2-lane.log`, `v4r-g3.log` and
+    `v4r-h4.log` in `/tmp/ci-analysis`.
+  - [x] (2026-10-25 22:01Z) Step 9, VA11's slot reuse: runs 40233219063 and 40235684332 each queued two VM jobs;
+    the second waited for teardown (and the intervening host claim), never a second running clone. In run
+    40237039928 (8afcb0475), widgets ran in `maws-vm-job-vm-20261025T214820Z`; `tart stop` at 21:50:34Z ended it,
+    stop verified 21:50:38Z, deleted and released 21:50:41Z. The next clone,
+    `maws-vm-job-vm-20261025T215047Z`, booted 21:50:49Z under fresh JIT, listened at 21:51:16Z and completed
+    document-app green at 21:54:23Z; widgets failed at GitHub at 21:59:51Z (job 121301132331), so the run was red
+    as expected. Step 9's old session-recovery clause cannot arise from reuse of a per-clone JIT registration; no
+    session conflict was seen. Instead of a recovery time from `out/_diag` against the 5 min budget, the read was
+    the launcher's boot line and its folded `out/listening` and wrapper log: a fresh listener, not recovery of the
+    stopped clone's session. Remote DELETE returned HTTP 422 and retried while the next clone ran; the final
+    GitHub read had no guest registration and Tart had no job clone. `bake.sh --trial maws-vm-candidate-va11`
+    while the earlier dashboard clone ran refused `no maintenance hold` at 21:32:22Z (exit 1). Evidence:
+    `v4r-p1-lane.log`, `v4r-p2.log`, `v4r-p2-lane.log`, `v4r-p2-runners.txt`, `v4r-p2-tart.txt`, `v4r-g5.log`
+    in `/tmp/ci-analysis`, and STATE's 22:01Z entry. These reads do not show mint failure or the local config and
+    pending-metadata boundary; the earlier JIT implementation tests cover those, not this live rehearsal.
+  - [x] (2026-10-25 22:30Z) Step 11, VA8's rollback, after the successful refreshes and retirements above:
+    under maintenance from 22:20:32Z, `maws-vm-candidate-20261025rb` was cloned from the golden at 22:20:42Z,
+    its runner directory removed and the removal verified after reboot (Surprises). Trial at 22:23:45Z booted
+    `maws-vm-trial-20261025T222345Z` with its own JIT runner and `ci-kit-mac-vm-trial` alone; kickoff failed
+    `no runner at /Users/admin/actions-runner-maws`, before the wrapper, so no `out/unfit` and an empty `out/`.
+    The stop was verified and the clone deleted. `trials/maws-vm-candidate-20261025rb` said `no job`, with
+    run/attempt/job/conclusion empty and the kickoff error as its reason; promote refused `the trial record names
+    no job id ... no trial job ran`. The pointer stayed `maws-vm-golden-20261025`, the golden untouched;
+    `--retire` deleted the candidate and no trial registration remained at GitHub. Evidence: STATE's 22:30Z entry;
+    the promoted refreshes are recorded in steps 2 and 4 above, promote's repeat-safety in V2's pointer tests.
+  - [x] (2026-10-25) Step 12, the operating verdict: `MAC_VM_E2E` is 33 groups on MAWS master 3f5e7119f, through
+    MAWS #135, #148 and #149; of the trial candidates, only terminal and design stay off. The mode stays `always`
+    on step 5's production reading, not a new staged comparison. The launcher has been on since
+    2026-10-23 07:26Z, apart from the recorded holds and maintenance windows. The mini now runs ci-kit 861acf2:
+    `install.sh --vm --disabled` at 22:20Z removed the floor-57 plist bridge, and the installed kit's default is
+    57. Release explicitly enabled and bootstrapped the launcher at 22:24:59Z; recovery read no job clone and no
+    reservation, then waited on maintenance and `CI-opt-t2` until their release. This records the verdict, not
+    completion of every VA in V4's Proof line.
+  - [ ] (2026-10-25) V4's remaining proof is VA2, VA3, VA4, VA5, VA6, VA11 and VA12. VA2 needs the idle-host and
+    busy-host `ci-kit-mac-solo` assignments paired with their boot-rule reads; the held-host run proves VA1, and
+    the forced-VM runs do not prove this routing choice. VA3 has the measured wait, claim and green job in step 7,
+    but no recorded comparison of its timings with its solo spread. VA4 has the overlapping holds and two live
+    bake refusals, but needs the `reservation stands` refusal on the mini; tests alone are not the live proof.
+    VA5 has production floor refusals and warning pauses (step 10 and the floor decision, plus phase 1), but no
+    critical-pressure stop and alert on the mini. VA6 needs the recorded guest credential/`gh` and host-to-guest
+    transport audit of `out/` and the launcher log; the design and tests are not that read. VA11 has distinct JIT
+    clones, serialized jobs, a fresh job after the forced stop and remote-DELETE retries; still needed are a live
+    mint-failure/no-boot read, guest registration label readback on the mini, and post-teardown local config removal
+    with only nonsecret pending metadata during a failed DELETE. VA12 needs the under-reserve boot and bake
+    refusals, disk-floor stop with alert and failed marker-write/stricter-state evidence on the mini; the bake's
+    free-space peak and V2's fake tests do not show them live. VA1 and VA9 are shown by steps 6 and 8, VA8 by the
+    promoted refreshes and step 11's rollback (its interface tested in V2), and VA10 by step 7 with the boot-case
+    substitution stated there. V4 stays unticked; no live fault injection is claimed by this documentation record.
 - [ ] V5 — Widen the proven-VM set; the second guest, if memory ever allows it.
 
 ## Design
@@ -1813,6 +1897,14 @@ hold-aware plan send them to the guest, which this spec leaves open.
   **Rejected:** keeping 60 and asking the owner to close sessions on the mini (the floor would starve again at the
   next drift); a lower floor such as 50 (it admits a boot beside a host job's surge, the case V1 drew the floor for).
 
+- 2026-10-25 (V4 step 7): **Accept reservation continuity for the boot-time restart, not an unobserved settle
+  wait.** Phase 1's running-job restart did show a measured job parked until verified teardown. Its boot restart
+  showed the reservation surviving SIGTERM, recovery stopping the unassigned clone, and release only after the
+  verified stop. A pre-existing settle claim prevents a boot, so the requested second overlap requires settle to
+  begin during the boot. The alternative, repeating the restart until that narrow overlap happens, was not taken;
+  the continuity read is accepted for the boot case, and the missing measured waiter is explicit in Progress.
+  This does not waive VA3's solo-spread comparison or V4's other missing live proofs.
+
 ## Surprises & Discoveries
 
 - 2026-10-21, M1 (ci-kit #67), from its reviews:
@@ -2117,6 +2209,42 @@ hold-aware plan send them to the guest, which this spec leaves open.
   same on the old guest on 10-24; host 9/9), fixed by an `expect.poll` (MAWS 97db96417); terminal,
   `terminal.spec.ts:490` re-adopt line count, 2 of 6 guest passes. A slower 4 GB guest widens a window the host
   rarely meets; none was an image gap.
+
+- 2026-10-25, V4 step 11, **an immediate `tart stop` lost an in-guest image edit.** In
+  `maws-vm-candidate-20261025rb`, `tart exec` removed `/Users/admin/actions-runner-maws`, but the directory was back
+  on the next boot after `tart stop`. Repeating the removal with `sync` and the guest's own
+  `sudo -n /sbin/shutdown -h now` kept it removed on reboot. A hand-edited image therefore needs a flushed,
+  in-guest shutdown and a reboot readback before its edit is relied on. The subsequent trial failed at kickoff,
+  before a wrapper could write `out/unfit`; the empty `out/` and no-job trial record distinguish that failure from
+  a job's red. Evidence: STATE's 2026-10-25 22:30Z entry, candidate and trial record named in Progress step 11.
+- 2026-10-25, V4 step 7, **`launchctl kickstart -k` sent SIGTERM, not an immediate kill.** At 21:08:31Z the
+  boot-time restart was requested; the trap logged at 21:08:34Z, after the current command returned:
+  `stopping on SIGTERM (booting, maws-vm-job-vm-20261025T210819Z); a guest and its reservation stay for the next start`.
+  The running-job restart's line at 21:02:15Z similarly named `running` and
+  `maws-vm-job-vm-20261025T210021Z`. The state line, not just kickstart's return, tells the reader what the old
+  launcher left for recovery. Evidence: `/tmp/ci-analysis/v4r-p1.log` and `v4r-p1-lane.log`.
+- 2026-10-25, V4 step 9, **a clone stopped by hand mid-job looks like a guest power-off to the launcher.**
+  `tart stop maws-vm-job-vm-20261025T214820Z` returned 0 at 21:50:34Z; the lane logged `the guest powered itself
+  off; teardown` at 21:50:35Z, then `the runner exited without out/done` after verifying the end at 21:50:38Z.
+  No failure was counted and no alert opened. GitHub failed widgets job 121301132331 of run 40237039928 at
+  21:59:51Z, about nine minutes later. The next job's green does not mean that forced-dead job recovered.
+  Evidence: `/tmp/ci-analysis/v4r-p2.log`, `v4r-p2-lane.log`, `v4r-g5.log`, STATE's 22:01Z entry.
+- 2026-10-25, V4 step 9, **a remote JIT delete can lag the next green job.** After the forced stop, the launcher
+  logged `registration cleanup pending: JIT reap: DELETE failed (HTTP 422)` from 21:50:51Z through 21:59:44Z,
+  while `maws-vm-job-vm-20261025T215047Z` booted, ran document-app green and was deleted. The final GitHub
+  runner read held only the three host instances. This is live evidence of retries not blocking admission, not
+  a read of the local pending record's contents or proof of why GitHub returned 422. Evidence:
+  `/tmp/ci-analysis/v4r-p2-lane.log`, `v4r-p2-runners.txt`.
+- 2026-10-25, **Accessibility was frontmost at the start of 48 of 290 guest jobs since 10-23, all green.**
+  This is the `guest-desktop-check` observation, not a cause found for a failure or for the app being in front.
+  Evidence: STATE's 22:01Z entry; no causal experiment was part of these rehearsals.
+- 2026-10-25, V4 steps 7–9, **the real guard paused a warning without stopping its job.** Phase 1's 41 samples
+  read pressure 1 or 2, available 28–60%, swap 1123–1699 MB, disk free 118–120 GB. Dashboard's clone
+  `maws-vm-job-vm-20261025T210942Z` warned twice; at 21:12:38Z the lane left its job to finish and paused the next
+  boot. It was deleted at 21:15:28Z and the pause line named expiry 21:17:22Z. Phase 2's 74 samples all read
+  pressure 1, available 34–60%, swap 1382–1560 MB, disk free 116–118 GB. Neither phase showed critical pressure
+  or a disk-floor stop. Evidence: `/tmp/ci-analysis/v4r-p1-samples.log`, `v4r-p1-lane.log`,
+  `v4r-p2-samples.log`.
 
 ## Outcomes & Retrospective
 
