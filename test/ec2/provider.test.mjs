@@ -25,6 +25,7 @@ test('RunInstances sends only one spot VM with immutable coordinates, hardened m
   assert.equal(body.NetworkInterfaces[0].SubnetId, 'subnet-123'); assert.equal(body.NetworkInterfaces[0].AssociatePublicIpAddress, true);
   for (const t of body.TagSpecifications) { const value = Object.fromEntries(t.Tags.map(({ Key, Value }) => [Key, Value])); assert.equal(value['ci-kit-pool'], 'ec2'); assert.equal(value['ci-kit-purpose'], 'job'); assert.equal(value['ci-kit-deadline'], '2026-10-23T14:15:00.000Z'); }
   const data = JSON.parse(Buffer.from(body.UserData, 'base64').toString());
+  assert.equal(data.repo, 'SSFSKIM/ci-kit-sandbox');
   assert.equal(data.jit, 'jit-secret'); assert.equal(data.alloc, 'alloc1'); assert.equal(data.deadline, '2026-10-23T14:00:00.000Z'); assert.ok(data.report.exit.includes('/reports/alloc1/exit.json'));
   assert.deepEqual(f.row, before, 'no request, JIT or URL retained on row');
 });

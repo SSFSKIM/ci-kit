@@ -38,6 +38,7 @@ test('launch uses the candidate disk/subnet and logical labels; observe preserve
   assert.equal(vm.labels['ci-kit-disk'], 'pd-balanced');
   assert.equal(vm.networkInterfaces[0].subnetwork, 'regions/us-central1/subnetworks/ci-kit-us-central1');
   assert.equal(vm.metadata.items.find((m) => m.key === 'ci-kit-jit').value, 'encoded-jit');
+  assert.equal(vm.metadata.items.find((m) => m.key === 'ci-kit-repo')?.value, REPO);
   assert.equal(vm.scheduling.maxRunDuration.seconds, '7200');
   const seen = await provider.observe();
   assert.equal(seen.complete, true);

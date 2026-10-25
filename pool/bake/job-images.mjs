@@ -75,6 +75,7 @@ export async function bakeJobImages({ manifest, token, kit = KIT, cache = CACHE,
       await exec('docker', containerArgs({ repo, phase: 'apply', hash: entry.setup_hash, kit, cache }));
       await exec('docker', ['commit', '--change', `ENV CI_KIT_SETUP_HASH=${entry.setup_hash}`,
         '--change', `LABEL CI_KIT_SETUP_HASH=${entry.setup_hash}`,
+        '--change', `LABEL CI_KIT_REPO=${repo}`,
         '--change', 'ENTRYPOINT ["/usr/local/bin/ci-kit-entrypoint"]', '--change', 'CMD []',
         '--change', 'WORKDIR /home/runner', name, jobImage(repo)]);
       await exec('docker', ['rm', name]);

@@ -385,3 +385,14 @@ test('a deadline crossed while systemd arms the timer cannot leave a job running
   assert.equal(f.reports.at(-1).value, 'failed:deadline');
   assert.ok(!f.calls.some(([op]) => op === 'run'));
 });
+
+for (const repo of ['SSFSKIM/MAWS', undefined]) {
+  test(`guest passes repository ${repo ?? '(old launcher)'} to container startup without persisting JIT`, async () => {
+    const f = fixture({ readUserData: async () => JSON.stringify({ ...data(), repo }) });
+    await runGuest(f.deps);
+    const options = f.calls.find(c => c[0] === 'run')[1];
+    assert.equal(options.repo, repo);
+    assert.equal(options.log, f.deps.log);
+    assert.equal(f.reports.at(-1).value, 'exit:0');
+  });
+}
