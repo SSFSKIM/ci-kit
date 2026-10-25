@@ -2,7 +2,7 @@ import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,6 +39,7 @@ const CANDIDATE = 'maws-vm-candidate-20261022';
 const GOLDEN = 'maws-vm-golden-20261022';
 const OLD = 'maws-vm-golden-20261020';
 const identities = ['.runner', '.credentials', '.credentials_rsaparams'];
+const ENGINE = '2.1.309';
 const installPin = (name) => new RegExp(`^${name}=([0-9a-f.]+)`, 'm').exec(readFileSync(join(mac, 'install.sh'), 'utf8'))[1];
 
 // Tart, as far as the procedure uses it. Every call is a line of calls; a VM is vms/<name>/ with its state.
@@ -182,6 +183,8 @@ function fixture({ hold = 'maintenance since 2026-10-22T09:00:00Z', disk = 120, 
   writeFileSync(join(vmHome, 'golden'), `${OLD}\n`);
   executable(join(bin, 'tart'), fakeTart);
   executable(join(bin, 'gh'), fakeGh);
+  mkdirSync(join(home, '.local/bin'), { recursive: true });
+  executable(join(home, '.local/bin/claude'), `[[ $1 == --version ]] && echo '${ENGINE} (Claude Code)'`);
   executable(join(bin, 'launchctl'), `echo "$*" >> "$HOME/launchctl.calls"
 [[ $1 == print ]] || exit 0
 [[ ! -e $HOME/launchctl-fails ]] || exit 5
@@ -335,7 +338,7 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.deepEqual(text(join(f.vms, CANDIDATE, 'run.args')).trim().split('\n'), ['--no-graphics', '--no-clipboard', `--dir=kit:${mac}:ro`, `--dir=maws:${f.maws}:ro`, CANDIDATE]);
     const script = '/bin/bash /Volumes/My Shared Files/kit/vm/provision.sh';
     assert.deepEqual(f.exec(CANDIDATE), [`${script} check`, `${script} disk 60`, `${script} quiet`, `${script} display`, `${script} node 11.23.0`, `${script} store`, `${script} libreoffice`, `${script} poppler`,
-      `${script} runner ${installPin('RUNNER_VERSION')} ${installPin('RUNNER_SHA256')} mini-vm`, `${script} workrepo`, `${script} helpers`]);
+      `${script} engine ${ENGINE}`, `${script} runner ${installPin('RUNNER_VERSION')} ${installPin('RUNNER_SHA256')} mini-vm`, `${script} workrepo`, `${script} helpers`]);
     assert.match(result.stdout, /the seeded MAWS work repository \(workrepo\)/);
     // Its end verified before the step reports done: a stop, then Tart's list.
     const calls = f.calls();
@@ -368,6 +371,21 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.match(g.run(['--bake', '--name', CANDIDATE]).stderr, new RegExp(`refused: ${GOLDEN} exists, which ${CANDIDATE} would be promoted to`));
     assert.match(g.run(['--bake', '--memory', 'lots']).stderr, /--memory takes the guest's memory in MB/);
     assert.match(g.run(['--bake', '--name', 'maws-vm-golden-x']).stderr, /--name takes maws-vm-candidate-<id>/);
+  });
+
+  test('--bake: the guest\'s Claude Code is the host user\'s version, or CI_KIT_VM_ENGINE\'s; with neither, refused before a clone', () => {
+    const script = '/bin/bash /Volumes/My Shared Files/kit/vm/provision.sh';
+    const f = fixture();
+    const result = f.run(['--bake', '--name', CANDIDATE], { extra: { CI_KIT_VM_ENGINE: '2.1.300' } });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.ok(f.exec(CANDIDATE).includes(`${script} engine 2.1.300`), f.exec(CANDIDATE).join('\n'));
+    assert.match(result.stdout, /Claude Code 2\.1\.300, guest machine mini-vm/);
+    const g = fixture();
+    rmSync(join(g.home, '.local/bin/claude'));
+    const refused = g.run(['--bake', '--name', CANDIDATE]);
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /refused: no Claude Code version for the guest: \S+\/\.local\/bin\/claude answers none/);
+    assert.ok(!g.calls().some((call) => call.startsWith('clone ')), g.calls().join('\n'));
   });
 
   test('--bake: a --memory under the base image\'s 4 GiB is refused before anything, with the image\'s reason', () => {
@@ -1102,6 +1120,24 @@ describe('the bake\'s provisioning in the guest (provision.sh)', macOnly, () => 
     const again = g.run(['display']);
     assert.equal(again.status, 0, again.stderr);
     assert.deepEqual(g.displayCalls().slice(3), ['list'], 'read, and nothing set');
+  });
+
+  test('engine: Claude Code already at the version through the installer\'s link is left as it is; a malformed version, or another layout, fails', () => {
+    const g = guest();
+    const versions = join(g.home, '.local/share/claude/versions');
+    for (const dir of [versions, join(g.home, '.local/bin')]) mkdirSync(dir, { recursive: true });
+    executable(join(versions, '2.1.309'), "echo '2.1.309 (Claude Code)'");
+    symlinkSync(join(versions, '2.1.309'), join(g.home, '.local/bin/claude'));
+    const result = g.run(['engine', '2.1.309']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /provision: Claude Code 2\.1\.309 at \S+\/\.local\/bin\/claude/);
+    assert.match(g.run(['engine', 'latest']).stderr, /provision: engine takes Claude Code's version \(got 'latest'\)/);
+    const copied = guest();
+    mkdirSync(join(copied.home, '.local/bin'), { recursive: true });
+    executable(join(copied.home, '.local/bin/claude'), "echo '2.1.309 (Claude Code)'");
+    const refused = copied.run(['engine', '2.1.309']);
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /is not the native installer's link to version 2\.1\.309 \(not a link\)/);
   });
 
   test('display: a set that does not take, or a mode that cannot be read, fails the step', () => {
