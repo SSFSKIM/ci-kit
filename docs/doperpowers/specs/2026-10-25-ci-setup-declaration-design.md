@@ -149,8 +149,12 @@ through `plan/config.mjs`'s parser (the same validation as the plan), then:
    `ci-kit setup: image matches setup <hash>`. Different or absent: it proceeds the same way, and when an image hash
    was present it emits a `::notice::` naming both hashes, which is the signal that the image is older than the
    commit.
-2. Checks each package of its platform for presence (`dpkg-query` on Linux, `brew list --formula` / `--cask` on
-   macOS), all in one call per list.
+2. Checks each package of its platform for presence in one inventory call per list: on Linux `dpkg-query`, counting
+   the names installed packages provide as present (a virtual name such as `libasound2` is satisfied by
+   `libasound2t64`); on macOS `brew info --json=v2 --installed` for formulas and casks, matching declared names
+   against each installed item's name, aliases and old names (so `pkg-config` is satisfied by `pkgconf` and never
+   triggers an upgrade). A name the inventory does not know stays missing, and its install reports Homebrew's or
+   apt's own error.
 3. Installs only the missing ones: `sudo -n apt-get update` then `sudo -n apt-get install -y --no-install-recommends`
    with `DEBIAN_FRONTEND=noninteractive` on Linux; `brew install` and `brew install --cask` on macOS. A failed install
    fails the step naming the package. A cask install that fails asking for a password or `sudo` fails with a
