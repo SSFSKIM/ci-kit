@@ -53,7 +53,7 @@ test('a Node repo: a gate per declared script, with the package manager its lock
   assert.equal(readFileSync(join(dir, CALLER_PATH), 'utf8'), CALLER);
   const config = configOf(dir);
   assert.deepEqual(gatesOf(config), [['test', 'npm test'], ['lint', 'npm run lint'], ['build', 'npm run build']]);
-  assert.deepEqual(config.setup, { node: '>=22.12', pnpm: false, install: 'npm ci', fetch_depth: 1 });
+  assert.deepEqual(config.setup, { node: '>=22.12', pnpm: false, install: 'npm ci', fetch_depth: 1, apt: [], brew: [], cask: [], script: '' });
   assert.ok(config.gates.every((g) => g.lane === 'hosted' && g.paths.length === 0));
   assert.match(result.lines.join('\n'), /3 gates \(test, lint, build\) from package\.json \(npm, package-lock\.json\)/);
   assert.match(result.lines.at(-1), /^next: .*ci-gate/);
@@ -82,7 +82,7 @@ test('a pnpm repo enables corepack; npm init\'s placeholder test script is not a
   const result = initRepo({ dir, visibility: PUBLIC });
   const config = configOf(dir);
   assert.deepEqual(gatesOf(config), [['typecheck', 'pnpm run typecheck']]);
-  assert.deepEqual(config.setup, { node: '24.1.0', pnpm: true, install: 'pnpm install --frozen-lockfile', fetch_depth: 1 });
+  assert.deepEqual(config.setup, { node: '24.1.0', pnpm: true, install: 'pnpm install --frozen-lockfile', fetch_depth: 1, apt: [], brew: [], cask: [], script: '' });
   assert.match(result.lines.join('\n'), /placeholder/);
 });
 
