@@ -1,0 +1,58 @@
+{
+  "window": {
+    "since": "2026-10-19T10:05:36Z",
+    "until": "2026-10-26T10:05:36Z"
+  },
+  "mac_queue": {
+    "n": 1550,
+    "median": 15.51,
+    "p90": 84.12
+  },
+  "hosted_share": {
+    "hosted_minutes": 704.45,
+    "mac_minutes": 4246.0,
+    "share": 0.1423
+  },
+  "hosted_queue": {
+    "n": 99,
+    "median": 7.97,
+    "p90": 23.78
+  },
+  "waiters": {
+    "jobs": 95,
+    "minutes": 1715.52,
+    "cost_usd": 1.0293,
+    "spot_rate_usd_per_minute": 0.0006,
+    "deadline_reds": 0,
+    "deadline_red_logs_unread": 0
+  },
+  "sources": [
+    {
+      "repo": "SSFSKIM/MAWS",
+      "workflow": "gate.yml",
+      "found": true,
+      "runs_listed": 1605,
+      "runs": 925,
+      "jobs": 10049
+    },
+    {
+      "repo": "SSFSKIM/maws-app",
+      "workflow": "hosted-mac.yml",
+      "found": true,
+      "runs_listed": 111,
+      "runs": 111,
+      "jobs": 445
+    }
+  ],
+  "params": {
+    "app_job": "e2e",
+    "waiter_labels": [
+      "self-hosted",
+      "ci-kit-pool",
+      "cpus-2"
+    ],
+    "lookback_days": 30,
+    "mac_runner_prefix": "ci-kit-mac-"
+  },
+  "api_calls": 1152
+}

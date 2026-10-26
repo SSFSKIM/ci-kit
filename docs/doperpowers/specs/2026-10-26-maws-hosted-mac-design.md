@@ -829,4 +829,21 @@ M3's wave, from a worktree of MAWS master:
 
 ## Outcomes & Retrospective
 
-(At M4.)
+**Before** (the 7 days before wave 1 landed: 2026-10-19T10:05:36Z to 2026-10-26T10:05:36Z; `measure.py --since
+2026-10-19T10:05:36Z --until 2026-10-26T10:05:36Z`, 1,152 API calls; the JSON is `2026-10-26-maws-hosted-mac/before.json`):
+
+| Measure | Before | After |
+|---|---|---|
+| Mac queue (`ci-kit-mac-*` jobs, started minus created) | 1,550 jobs, median 15.5 min, p90 84.1 min | (CI-opt, on the eighth day) |
+| Hosted share of e2e job-minutes | 14.2% (hosted 704.5, Macs 4,246.0) | |
+| Hosted queue (maws-app `e2e` jobs) | 99 jobs, median 8.0 min, p90 23.8 min | |
+| Waiters | 95 jobs, 1,715.5 min, $1.03 at $0.0006/min; 0 deadline reds | |
+
+The before window is not hosted-free: every hosted minute in it is this work's own proof, M1's hand runs, M2's
+acceptance runs and M3's admission waves, all on 10-26 and under `Lane: hosted`. Those waves ran three runs of five
+groups at a time against the account's five Macs, so the hosted queue (median 8 min) and the waiters' 18 minutes a
+job are a loaded queue's; read the after window's hosted queue against the 3 to 5 s that M1's lone requests waited.
+The Mac queue is the comparison that matters: its week's median of 15.5 min is lower than 10-24 and 10-25's 24 to 27,
+since the week includes quieter days; the after window is the same seven-day shape.
+
+(The after numbers, the comparison and the retrospective follow on the eighth day.)
