@@ -682,6 +682,25 @@ M3's wave, from a worktree of MAWS master:
   - Proof requests carry no `Sminos-Session` trailer: they are protocol commits shaped as the waiter's. `main`'s
     commit carries it.
 
+- 2026-10-26 (executor, M2, on MAWS f783456c3):
+  - **A `HOSTED_MAC_E2E` entry that is not eligible refuses every run**, Linux and class 1a static included, so the
+    static gate catches it before landing; the refusal names every reason (`tool-time-heavy-live (measured, live)`).
+  - **The request's subject names the requested commit** (`MAWS <requested sha12> e2e:<group>`); `MAWS-Source` still
+    names `$GITHUB_SHA`. The requested commit is the first parent only for a real ci-gate commit (subject
+    `ci-gate: ` and a `Nonce:` trailer).
+  - **"On master" for the `main` refresh**: MAWS's compare answers `ahead` or `identical`, and its base commit's tree
+    equals `MAWS-Source-Tree`, so a `ci/` push whose head is not a true nonce commit never moves `main`.
+  - **Earlier attempts are found by listing** `ci/hosted/<run id>-*` and matching `-<k>-<slug>`, k below the attempt;
+    every cancel is pushed with `--force-with-lease=<ref>:<request>`, so it never overwrites a newer push.
+  - **The cancel trail goes to the sweep**: after a cancel or a deadline, the cleanup does not wait for the cancelled
+    run's result ref.
+  - **The refused-start walk reads each matrix job's runner from its own `include` output**, an unknown one counting
+    as a Mac; the alert preflight lists the plan's own Mac jobs (`macPlan`), and `guestRun` answers `none` when no job
+    is on a Mac.
+  - **The waiter commits as `MAWS hosted Mac <hosted-mac@maws-app.invalid>`**, and pushes from its blob-less clone
+    with `--no-thin` and `GIT_NO_LAZY_FETCH=1` (a thin push lazily fetched old blobs to delta against).
+  - `e2e-hosted` sits between `e2e-build` and `e2e` in gate.yml (a test reads `e2e-vm` as the file's last job).
+
 - 2026-10-26 (executor, M4's collector, 455a87d and 72c24a3, reviewed clean):
   - A Mac job is one whose runner name starts with `ci-kit-mac-` (host and guest). A waiter is an `e2e:*` job whose
     labels are exactly `self-hosted`, `ci-kit-pool`, `cpus-2`: no other e2e job asks for cpus-2 today (desk-web is
@@ -727,6 +746,19 @@ M3's wave, from a worktree of MAWS master:
     MAWS sha there fails `not our ref`: the waiter keeps its MAWS-side git calls out of that `GIT_DIR`.
   - **ci-kit's setup installs the LibreOffice cask on every macOS job**, `Hosted-LibreOffice` or not (the input is
     Linux-only); it is part of the setup's brew time, and only ci-kit could skip it.
+- **M2's acceptance runs** (MAWS; maws-app in brackets): 1, 40280116546 green [40280193280, 40280199856], document-app
+  20 passed in 3.6 min, transcript 37 in 5.4, a two-group set 9 minutes end to end, each hosted job started about 20 s
+  after its push; 5, the recompute gave 3069d91d, both requests' tree; 6, scratch token 40280116914 red with
+  `hosted: secret scan refused the push`, nothing on maws-app; 2, 40280116977 red [40280195275], the hosted report
+  downloaded; 3, its rerun (attempt 2) red the same way [40281407904], the revert 40281350065 green; 4, 40281362983
+  cancelled, the hosted job `cancelled` 48 s later [40281460980]; 7, read on 10-26. `main`'s refresh was not
+  exercised live (`main` was under a day old).
+  - **The pool runs on EC2 now**: the waiters ran on `ci-kit-ec2-…` runners with the `ci-kit-pool`, `cpus-2` labels.
+    M4's collector finds waiters by labels, and its spot rate is a parameter.
+  - **`desk-web-hub` is eligible by Placement's list but drives the system Chrome through desk-web's hub suite**, not
+    `scripts/e2e-build.sh`. It is not a class-1 group, so only a run naming it under `Lane: hosted` would host it.
+  - MAWS has no push protection (`security_and_analysis` is null): the scratch token reached MAWS unblocked; the
+    waiter's scan is the only gate before maws-app.
 - **`gh api` withholds a job log that holds terminal escapes** unless given `--allow-escape-sequences`; M4's collector
   passes it, or no `hosted: no result by` red could be read. The collector over all of 10-25: 383 Mac jobs, queue
   median 26.6 and p90 94.6 minutes, 1,082 Mac e2e job-minutes, in line with Purpose.
