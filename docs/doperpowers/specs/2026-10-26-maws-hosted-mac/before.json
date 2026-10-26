@@ -1,0 +1,207 @@
+{
+  "window": {
+    "since": "2026-10-19T10:05:36Z",
+    "until": "2026-10-26T10:05:36Z"
+  },
+  "mac_queue": {
+    "n": 1555,
+    "median": 15.68,
+    "p90": 84.12
+  },
+  "hosted_share": {
+    "hosted_minutes": 715.98,
+    "mac_minutes": 4258.07,
+    "share": 0.1439
+  },
+  "hosted_share_by_kind": {
+    "default": {
+      "hosted_minutes": 0,
+      "mac_minutes": 3445.35,
+      "share": 0.0
+    },
+    "trial": {
+      "hosted_minutes": 715.98,
+      "mac_minutes": 812.72,
+      "share": 0.4684
+    }
+  },
+  "hosted_queue": {
+    "n": 101,
+    "median": 8.45,
+    "p90": 24.63
+  },
+  "hosted_queue_by_kind": {
+    "default": {
+      "n": 0,
+      "median": null,
+      "p90": null
+    },
+    "trial": {
+      "n": 101,
+      "median": 8.45,
+      "p90": 24.63
+    }
+  },
+  "waiters": {
+    "jobs": 99,
+    "minutes": 1862.95,
+    "cost_usd": 1.1178,
+    "spot_rate_usd_per_minute": 0.0006,
+    "deadline_reds": 0,
+    "deadline_red_logs_unread": 0
+  },
+  "mini": {
+    "holds": {
+      "minutes": 1047.4,
+      "minutes_with_host_job_queued": 306.83,
+      "issues": [
+        {
+          "number": 16,
+          "title": "ci-kit alert: mini: UserNotificationCenter since 2026-10-19T14:02Z (TCC requests before it came to front: replayd, cua-engine)",
+          "from": "2026-10-19T14:03:26Z",
+          "to": "2026-10-19T14:41:47Z"
+        },
+        {
+          "number": 17,
+          "title": "ci-kit alert: mini: UserNotificationCenter since 2026-10-19T15:24Z (TCC requests before it came to front: replayd, cua-engine, syspolicyd)",
+          "from": "2026-10-19T15:26:15Z",
+          "to": "2026-10-19T15:41:24Z"
+        },
+        {
+          "number": 18,
+          "title": "ci-kit alert: mini: SecurityAgent since 2026-10-19T21:03Z",
+          "from": "2026-10-19T21:04:50Z",
+          "to": "2026-10-19T21:10:00Z"
+        },
+        {
+          "number": 19,
+          "title": "ci-kit alert: mini: loginwindow since 2026-10-20T05:44Z",
+          "from": "2026-10-20T05:45:48Z",
+          "to": "2026-10-20T06:06:36Z"
+        },
+        {
+          "number": 20,
+          "title": "ci-kit alert: mini: UserNotificationCenter since 2026-10-20T06:21Z",
+          "from": "2026-10-20T06:22:37Z",
+          "to": "2026-10-20T06:32:44Z"
+        },
+        {
+          "number": 21,
+          "title": "ci-kit alert: mini: SecurityAgent since 2026-10-20T22:10Z",
+          "from": "2026-10-20T22:12:02Z",
+          "to": "2026-10-20T22:17:07Z"
+        },
+        {
+          "number": 23,
+          "title": "ci-kit alert: mini: SecurityAgent since 2026-10-21T13:29Z (security request from security)",
+          "from": "2026-10-21T13:31:08Z",
+          "to": "2026-10-21T16:52:42Z"
+        },
+        {
+          "number": 24,
+          "title": "ci-kit alert: mini: UserNotificationCenter since 2026-10-21T16:55Z (TCC requests before it came to front: tccd, UserNotificationCenter, sandboxd (data from other apps), syspolicyd)",
+          "from": "2026-10-21T16:56:56Z",
+          "to": "2026-10-21T17:32:09Z"
+        },
+        {
+          "number": 26,
+          "title": "ci-kit alert: mini: UserNotificationCenter since 2026-10-22T08:49Z (TCC requests before it came to front: tccd, UserNotificationCenter, sandboxd (data from other apps), window-list, syspolicyd)",
+          "from": "2026-10-22T08:51:10Z",
+          "to": "2026-10-22T09:51:06Z"
+        },
+        {
+          "number": 27,
+          "title": "ci-kit alert: mini: UserNotificationCenter since 2026-10-22T12:27Z (TCC requests before it came to front: tccd, ClaudeUsage, syspolicyd, cursor-park, window-list)",
+          "from": "2026-10-22T12:28:27Z",
+          "to": "2026-10-22T19:44:55Z"
+        },
+        {
+          "number": 49,
+          "title": "ci-kit alert: mini: UserNotificationCenter since 2026-10-22T23:20Z",
+          "from": "2026-10-22T23:21:40Z",
+          "to": "2026-10-22T23:51:49Z"
+        },
+        {
+          "number": 54,
+          "title": "ci-kit alert: mini: UserNotificationCenter since 2026-10-25T23:44Z (TCC requests before it came to front: tccd, sandboxd (data from other apps), syspolicyd)",
+          "from": "2026-10-25T23:46:06Z",
+          "to": "2026-10-26T01:15:49Z"
+        },
+        {
+          "number": 56,
+          "title": "ci-kit alert: mini: Display since 2026-10-26T07:51Z (display 2560x1440@1x, expected 2560x1440@2x)",
+          "from": "2026-10-26T07:52:08Z",
+          "to": "2026-10-26T09:31:49Z"
+        }
+      ]
+    },
+    "guest_off": {
+      "source": "ssh mini cat ~/Library/Logs/ci-kit/vm-lane.log",
+      "log_from": "2026-10-23T07:26:12Z",
+      "covered_from": "2026-10-23T07:26:12Z",
+      "minutes": 1314.87,
+      "minutes_with_guest_job_queued": 208.62,
+      "by_reason": {
+        "swap": 7.99,
+        "held: cua_repl": 325.14,
+        "paused": 62.22,
+        "held: CI-opt-t": 8.6,
+        "memory available N%, under the floor of N%": 898.51,
+        "a ci-kit-mac-solo job queued, but the host's exclusive instance is idle and takes it first": 0.27,
+        "held: CI-opt": 0.55,
+        "the queue cannot be read": 0.18,
+        "swap grew from N MB to N MB in N s": 0.23,
+        "a claim holds the lane": 4.76,
+        "memory pressure N, not N": 5.22,
+        "held: CI-opt-t2": 1.21
+      },
+      "controller_stopped": {
+        "minutes": 172.87,
+        "minutes_with_guest_job_queued": 90.23
+      },
+      "note": "the figures cover the window from covered_from only; minutes counts idle minutes too (no guest job queued), minutes_with_guest_job_queued does not; controller_stopped is the lane controller's own down time, which a running guest outlives, and is not in minutes"
+    }
+  },
+  "sources": [
+    {
+      "repo": "SSFSKIM/MAWS",
+      "workflow": "gate.yml",
+      "found": true,
+      "runs_listed": 1605,
+      "runs": 925,
+      "jobs": 10049
+    },
+    {
+      "repo": "SSFSKIM/maws-app",
+      "workflow": "hosted-mac.yml",
+      "found": true,
+      "runs_listed": 111,
+      "runs": 111,
+      "jobs": 445,
+      "runs_without_a_listed_private_run": 13
+    }
+  ],
+  "params": {
+    "app_job": "e2e",
+    "waiter_labels": [
+      "self-hosted",
+      "ci-kit-pool",
+      "cpus-2"
+    ],
+    "lookback_days": 30,
+    "mac_runner_prefix": "ci-kit-mac-",
+    "trial_lanes": [
+      "hosted",
+      "no-hosted",
+      "vm",
+      "vm-trial"
+    ],
+    "holds_repo": "SSFSKIM/ci-kit-sandbox",
+    "hold_title": "ci-kit alert: mini:",
+    "guest_labels": [
+      "ci-kit-mac-vm",
+      "ci-kit-mac-vm-trial"
+    ]
+  },
+  "api_calls": 1154
+}
