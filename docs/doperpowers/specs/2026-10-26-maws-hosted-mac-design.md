@@ -758,6 +758,13 @@ M3's wave, from a worktree of MAWS master:
   geometry, and tools went green by that move alone; terminal's 3 lines fit a few rows' difference across its
   reload. browser-cua's wave runs on the architect's fix branch.
 
+- 2026-10-26 (executor, M3 wave 8, master 70a2eff1a): **admitted** panel (27 passed), 3/3 in runs 40312341344,
+  40312436985 and 40312502469, counts equal to the host baseline 40312170276; its wave-4 reds at `:1197` did not
+  recur on the new geometry. **Still off**: c7, red 3/3 at `composer.spec.ts:772` (the actions at opacity 0; `:871`'s
+  clamp is gone); terminal, red 2/3 at `terminal.spec.ts:508` (10044 lines against 10047); browser, red 1/3 at
+  `browser.spec.ts:363` (the placeholder image missing). SSFSKIM/MAWS#167, M3's last list PR: `HOSTED_MAC_E2E` holds
+  26 groups. Off the list, each with a debt row on MAWS: transcript, c7, browser, terminal, browser-cua and
+  browser-comment.
 - 2026-10-26 (executor, M3 waves 2 and 3, tree c9803aa1a): **admitted** to-human (2 passed), widgets (29), side (12),
   supervisor (10), c12 (4), browser-import (6) and document (19), 3/3 in runs 40290693239, 40290750401, 40294506903
   (W2) and 40293256908, 40293322930, 40295843922 (W3), counts equal to the host baseline 40302689449. **Set aside**:
