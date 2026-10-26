@@ -483,8 +483,9 @@ The work:
   PR, each admitted group with its 3 run ids in a gate.yml comment. The architect lands it.
 - A group that fails for the 1x display, the 3 CPUs or the 7 GiB stays off the list, with the failure named.
 - Two small MAWS PRs come first, in any order: the reserved-final rule in `gate-plan.mjs` and its tests (Placement),
-  which connectors, dashboard and design wait on; and the MesloLGM Nerd Font cask in `.github/ci-kit.yml`, which
-  settings' count rule waits on (the mini has the font by hand; the guest takes it at its next bake).
+  which connectors, dashboard and design wait on; and the MesloLGM Nerd Font, installed by `.github/ci-setup.sh` where
+  it is missing, which settings' count rule waits on (the mini has the font by hand; the guest takes it at its next
+  bake).
 - The waves (architect, M3): W1 document-app, transcript, browser-chrome, available, artifacts; W2 to-human, widgets,
   side, c7, tools; W3 supervisor, c12, browser-import, document, design-systems; W4 panel, code, scm, agents,
   browser; W5 settings, connectors, connectors-direct, delivery; W6 library, deliverables, browser-cua,
@@ -704,7 +705,11 @@ M3's wave, from a worktree of MAWS master:
   - **Final bundles, option (b)**: a run on a reserved `ci/h-final-*` ref hosts no group (Placement). Rejected:
     keeping final-bundle groups off the list, which gives up their capacity on every ordinary run for a rare final
     run; and leaving it to the final runs' callers to pass `--lane no-hosted`, which a caller can forget.
-  - **settings** gets the MesloLGM Nerd Font cask in `.github/ci-kit.yml`, so its font case runs on every desktop.
+  - **settings** gets the MesloLGM Nerd Font, so its font case runs on every desktop. Revised in M3 (executor, CI-opt):
+    the font is installed from `.github/ci-setup.sh` where `MesloLGMNerdFontMono-Regular.ttf` is missing, not as a
+    cask in `.github/ci-kit.yml`. The mini's copy was installed by hand (72 files in `~/Library/Fonts`, 2025-04), and
+    Homebrew refuses to overwrite a font it did not install, `--adopt` included, so the cask would fail every setup
+    on the mini. ci-setup.sh runs in the guest's bakes too.
   - **desk-web-hub** is not on `CLASS1_E2E`, so it is no candidate; no special case.
 
 - 2026-10-26 (executor, M2, on MAWS f783456c3):
