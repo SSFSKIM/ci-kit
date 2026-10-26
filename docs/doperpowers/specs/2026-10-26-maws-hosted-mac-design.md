@@ -91,7 +91,8 @@ request commit carries `MAWS-Source-Tree: <the tree of sha>`, and it ran on `mac
   reviewer-high, two fix waves); the deploy key by CI-opt; acceptance 1–4, 6's scratch token and 7 (Surprises &
   Discoveries). For the architect to land with gate-offload Decision Log 106.
 - [x] (2026-10-26 11:52Z) M3: admission waves W1 to W8, 26 groups on `HOSTED_MAC_E2E` (SSFSKIM/MAWS #160, #161, #163, #164, #165,
-  #167, the last landed as 8588a4a7a), with the prerequisites #156, #158 and #159; acceptance 8 in run 40316974655.
+  #167, landed as 8588a4a7a, and #169 for browser-cua after its fix), with the prerequisites #156, #158 and #159;
+  acceptance 8 in run 40316974655.
 - [ ] M4: the collector and the before numbers; the after numbers seven days after M3's first wave lands;
   acceptance 9; Outcomes.
 
@@ -770,6 +771,13 @@ M3's wave, from a worktree of MAWS master:
   e2e:document-app,e2e:panel,e2e:transcript --runner macos`, no `Lane:`, run 40316974655 green. document-app and
   panel ran as waiters on pool boxes (`ci-kit-ec2-…`, `cpus-2`; maws-app 40317059136 and 40317076639, each
   `hosted: success`), and transcript, which is not listed, on the mini host (`ci-kit-mac-mini`). M3 is done.
+- 2026-10-26 (architect, after #166; the closing admission): **browser-cua admitted**. #166 (master c2af92b14) fixed
+  `:186`'s cause, which was not `release()`'s 1 s bound: Chromium answers `clearDeviceMetricsOverride` before the view's
+  restored size reaches the page (up to 83 ms), and the next attach now waits for the page's size. On head 5662a4cda
+  (tree 2fa9cdcea), three `Lane: hosted` runs (40316175010, 40316176207, 40316176658, waiters on pool boxes) and four
+  mini runs (40316186184, 40316186362, 40316177141, 40316186658) each gave 7 passed, `:186` and `:493` passing in all
+  seven (gate-offload Decision Log 114, a0b729dba). `:493`'s debt row stays open: its earlier red has no cause in the
+  logs. SSFSKIM/MAWS#169 brings `HOSTED_MAC_E2E` to 27 groups.
 - 2026-10-26 (executor, M3 waves 2 and 3, tree c9803aa1a): **admitted** to-human (2 passed), widgets (29), side (12),
   supervisor (10), c12 (4), browser-import (6) and document (19), 3/3 in runs 40290693239, 40290750401, 40294506903
   (W2) and 40293256908, 40293322930, 40295843922 (W3), counts equal to the host baseline 40302689449. **Set aside**:
