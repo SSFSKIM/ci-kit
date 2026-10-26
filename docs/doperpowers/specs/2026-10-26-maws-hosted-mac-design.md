@@ -494,9 +494,11 @@ The work:
   it is missing, which settings' count rule waits on (the mini has the font by hand; the guest takes it at its next
   bake).
 - The waves (architect, M3): W1 document-app, transcript, browser-chrome, available, artifacts; W2 to-human, widgets,
-  side, c7, tools; W3 supervisor, c12, browser-import, document, design-systems; W4 panel, code, scm, agents,
-  browser; W5 settings, connectors, connectors-direct, delivery; W6 library, deliverables, browser-cua,
-  presentations, terminal; then dashboard and design once the reserved-final rule lands. browser-comment stays off.
+  side, c7, tools; W3 supervisor, c12, browser-import, document; W4 panel, code, scm, agents, browser;
+  W5 settings, connectors, connectors-direct, delivery; W6 library, deliverables, browser-cua, presentations,
+  terminal; W7 dashboard, design, design-systems. browser-comment stays off. The prerequisites landed as MAWS #156
+  (the font, 702bef8c6), #158 (the reserved-final rule, b92a4b1ff) and #159 (the hosted Dock, e7ab5da39); settings
+  and design-systems are admitted only from runs on a tree that contains e7ab5da39.
 - A baseline the mini refuses for its display (ci-kit#162 enforces 2560x1440@2x) is a signal about the desktop, not
   the group's failure.
 
