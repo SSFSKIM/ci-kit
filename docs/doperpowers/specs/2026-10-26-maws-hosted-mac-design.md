@@ -730,6 +730,12 @@ M3's wave, from a worktree of MAWS master:
   `--label`, since runs on one ref cancel each other; one baseline serves several waves on one tree. Landed as
   MAWS f2c1be6d0 at 2026-10-26T10:05:36Z, which starts M4's clock (gate-offload Decision Log 108, 6492fd98f).
 
+- 2026-10-26 (executor, M3 wave 5, tree e7ab5da39): **admitted** settings (12 passed), connectors (5),
+  connectors-direct (15) and delivery (3), 3/3 in runs 40300743480, 40300806384 and 40300870157, counts equal to the
+  host baseline 40300686375. SSFSKIM/MAWS#161. Hosting connectors and connectors-direct left
+  `ci-gate-alerts.test.mjs`'s own-workflow guest test with no Mac job, so it now reads `HOSTED_MAC_E2E` as empty, as
+  gate-plan's proven-VM tests do.
+
 - 2026-10-26 (architect, through CI-opt, on M3's step A):
   - **The font PR goes ahead** whatever settings' display result: it declares a dependency the mini had only by hand,
     and the guest needs it for settings' `:429`.
