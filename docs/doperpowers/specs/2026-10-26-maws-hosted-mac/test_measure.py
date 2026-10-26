@@ -1,7 +1,7 @@
 """Tests for measure.py's pure logic. Run: python3 -m unittest discover -s <this directory>"""
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import measure
 
@@ -149,6 +149,43 @@ class Measure(unittest.TestCase):
                 created="2026-10-27T00:00:00Z"),
         ]
         self.assertEqual(measure.failed_waiter_ids(maws, SINCE, UNTIL, WAITER), [2])
+
+
+class FakeGh:
+    """The two run and job listings collect() reads, answered from fixtures; records which runs' jobs were fetched."""
+
+    def __init__(self, runs, jobs):
+        self.runs, self.jobs, self.jobs_fetched = runs, jobs, []
+
+    def _created(self, path):
+        a, b = path.split("created=")[1].split("&")[0].split("..")
+        a, b = measure.parse_utc(a), measure.parse_utc(b)
+        return [r for r in self.runs if a <= measure.parse_utc(r["created_at"]) <= b]
+
+    def get(self, path, raw=False):
+        return {"total_count": len(self._created(path))}
+
+    def pages(self, path, key):
+        if key == "workflow_runs":
+            return self._created(path)
+        run_id = int(path.split("/runs/")[1].split("/")[0])
+        self.jobs_fetched.append(run_id)
+        return self.jobs[run_id]
+
+
+class Collect(unittest.TestCase):
+    def test_a_run_created_days_before_and_rerun_in_the_window_is_counted(self):
+        old_rerun = {"id": 1, "created_at": "2026-10-14T09:00:00Z", "updated_at": "2026-10-20T11:00:00Z"}
+        old_untouched = {"id": 2, "created_at": "2026-10-14T09:00:00Z", "updated_at": "2026-10-14T10:00:00Z"}
+        gh = FakeGh([old_rerun, old_untouched], {
+            1: [job("e2e:a", created="2026-10-14T09:00:05Z", id_=10),
+                job("e2e:a", created="2026-10-20T10:00:00Z", queued_min=7, ran_min=5, id_=11)],
+            2: [job("e2e:b", created="2026-10-14T09:00:05Z", id_=20)],
+        })
+        jobs, src = measure.collect(gh, "o/r", "gate.yml", SINCE, UNTIL, timedelta(days=7))
+        self.assertEqual(gh.jobs_fetched, [1])
+        self.assertEqual(src["jobs"], 1)
+        self.assertEqual(run(maws=jobs)["mac_queue"], {"n": 1, "median": 7, "p90": 7})
 
 
 class Chunks(unittest.TestCase):

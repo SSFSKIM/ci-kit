@@ -8,8 +8,8 @@ deadline reds. Python 3 standard library and the caller's `gh` login.
     measure.py --since 2026-10-19T00:00:00Z --until 2026-10-26T00:00:00Z [--json out.json]
 
 A job belongs to the window when it was created in it (half-open, [since, until)), so a rerun counts in the window it
-ran in. Runs are listed from --lookback-hours before --since, so a run created just before the window still yields
-its jobs created in it.
+ran in. Runs are listed from --lookback-days before --since (default 30, GitHub's limit on re-running a run), and
+only the runs updated since --since have their jobs fetched: a run created weeks before and rerun in the window counts.
 """
 
 import argparse
@@ -222,11 +222,13 @@ def read_deadline_reds(gh, repo, job_ids):
 
 def collect(gh, repo, workflow, since, until, lookback):
     try:
-        runs = list_runs(gh, repo, workflow, since - lookback, until)
+        listed = list_runs(gh, repo, workflow, since - lookback, until)
     except NotFound:
-        return [], {"repo": repo, "workflow": workflow, "found": False, "runs": 0, "jobs": 0}
+        return [], {"repo": repo, "workflow": workflow, "found": False, "runs_listed": 0, "runs": 0, "jobs": 0}
+    # A run last updated before the window has no job in it; the listing is a page per 100 runs, the jobs a call per run.
+    runs = [r for r in listed if parse_utc(r["updated_at"]) >= since]
     jobs = list_jobs(gh, repo, runs)
-    return jobs, {"repo": repo, "workflow": workflow, "found": True, "runs": len(runs),
+    return jobs, {"repo": repo, "workflow": workflow, "found": True, "runs_listed": len(listed), "runs": len(runs),
                   "jobs": sum(1 for j in jobs if in_window(j, since, until))}
 
 
@@ -242,14 +244,14 @@ def main(argv=None):
     ap.add_argument("--app-job", default="e2e", help="maws-app's hosted test job's name")
     ap.add_argument("--waiter-labels", default="self-hosted,ci-kit-pool,cpus-2", help="the waiter's runs-on labels")
     ap.add_argument("--spot-rate", type=float, default=0.0006, help="the waiter box's spot rate, USD per minute")
-    ap.add_argument("--lookback-hours", type=float, default=6,
-                    help="list runs created this long before --since, for their jobs created in the window")
+    ap.add_argument("--lookback-days", type=float, default=30,
+                    help="list runs created this long before --since, for reruns in the window (GitHub's re-run limit)")
     args = ap.parse_args(argv)
     until = args.until or datetime.now(timezone.utc).replace(microsecond=0)
     if until <= args.since:
         ap.error("--until must be after --since")
     waiter_labels = [s for s in args.waiter_labels.split(",") if s]
-    lookback = timedelta(hours=args.lookback_hours)
+    lookback = timedelta(days=args.lookback_days)
 
     gh = Gh()
     maws_jobs, maws_src = collect(gh, args.maws_repo, args.maws_workflow, args.since, until, lookback)
@@ -261,7 +263,7 @@ def main(argv=None):
     out.update(measure(maws_jobs, app_jobs, reds, since=args.since, until=until, spot_rate=args.spot_rate,
                        waiter_labels=waiter_labels, app_job=args.app_job, unread_logs=unread))
     out["sources"] = [maws_src, app_src]
-    out["params"] = {"app_job": args.app_job, "waiter_labels": waiter_labels, "lookback_hours": args.lookback_hours,
+    out["params"] = {"app_job": args.app_job, "waiter_labels": waiter_labels, "lookback_days": args.lookback_days,
                      "mac_runner_prefix": MAC_RUNNER_PREFIX}
     out["api_calls"] = gh.calls
 
@@ -275,7 +277,7 @@ def main(argv=None):
     print(render(out))
     for s in out["sources"]:
         print(f"source {s['repo']} {s['workflow']}: "
-              + (f"{s['runs']} runs listed, {s['jobs']} jobs in the window" if s["found"] else "no such workflow"))
+              + (f"{s['runs_listed']} runs listed, {s['runs']} updated since --since, {s['jobs']} jobs in the window" if s["found"] else "no such workflow"))
     print(f"api calls {gh.calls}; json {path}")
 
 
