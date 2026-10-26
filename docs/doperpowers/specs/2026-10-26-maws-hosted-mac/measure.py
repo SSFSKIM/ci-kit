@@ -12,10 +12,10 @@ A job belongs to the window when it was created in it (half-open, [since, until)
 ran in. Runs are listed from --lookback-days before --since (default 30, GitHub's limit on re-running a run), and
 only the runs updated since --since have their jobs fetched: a run created weeks before and rerun in the window counts.
 
-Run kinds: a run whose ci-gate commit carries `Lane: hosted` or `Lane: no-hosted` (--trial-lanes) is a trial or a
-baseline, its placement forced; every other run is a default run, placed by gate.yml's lists (Lane: vm and vm-trial
-host what HOSTED_MAC_E2E names, as a run with no lane does). A hosted job takes its private run's kind, through its
-request's `MAWS-Run:` trailer.
+Run kinds: a run whose ci-gate commit carries a `Lane:` trailer (hosted, no-hosted, vm, vm-trial: --trial-lanes) is a
+trial or a baseline; a run with none is a default run, placed by gate.yml's lists alone. vm and vm-trial count as
+trials because under them a MAC_VM_E2E group goes to the guest even when HOSTED_MAC_E2E lists it, so they do not show
+what a default run hosts. A hosted job takes its private run's kind, through its request's `MAWS-Run:` trailer.
 """
 
 import argparse
@@ -35,7 +35,9 @@ DEADLINE_RED = "hosted: no result by"
 RUNS_SEARCH_CAP = 1000  # the runs API answers at most this many runs for one `created` query
 PER_PAGE = 100
 KINDS = ("default", "trial")
-KIND_LABELS = {"default": "default runs (no Lane:, vm, vm-trial)", "trial": "trials and baselines (Lane: hosted, no-hosted)"}
+TRIAL_LANES = ("hosted", "no-hosted", "vm", "vm-trial")
+KIND_LABELS = {"default": "default runs (no Lane:)", "trial": "trials and baselines (a Lane: trailer)"}
+CONTROLLER_STOPPED = "controller stopped"
 
 
 # ---- pure logic ----------------------------------------------------------------------------------------------------
@@ -214,9 +216,11 @@ def off_reason(reason):
 
 
 def guest_off_intervals(log_text, log_end):
-    """vm-lane.log's lane states as (from, to, reason) for the times the guest could not boot. The log writes a state
-    when it changes, so a state lasts to the next state line; a no-boot for want of a queued job is idle, not off, and a
-    stopped lane is off until it starts again."""
+    """vm-lane.log's lane states as (from, to, reason) for the times the guest could not boot, and for the times its
+    controller was stopped (reason CONTROLLER_STOPPED). The log writes a state when it changes, so a state lasts to the
+    next state line; a no-boot for want of a queued job is idle, not off. A stopped controller is not a guest that is
+    off: lane.sh's SIGTERM leaves a running guest and its reservation to finish their job, so the stop is its own
+    state, kept out of the guest's off time."""
     states = []
     for line in log_text.splitlines():
         stamp, _, rest = line.partition(" vm-lane ")
@@ -227,7 +231,7 @@ def guest_off_intervals(log_text, log_end):
         elif rest.startswith("no boot: "):
             state = off_reason(rest[len("no boot: "):])
         elif rest.startswith("stopping on SIGTERM"):
-            state = "lane stopped"
+            state = CONTROLLER_STOPPED
         elif rest.startswith(("booting ", "starting ")):
             state = None
         else:
@@ -250,19 +254,26 @@ def mini_report(issues, log_text, maws_jobs, *, since, until, now, hold_prefix, 
              "issues": [{"number": i["number"], "title": i["title"], "from": i["created_at"], "to": i["closed_at"]}
                         for i, _, _ in spans]}
 
-    guest = {"source": log_source, "log_from": None, "minutes": None, "minutes_with_guest_job_queued": None,
-             "by_reason": {},
-             "note": "minutes counts idle minutes too (no guest job queued); minutes_with_guest_job_queued does not"}
+    guest = {"source": log_source, "log_from": None, "covered_from": None, "minutes": None,
+             "minutes_with_guest_job_queued": None, "by_reason": {}, "controller_stopped": None,
+             "note": "the figures cover the window from covered_from only; minutes counts idle minutes too (no guest "
+                     "job queued), minutes_with_guest_job_queued does not; controller_stopped is the lane controller's "
+                     "own down time, which a running guest outlives, and is not in minutes"}
     if log_text is not None:
         first = next((line.split(" ", 1)[0] for line in log_text.splitlines() if " vm-lane " in line), None)
-        off = [(a, b, r) for a, b, r in guest_off_intervals(log_text, min(now, until)) if b > since and a < until]
+        states = [(a, b, r) for a, b, r in guest_off_intervals(log_text, min(now, until)) if b > since and a < until]
+        off = [(a, b, r) for a, b, r in states if r != CONTROLLER_STOPPED]
         off_iv = clip([(a, b) for a, b, _ in off], since, until)
+        stopped_iv = clip([(a, b) for a, b, r in states if r == CONTROLLER_STOPPED], since, until)
         by_reason = {}
         for a, b, reason in off:
             by_reason[reason] = round(by_reason.get(reason, 0) + minutes(clip([(a, b)], since, until)), 2)
         guest_waits = waiting_intervals(maws_jobs, lambda labels: any(label in guest_labels for label in labels))
-        guest.update(log_from=first, minutes=minutes(off_iv), by_reason=by_reason,
-                     minutes_with_guest_job_queued=overlap_minutes(off_iv, guest_waits))
+        guest.update(log_from=first, covered_from=iso(max(parse_utc(first), since)) if first else None,
+                     minutes=minutes(off_iv), by_reason=by_reason,
+                     minutes_with_guest_job_queued=overlap_minutes(off_iv, guest_waits),
+                     controller_stopped={"minutes": minutes(stopped_iv),
+                                         "minutes_with_guest_job_queued": overlap_minutes(stopped_iv, guest_waits)})
     return {"holds": holds, "guest_off": guest}
 
 
@@ -286,11 +297,17 @@ def render(out):
         if guest["minutes"] is None:
             lines.append(f"  guest off: n/a ({guest['source']})")
         else:
+            covers = (f"covering the window from {guest['covered_from']} only, where vm-lane.log starts"
+                      if guest["covered_from"] != out.get("window", {}).get("since") else "covering the whole window")
             lines.append(f"  guest off: {mins(guest['minutes'])} counting idle minutes, "
-                         f"{mins(guest['minutes_with_guest_job_queued'])} with a guest-lane job queued "
-                         f"(vm-lane.log from {guest['log_from']}, {guest['source']})")
+                         f"{mins(guest['minutes_with_guest_job_queued'])} with a guest-lane job queued; {covers} "
+                         f"({guest['source']})")
             for reason, m in sorted(guest["by_reason"].items(), key=lambda kv: -kv[1]):
                 lines.append(f"    {m:8.1f} min  {reason}")
+            stopped = guest["controller_stopped"]
+            lines.append(f"  guest lane controller stopped: {mins(stopped['minutes'])}, "
+                         f"{mins(stopped['minutes_with_guest_job_queued'])} with a guest-lane job queued "
+                         f"(not in guest off: a running guest outlives its controller's stop)")
     lines.append(f"hosted share: {share(out['hosted_share'])}")
     lines += [f"  {KIND_LABELS[k]}: {share(out['hosted_share_by_kind'][k])}" for k in KINDS]
     lines.append(f"hosted queue: {queue(out['hosted_queue'])}")
@@ -444,7 +461,7 @@ def main(argv=None):
     ap.add_argument("--spot-rate", type=float, default=0.0006, help="the waiter box's spot rate, USD per minute")
     ap.add_argument("--lookback-days", type=float, default=30,
                     help="list runs created this long before --since, for reruns in the window (GitHub's re-run limit)")
-    ap.add_argument("--trial-lanes", default="hosted,no-hosted",
+    ap.add_argument("--trial-lanes", default=",".join(TRIAL_LANES),
                     help="the Lane: values that make a run a trial or a baseline")
     ap.add_argument("--holds-repo", default="SSFSKIM/ci-kit-sandbox", help="where ci-kit files the mini's alerts")
     ap.add_argument("--hold-title", default="ci-kit alert: mini:", help="the title prefix of a mini alert")

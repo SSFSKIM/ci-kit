@@ -16,13 +16,13 @@
   "hosted_share_by_kind": {
     "default": {
       "hosted_minutes": 0,
-      "mac_minutes": 4209.35,
+      "mac_minutes": 3445.35,
       "share": 0.0
     },
     "trial": {
       "hosted_minutes": 715.98,
-      "mac_minutes": 48.72,
-      "share": 0.9363
+      "mac_minutes": 812.72,
+      "share": 0.4684
     }
   },
   "hosted_queue": {
@@ -138,12 +138,12 @@
     "guest_off": {
       "source": "ssh mini cat ~/Library/Logs/ci-kit/vm-lane.log",
       "log_from": "2026-10-23T07:26:12Z",
-      "minutes": 1487.73,
-      "minutes_with_guest_job_queued": 298.85,
+      "covered_from": "2026-10-23T07:26:12Z",
+      "minutes": 1314.87,
+      "minutes_with_guest_job_queued": 208.62,
       "by_reason": {
         "swap": 7.99,
         "held: cua_repl": 325.14,
-        "lane stopped": 172.86,
         "paused": 62.22,
         "held: CI-opt-t": 8.6,
         "memory available N%, under the floor of N%": 898.51,
@@ -155,7 +155,11 @@
         "memory pressure N, not N": 5.22,
         "held: CI-opt-t2": 1.21
       },
-      "note": "minutes counts idle minutes too (no guest job queued); minutes_with_guest_job_queued does not"
+      "controller_stopped": {
+        "minutes": 172.87,
+        "minutes_with_guest_job_queued": 90.23
+      },
+      "note": "the figures cover the window from covered_from only; minutes counts idle minutes too (no guest job queued), minutes_with_guest_job_queued does not; controller_stopped is the lane controller's own down time, which a running guest outlives, and is not in minutes"
     }
   },
   "sources": [
@@ -188,7 +192,9 @@
     "mac_runner_prefix": "ci-kit-mac-",
     "trial_lanes": [
       "hosted",
-      "no-hosted"
+      "no-hosted",
+      "vm",
+      "vm-trial"
     ],
     "holds_repo": "SSFSKIM/ci-kit-sandbox",
     "hold_title": "ci-kit alert: mini:",

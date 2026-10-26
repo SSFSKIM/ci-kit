@@ -221,9 +221,11 @@ class RunKinds(unittest.TestCase):
         app_runs = [app_run(100, "1/1"), app_run(101, "2/1"), app_run(102, "m1/1"), app_run(103, "999/2"),
                     app_run(104, "3/1")]
         app_jobs = [job("e2e", labels=HOSTED, run_id=r, id_=r) for r in (100, 101, 102, 103, 104)]
-        m, a, unmatched = measure.with_kinds(maws_runs, maws_jobs, app_runs, app_jobs, ["hosted", "no-hosted"])
-        self.assertEqual([j["kind"] for j in m], ["trial", "default", "default", "trial", "default"])
-        self.assertEqual([j["kind"] for j in a], ["trial", "default", "trial", "trial", "default"])
+        # Under vm and vm-trial a MAC_VM_E2E group goes to the guest even when HOSTED_MAC_E2E lists it, so only a run
+        # with no Lane: shows what a default run hosts.
+        m, a, unmatched = measure.with_kinds(maws_runs, maws_jobs, app_runs, app_jobs, measure.TRIAL_LANES)
+        self.assertEqual([j["kind"] for j in m], ["trial", "default", "trial", "trial", "trial"])
+        self.assertEqual([j["kind"] for j in a], ["trial", "default", "trial", "trial", "trial"])
         self.assertEqual(unmatched, 2)
         self.assertNotIn("kind", maws_jobs[0])  # the inputs are left as they were
 
@@ -330,13 +332,15 @@ class Mini(unittest.TestCase):
     def test_guest_off_reads_the_lane_states(self):
         off = self.report(until=datetime(2026, 10, 20, 12, tzinfo=UTC))["guest_off"]
         self.assertEqual(off["log_from"], "2026-10-20T09:00:00Z")
+        self.assertEqual(off["covered_from"], "2026-10-20T09:00:00Z")  # the window opens 10-19, before the log
         self.assertEqual(off["by_reason"], {
             "memory available N%, under the floor of N%": 20 + 45,
             "memory pressure N, not N": 10,
             "held: cua_repl": 5,
-            "lane stopped": 10,
         })
-        self.assertEqual(off["minutes"], 90)
+        self.assertEqual(off["minutes"], 80)
+        # the controller's idle stop, 11:05 to 11:15, is its own row
+        self.assertEqual(off["controller_stopped"], {"minutes": 10, "minutes_with_guest_job_queued": 0})
         self.assertIn("idle", off["note"])
 
     def test_guest_off_counts_the_minutes_a_guest_job_was_queued(self):
@@ -344,6 +348,25 @@ class Mini(unittest.TestCase):
                 job("e2e:b", labels=["ci-kit-mac-solo"], created="2026-10-20T10:00:00Z", queued_min=60)]
         off = self.report(jobs=jobs, until=datetime(2026, 10, 20, 12, tzinfo=UTC))["guest_off"]
         self.assertEqual(off["minutes_with_guest_job_queued"], 15)
+
+    def test_a_controller_stopped_over_a_busy_guest_is_not_a_guest_off(self):
+        busy = """\
+2026-10-20T10:00:00Z vm-lane starting (pid 1, slot vm, mode always); recovery first
+2026-10-20T10:00:05Z vm-lane no boot: no queued job for the guest
+2026-10-20T10:01:00Z vm-lane booting maws-vm-job-vm-20261020T100100Z from the golden image g: 1 ci-kit-mac-vm job(s)
+2026-10-20T10:01:30Z vm-lane maws-vm-job-vm-20261020T100100Z: its guest agent answers after 20 s
+2026-10-20T10:05:00Z vm-lane stopping on SIGTERM (running, maws-vm-job-vm-20261020T100100Z); a guest and its reservation stay for the next start
+2026-10-20T10:35:00Z vm-lane starting (pid 2, slot vm, mode always); recovery first
+2026-10-20T10:35:02Z vm-lane recovery: a job clone maws-vm-job-vm-20261020T100100Z runs; resuming it
+2026-10-20T10:45:00Z vm-lane maws-vm-job-vm-20261020T100100Z: the guest powered itself off; teardown
+2026-10-20T10:46:00Z vm-lane no boot: no queued job for the guest
+"""
+        jobs = [job("e2e:a", runner="ci-kit-mac-mini-maws-vm-job-vm-20261020T100100Z", labels=["ci-kit-mac-vm"],
+                    created="2026-10-20T10:00:00Z", queued_min=1, ran_min=44)]
+        off = self.report(log=busy, jobs=jobs, until=datetime(2026, 10, 20, 11, tzinfo=UTC))["guest_off"]
+        self.assertEqual(off["minutes"], 0)
+        self.assertEqual(off["by_reason"], {})
+        self.assertEqual(off["controller_stopped"], {"minutes": 30, "minutes_with_guest_job_queued": 0})
 
     def test_the_last_state_runs_to_the_read_not_past_it(self):
         off = self.report(until=datetime(2026, 10, 26, tzinfo=UTC), now=datetime(2026, 10, 20, 11, 25, tzinfo=UTC))
