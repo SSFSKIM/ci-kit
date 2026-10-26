@@ -7,8 +7,6 @@ import {
   launchRow, runningRow, attemptRow, withJob, jobRecord, finalRow, renderRow, parseRow, rowsOf, moreFinal, dollars, dailyLine, renderDaily, dailyDays,
 } from '../../gce/launcher/ledger.mjs';
 import { createGceLedger, ROTATE_AT, WINDOW_MS, FULL_READ_MS } from '../../gce/launcher/ledger-store.mjs';
-import { createLedgerStore } from '../../pool/lib/ledger-store.mjs';
-import { parseRow as parseHetznerRow } from '../../pool/lib/ledger.mjs';
 
 const SBX = 'SSFSKIM/ci-kit-sandbox';
 const T0 = Date.parse('2026-10-16T12:00:00Z');
@@ -28,7 +26,6 @@ test('a row goes launching → running → deleting → final, and renders the I
   assert.match(text, /\| alloc \| instance \| repo \| job \(actual\) \| created \(UTC\) \| deleted \(UTC\) \| machine@zone \| spot\/standard \| seconds \| \$ \| end \|/);
   assert.match(text, /\| tb0abc0001 \| ci-kit-gce-tb0abc0001 \| SSFSKIM\/ci-kit-sandbox \| ci \/ nproc \(99\) \| 2026-10-16 12:00:05 \| 2026-10-16 12:03:05 \| c3d-highcpu-4@us-central1-a \| spot \| 180 \| 0\.\d{4} \| done \|$/);
   assert.deepEqual(parseRow(text), done);
-  assert.equal(parseHetznerRow(text), null, 'the Hetzner ledger readers skip GCE rows');
 });
 
 // M3 Timing in the ledger: the stages of a job's start are read back from its row (gce/latency-report.mjs).
@@ -287,7 +284,7 @@ function fakeIssue({ comments = [], issues = [{ number: 7, title: 'pool ledger',
 const LEDGER = { repo: SBX, issue_title: 'pool ledger' };
 
 test('the store discovers old active rows on a full read, creates a launch row, and finalizes that same comment in place', async () => {
-  const f = fakeIssue({ comments: [{ id: 1, body: 'an old Hetzner row', updated_at: '2026-10-01T00:00:00Z' }] });
+  const f = fakeIssue({ comments: [{ id: 1, body: '<!-- ci-kit-ledger {"server":42,"state":"final"} -->', updated_at: '2026-10-01T00:00:00Z' }] });
   const store = createGceLedger(f.gh, LEDGER, { now: () => T0 });
   const launching = launchRow({ alloc: 'tb0abc0001', repo: SBX, cpus: 4, at: T0, config: 'x' });
   await store.read();
@@ -530,16 +527,6 @@ test('rotation: when the new issue cannot be made, rows keep going to the curren
   f.gh.createIssue = create;
   await store.read();
   assert.equal(f.state.issues.length, 2);
-});
-
-test('rotation: Hetzner\'s ledger store still finds the original "pool ledger" issue, never a rotated GCE one', async () => {
-  const f = fakeIssue({ issues: [{ number: 7, title: 'pool ledger', created_at: '2026-10-01T00:00:00Z', older: ROTATE_AT }] });
-  await createGceLedger(f.gh, LEDGER, { now: () => T0 }).read();
-  assert.equal(f.state.issues.length, 2);
-  f.state.issues.reverse(); // GitHub lists the newest first
-  const hetzner = createLedgerStore(f.gh, LEDGER);
-  await hetzner.comments();
-  assert.ok(f.calls.includes('read #7 since undefined'));
 });
 
 test('rotation: the store keeps reading the issue it opened while GitHub\'s listing has not caught up', async () => {

@@ -153,7 +153,7 @@ for (const kind of ['boot', 'notice', 'claimed']) test(`${kind}-only bundles nei
   const { w, provider } = setup();
   let seq = 0;
   const ledger = createGceLedger(w.github, CFG.ledger, { now: w.now });
-  const make = () => new Launcher({ provider, gh: w.github, ledger, cfg: CFG, config: CONFIG, poolRepos: [], now: w.now, random: () => ++seq });
+  const make = () => new Launcher({ provider, gh: w.github, ledger, cfg: CFG, config: CONFIG, now: w.now, random: () => ++seq });
   w.sim.queue(REPO, ['self-hosted', 'ci-kit-pool', 'cpus-2']);
   const first = await make().tick();
   assert.equal(first.launched.length, 1);

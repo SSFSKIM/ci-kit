@@ -4,9 +4,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { jobRunArgs, vmMode, smokeVerdict, METADATA_BLOCK } from '../../gce/vm/run.mjs';
-import { runArgs, CACHE } from '../../pool/agent/docker.mjs';
+import { CACHE } from '../../pool/agent/docker.mjs';
 
-test('a GCE job container gets every vCPU, the same caches, hook and JIT passing as on the Hetzner box, and no memory cap', () => {
+test('a GCE job container gets every vCPU, the shared caches, hook and JIT passing, and no memory cap', () => {
   const args = jobRunArgs({ name: 'ci-kit-gce-abc', cpus: 8 });
   const joined = args.join(' ');
   assert.equal(args[0], 'run');
@@ -16,9 +16,13 @@ test('a GCE job container gets every vCPU, the same caches, hook and JIT passing
   assert.match(joined, new RegExp(`-v ${CACHE}:${CACHE} `));
   assert.match(joined, /-e CI_KIT_JIT /);
   assert.ok(!args.some((a) => a.startsWith('CI_KIT_JIT=')));
-  // Everything the Hetzner container gets from its environment, the GCE one gets too.
-  const hetzner = runArgs({ name: 'n', repo: 'o/r', runnerId: 1, labels: ['cpus-8'], cores: [0, 1, 2, 3, 4, 5, 6, 7], memoryGbPerCpu: 2 });
-  for (const a of hetzner.filter((x) => /^[A-Za-z_]+=/.test(x) && !x.startsWith('CI_KIT_CORES='))) assert.ok(args.includes(a), a);
+  const dirs = {
+    RUNNER_TOOL_CACHE: 'toolcache', AGENT_TOOLSDIRECTORY: 'toolcache', npm_config_cache: 'npm',
+    npm_config_store_dir: 'pnpm-store', pnpm_config_store_dir: 'pnpm-store', COREPACK_HOME: 'corepack',
+    PLAYWRIGHT_BROWSERS_PATH: 'ms-playwright', electron_config_cache: 'electron', ELECTRON_CACHE: 'electron',
+  };
+  for (const [env, dir] of Object.entries(dirs)) assert.ok(args.includes(`${env}=${CACHE}/${dir}`), env);
+  assert.ok(args.includes('ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/ci-kit-job-started.sh'));
   assert.equal(args.at(-1), 'ci-kit-runner:latest');
 });
 

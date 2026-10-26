@@ -1,4 +1,4 @@
-// A fake Compute Engine client (the interface of lib/gce.mjs) over recorded resource shapes. Like the Hetzner fake, it
+// A fake Compute Engine client (the interface of lib/gce.mjs) over recorded resource shapes. It
 // ignores filters and returns every resource in the project, so the code under test must check labels itself.
 // Instances it creates follow a script: each instance() read takes the next state ({status, attrs}) and the last one
 // sticks. FOREIGN holds resources the kit must never delete or label, some carrying the kit's names.

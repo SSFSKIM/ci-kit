@@ -46,7 +46,7 @@ function setup({ refs, max = 64 } = {}) {
   const gce = createProvider({ gce: w.gce, cfg, config: 'test', now: w.now });
   let seq = 0;
   const state = new Map(), logs = [];
-  const make = (extra = {}) => new Launcher({ providers: [gce, a, b], provider: gce, ec2, repoProviders: { [repo]: refs ?? [ref('ec2', 'a'), ref('gce', cfg.project)] }, gh: w.github, ledger, cfg, config: 'test', poolRepos: [], now: w.now, random: () => ++seq, providerState: state, log: (s) => logs.push(s), ...extra });
+  const make = (extra = {}) => new Launcher({ providers: [gce, a, b], provider: gce, ec2, repoProviders: { [repo]: refs ?? [ref('ec2', 'a'), ref('gce', cfg.project)] }, gh: w.github, ledger, cfg, config: 'test', now: w.now, random: () => ++seq, providerState: state, log: (s) => logs.push(s), ...extra });
   const rows = async () => ledger.rows();
   const queue = (size = 8, p = 'any') => w.sim.queue(repo, labels(size, p));
   return { w, cfg, a, b, gce, ec2, ledger, rows, queue, make, logs };

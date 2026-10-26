@@ -2698,6 +2698,13 @@ euros, jobs, and the projected month at the current rate.
 
 ## Decision Log
 
+- **2026-10-26 — Proposed retirement (ci-kit#23; owner approval pending).** Remove the unused Hetzner provider,
+  weekly snapshot bake and ten-minute guard; retain shared GCE/EC2 modules and the independent EC2 guard.
+  `pool-ensure` becomes a credential-free no-op with an accepted-but-ignored legacy input for `@v1` callers.
+  Historical design text below remains a record, not instructions to restore the provider. Merging, `v1`,
+  deployments, secrets and resource cleanup await the owner's decision; the GitHub-secret App key still
+  serves the EC2 guard and sandbox workflows and must not simply be revoked.
+
 - **Decision:** the verification for this work.
   - **The spec.** One independent spec review by `doperpowers:adversarial-reviewer`, since the spec
     is technical-heavy. In the same round, a buildability review of the execution section by

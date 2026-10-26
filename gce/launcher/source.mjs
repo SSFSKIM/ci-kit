@@ -5,14 +5,6 @@ import { parseGceConfig, parseEc2Config, resolveRepoProviders } from './config.m
 const KIT = 'SSFSKIM/ci-kit';
 const GCE_PATH = 'pool/config/gce.json';
 const EC2_PATH = 'pool/config/ec2.json';
-const POOL_PATH = 'pool/config/pool.json';
-
-// pool.json's repo names, read apart from its operational schema (the Hetzner agent's parser owns that).
-export function poolRepos(text) {
-  const repos = JSON.parse(text).repos;
-  if (!Array.isArray(repos) || !repos.every((r) => typeof r?.repo === 'string')) throw new Error('pool.json has no readable repos list');
-  return repos.map((r) => r.repo);
-}
 
 const gceConfig = (text) => {
   if (text === null) throw new Error(`${GCE_PATH} is missing`);
@@ -21,7 +13,7 @@ const gceConfig = (text) => {
 const ec2Config = (text) => (text === null ? null : parseEc2Config(text));
 
 // gh: {lastCommit(repo, path)}; fetchText(url) → text or null on confirmed 404; readBundled(name) → text or null.
-// load() → {cfg, config, poolRepos, ec2, repoProviders}. cfg.repos retains its original optional providers; resolved
+// load() → {cfg, config, ec2, repoProviders}. cfg.repos retains its original optional providers; resolved
 // repoProviders is keyed by repo and includes configured disabled accounts. ec2=null means confirmed absence.
 export function createConfigSource({ gh, fetchText, readBundled, bundledCommit, log = () => {} }) {
   const last = new Map(); // path → {commit, value}, successfully parsed
@@ -65,10 +57,9 @@ export function createConfigSource({ gh, fetchText, readBundled, bundledCommit, 
   }
 
   return async function load() {
-    let [gce, ec2, pool] = await Promise.all([
+    let [gce, ec2] = await Promise.all([
       read(GCE_PATH, gceConfig, 'gce.json'),
       read(EC2_PATH, ec2Config, 'ec2.json'),
-      read(POOL_PATH, (text) => (text === null ? [] : poolRepos(text)), 'pool.json'),
     ]);
     let repoProviders;
     try {
@@ -89,6 +80,6 @@ export function createConfigSource({ gh, fetchText, readBundled, bundledCommit, 
       last.set(EC2_PATH, ec2);
     }
     active = { gce, ec2, repoProviders };
-    return { cfg: gce.value, config: gce.commit, poolRepos: pool.value, ec2: ec2.value, repoProviders };
+    return { cfg: gce.value, config: gce.commit, ec2: ec2.value, repoProviders };
   };
 }

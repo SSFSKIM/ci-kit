@@ -19,7 +19,7 @@ function setup() {
   const ledger = () => createGceLedger(w.github, cfg.ledger, { now: w.now });
   const make = (l = ledger()) => {
     const providers = createProviders({ gce: w.gce, cfg, config: 'commit', ec2, now: w.now, awsFactory });
-    return new Launcher({ provider: providers[0], providers, ec2, cfg, config: 'commit', gh: w.github, ledger: l, poolRepos: [], now: w.now, after: w.after });
+    return new Launcher({ provider: providers[0], providers, ec2, cfg, config: 'commit', gh: w.github, ledger: l, now: w.now, after: w.after });
   };
   const saved = async (ageMinutes = 0) => {
     const row = { ...launchRow({ alloc: 'alloc1', repo, cpus: 8, reserved: 8, provider: 'ec2', account: account.account, at: start, config: 'commit' }),

@@ -112,7 +112,7 @@ test('real STS timeout during refresh prevents a launcher tick from invoking or 
   const ledger = createGceLedger(w.github, cfg.ledger, { now: w.now });
   w.sim.queue(repo, ['self-hosted', 'ci-kit-pool', 'cpus-8', 'ci-kit-ec2']);
   const out = await new Launcher({ provider: providers[0], providers, ec2, cfg, config: 'timeout', gh: w.github, ledger,
-    poolRepos: [], now: w.now, after: w.after }).tick();
+    now: w.now, after: w.after }).tick();
   assert.equal(refreshError.name, 'TimeoutError', 'the runtime-created STS handler must abort its hung request');
   assert.equal(refreshError.code, 'ETIMEDOUT');
   assert.equal(refreshError.$metadata.attempts, 1);

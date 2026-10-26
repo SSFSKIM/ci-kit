@@ -26,7 +26,7 @@ function setup({ cfg = CFG } = {}) {
   let seq = 0;
   // A new Launcher is a restart: it keeps nothing but what GCE, GitHub and the ledger hold.
   const make = () => new Launcher({
-    gce: w.gce, gh: w.github, ledger: createGceLedger(w.github, cfg.ledger, { now: w.now }), cfg, config: COMMIT, poolRepos: [],
+    gce: w.gce, gh: w.github, ledger: createGceLedger(w.github, cfg.ledger, { now: w.now }), cfg, config: COMMIT,
     now: w.now, random: () => (seq += 1), alert: async () => {}, log: (m) => w.log.push(`log ${m}`), after: w.after,
   });
   return { w, launcher: make(), make };
@@ -359,7 +359,7 @@ test('the daily line reads the day\'s NAT from Cloud Monitoring once, when it is
       return [{ resource: { type: 'nat_gateway', labels: { region: 'us-west4' } }, points: [{ value: { int64Value: String(value) } }] }];
     };
     const launcher = new Launcher({
-      gce: w.gce, gh: w.github, ledger: createGceLedger(w.github, CFG.ledger, { now: w.now }), cfg: CFG, config: COMMIT, poolRepos: [],
+      gce: w.gce, gh: w.github, ledger: createGceLedger(w.github, CFG.ledger, { now: w.now }), cfg: CFG, config: COMMIT,
       now: w.now, random: () => 1, alert: async () => {}, log: (m) => w.log.push(`log ${m}`), after: w.after,
     });
     await launcher.tick();
@@ -457,7 +457,7 @@ test('the daily line waits until 5 min past midnight UTC, when the NAT samples o
   const start = Date.parse('2026-10-17T00:02:00Z');
   const w = world({ start });
   const launcher = new Launcher({
-    gce: w.gce, gh: w.github, ledger: createGceLedger(w.github, CFG.ledger, { now: w.now }), cfg: CFG, config: COMMIT, poolRepos: [],
+    gce: w.gce, gh: w.github, ledger: createGceLedger(w.github, CFG.ledger, { now: w.now }), cfg: CFG, config: COMMIT,
     now: w.now, random: () => 1, alert: async () => {}, log: () => {}, after: w.after,
   });
   const posted = () => w.gh.comments.filter((c) => c.body.includes('ci-kit-gce-daily')).length;

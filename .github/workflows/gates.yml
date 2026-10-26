@@ -133,8 +133,6 @@ jobs:
       - name: Pool
         if: steps.plan.outputs.pool == 'true'
         uses: ./.ci-kit/pool-ensure
-        with:
-          hcloud-token: ${{ secrets.HCLOUD_TOKEN }}
 
   gate:
     name: ${{ matrix.gate.name }}

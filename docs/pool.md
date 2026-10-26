@@ -1,236 +1,70 @@
 # The pool — operator runbook
 
-The pool has a Hetzner backend and an ephemeral-VM launcher serving GCE and EC2. Repos belong to one
-backend; ephemeral repos choose their clouds/accounts in ci-kit's config. See [EC2 and credit preference](#ec2-and-credit-preference)
-for the second cloud, billing and independent guard. The Hetzner operating model follows first.
-
-The Hetzner pool is one server, `ci-kit-pool`, that exists only while private repos' pool-lane gates run
-(design: spec §3). A workflow's `plan` job runs **ensure**, which creates the box from the newest pool snapshot
-if none exists. The **agent** on the box starts one Docker container per queued pool job, each with a fresh
-just-in-time runner and an exclusive set of cores, and deletes the box when it is idle at minute ≥ 50 of its
-billed hour. The **watchdog** on the box and the **guard** workflow are the backstops. The **bake** builds the
-snapshot weekly.
-
-**Idle** means no pool demand: no running job container, no queued or in-progress job carrying `ci-kit-pool` in
-a served repo, and no ensure call in the last 15 minutes. Ensure stamps the box `ci-kit-want=<unix seconds>` on
-every call, on an existing box as well as a new one, because the job it is for may queue minutes later behind
-hosted jobs. A served repo's runs that use no pool job keep nothing alive. MAWS runs over a hundred gates a day,
-and most of them never touch the pool.
+The pool runs each private repo's job on an ephemeral GCE or EC2 VM. The launcher reads GitHub's queue and
+provisions runners automatically; a workflow does not create capacity itself. Repositories and provider order
+live in `pool/config/gce.json`; EC2 accounts live in `pool/config/ec2.json`. See [GCE](#gce) for the shared
+launcher and bake, and [EC2 and credit preference](#ec2-and-credit-preference) for account selection and billing.
 
 | Piece | Where |
 |---|---|
-| ensure | `pool-ensure/` (the action), `pool/lib/ensure.mjs` |
-| agent, watchdog | `pool/agent/` (`agent.mjs`, `watchdog.mjs`, `systemd/`), decisions in `logic.mjs` |
-| job container image | `pool/image/` |
-| bake | `.github/workflows/pool-bake.yml`, `pool/bake/` |
-| guard | `.github/workflows/pool-guard.yml`, `pool/guard.mjs`, rules in `pool/lib/guard.mjs` |
-| served repos and preferences | `pool/config/pool.json` |
-| GCE backend (§3a): launcher, image bake, VM unit, deploy | `gce/`, `lib/gce.mjs`, `pool/config/gce.json`; see "GCE" below |
-| ledger and alerts | issue "pool ledger" and issues labelled `ci-kit-alert` in `SSFSKIM/ci-kit-sandbox` |
-
-Every Hetzner resource the kit makes carries a `ci-kit=` label (`pool`, `pool-image`, `builder`), and every
-piece of the kit selects by that label and checks it again before acting. The project holds other work's
-resources; anything without the label is never touched.
+| shared runner image and job-started hook | `pool/image/` |
+| shared cache paths, container environment and queue filter | `pool/agent/docker.mjs`, `pool/agent/logic.mjs` |
+| shared VM container runtime | `pool/vm/` |
+| shared image preparation, setup manifest and job images | `pool/bake/` |
+| alerts | `pool/lib/alerts.mjs` |
+| launcher, GCE bake, VM unit and deploy | `gce/`, `lib/gce.mjs` |
+| EC2 bake, VM unit and cloud setup | `ec2/`, `lib/aws.mjs` |
+| independent EC2 guard | `.github/workflows/pool-guard.yml`, `ec2/guard.mjs` |
+| ledger | issues titled "pool ledger" or "pool ledger from …" in `SSFSKIM/ci-kit-sandbox` |
 
 ## Using the pool from a repo
 
-A private repo's gate goes on the pool with `lane: pool` and `cpus: 2|4|8|16` in `.github/ci-kit.yml`
-(see `docs/adopting.md`), plus two things only the operator can do:
+A private repo's gate uses `lane: pool` and `cpus: 2|4|8|16` in `.github/ci-kit.yml`
+(see [adopting.md](adopting.md)). The operator must:
 
-1. **Serve the repo.** Add it to `repos` in `pool/config/pool.json`:
-   `{"repo": "SSFSKIM/<name>", "workflows": ["ci.yml"]}`. The current agent no longer reads `workflows`: demand
-   comes from pool jobs in any workflow. Boxes from images baked before 2026-10-16 still read it, so give it the
-   workflows that use the pool until those images are gone. Commit to `main`. The agent re-reads the config every
-   5 minutes, so no re-bake or restart is needed. A repo the API reports as public is refused.
-2. **Install the App and set the secret.** Add the repo to the `ci-kit-runners` installation
-   (github.com/settings/installations → ci-kit-runners → Configure), and set `HCLOUD_TOKEN`:
-   `gh secret set HCLOUD_TOKEN -R SSFSKIM/<name> --body "$(cat ~/.config/claude-secrets/HETZNER_API_TOKEN)"`.
+1. Add the repo to `repos` in `pool/config/gce.json`, with its provider preferences if needed, and commit to
+   `main`. The launcher reloads configuration each tick. A repo the API reports as public is refused.
+2. Add the repo to the `ci-kit-runners` App installation (GitHub Settings → Applications → Installed GitHub Apps
+   → ci-kit-runners → Configure). Deploy the webhook receiver with the new repo list for prompt wakeups;
+   the scheduled launcher tick still works before that deploy.
 
-A repo with its own workflow (MAWS's `gate.yml`) uses the lane directly: `runs-on: [self-hosted, ci-kit-pool,
-cpus-<N>]`, and a step before the pool jobs queue:
+A custom workflow uses `runs-on: [self-hosted, ci-kit-pool, cpus-<N>]` directly. No cloud token or ensure step is
+needed. `SSFSKIM/ci-kit/pool-ensure@v1` remains available for existing workflows as a no-op: its deprecated
+`hcloud-token` input is accepted but ignored, and its `result` output is always `none`. Once `v1` includes this
+retirement, callers may remove the old input and step.
 
-```yaml
-- uses: SSFSKIM/ci-kit/pool-ensure@v1
-  with: {hcloud-token: "${{ secrets.HCLOUD_TOKEN }}"}
-```
+Removing a repo from `gce.json` stops new launches after the launcher reads that commit. Busy VMs finish their
+jobs; idle runners are unregistered immediately. Jobs queued meanwhile wait in GitHub. The launcher's tick log
+records its `config` commit; a failed config fetch keeps the last good copy and logs that fact.
 
-Ensure reads which repos the pool serves from the kit's `main`. It uses the copy bundled with `v1` only when `main`
-cannot be reached. It wakes or stamps a box only for a repo in `pool.json`. For a repo in `pool/config/gce.json`
-its result is `gce`, and for a repo in neither it is `none`. In both cases it touches nothing in Hetzner and needs
-no `hcloud-token`. A config on `main` whose `repos` cannot be read fails ensure rather than falling back to the
-bundled list, which may still hold a repo that `main` has moved.
-
-**Removing a repo** from `repos` drains it within 5 minutes, when the agent next reads the config. No new
-container starts for the repo. Its busy runners finish their jobs, or run until the 6 h 15 min container
-deadline. Its idle runners are unregistered, then their containers stop. Jobs it queues meanwhile wait in GitHub's
-queue. Each box labels itself `ci-kit-config=<sha8>`, the commit of the config it runs: the newest commit on `main`
-that changed `pool.json`, or the snapshot's bake commit until a fetch from `main` succeeds. A box showing the
-removal commit, or a later one, has stopped serving the repo. A box on an older commit has not: its config fetch is
-failing, or it booted from a snapshot whose baked list still has the repo. The agents in snapshots baked before this
-change kill a removed repo's containers after 5 minutes, busy or not.
-
-Inside a `cpus-N` container, `nproc` and Node's `os.availableParallelism()` report N; `getconf
-_NPROCESSORS_ONLN` reports the host's cores. Size worker pools from `nproc`.
+Inside a job container, size worker pools from `nproc` or Node's `os.availableParallelism()`.
 
 ## Credentials
 
-| Credential | Where | Used by |
-|---|---|---|
-| GitHub App `ci-kit-runners` (id 5337915), owned by SSFSKIM, installed on MAWS, ci-kit-sandbox and ci-kit; Administration rw, Actions rw, Contents r, Issues rw | private key in secrets `CI_KIT_APP_KEY` (kit, sandbox), id in `CI_KIT_APP_ID`; baked to `/etc/ci-kit/app.pem`, `/etc/ci-kit/app_id` | the agent (runners, schedules, ledger), the watchdog (ledger), the guard |
-| Hetzner token | `~/.config/claude-secrets/HETZNER_API_TOKEN`; secret `HCLOUD_TOKEN` in the kit and every caller; baked to `/etc/ci-kit/hcloud_token` | ensure, agent, watchdog, guard, bake |
-
-Everything under `/etc/ci-kit` is root-only, and job containers never mount it.
-
-**Rotating a credential.** Update the repo secrets, then re-bake (below): the box reads its credentials from
-the snapshot. For the App key: github.com/settings/apps/ci-kit-runners → Private keys → Generate; set
-`CI_KIT_APP_KEY` in the kit and the sandbox from a 0600 file under `mktemp -d` (`gh secret set CI_KIT_APP_KEY -R
-<repo> < "$dir/app.pem"`), remove the file, re-bake, then delete the old key on the App's page.
+The GitHub App `ci-kit-runners` (id 5337915) has separate private keys in GitHub repository secrets and GCP
+Secret Manager. **Removing the old provider does not revoke either key.** The GitHub-secret key remains in use
+by ci-kit's EC2 guard and ci-kit-sandbox's history/probe workflows. Keep `CI_KIT_APP_ID` and `CI_KIT_APP_KEY` in
+both repositories. The GCP key serves the launcher and cloud bakes; it is not baked into GCE images or EC2 AMIs.
+See the GCE credential details below before rotating either key. No cloud token is required in pool callers.
 
 ## Re-bake
 
-The bake runs every Sunday at 18:00 UTC (03:00 KST Monday, an hour the pool is usually down) and on dispatch:
-
-```
-gh workflow run pool-bake.yml -R SSFSKIM/ci-kit
-gh run watch -R SSFSKIM/ci-kit $(gh run list -R SSFSKIM/ci-kit -w pool-bake.yml -L 1 --json databaseId -q '.[0].databaseId')
-```
-
-It waits while a pool box is up (see "The project's core limit" below), then creates a builder
-(`ci-kit-builder-<run id>`, label `ci-kit=builder`, from `ubuntu-24.04`, the smallest type that holds the build:
-`cpx12` with 2 GB of swap added, else `cx23`, else `cpx22`; the bake's log shows the build's peak memory plus swap)
-whose user-data
-(`pool/bake/builder.sh`) writes `/etc/ci-kit/`, installs Docker, clones the kit at the run's commit, and runs the
-provider-neutral half of the bake that the GCE bake shares (`pool/bake/prepare.sh`): Node, the runner image
-(`pool/image/Dockerfile`), and writable cache directories. This dormant Hetzner pool serves no repositories;
-project cache warming belongs to declarations in the multi-cloud bake below. It then smoke-tests a cpuset container, marks itself
-`ci-kit-bake=ok` and powers off. The workflow then snapshots it (`ci-kit=pool-image`, `ci-kit-commit=<sha>`),
-deletes it, and keeps the two newest snapshots. A builder that fails marks itself `ci-kit-bake=failed-<step>`,
-and the run fails naming the step. A failed or cancelled bake leaves the previous snapshots in place, and its
-last step deletes its builder and any snapshot it left unfinished; the guard deletes a builder older than 2 h.
-
-Bump the runner image's pinned version in `pool/image/Dockerfile` when GitHub releases a new runner, so jobs do
-not pay a runner self-update at start.
-
-The base image carries build tools, xvfb and the libraries Electron and Chromium need, not a project's packages.
-On GCE and EC2, each served repository's declaration supplies its tools in a per-repository job image and its
-`setup.install` warms the shared caches. A base-only job installs its declaration at job time.
-
-## Reading the ledger
-
-The ledger is the issue "pool ledger" in `SSFSKIM/ci-kit-sandbox`. Each pool server session has one comment:
-
-```
-| server id | created (UTC) | deleted (UTC) | type@location | billed h | € | jobs | end |
-```
-
-- A row is provisional before the server is gone. Its deleted column reads `running, seen <time>` from the box's
-  boot (the agent writes it then, and the guard writes or refreshes it every cycle for any live pool box). It reads
-  `deleting <time>` once a deleter has written it just before its delete call. The guard, or the next box's agent
-  at boot, finalizes it once the server is gone. A row never moves back.
-- `end`: `idle` (the agent deleted its idle box), `stale-heartbeat` (the guard deleted a box whose agent had not
-  reconciled for 10 min), `watchdog` (the box deleted itself after 30 min without reconciling), `max-uptime`
-  (24 h up), `manual`, or `vanished`. `vanished` means the server disappeared while its row still read `running`,
-  most likely its watchdog while GitHub was unreachable. Its deleted time is its last sighting, which is within one
-  guard cycle of the truth.
-- Accepted residue: a box that never reached GitHub and was deleted by its watchdog before the guard first saw it
-  has no row. The watchdog deletes whether or not GitHub answers, because deletion must not depend on GitHub.
-- `€` is billed hours times the type's gross hourly price in that location; the IPv4 address adds €0.001/h.
-- Two writers can each create a comment for the same server, for example the guard and a watchdog at once. Readers
-  count one row per server, the most final, then the oldest comment, and every writer deletes the others it finds.
-- A box ensure made smaller for the core limit shows its type in the row, for example
-  `| 170700001 | 2026-10-20 09:12:04 | 2026-10-20 10:02:11 | cpx52@hel1 | 1 | 0.19 | 6 | idle |`, and has a
-  matching `ci-kit-alert` issue.
-- Each comment starts with a hidden `<!-- ci-kit-ledger {…} -->` marker holding the same row as JSON; the kit
-  reads that, not the table.
-
-The guard posts a weekly summary comment (hours, euros, jobs, the month projected at that week's rate), and opens
-a `ci-kit-alert` issue when a day's pool hours exceed `max_hours_per_day` (default 8). A day's hours are the
-billed hours that begin in that UTC day, so a session across midnight counts on both days. It never deletes a box
-for cost; the levers are a smaller type in `types` (cpx52 or cpx42), CX53 stock, or fewer pool gates.
-
-## Changing type or location preferences
-
-Edit `types`, `fallback_types` and `locations` in `pool/config/pool.json` and commit to `main`. Ensure reads them from the kit
-checkout at the calling workflow's version (`@v1` callers after `v1` moves); the guard reads `main`. The first
-available type in order wins, in the first location in order that offers it (availability from
-`GET /v1/server_types`). A type with fewer than 16 cores serves fewer jobs at once. A job asking for more cores
-than the box has runs on all of the box's cores once the box is otherwise empty, and its job log says so: `ci-kit
-pool: this job asked for cpus-16; this box has 12 cores, so it runs on all of them (clamped)`. The box's disk must
-be at least the snapshot's `disk_size` (40 GB from a `cpx12` or `cx23` builder), which every type in the lists
-meets. Changing types for cost is the owner's call.
-
-**The project's core limit.** The kit lives within the Hetzner project's current shared-core limit, which is
-below 20 vCPU. 18 (the 16-core pool box plus the foreign 2-core `session-mirror`) is accepted, and 20 is refused.
-Raising the limit is not available for now, and `session-mirror` is not the kit's. Two measures follow:
-
-- **Smaller boxes.** When a create is refused for the limit (`403 resource_limit_exceeded`, "shared core limit
-  exceeded"), ensure does not try the same type elsewhere, since the limit is project-wide. It moves on to
-  `fallback_types` (cpx52 at 12 vCPU, then cpx42 at 8) and labels that box `ci-kit-fallback=core-limit`. Its agent
-  opens an alert, the ledger row shows the smaller type, and larger gates run clamped (above).
-- **The bake avoids the pool.** It is scheduled when the pool is usually down. If a pool box is up when it starts,
-  or the builder is refused for the limit, it tries again every 15 min for at most 2 h, then fails with an alert.
-  The previous snapshots stay in use.
-
-Raising the project's limit (a Hetzner support request) removes the need for both measures. With room for a pool
-box and a builder side by side, the fallback types would never be reached and the bake would never wait.
-
-## Debug access
-
-The box has no inbound access and no ssh key. Two ways in:
-
-- **Hetzner console.** console.hetzner.cloud → the project → `ci-kit-pool` → Console. There is no root password
-  set, so for a login: Rescue → Reset root password first (it reboots the box).
-- **ssh, temporarily.** Add a rule allowing your address on port 22 to the `ci-kit-pool` firewall and an ssh
-  key, then remove both:
-
-  ```
-  T="$(cat ~/.config/claude-secrets/HETZNER_API_TOKEN)"
-  fw=$(curl -s -H "Authorization: Bearer $T" 'https://api.hetzner.cloud/v1/firewalls?label_selector=ci-kit=pool' | jq '.firewalls[0].id')
-  me=$(curl -s https://api.ipify.org)
-  curl -s -X POST -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
-    "https://api.hetzner.cloud/v1/firewalls/$fw/actions/set_rules" \
-    -d "{\"rules\":[{\"direction\":\"in\",\"protocol\":\"tcp\",\"port\":\"22\",\"source_ips\":[\"$me/32\"]}]}"
-  ```
-
-  A key cannot be added to a running server through the API; add one with `ssh-copy-id` from the console
-  session, or create a debugging box with `ssh_keys` set (see "A box by hand" below). Afterwards set the rules
-  back to `[]`.
-
-On the box: `journalctl -u ci-kit-agent -f` (the agent logs every container it starts and retires, every state
-change, and every skipped tick), `systemctl list-timers ci-kit-watchdog.timer`, `journalctl -u ci-kit-watchdog`,
-`docker ps --filter label=ci-kit-job`, `cat /var/lib/ci-kit/kit-commit`.
-
-**A box by hand.** For a test, create the server as ensure does, with user-data to change the box at boot (a
-shell script that cloud-init runs once): for example writing a wrong key to `/etc/ci-kit/app.pem` and running
-`systemctl restart ci-kit-agent`, or `systemctl disable --now ci-kit-watchdog.timer`. Give it the `ci-kit=pool`
-and `ci-kit-state=booting` labels so the guard watches it, and delete it afterwards.
-
-## When something goes wrong
-
-| Symptom | Look at |
-|---|---|
-| A pool gate waits (`ci-gate` prints `WAIT`) for more than ~3 min | the `plan` job's Pool step (ensure's result); then `GET /v1/servers?label_selector=ci-kit=pool`; then the agent's journal |
-| ensure fails "no pool server type is available" | stock: every pair in `types` × `locations` is out; add a type or location |
-| ensure fails "no snapshot labelled ci-kit=pool-image" | run the bake |
-| ensure warns "the project's core limit refused …", or an alert names a smaller box or a refused bake | the project's shared-core limit (above); list the project's servers, and ask Hetzner for a higher limit if this recurs |
-| An alert "heartbeat stale" | the agent could not reconcile (GitHub unreachable, App key revoked, crash); the box is already deleted; check the App and the last bake |
-| A box up more than 12 h | a pool job that never ends, or ensure called over and over (each call holds the box 15 min); cancel the job or find the caller, and the box then idles out |
-| The guard has no scheduled runs (`gh api 'repos/SSFSKIM/ci-kit/actions/runs?event=schedule'`) an hour after its file changed | GitHub has not registered the schedule; commit any change to `.github/workflows/pool-guard.yml` on `main`. Meanwhile `gh workflow run pool-guard.yml -R SSFSKIM/ci-kit` runs one cycle |
-| The guard or bake stopped running | GitHub disables scheduled workflows in a repo with no activity for 60 days; each pool boot re-enables them, or `gh workflow enable pool-guard.yml -R SSFSKIM/ci-kit` |
+GCE and EC2 share the bake manifest and preparation. Their Cloud Run bake jobs and the independent bake-check
+job are deployed from a checkout with `gce/deploy.sh bake bake-check`; see the GCE bake instructions below for
+execution and schedules. The baked job images contain tools and caches, not the App private key.
 
 ## GCE
 
 The GCE backend (spec §3a) runs each pool job on its own spot VM in the project `ssfskim-ci-kit`, booted from the
-image family `ci-kit-runner`. A repo listed in `pool/config/gce.json` is served by it; one in `pool.json` by the
-Hetzner box; a repo is never in both (the launcher serves neither copy and opens an alert, and the kit's test that
-the two files list no repo twice fails). Ensure prints `result=gce` for a GCE repo and touches nothing in Hetzner.
+image family `ci-kit-runner`. Repos listed in `pool/config/gce.json` are served by the shared launcher, using
+each repo's configured GCE/EC2 provider preferences.
 
 | Piece | Where |
 |---|---|
 | launcher (Cloud Run service `ci-kit-launcher`) | `gce/launcher/`: `server.mjs` (the service), `routes.mjs` (its paths), `ticker.mjs` (when ticks run), `launcher.mjs` (one tick), decisions in `logic.mjs`, ledger rows in `ledger.mjs` and `ledger-store.mjs`, configs from main in `source.mjs` |
 | webhook receiver (Cloud Run service `ci-kit-webhook`) | `gce/webhook/`: `server.mjs` (the service), `receiver.mjs` (signature, filter, publish); the App's hook config: `gce/tools/app-hook.mjs` |
 | bake (orchestrator, decisions) | `gce/bake/bake.mjs`, `gce/bake/plan.mjs` |
-| builder (startup script) | `gce/bake/builder.sh`, sharing `pool/bake/prepare.sh` with the Hetzner builder |
+| builder (startup script) | `gce/bake/builder.sh`, sharing `pool/bake/prepare.sh` with the EC2 builder |
 | the VM's job unit and smoke check | `gce/vm/` (`ci-kit-gce-job.service`, `job.mjs`, `run.mjs`, `smoke.sh`) |
 | Compute Engine and Secret Manager client | `lib/gce.mjs` |
 | deploy | `gce/deploy.sh` |
@@ -288,9 +122,9 @@ instance at a time and admits many requests at once, but runs one tick at a time
 same full reconciliation, whoever asked, and nothing is kept between ticks: state is in GCE labels, the ledger and
 GitHub. A tick:
 
-1. reads `gce.json` and `pool.json` from the kit's main (the newest commit that changed each; on a failed read it
+1. reads `gce.json` and `ec2.json` from the kit's main (the newest commit that changed each; on a failed read it
    keeps the last good copy, and at a cold start without main, the copy in its own build);
-2. reads, all at once: each repo's visibility (public repos, and any repo in both files, are refused), its
+2. reads, all at once: each repo's visibility (public repos are refused), its
    `ci-kit-gce-*` runners and then its queued and in-progress runs and their jobs; the ledger's last 26 h on every
    open ledger issue (below) and then the `ci-kit=gce` instances and disks; the images; and, once the runners and
    instances are in, `ci-kit/job` of each VM whose runner is not busy;
@@ -401,8 +235,8 @@ GitHub App ci-kit-runners ──workflow_job──▶ ci-kit-webhook (public) �
   pre-launches (Pre-launch, below). Holding no state, the receiver cannot tell a run's first job from a later one;
   the tick, which reads the run, decides. Every other delivery is answered 200 with why it was ignored, which
   GitHub's delivery log shows. It runs as `ci-kit-webhook@`, which may read the webhook secret and publish to the
-  topic, and nothing else: it cannot invoke the launcher. Which repos are served is read from the `gce.json` and
-  `pool.json` bundled at its deploy, so a repo added on main reaches the webhook path at the receiver's next
+  topic, and nothing else: it cannot invoke the launcher. Which repos are served is read from the `gce.json`
+  bundled at its deploy, so a repo added on main reaches the webhook path at the receiver's next
   `gce/deploy.sh webhook` (until then its jobs wait for the minute tick, as before).
 - **The path to the launcher.** Cloud Run's internal ingress admits a Pub/Sub push subscription of the same project
   calling the service's `run.app` URL; Cloud Run then checks the push's OIDC token (`ci-kit-launcher@`, audience the
@@ -588,20 +422,27 @@ Every resource carries a `ci-kit` label: `gce-builder` (builders and smoke VMs, 
 the label again before it acts.
 
 **Credentials.**
-- The App key used by GCE lives only in Secret Manager: `ci-kit-app-id` and `ci-kit-app-key`, labelled
-  `ci-kit=app`, readable only by `ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com`. gcloud's default account
-  reads them for a bake run from the Mac.
-- The App has one key per backend, told apart by fingerprint (GitHub's App settings → Credentials → Key pairs):
-  `SHA256:yj//oTVKm3OJamD12RO3JYnGFdQxzGoFYRmFkD90cYU=` is the Hetzner key (GitHub secrets `CI_KIT_APP_KEY`, baked
-  into the snapshots); `SHA256:qQgu9FOJPM9maxPvDhd8nV+AyYS+tXW6+mp2RGiXvAg=` is the GCE key (Secret Manager), added
-  2026-10-16. Retiring Hetzner revokes the Hetzner key without touching GCE.
+- The App key used by the cloud launcher and bakes lives in Secret Manager: `ci-kit-app-id` and `ci-kit-app-key`, labelled
+  `ci-kit=app`, with an explicit secret-level accessor grant to
+  `ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com` (project owner/admin access may be inherited). Both
+  `ci-kit-bake` and `ci-kit-bake-check` use this identity too, including their EC2 stages. Operator tools
+  `gce/tools/boot-sample.mjs` and `gce/tools/app-hook.mjs` also read the pair through gcloud credentials.
+- The documented fingerprints distinguish the two App keys (GitHub App settings → Credentials → Key pairs):
+  `SHA256:yj//oTVKm3OJamD12RO3JYnGFdQxzGoFYRmFkD90cYU=` is the GitHub-secret key, also embedded in the retired
+  Hetzner snapshots; `SHA256:qQgu9FOJPM9maxPvDhd8nV+AyYS+tXW6+mp2RGiXvAg=` is the Secret Manager key, added
+  2026-10-16. The EC2 guard and sandbox history/probe workflows still need the former: update their repository
+  secrets before revoking it, if the owner elects to rotate that key. Deleting retired snapshots alone does not
+  rotate a key.
 - **Writing Secret Manager is a human-only step on this machine.** The agent's permission classifier refuses
   secret-store writes, so a rotation goes to the human from the start: generate a new key on the App's Key pairs
   page, then, with the `.pem` in a 0600 file under `mktemp -d`,
-  `gcloud secrets versions add ci-kit-app-key --project=ssfskim-ci-kit --data-file=<file>`, remove the file, run a
-  bake, and delete the old GCE key on the App's page.
-- The webhook secret, `ci-kit-webhook-secret` (label `ci-kit=webhook`), is readable only by
-  `ci-kit-webhook@ssfskim-ci-kit.iam.gserviceaccount.com`; creating and rotating it are the owner's (The webhook,
+  `gcloud secrets versions add ci-kit-app-key --project=ssfskim-ci-kit --data-file=<file>`, then remove the file.
+  The launcher caches the PEM at process startup: restart/redeploy it (for example, `gce/deploy.sh launcher`)
+  and verify the new revision serves a successful tick before revoking the old key. New bake/check executions
+  read the latest version; let any old-key executions finish before revocation. No image rebuild is needed
+  solely for App-key rotation. Rotation itself is the owner's decision, not a prerequisite for retiring a provider.
+- The webhook secret, `ci-kit-webhook-secret` (label `ci-kit=webhook`), has an explicit secret-level accessor
+  grant to `ci-kit-webhook@ssfskim-ci-kit.iam.gserviceaccount.com`; creating and rotating it are the owner's (The webhook,
   above).
 - No VM gets a service account or a key. The builder gets a one-hour installation token, narrowed to reading
   the served repositories' contents (`bakeScope` in `pool/bake/manifest.mjs`), in its metadata; the image is made from its disk, never
@@ -746,7 +587,7 @@ job uses it only if its `CI_KIT_REPO` label matches `owner/name` case-insensitiv
 `ci-kit-runner:latest`. The bake writes that identity label beside `CI_KIT_SETUP_HASH`, since normalized tags can
 alias different repository names. Older, unlabeled images also fall back to the base, and the image-choice log
 names the fallback reason. No repository is also a base-image fallback, for VMs
-started by an older launcher. The Hetzner agent is unchanged. Smoke still checks the base container and each
+started by an older launcher. Smoke still checks the base container and each
 repository image separately.
 
 The VM logs `job image <name>` before starting Docker. This is in its **serial console**, before the Actions
@@ -884,7 +725,7 @@ can be read there:
 
 **The job VM.** At boot, `ci-kit-gce-job.service` runs `gce/vm/job.mjs`: it drops the job container's TCP and UDP
 to `169.254.169.254` except port 53 (GCE's resolver lives there), runs one job container from
-`ci-kit-runner:latest` on all of the VM's vCPUs with the Hetzner container's mounts and environment and the JIT
+`ci-kit-runner:latest` on all of the VM's vCPUs with the shared container mounts and environment and the JIT
 config from metadata `ci-kit-jit`, reports `ci-kit/job=exit:<code>`, and the unit powers the VM off at once
 (`poweroff-immediate`: no orderly shutdown, since the disk is discarded; an orderly one took about 85 s). A VM with no
 `ci-kit-jit` and no `ci-kit-smoke` reports `ci-kit/job=failed:no-jit` and powers off. Every VM needs metadata
@@ -934,7 +775,7 @@ finalized, the gce.json commit it ran (`config`), its GitHub budget, when it sta
 first insert (`firstInsert`, null when it launched nothing), what asked for it (`trigger`: `scheduled` when the
 minute tick is among its requests, else `requested`) and how many requests it served (`requests`).
 
-**Reading the GCE ledger.** The same issue as Hetzner's ("pool ledger" in `SSFSKIM/ci-kit-sandbox`), one comment
+**Reading the GCE ledger.** The pool ledger issue in `SSFSKIM/ci-kit-sandbox`, one comment
 per allocation:
 
 ```
@@ -1009,24 +850,7 @@ per allocation:
   A failed cloud list is not an empty inventory: that account's allocations stay reserved until observation
   recovers. The independent EC2 guard and guest deadlines remain backstops during a launcher outage.
 - Hidden markers `<!-- ci-kit-gce-ledger {…} -->` and `<!-- ci-kit-gce-daily {…} -->` hold the JSON the kit reads;
-  the Hetzner readers skip them.
-
-**Moving a repo between backends.** The preferred move is a window with the repo's pool lane off (spec §3a): the
-repo's owner unsets the toggle (MAWS: `GATE_RUNNER`), so its pool jobs run hosted and nothing is in flight on either
-backend; then one commit on main moves the repo between `pool.json` and `gce.json`; then the owner sets the toggle
-again. Before the commit:
-
-- From Hetzner: no job of the repo `in_progress` on a `ci-kit-pool-*` runner
-  (`gh api repos/<repo>/actions/runs?status=in_progress` and their jobs' `runner_name`), and no pool box serving it
-  (idle, or deleted by hand once idle, with a `manual` ledger row).
-- From GCE (the fallback, reversed): no `ci-kit=gce` instance with `ci-kit-repo=<owner>--<repo>`
-  (`gcloud compute instances list --project=ssfskim-ci-kit --filter='labels.ci-kit-repo=<owner>--<repo>'`).
-
-When the lane cannot be toggled, the move is fail-closed: remove the repo from its old file first, wait for its
-work there to end, then add it to the new file; jobs queued in between wait in GitHub's queue. A repo removed from
-`gce.json` is draining: the launcher launches nothing for it, leaves its busy VMs to finish, and unregisters its
-idle runners first, at once. To know the launcher runs the removal commit, read `config` in its tick log (a launcher
-that cannot read main keeps its last good copy, and its log says so).
+  historical server-session rows use a different marker and are ignored.
 
 **Quotas and budget.** `max_vcpus` is the launcher's soft cap on the vCPUs of its VMs in flight; the project's
 quotas are the hard cap, and a refusal is a wait. Parallelism comes first: the owner ruled on 2026-10-21 that CI must
@@ -1166,8 +990,7 @@ only terminal evidence/actual disappearance retires the allocation, as `preempte
 
 ### Independent EC2 guard
 
-`.github/workflows/pool-guard.yml` retains Hetzner's ten-minute job and adds a distinct fifteen-minute EC2
-schedule. Each configured account, disabled ones included, gets an independent `ubuntu-latest` matrix leg;
+`.github/workflows/pool-guard.yml` runs the independent EC2 guard every fifteen minutes. Each configured account, disabled ones included, gets an independent `ubuntu-latest` matrix leg;
 an absent file yields none, invalid config fails discovery, and one leg's failure does not cancel the others.
 Each leg exchanges GitHub OIDC for that account's guard role, trusted only for
 `repo:SSFSKIM/ci-kit:ref:refs/heads/main`, with temporary credentials kept in memory. It cannot launch resources.

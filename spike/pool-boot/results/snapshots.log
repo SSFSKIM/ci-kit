@@ -1,9 +1,0 @@
-21:45:22 small builder 170639429 created
-21:45:22 large builder 170639432 created
-21:46:57 small builder off after 96 s
-21:47:08 large builder off after 107 s
-21:47:20 small snapshot 444007961 image_size 1.6973190859375 GB disk_size 40
-21:47:20 small builder 170639429 deleted
-21:47:37 large snapshot 444007966 image_size 12.158423665039063 GB disk_size 40
-21:47:37 large builder 170639432 deleted
-[{"size":"small","id":444007961,"image_size":1.6973190859375,"disk_size":40,"build_s":119},{"size":"large","id":444007966,"image_size":12.158423665039063,"disk_size":40,"build_s":136}]

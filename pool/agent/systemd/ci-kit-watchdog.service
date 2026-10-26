@@ -1,9 +1,0 @@
-[Unit]
-Description=ci-kit pool watchdog: delete this box after 30 min without a successful reconciliation, or 24 h up
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/node /opt/ci-kit/pool/agent/watchdog.mjs
-TimeoutStartSec=180

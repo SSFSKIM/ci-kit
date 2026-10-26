@@ -110,7 +110,7 @@ export function runnersNeverOnline({ instances, runners, now, claimed = new Set(
 // determined by its size. Each key's unclaimed instances (runner registered and not busy, younger than
 // idle_runner_minutes, its runner never having taken a job, and not neverOnline()) cover one queued job each; a busy
 // or claimed instance covers nothing. The rest launch oldest first while the vCPUs in flight stay at or under
-// max_vcpus; a job that does not fit holds the line (first in, first out, as on the Hetzner box), and the rest wait in
+// max_vcpus; a job that does not fit holds the line (first in, first out), and the rest wait in
 // GitHub's queue.
 // queued: queued pool jobs of served repos, each with `repo`. instances: viewInstance()s of every ci-kit=gce instance.
 // runners: Map repo → Map runner name → runner, for each repo whose listing succeeded; a repo without one gets nothing.

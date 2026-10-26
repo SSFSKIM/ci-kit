@@ -1,7 +1,7 @@
 // The GCE ledger rows (spec I12): one comment per allocation on the pool ledger issue, keyed by the allocation id,
 // written `launching` before the JIT mint and finalized in place; and a daily line. A row only moves forward:
 // launching → running (its VM exists) → deleting (just before the launcher's delete call) → final. The hidden mark
-// differs from the Hetzner rows' (pool/lib/ledger.mjs), so each backend's readers see only their own rows.
+// differs from the historical pool ledger marker, so old server rows are ignored.
 import { machineCpus } from '../bake/plan.mjs';
 import { providerRunnerName, requiredProvider } from './providers/contracts.mjs';
 import { MEMORY_GIB } from './providers/gce-data.mjs';
