@@ -515,9 +515,19 @@ At its end, the effect is measured.
   - **hosted share**: maws-app `e2e` job minutes (`completed_at` minus `started_at`, jobs that ran) over those plus
     MAWS's `e2e:*` job minutes on `ci-kit-mac-*` runners. Waiter minutes are counted in neither;
   - **hosted queue**: maws-app `e2e` jobs' `started_at` minus `created_at`: median and p90;
-  - **waiters**: their job minutes, times the cpus-2 spot rate; and the count of `hosted: no result by` reds.
-- **Before**: the 7 days before M3's first wave lands, run by the executor at the end of M3.
-- **After**: the 7 days after it lands, run by CI-opt on the eighth day.
+  - **waiters**: their job minutes, times the cpus-2 spot rate; and the count of `hosted: no result by` reds;
+  - **by run kind** (the architect, M3): the hosted share and the hosted queue split into default runs (no `Lane:`)
+    and trials and baselines (`Lane:` hosted, no-hosted, vm or vm-trial), a hosted job taking its private run's kind
+    through its request's `MAWS-Run`;
+  - **beside the Mac queue, not folded into it** (the architect, M3): the minutes the mini's host was held (the
+    `ci-kit alert: mini: …` issues of ci-kit-sandbox, created to closed), the guest was off (the mini's
+    `vm-lane.log` no-boot states, read over `ssh mini`) and the guest lane's controller was stopped, each in total
+    and with a job of that desktop queued.
+- **Before**: the 7 days before M3's first wave lands, run by the executor.
+- **After**: the 7 days after it lands, run by CI-opt on the eighth day, at least 3 hours after the window closes, from
+  the ci-kit worktree with `gh` and `ssh mini`: `python3 docs/doperpowers/specs/2026-10-26-maws-hosted-mac/measure.py
+  --since 2026-10-26T10:05:36Z --until 2026-11-02T10:05:36Z --json
+  docs/doperpowers/specs/2026-10-26-maws-hosted-mac/after.json`.
 - **The record**: both outputs in Outcomes & Retrospective.
 
 Proves: acceptance 9.
@@ -844,20 +854,26 @@ M3's wave, from a worktree of MAWS master:
 ## Outcomes & Retrospective
 
 **Before** (the 7 days before wave 1 landed: 2026-10-19T10:05:36Z to 2026-10-26T10:05:36Z; `measure.py --since
-2026-10-19T10:05:36Z --until 2026-10-26T10:05:36Z`, 1,152 API calls; the JSON is `2026-10-26-maws-hosted-mac/before.json`):
+2026-10-19T10:05:36Z --until 2026-10-26T10:05:36Z`, run hours after the window closed so its jobs had finished, 1,154
+API calls; the JSON is `2026-10-26-maws-hosted-mac/before.json`):
 
 | Measure | Before | After |
 |---|---|---|
-| Mac queue (`ci-kit-mac-*` jobs, started minus created) | 1,550 jobs, median 15.5 min, p90 84.1 min | (CI-opt, on the eighth day) |
-| Hosted share of e2e job-minutes | 14.2% (hosted 704.5, Macs 4,246.0) | |
-| Hosted queue (maws-app `e2e` jobs) | 99 jobs, median 8.0 min, p90 23.8 min | |
-| Waiters | 95 jobs, 1,715.5 min, $1.03 at $0.0006/min; 0 deadline reds | |
+| Mac queue (`ci-kit-mac-*` jobs, started minus created) | 1,555 jobs, median 15.7 min, p90 84.1 min | (CI-opt, on the eighth day) |
+| Beside it: mini host held (`ci-kit alert: mini:` issues) | 1,047.4 min, 306.8 with a host job queued (13 alerts) | |
+| Beside it: guest off (vm-lane.log, from 10-23T07:26Z only) | 1,314.9 min with idle, 208.6 with a guest job queued (memory floor 898.5, `held: cua_repl` 325.1, paused 62.2) | |
+| Beside it: guest lane's controller stopped | 172.9 min, 90.2 with a guest job queued | |
+| Hosted share of e2e job-minutes, default runs (no `Lane:`) | 0.0% (0.0 of 3,445.3) | |
+| Hosted share, trials and baselines (`Lane:` hosted, no-hosted, vm, vm-trial) | 46.8% (716.0 hosted against 812.7 on the Macs) | |
+| Hosted share, all runs | 14.4% (716.0 hosted, 4,258.1 on the Macs) | |
+| Hosted queue (maws-app `e2e` jobs) | 101 jobs, all trials: median 8.4 min, p90 24.6 min | |
+| Waiters | 99 jobs, 1,863.0 min, $1.12 at $0.0006/min; 0 deadline reds | |
 
-The before window is not hosted-free: every hosted minute in it is this work's own proof, M1's hand runs, M2's
-acceptance runs and M3's admission waves, all on 10-26 and under `Lane: hosted`. Those waves ran three runs of five
-groups at a time against the account's five Macs, so the hosted queue (median 8 min) and the waiters' 18 minutes a
-job are a loaded queue's; read the after window's hosted queue against the 3 to 5 s that M1's lone requests waited.
-The Mac queue is the comparison that matters: its week's median of 15.5 min is lower than 10-24 and 10-25's 24 to 27,
-since the week includes quieter days; the after window is the same seven-day shape.
+The before window's hosted minutes are all this work's own trials (M1's hand runs, M2's acceptance runs, M3's
+admission waves, all on 10-26): default runs hosted nothing. Admission's effect is the after window's default-run
+share. The waves ran three runs of five groups at a time against the account's five Macs, so the before hosted queue
+is a loaded queue's; read the after window's default-run hosted queue against the 3 to 5 s that M1's lone requests
+waited. The Mac queue is read beside the holds: a week with more held minutes has a longer queue whatever the
+hosted share. The guest-off figure covers only the window's last 3 days (the log's start), so compare it per day.
 
 (The after numbers, the comparison and the retrospective follow on the eighth day.)
