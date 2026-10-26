@@ -715,6 +715,17 @@ M3's wave, from a worktree of MAWS master:
     gitleaks' is (a fixed release and the archive's sha256, checked before unpacking, refusing on a mismatch).
   - **desk-web-hub** is not on `CLASS1_E2E`, so it is no candidate; no special case.
 
+- 2026-10-26 (architect, through CI-opt, on M3's step A):
+  - **The font PR goes ahead** whatever settings' display result: it declares a dependency the mini had only by hand,
+    and the guest needs it for settings' `:429`.
+  - **The hosted Mac hides its Dock.** settings `:478` asks for a 1512x982 content area, a MacBook-sized window, and the
+    spec means to test it. macOS limits a titled window to the screen's visible frame, which on 1920x1080 with the
+    default Dock is about 985 pt high, against 982 plus a title bar. The hosted desktop is 1920x1080@1x with the Dock
+    hidden. Every macOS lane prints its desktop's display mode, Dock state and visible frame from the job's own
+    context, so the three desktops stay comparable; a read over ssh on the mini is not authoritative. Groups already
+    admitted are re-proved by their remaining wave runs: the change only enlarges the visible frame.
+  - **The reserved-final rule covers all four `FINAL_LABELS`**, tied to the reporters by a test.
+
 - 2026-10-26 (executor, M2, on MAWS f783456c3):
   - **A `HOSTED_MAC_E2E` entry that is not eligible refuses every run**, Linux and class 1a static included, so the
     static gate catches it before landing; the refusal names every reason (`tool-time-heavy-live (measured, live)`).
