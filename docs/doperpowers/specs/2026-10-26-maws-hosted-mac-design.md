@@ -87,7 +87,9 @@ request commit carries `MAWS-Source-Tree: <the tree of sha>`, and it ran on `mac
   reviewed clean: a task review and reviewer-high, one fix wave); maws-app's `main` at 6d44bb9 and ruleset 25857219;
   the public half proven by hand (Surprises & Discoveries). SSFSKIM/MAWS#151, landed as master a61cab69d;
   the architect's recompute of 21bad077d gave tree 6baa632e, maws-app `main`'s (acceptance 5).
-- [ ] M2: the routing, the waiter and the three readers in MAWS; the deploy key; acceptance 1–4 and 7.
+- [x] (2026-10-26 07:38Z) M2: the routing, the waiter and the three readers in MAWS (605cea60b, reviewed clean: a task review and
+  reviewer-high, two fix waves); the deploy key by CI-opt; acceptance 1–4, 6's scratch token and 7 (Surprises &
+  Discoveries). For the architect to land with gate-offload Decision Log 106.
 - [ ] M3: admission waves; `HOSTED_MAC_E2E` populated; acceptance 8.
 - [ ] M4: the collector and the before numbers; the after numbers seven days after M3's first wave lands;
   acceptance 9; Outcomes.
@@ -700,6 +702,10 @@ M3's wave, from a worktree of MAWS master:
   - **The waiter commits as `MAWS hosted Mac <hosted-mac@maws-app.invalid>`**, and pushes from its blob-less clone
     with `--no-thin` and `GIT_NO_LAZY_FETCH=1` (a thin push lazily fetched old blobs to delta against).
   - `e2e-hosted` sits between `e2e-build` and `e2e` in gate.yml (a test reads `e2e-vm` as the file's last job).
+  - **Review of M2** (a task review and reviewer-high, two fix waves): the alert preflight runs the tested commit's plan
+    before any shortcut, the caller's flags and `POOL_E2E` serving only when the plan cannot run; and the waiter
+    refuses a `RUNNER_TEMP` outside `[A-Za-z0-9/._-]` before it writes the key, since `GIT_SSH_COMMAND` passes
+    through a shell and `UserKnownHostsFile` through ssh's own list parser. Real runners' paths are plain.
 
 - 2026-10-26 (executor, M4's collector, 455a87d and 72c24a3, reviewed clean):
   - A Mac job is one whose runner name starts with `ci-kit-mac-` (host and guest). A waiter is an `e2e:*` job whose
