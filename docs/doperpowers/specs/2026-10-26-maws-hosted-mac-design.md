@@ -83,8 +83,9 @@ request commit carries `MAWS-Source-Tree: <the tree of sha>`, and it ran on `mac
 - [x] (2026-10-26 05:1xZ) Spec review, two rounds (three adversarial reviews): the control plane moved to git refs, the
   ineligible groups and the three readers named, admission given its 1x rule, the acceptance list rewritten. Decision
   Log, 2026-10-26 "review round 1".
-- [ ] M1: the filter, the overlay and the hosted Mac setup in MAWS; maws-app's `main` and ruleset; the public half
-  proven by hand.
+- [x] (2026-10-26 05:58Z) M1: the filter, the overlay, the secret scan and the hosted Mac setup in MAWS (21bad077d,
+  reviewed clean: a task review and reviewer-high, one fix wave); maws-app's `main` at 6d44bb9 and ruleset 25857219;
+  the public half proven by hand (Surprises & Discoveries). SSFSKIM/MAWS#151, for the architect to land.
 - [ ] M2: the routing, the waiter and the three readers in MAWS; the deploy key; acceptance 1–4 and 7.
 - [ ] M3: admission waves; `HOSTED_MAC_E2E` populated; acceptance 8.
 - [ ] M4: the collector and the before numbers; the after numbers seven days after M3's first wave lands;
