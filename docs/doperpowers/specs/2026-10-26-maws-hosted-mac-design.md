@@ -709,7 +709,8 @@ M3's wave, from a worktree of MAWS master:
     the font is installed from `.github/ci-setup.sh` where `MesloLGMNerdFontMono-Regular.ttf` is missing, not as a
     cask in `.github/ci-kit.yml`. The mini's copy was installed by hand (72 files in `~/Library/Fonts`, 2025-04), and
     Homebrew refuses to overwrite a font it did not install, `--adopt` included, so the cask would fail every setup
-    on the mini. ci-setup.sh runs in the guest's bakes too.
+    on the mini. ci-setup.sh runs in the guest's bakes too. The architect's condition: the download is pinned as
+    gitleaks' is (a fixed release and the archive's sha256, checked before unpacking, refusing on a mismatch).
   - **desk-web-hub** is not on `CLASS1_E2E`, so it is no candidate; no special case.
 
 - 2026-10-26 (executor, M2, on MAWS f783456c3):
