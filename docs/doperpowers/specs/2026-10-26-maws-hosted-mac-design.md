@@ -647,6 +647,16 @@ M3's wave, from a worktree of MAWS master:
     skipping on the 3-CPU, 1x box (a hardware-dependent skip) would stay green; a later check (ci-gate comparing a
     hosted job's skipped count with the mini's last run of the group) would catch it.
 
+- 2026-10-26 (executor, M4's collector, 455a87d and 72c24a3, reviewed clean):
+  - A Mac job is one whose runner name starts with `ci-kit-mac-` (host and guest). A waiter is an `e2e:*` job whose
+    labels are exactly `self-hosted`, `ci-kit-pool`, `cpus-2`: no other e2e job asks for cpus-2 today (desk-web is
+    cpus-4), and if one ever does, the rule needs the hosted entry's own mark.
+  - A job counts in the window it was created in. Runs are listed 30 days back (GitHub's rerun limit) and their jobs
+    fetched (`filter=all`) only when the run's `updated_at` is in or after the window, so a rerun of an older run
+    counts: on 10-25 that was 8 jobs from 3 earlier runs. p90 is nearest-rank. The window should be closed (its runs
+    finished) when measured.
+  - The waiter cost is job minutes times the rate, as M4 says; the pool bills a box's whole life, so it is a floor.
+
 ## Surprises & Discoveries
 
 - **The spike** (runs 40258008992, 40258766113, 40259835982 on maws-app):
@@ -666,6 +676,9 @@ M3's wave, from a worktree of MAWS master:
   its own repository whatever the other's visibility.
 - **The pool image has no `gh`** (ci-kit `pool/image/Dockerfile`; the actions-runner base installs git, curl and jq).
   The waiter needs none: git, ssh, python3 and jq.
+- **`gh api` withholds a job log that holds terminal escapes** unless given `--allow-escape-sequences`; M4's collector
+  passes it, or no `hosted: no result by` red could be read. The collector over all of 10-25: 383 Mac jobs, queue
+  median 26.6 and p90 94.6 minutes, 1,082 Mac e2e job-minutes, in line with Purpose.
 
 ## Outcomes & Retrospective
 
