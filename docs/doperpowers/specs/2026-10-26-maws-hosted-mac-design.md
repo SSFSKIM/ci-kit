@@ -755,8 +755,9 @@ M3's wave, from a worktree of MAWS master:
   exercised live (`main` was under a day old).
   - **The pool runs on EC2 now**: the waiters ran on `ci-kit-ec2-…` runners with the `ci-kit-pool`, `cpus-2` labels.
     M4's collector finds waiters by labels, and its spot rate is a parameter.
-  - **`desk-web-hub` is eligible by Placement's list but drives the system Chrome through desk-web's hub suite**, not
-    `scripts/e2e-build.sh`. It is not a class-1 group, so only a run naming it under `Lane: hosted` would host it.
+  - **`desk-web-hub` is eligible by Placement's list**: its hub suite builds itself with Vite and drives the system
+    Chrome on Darwin, which the hosted Mac has, so it may run there, unproven. It is not a class-1 group, so only a run
+    naming it under `Lane: hosted` would host it.
   - MAWS has no push protection (`security_and_analysis` is null): the scratch token reached MAWS unblocked; the
     waiter's scan is the only gate before maws-app.
 - **`gh api` withholds a job log that holds terminal escapes** unless given `--allow-escape-sequences`; M4's collector
