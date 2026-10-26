@@ -727,7 +727,8 @@ M3's wave, from a worktree of MAWS master:
   40289382978, 40289421123 and 40289457942, each run's counts those of the host baseline 40300474330. **Set aside**:
   transcript, red in 40289382978 at `transcript.spec.ts:1299` (the sidebar hover card still shown 5 s after the pointer
   left), green in the other two and the baseline; cause not established. SSFSKIM/MAWS#160. Each run takes its own
-  `--label`, since runs on one ref cancel each other; one baseline serves several waves on one tree.
+  `--label`, since runs on one ref cancel each other; one baseline serves several waves on one tree. Landed as
+  MAWS f2c1be6d0 at 2026-10-26T10:05:36Z, which starts M4's clock (gate-offload Decision Log 108, 6492fd98f).
 
 - 2026-10-26 (architect, through CI-opt, on M3's step A):
   - **The font PR goes ahead** whatever settings' display result: it declares a dependency the mini had only by hand,
