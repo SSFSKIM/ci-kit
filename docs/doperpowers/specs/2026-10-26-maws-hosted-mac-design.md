@@ -90,7 +90,8 @@ request commit carries `MAWS-Source-Tree: <the tree of sha>`, and it ran on `mac
 - [x] (2026-10-26 07:38Z) M2: the routing, the waiter and the three readers in MAWS (605cea60b, reviewed clean: a task review and
   reviewer-high, two fix waves); the deploy key by CI-opt; acceptance 1–4, 6's scratch token and 7 (Surprises &
   Discoveries). For the architect to land with gate-offload Decision Log 106.
-- [ ] M3: admission waves; `HOSTED_MAC_E2E` populated; acceptance 8.
+- [x] (2026-10-26 11:52Z) M3: admission waves W1 to W8, 26 groups on `HOSTED_MAC_E2E` (SSFSKIM/MAWS #160, #161, #163, #164, #165,
+  #167, the last landed as 8588a4a7a), with the prerequisites #156, #158 and #159; acceptance 8 in run 40316974655.
 - [ ] M4: the collector and the before numbers; the after numbers seven days after M3's first wave lands;
   acceptance 9; Outcomes.
 
@@ -765,6 +766,10 @@ M3's wave, from a worktree of MAWS master:
   `browser.spec.ts:363` (the placeholder image missing). SSFSKIM/MAWS#167, M3's last list PR: `HOSTED_MAC_E2E` holds
   26 groups. Off the list, each with a debt row on MAWS: transcript, c7, browser, terminal, browser-cua and
   browser-comment.
+- 2026-10-26 (CI-opt's executor, acceptance 8, master e2986cd38 with #167): `scripts/ci-gate.sh e2986cd38 --gates
+  e2e:document-app,e2e:panel,e2e:transcript --runner macos`, no `Lane:`, run 40316974655 green. document-app and
+  panel ran as waiters on pool boxes (`ci-kit-ec2-…`, `cpus-2`; maws-app 40317059136 and 40317076639, each
+  `hosted: success`), and transcript, which is not listed, on the mini host (`ci-kit-mac-mini`). M3 is done.
 - 2026-10-26 (executor, M3 waves 2 and 3, tree c9803aa1a): **admitted** to-human (2 passed), widgets (29), side (12),
   supervisor (10), c12 (4), browser-import (6) and document (19), 3/3 in runs 40290693239, 40290750401, 40294506903
   (W2) and 40293256908, 40293322930, 40295843922 (W3), counts equal to the host baseline 40302689449. **Set aside**:
