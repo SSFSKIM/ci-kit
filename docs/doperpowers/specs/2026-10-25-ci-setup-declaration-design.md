@@ -209,6 +209,16 @@ does not, because the gates workflow keeps its own Install step after it. A repo
 `install: true`, so the declared command is the one its jobs run. The step is the same on every lane; what differs
 is only how often it has anything to do.
 
+**Per-job package omission (2026-10-26).** The optional `skip` input (default empty) is a whitespace-separated list
+of declared `apt:name`, `brew:name` and `cask:name` identities. It filters the job's direct package requests before
+presence queries, not the declaration used for the hash or stale-image comparison. Names must match the declaration
+exactly, including tap prefixes; malformed or undeclared entries fail before any commands. Duplicates are ignored;
+entries for the other platform are accepted and have no effect there. The log names skipped entries, and an entirely
+skipped package list needs no query. Nothing is uninstalled, dependencies of retained packages are not suppressed,
+and the script and optional install still run unchanged. The caller owns knowing which packages the job needs.
+Bakes cannot skip: they still apply the full declaration whose hash they record. This lets MAWS omit
+`cask:libreoffice` in jobs that do not render through it while keeping its declared environment and images unchanged.
+
 After a cask install on macOS, the step lists the installed apps that still carry `com.apple.quarantine` and names
 them in a `::warning::` (the exception under "Images are caches of the declaration").
 
@@ -351,7 +361,8 @@ hold, never what an image must contain, and a stale cache only slows an install.
 has the hash `none`.
 
 **The action** (`setup/action.yml`, `setup/` holding its code): no required inputs; `root` defaults to the
-workspace; `install` (`true`/`false`, default `false`) also runs the declared `install`. Environment it reads: `CI_KIT_SETUP_HASH` (the image's). Outputs: `hash` (the commit's), `installed`
+workspace; `install` (`true`/`false`, default `false`) also runs the declared `install`; `skip` (default empty) omits
+whitespace-separated declared `kind:name` packages for this job only. Environment it reads: `CI_KIT_SETUP_HASH` (the image's). Outputs: `hash` (the commit's), `installed`
 (space-separated `apt:<name>`, `brew:<name>`, `cask:<name>`), `stale` (`true` when an image hash was present and
 differed). The same code runs as a CLI for the bakes: `node setup/apply.mjs --mode bake --root <clone> [--install]`,
 where `--install` also runs the declaration's `install` command in the clone.
