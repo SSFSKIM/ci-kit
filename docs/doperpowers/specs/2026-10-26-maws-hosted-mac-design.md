@@ -722,6 +722,13 @@ M3's wave, from a worktree of MAWS master:
     gitleaks' is (a fixed release and the archive's sha256, checked before unpacking, refusing on a mismatch).
   - **desk-web-hub** is not on `CLASS1_E2E`, so it is no candidate; no special case.
 
+- 2026-10-26 (executor, M3 wave 1, tree c9803aa1a): **admitted** document-app (20 passed), browser-chrome (7),
+  available (2) and artifacts (4 passed, 1 skipped, its measured case), 3/3 green under `Lane: hosted` in runs
+  40289382978, 40289421123 and 40289457942, each run's counts those of the host baseline 40300474330. **Set aside**:
+  transcript, red in 40289382978 at `transcript.spec.ts:1299` (the sidebar hover card still shown 5 s after the pointer
+  left), green in the other two and the baseline; cause not established. SSFSKIM/MAWS#160. Each run takes its own
+  `--label`, since runs on one ref cancel each other; one baseline serves several waves on one tree.
+
 - 2026-10-26 (architect, through CI-opt, on M3's step A):
   - **The font PR goes ahead** whatever settings' display result: it declares a dependency the mini had only by hand,
     and the guest needs it for settings' `:429`.
