@@ -43,6 +43,10 @@ request commit carries `MAWS-Source-Tree: <the tree of sha>`, and it ran on `mac
 - **Nothing published beyond the filter.** Every pushed tree is the deterministic filter's output for one MAWS
   commit. No private history, no other refs, no logs of the private run. The filter is a deny list over a tree the
   owner chose to publish whole; it is not a scanner for content added to MAWS later.
+- **No credential published by accident.** Every gated branch commit is published within minutes, so a token an
+  agent commits to any branch would go public, where today it reaches only a private repository. A secret scan runs
+  on what each push would add, and fails closed: a finding, or a scan that cannot run, makes the group red and
+  pushes nothing (The secret scan).
 - **No change to what a private run means.** A hosted group's verdict is a job of the private run. A run that
   passes means every group passed somewhere admitted, and admission keeps a group off the hosted Macs when 1x would
   hide a regression the 2x desktops catch.
@@ -155,11 +159,17 @@ e2e-build builds nothing for it. It stays in `e2e`, so `e2e-default-specs.mjs` c
       attempt gets a cancel (a waiter lost to a spot preemption could not cancel its own);
    3. runs the filter on `$GITHUB_SHA` into an empty directory;
    4. fetches maws-app's `main` with `--depth=1 --filter=blob:none` into a fresh git directory, so the push sends only
-      the blobs `main` lacks (the whole tree is a 51 MiB pack);
+      the blobs `main` lacks (the whole tree is a 51 MiB pack). Then it runs the secret scan on the files of the
+      filtered tree that differ from `main`'s tree. A finding stops it here: it prints each finding's file, line and
+      rule, never the value, prints `hosted: secret scan refused the push`, pushes nothing and exits 1;
    5. commits the filtered tree with `main`'s tip as its parent, the message `MAWS <sha12> e2e:<group>` and the
       trailers below, and force-pushes it to `ci/hosted/<suffix>`;
-   6. when `main`'s tip is more than 24 hours old, pushes the request to `main` too, as a fast-forward; a rejected
-      push (another waiter won) is ignored. This keeps the next pushes small;
+   6. when `main`'s tip is more than 24 hours old and the run's requested commit is already on MAWS master, pushes
+      the request to `main` too, as a fast-forward; a rejected push (another waiter won) is ignored. The requested
+      commit is `$GITHUB_SHA`'s first parent under ci-gate (its nonce commit), else `$GITHUB_SHA`; "on master" is
+      MAWS's compare API (`compare/<commit>...master` answering `ahead` or `identical`), read with the job's own
+      token. So `main`, its overlay (whose sweep the schedule runs) and its tree are always landed work, and the
+      next pushes stay small;
    7. prints `hosted: request ci/hosted/<suffix> <request sha>` and the link
       `https://github.com/SSFSKIM/maws-app/actions?query=branch%3Aci%2Fhosted%2F<suffix>`.
 3. **The hosted run.** maws-app's `hosted-mac.yml` runs on that push (below). Its `result` job writes the result
@@ -262,6 +272,19 @@ The filter then writes the overlay: `.github/maws-app/README.md` to `README.md`,
 `.github/ci-kit.yml` and `.github/ci-setup.sh` stay, because the shared setup reads them. It prints its version on
 stdout.
 
+### The secret scan
+
+`.github/scripts/maws-app-scan.sh <dir>` scans a directory with gitleaks (`dir` mode, `--redact`), using the default
+rules and `.github/maws-app/gitleaks.toml`, whose allowlist names each known false positive with its reason (test
+vectors, `api_message_id`, the public keys in saved pages: the kinds the 2026-10-26 history audit found). The script
+pins one gitleaks release by version and sha256 and downloads it with curl when it is not on `PATH`; a download or
+checksum failure is a refusal like a finding. It exits 0 when clean and 1 otherwise, printing each finding's file,
+line and rule.
+
+The waiter scans only the files that differ from `main`'s tree, copied with their paths into an empty directory:
+`main` holds only trees that were scanned on their way there (its first v2 tree in full, in M1), so the new files are
+what a push adds. The config is not published: the filter removes `.github/maws-app/`.
+
 ### The hosted workflow
 
 `hosted-mac.yml`, in maws-app:
@@ -314,9 +337,11 @@ A candidate is admitted when all of these hold:
   baseline;
 - each hosted run's count lines (passed, skipped, flaky) equal the baseline's. A group that skips on the hosted Mac
   what it runs on the mini is not admitted;
-- its specs do not read the display's scale. M3 searches each candidate's specs for `devicePixelRatio`,
-  `deviceScaleFactor`, `backingScaleFactor`, `scaleFactor`, `toHaveScreenshot` and `toMatchSnapshot`. A group with
-  a hit stays off the list, with the hits named, unless the architect rules each hit scale-neutral. Splitting the
+- its specs do not read the display's scale or its pixels. M3 searches each candidate's specs, and the e2e support
+  files they import, for `devicePixelRatio`, `deviceScaleFactor`, `backingScaleFactor`, `scaleFactor`,
+  `toHaveScreenshot`, `toMatchSnapshot`, `capturePage`, `toBitmap`, `PNG.sync` and `pngjs`. A group with a hit stays
+  off the list, with the hits named, unless the architect rules each hit scale-neutral (most are colour samples, but
+  a green run at 1x does not settle it). Splitting the
   scale-reading specs into a group of their own is later work for the architect.
 
 Groups are admitted in waves, and the architect lands each wave with its run ids. Also:
@@ -374,9 +399,11 @@ Touches:
 - `.github/actions/setup/action.yml`: the hosted macOS display step and the desktop line; the pnpm and Electron
   caches extended to GitHub-hosted macOS.
 - `.github/scripts/maws-app-tree.test.mjs` (new).
+- `.github/scripts/maws-app-scan.sh`, `.github/maws-app/gitleaks.toml` and `.github/scripts/maws-app-scan.test.mjs`
+  (new): the secret scan. The allowlist is built from a full scan of the current filtered tree.
 - The four SHOTS and EVIDENCE writers, if one of them lacks a recursive mkdir.
 - On maws-app, by hand: `main` moved to the v2 tree of M1's branch head (a commit with the current `main` as
-  parent), so the schedule runs the overlay's sweep; a ruleset on `main` that blocks deletion and non-fast-forward pushes.
+  parent), after a full-tree scan of it comes back clean, so the schedule runs the overlay's sweep; a ruleset on `main` that blocks deletion and non-fast-forward pushes.
 
 Does not touch: `gate.yml`'s jobs or lists, `gate-plan.mjs`, `ci-gate.sh`.
 
@@ -386,7 +413,10 @@ Proves: acceptance 5 and 6, and the public half by hand (Concrete Steps). The te
 - every excluded path is absent, `p1-e8/g0-cli-probe.txt` is present, and `.github/maws-app/` is absent;
 - none of the four addresses remains;
 - `.github/workflows/` holds exactly `hosted-mac.yml`, and `README.md` is the overlay's;
-- `hosted-mac.yml` has no `secrets.` reference and no `pull_request` trigger.
+- `hosted-mac.yml` has no `secrets.` reference and no `pull_request` trigger;
+- the scan: a planted fake token (a well-formed GitHub token, an AWS key, a private key block) is found and exits 1
+  with its file and rule and without the value; the current filtered tree scans clean; a scanner that cannot be
+  downloaded or verified exits 1.
 
 ### M2 — MAWS: the routing, the waiter and the readers
 
@@ -413,7 +443,7 @@ Touches:
 
 Does not touch: the mini's lanes, `MAC_VM_E2E`, ci-kit.
 
-Proves: acceptance 1–4 and 7. The tests pin:
+Proves: acceptance 1–4, 6's scratch-token case, and 7. The tests pin:
 
 - gate-plan: a listed eligible group is hosted on a macOS lane and never on a Linux lane; `Lane: hosted` hosts every
   eligible group of the run, with `--gates all`'s set as one case; `default`, a measured, a live, a secret and a
@@ -425,7 +455,8 @@ Proves: acceptance 1–4 and 7. The tests pin:
   tree equals the filter's and its trailers are those of Provenance; `success` exits 0 and `failure` 1, with both refs
   deleted; a result whose parent is not the request is ignored; the deadline prints its line, pushes a cancel and
   exits 1; `--cleanup` after a push with no result pushes a cancel; an attempt-2 waiter cancels attempt 1's request;
-  the main refresh fast-forwards only;
+  a scan finding pushes nothing and exits 1; the main refresh fast-forwards only, and only for a requested commit on
+  master;
 - ci-gate-alerts: a hosted-only run proceeds past a mini alert; a run with one hosted and one host group stops;
 - ci-gate.sh's `--lane` accepts the two new values.
 
@@ -521,7 +552,9 @@ M3's wave, from a worktree of MAWS master:
    equals the request's tree.
 6. No pushed request contains `research/`, `.smns`, a workflow other than `hosted-mac.yml`, a
    `docs/doperpowers/evidence/` file other than `p1-e8/g0-cli-probe.txt`, or any of the four addresses. The M1 test
-   pins this, and `git grep` over the acceptance runs' requests shows it.
+   pins this, and `git grep` over the acceptance runs' requests shows it. A scratch commit with a planted fake token
+   makes its `e2e:<group>` red with `hosted: secret scan refused the push`, the file and the rule, and no request of
+   that commit reaches maws-app.
 7. maws-app's workflow has no `secrets.` reference and no `pull_request` trigger;
    `gh api repos/SSFSKIM/maws-app/actions/permissions/fork-pr-contributor-approval` answers
    `all_external_contributors`; `gh api repos/SSFSKIM/maws-app/actions/runners` lists none; the deploy key is the
@@ -600,6 +633,19 @@ M3's wave, from a worktree of MAWS master:
     a cancel could be processed before its request; the request then started with a future deadline.
   - Not taken: a fallback to the mini for a request that has not started by a bound. It is the next lever if M4 shows
     deadline reds (Capacity and cost).
+
+- 2026-10-26 (architect, on 32aa029, all taken):
+  - **A secret scan before every push**, failing closed (The secret scan). Publishing every gated branch commit
+    turns an accidentally committed token from a private leak into a public one.
+  - **`main` refreshes only from landed work**: the first draft let any request, branch work included, become `main`,
+    whose overlay the schedule runs and whose tree the world reads first. Rejected: refreshing only when the requested
+    commit is master's tip, which a gate run before landing never is, so `main` would rarely move.
+  - **The pixel terms** `capturePage`, `toBitmap`, `PNG.sync` and `pngjs` join the scale search; they appear in
+    dashboard, dashboard-export, deliverables, design-export, library, presentations, presentations-export and
+    terminal.
+  - Deferred to the debt list: count-line equality is checked at admission only. A hosted group that later starts
+    skipping on the 3-CPU, 1x box (a hardware-dependent skip) would stay green; a later check (ci-gate comparing a
+    hosted job's skipped count with the mini's last run of the group) would catch it.
 
 ## Surprises & Discoveries
 
