@@ -7,13 +7,15 @@
 #   screen for hours with Terminal in front). Dialogs are the human's to dismiss; this never tries to clear one. The
 #   refusal opens the machine's dialog episode and its alert issue unless the dialog watcher already did (dialog.sh,
 #   dialog-watch.sh): they share it.
+# - With CI_KIT_DISPLAY configured, a different main display or persistent probe failure also refuses (dialog.sh).
+#   It shares the episode and hold above; this check only reads the display, never changes it.
 # - Any other app in front is replaced by Terminal: some of MAWS's paste and to-human results depend on the app in
 #   front (Finder where focus falls when an e2e app quits; Chrome after a test leaked a URL into it), so every job
 #   starts from the same one. `open -a Terminal` goes through LaunchServices (no Apple Events, no Automation consent);
 #   the job fails fast if Terminal is not in front within about 5 s. It acts only before the job, so MAWS's own
 #   MAWS_E2E_FOREGROUND=1 is never fought.
 #
-# When the frontmost app cannot be read, the job is not blocked unless a dialog is on screen; when the windows on
+# When the frontmost app cannot be read, only a dialog on screen or a failed display check blocks; when the windows on
 # screen cannot be read, a dialog is seen only in front. Either miss is logged.
 set -uo pipefail
 log_tag='desktop-check'
@@ -39,7 +41,7 @@ refuse_dialog() {
       st_clear=0 st_clear_since=''
       save_state || true
     else
-      if [[ $st_phase == pending && $st_name == "$dialog" ]] && consecutive; then since=$st_since; fi
+      if [[ $st_phase == pending ]] && continues_pending; then since=$st_since; fi
       if start_episode "$since"; then opened=1; fi
     fi
   else
@@ -50,8 +52,13 @@ refuse_dialog() {
       [[ $st_name != "$dialog" ]] || source=$st_source
     fi
   fi
-  log "$seen: $source; a system dialog $dialog_held since $since; failing the job"
-  echo "ci-kit: a system dialog ($dialog: $source) $dialog_held on the $machine since $(minute "$since") — dismiss it there and rerun" >&2
+  if [[ $dialog == Display ]]; then
+    log "$display_detail; desktop held since $since; failing the job"
+    echo "ci-kit: $display_detail on the $machine; desktop held since $(minute "$since") — restore its display there and rerun" >&2
+  else
+    log "$seen: $source; a system dialog $dialog_held since $since; failing the job"
+    echo "ci-kit: a system dialog ($dialog: $source) $dialog_held on the $machine since $(minute "$since") — dismiss it there and rerun" >&2
+  fi
   [[ -z $opened ]] || alert_episode "a refused job (run ${GITHUB_RUN_ID:--})" || true
   unlock_state
 }
@@ -79,7 +86,8 @@ fi
 read_windows
 [[ -z $windows_miss ]] || log "could not read the windows on screen ($windows_miss); a dialog is seen only in front"
 
-if is_dialog; then
+read_display
+if is_blocked; then
   clock
   refuse_dialog
   exit 1

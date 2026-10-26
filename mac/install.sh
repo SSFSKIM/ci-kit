@@ -16,6 +16,8 @@
 #   ssh <mac> <kit>/mac/install.sh               re-run on a registered runner: refresh and reload
 #   ssh <mac> <kit>/mac/install.sh --shared 2    two shared instances (a token on stdin registers new ones)
 #   ssh <mac> <kit>/mac/install.sh --vm          the VM lane's launcher as well (installed disabled), or --no-vm to remove it
+#   ssh <mac> <kit>/mac/install.sh --display 2560x1440@2x  require this main display before jobs (kept on re-runs)
+#   ssh mini <kit>/mac/install.sh --home        the exclusive home-desktop label (mini only; kept on re-runs)
 #   ssh <mac> <kit>/mac/install.sh --check       the prerequisites only
 #   ssh <mac> <kit>/mac/install.sh --disabled    install, but leave every runner's LaunchAgent unloaded and disabled
 #   ssh <mac> <kit>/mac/install.sh --uninstall   unload and remove every LaunchAgent (the registrations and files stay)
@@ -27,6 +29,11 @@
 # has shared instances, since a shared instance's runner name ends so. The runners' .env and the watcher's LaunchAgent
 # carry it to the hooks as CI_KIT_MACHINE for their messages and alerts; a shared instance's .env adds
 # CI_KIT_SHARED_DESKTOP=1.
+#
+# --display is logical width x height and backing scale, handed to every instance and the watcher as CI_KIT_DISPLAY.
+# No setting keeps the old unchecked display behavior. --home registers the exclusive instance with ci-kit-mac-home;
+# an existing registration keeps its labels (a reminder is printed on every re-run). The exclusive .env remembers
+# both settings; shared instances inherit only the display check. Neither option changes the desktop.
 #
 # --shared sets the count of shared instances. Without it, a re-run keeps the count installed (their LaunchAgents), and
 # a fresh machine gets none: sharing is opted into. A shared instance keeps the enabled state launchd has for it across
@@ -217,6 +224,9 @@ mode=enabled
 name=
 shared=
 vm=
+display=
+display_given=
+home=
 while (($# > 0)); do
   case $1 in
     --check) mode=check ;;
@@ -224,6 +234,8 @@ while (($# > 0)); do
     --uninstall) mode=uninstall ;;
     --name) (($# > 1)) || usage; name=$2; shift ;;
     --shared) (($# > 1)) || usage; shared=$2; shift ;;
+    --display) (($# > 1)) || usage; display=$2; display_given=1; shift ;;
+    --home) home=1 ;;
     --vm) vm=1 ;;
     --no-vm) vm=0 ;;
     *) usage ;;
@@ -235,7 +247,7 @@ done
 [[ -z $shared || $shared =~ ^[0-8]$ ]] || die "--shared takes a count of shared instances, 0 to 8 (got '$shared')"
 
 if [[ $mode == uninstall ]]; then
-  [[ -z $name && -z $shared && -z $vm ]] || usage
+  [[ -z $name && -z $shared && -z $vm && -z $display_given && -z $home ]] || usage
   if running=$(job_running); then refuse_job "$running"; fi
   lane=''
   if vm_installed; then
@@ -260,6 +272,20 @@ fi
 vm_before=
 if vm_installed; then vm_before=1; fi
 [[ -n $vm ]] || vm=${vm_before:-0}
+
+# These machine settings survive the .env rewrite below; read data, never source the runner's environment as code.
+if [[ -f $RUNNER_DIR/.env ]]; then
+  while IFS='=' read -r key value; do
+    case $key in
+      CI_KIT_DISPLAY) [[ -n $display_given ]] || display=$value ;;
+      CI_KIT_HOME) [[ $value != 1 ]] || home=1 ;;
+    esac
+  done <"$RUNNER_DIR/.env"
+fi
+if [[ -n $display_given || -n $display ]]; then
+  [[ $display =~ ^[1-9][0-9]*x[1-9][0-9]*@[1-9][0-9]*([.][0-9]+)?x$ ]] ||
+    die "--display takes positive logical dimensions and backing scale, e.g. 2560x1440@2x (got '$display')"
+fi
 
 # 1. Runner infrastructure: Node >= 22.12 on the PATH jobs and hooks get, pnpm through corepack,
 # a native compiler, Python and git. Project applications belong to the repository's setup declaration,
@@ -381,8 +407,10 @@ done
 for ((n = 1; n <= last; n++)); do
   root=$(root_of "$n")
   [[ ! -f $root/.runner ]] || continue
-  labels=(--labels "$RUNNER_LABELS")
-  ((vm == 0)) || labels=(--labels "$RUNNER_LABELS,$SOLO_LABEL")
+  exclusive_labels=$RUNNER_LABELS
+  ((vm == 0)) || exclusive_labels+=",$SOLO_LABEL"
+  [[ -z $home ]] || exclusive_labels+=",ci-kit-mac-home"
+  labels=(--labels "$exclusive_labels")
   ((n == 1)) || labels=(--labels "$SHARED_LABELS" --no-default-labels)
   (cd "$root" && ACTIONS_RUNNER_INPUT_TOKEN=$token ./config.sh --unattended --url "$REPO_URL" \
     --name "${names[n - 1]}" "${labels[@]}" --work _work --replace)
@@ -408,7 +436,7 @@ compile() { # <helper> <what is lost without it>
     say "warning: $1 did not compile (see $LOG_DIR/$1-build.log); $2"
   fi
 }
-compile cursor-park 'jobs start without the cursor park'
+compile cursor-park 'jobs start without the cursor park; with --display configured, the display check refuses jobs'
 compile window-list 'the dialog check sees a dialog only in front'
 # Every instance's set is staged and checked before any goes live. A sibling keeps staging on the same volume.
 for ((n = 1; n <= last; n++)); do
@@ -470,6 +498,8 @@ for ((n = 1; n <= last; n++)); do
     echo "ACTIONS_RUNNER_HOOK_JOB_STARTED=$root/ci-kit/hooks/job-started.sh"
     echo "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=$root/ci-kit/hooks/job-completed.sh"
     echo "CI_KIT_MACHINE=$machine"
+    [[ -z $display ]] || echo "CI_KIT_DISPLAY=$display"
+    [[ -z $home || $n != 1 ]] || echo CI_KIT_HOME=1
     ((n == 1)) || echo CI_KIT_SHARED_DESKTOP=1
     ((vm == 0)) || echo "CI_KIT_VM_RESERVATION=$VM_RESERVED"
   } >"$root/.env"
@@ -486,7 +516,7 @@ for ((n = 1; n <= last; n++)); do
   plutil -lint -s "$(plist_of "$n")"
 done
 sed -e "s|__HOOKS_DIR__|$RUNNER_DIR/ci-kit/hooks|g" -e "s|__LOG_DIR__|$LOG_DIR|g" -e "s|__PATH__|$RUNNER_PATH|g" \
-  -e "s|__MACHINE__|$machine|g" "$here/$WATCH_AGENT.plist" >"$WATCH_PLIST"
+  -e "s|__MACHINE__|$machine|g" -e "s|__DISPLAY__|$display|g" "$here/$WATCH_AGENT.plist" >"$WATCH_PLIST"
 plutil -lint -s "$WATCH_PLIST"
 unload "$WATCH_AGENT"
 launchctl enable "$domain/$WATCH_AGENT"
@@ -548,6 +578,13 @@ if ((vm == 1)); then
 elif [[ -n $vm_before ]]; then
   rm -f "$VM_PLIST"
   say "removed: the VM lane's launcher $VM_AGENT is unloaded and its LaunchAgent removed; $VM_HOME stays"
+fi
+if [[ -n $home ]]; then
+  if [[ -n $new_machine ]]; then
+    say "$RUNNER_NAME registered with ci-kit-mac-home (only the home Mac carries this label)"
+  else
+    say "$RUNNER_NAME keeps its labels: ensure ci-kit-mac-home is on its registration by hand (docs/mac-lane.md, Adding a Mac)"
+  fi
 fi
 held=
 [[ ! -e $DRAIN_MARKER ]] || held=$(head -1 "$DRAIN_MARKER")

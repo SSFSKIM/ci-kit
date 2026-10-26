@@ -106,6 +106,18 @@ exit ${status}`);
 [[ $(cat '${file('windows-status')}') == hang ]] && { ${hangs(dir).replace(/\n/g, '; ')}; }
 cat '${file('windows.txt')}'
 exit $(cat '${file('windows-status')}')`);
+  const displayProbe = join(bin, 'cursor-park');
+  executable(displayProbe, `echo "$*" >> '${file('display.calls')}'
+values=()
+while IFS= read -r line; do values+=("$line"); done < '${file('display.txt')}'
+value=\${values[0]}
+if ((\${#values[@]} > 1)); then printf '%s\\n' "\${values[@]:1}" > '${file('display.txt')}'; fi
+case $value in
+  fail) exit 1 ;;
+  hang) ${hangs(dir).replace(/\n/g, '; ')} ;;
+  *) printf '%s\\n' "$value" ;;
+esac`);
+  writeFileSync(file('display.txt'), '2560x1440@2x\n');
   executable(join(bin, 'open'), `echo "$*" >> '${file('opened.txt')}'
 [[ -f '${file('after.txt')}' ]] && cp '${file('after.txt')}' '${front}'
 exit ${openStatus}`);
@@ -209,7 +221,7 @@ esac`);
       env: {
         PATH: `${bin}:/usr/bin:/bin`, HOME: dir,
         CI_KIT_LOG_BIN: log, CI_KIT_GH_BIN: gh, CI_KIT_WINDOW_LIST: listEnd === 'missing' ? join(bin, 'no-window-list') : windowList, FAKE_GH_STATUS: String(ghExit), FAKE_GH_FAIL: ghFail, FAKE_GH_UNRESOLVED: ghUnresolved ? '1' : '0', FAKE_GH_ISSUE: ghIssue, FAKE_GH_REPO: ghRepo ? '1' : '0', FAKE_GH_HANG: ghStall ? '1' : '0',
-        CI_KIT_IDLE_GAP: '0', ...job, ...env, ...extraEnv,
+        CI_KIT_IDLE_GAP: '0', CI_KIT_CURSOR_PARK: displayProbe, ...job, ...env, ...extraEnv,
       },
     });
     const elapsed = Date.now() - started;
@@ -229,6 +241,7 @@ esac`);
       ...result,
       elapsed,
       ghSurvivors: survivors,
+      displayCalls: text('display.calls').trim().split('\n').filter(Boolean),
       windowReads: text('window-list.calls').split('\n').filter((line) => line !== '').length,
       log: text('Library/Logs/ci-kit/mac-runner-hooks.log'),
       opened: text('opened.txt').trim().split('\n').filter(Boolean),
@@ -249,6 +262,7 @@ esac`);
   }
   const api = {
     dir,
+    display: (values) => writeFileSync(file('display.txt'), `${values}\n`),
     hook: (output, options) => run('desktop-check.sh', output, options),
     watch: (output, options) => run('dialog-watch.sh', output, options),
     runner: (state) => writeFileSync(processes, state),

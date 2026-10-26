@@ -1,15 +1,15 @@
 #!/bin/bash
 # Sourced by desktop-check.sh (the job-started hook) and dialog-watch.sh (the dialog watcher, every 60 s), so both work
 # from one definition of a system dialog, the same read-only reads of the frontmost app and the windows on screen, one
-# source attribution, and one dialog episode per machine with its alert issue (docs/mac-lane.md). The caller sets
+# source attribution, the optional expected-display check, and one desktop-blocking episode per machine with its alert issue (docs/mac-lane.md). The caller sets
 # log_tag before sourcing.
 #
 # The episode is the state file below, rewritten whole (a rename) under a lock, so whichever side sees a dialog first
 # opens the one episode and both name it by the same first-seen time:
 #
-#   phase=pending  the watcher saw a dialog on one read; its next read opens the episode if that dialog is still there
+#   phase=pending  the watcher saw a blocked desktop on one read; continues_pending decides whether the next opens it
 #   phase=open     the alert issue (issue=, empty when its creation failed) names name= since= and source=; the watcher
-#                  closes it after three consecutive reads (clear=) that see no dialog
+#                  closes it after three consecutive reads (clear=) with no dialog and a matching configured display
 #   phase=closed   the episode closed at cleared=, but its alert's close failed: the issue is still open. Each watcher
 #                  read that sees no dialog tries again, the clear comment unless commented= says when it went through,
 #                  then the close, and the file goes once the close does. A close owed holds no runner and refuses no
@@ -79,6 +79,51 @@ is_dialog() {
   # Without a frontmost read, which app has focus is not known.
   dialog_held="is on screen${name:+ without focus}"
   seen+="; on screen: $dialog ($dialog_window)"
+}
+
+# The configured main display is part of the desktop contract, not a mode to set here. cursor-park --describe is
+# read-only and reports logical points and backing scale (the same probe as desktop-posture). A failed/invalid read
+# gets two retries, each with a 1 s deadline: a transient miss need not hold a machine, but three misses refuse a job
+# rather than run blind. The watcher still needs two blocked ticks to open and three clear ticks to close an episode.
+# No setting preserves the old behavior, including not calling the helper.
+expected_display=${CI_KIT_DISPLAY:-}
+clear_condition='no dialog'
+[[ -z $expected_display ]] || clear_condition+=' and the configured display matches'
+display_fault='' display_detail=''
+read_display() {
+  local out actual='' attempt
+  display_fault='' display_detail=''
+  [[ -n $expected_display ]] || return 0
+  out=$(mktemp) || out=''
+  if [[ -n $out ]]; then
+    for attempt in 1 2 3; do
+      if bounded 1 "${CI_KIT_CURSOR_PARK:-$(dirname "${BASH_SOURCE[0]}")/cursor-park}" --describe >"$out" 2>/dev/null; then
+        actual=$(head -c 512 "$out")
+        [[ $actual =~ ^[1-9][0-9]*x[1-9][0-9]*@[1-9][0-9]*([.][0-9]+)?x$ ]] && break
+      fi
+      actual=''
+    done
+    rm -f "$out" || true
+  fi
+  # Numeric comparison accepts an equivalent scale such as 2.0; dimensions stay integer points.
+  if [[ -n $actual ]] && awk -v actual="$actual" -v expected="$expected_display" 'BEGIN {
+    split(actual, a, /[x@]/); split(expected, e, /[x@]/);
+    exit !(a[1] == e[1] && a[2] == e[2] && a[3] + 0 == e[3] + 0)
+  }'; then
+    return 0
+  fi
+  display_fault=1
+  display_detail="display ${actual:-unreadable (three probe attempts)}, expected $expected_display"
+}
+
+# Display faults take precedence for attribution. Display is one stable, single-word alert kind (MAWS parses that title);
+# the observed/expected mode goes in its source and body. Neither condition may clear the other's episode.
+is_blocked() {
+  if [[ -n $display_fault ]]; then
+    dialog=Display dialog_pid='' dialog_held='does not match its configured display' dialog_window='' seen=$display_detail
+    return 0
+  fi
+  is_dialog
 }
 
 # The frontmost app, read with lsappinfo alone: AppleScript or System Events would raise TCC prompts.
@@ -220,6 +265,7 @@ dialog_source() {
   local predicate out process
   source='source unknown' source_line=''
   case $dialog in
+    Display) source=$display_detail; return 0 ;;
     UserNotificationCenter) predicate='process == "socketfilterfw" AND eventMessage CONTAINS "doask: sending prompt for a filtering decision on:"' ;;
     SecurityAgent) predicate='process == "security" OR eventMessage CONTAINS "SecKeychain" OR (eventMessage CONTAINS "SecurityAgent" AND (eventMessage CONTAINS[c] "spawn" OR eventMessage CONTAINS[c] "launch"))' ;;
     *) return 0 ;;
@@ -312,6 +358,11 @@ drop_state() {
 consecutive() { # whether this read follows the watcher's last one closely enough to continue its count
   ((now_epoch - st_at <= reads_apart))
 }
+# Whether a blocked read continues the pending episode: configured machines track readiness regardless of attribution;
+# without a display setting the same dialog must persist.
+continues_pending() {
+  [[ -n $expected_display || $st_name == "$dialog" ]] && consecutive
+}
 
 # One holder at a time: the watcher tries once and skips its read when the hook holds it; the hook waits (its job is
 # refused or let through only after). The lock is flock(2) on descriptor 9, taken by a helper on the inherited
@@ -387,7 +438,7 @@ close_alert() {
     read_alert_token
     if [[ -z $st_commented ]]; then
       if alert_gh issue comment "$st_issue" --repo "$alert_repo" \
-        --body "cleared at $st_cleared: no dialog on $clear_reads reads in a row since $st_clear_since" >/dev/null 2>&1; then
+        --body "cleared at $st_cleared: $clear_condition on $clear_reads reads in a row since $st_clear_since" >/dev/null 2>&1; then
         st_commented=$now
       else
         log "dialog alert clear comment failed or timed out" || true
