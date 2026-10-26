@@ -740,6 +740,21 @@ M3's wave, from a worktree of MAWS master:
   `--label`, since runs on one ref cancel each other; one baseline serves several waves on one tree. Landed as
   MAWS f2c1be6d0 at 2026-10-26T10:05:36Z, which starts M4's clock (gate-offload Decision Log 108, 6492fd98f).
 
+- 2026-10-26 (executor, M3 waves 4 and 6, tree c9803aa1a): **admitted** code (37 passed), scm (8), agents (23),
+  library (7), deliverables (12) and presentations (38 passed, 10 skipped), 3/3 in runs 40295904022, 40295964453,
+  40296543781 (W4) and 40299148379, 40299211755, 40299275020 (W6), counts equal to the host baseline 40306555606. No
+  latency bound went red, so no hosted loosening. **Set aside**: panel (`panel.spec.ts:1197`, 2 of 3: the card at
+  [420,437] against its minimum [360,240]); browser (`browser.spec.ts:363`, 1 of 3: the placeholder image missing);
+  terminal (`terminal.spec.ts:508`, 3 of 3: 10044 lines against 10047); browser-cua (`:493`, connections 0 against 1;
+  `:186`, innerWidth 800 against 1280: the device-metrics override's clear races `release()`'s 1 s bound,
+  `connection.ts:44`; the architect owns the fix). `ci-gate-alerts.test.mjs:57` spread static's env into gate-plan,
+  `HOSTED_MAC_E2E` included, so a listed group left it no Mac job; it now passes the list empty. SSFSKIM/MAWS#164,
+  landed as f752d9707 (gate-offload Decision Log 111).
+- 2026-10-26 (architect, after wave 6): **W8**, one more three-run wave with a baseline on current master for c7,
+  panel, browser and terminal. Every set-aside red so far ran on c9803aa1a, before #159 changed the hosted window's
+  geometry, and tools went green by that move alone; terminal's 3 lines fit a few rows' difference across its
+  reload. browser-cua's wave runs on the architect's fix branch.
+
 - 2026-10-26 (executor, M3 waves 2 and 3, tree c9803aa1a): **admitted** to-human (2 passed), widgets (29), side (12),
   supervisor (10), c12 (4), browser-import (6) and document (19), 3/3 in runs 40290693239, 40290750401, 40294506903
   (W2) and 40293256908, 40293322930, 40295843922 (W3), counts equal to the host baseline 40302689449. **Set aside**:
