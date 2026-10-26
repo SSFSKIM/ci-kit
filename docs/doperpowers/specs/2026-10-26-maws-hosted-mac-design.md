@@ -124,8 +124,10 @@ The plan (`gate-plan.mjs`) decides, for each e2e group of a run on a macOS lane,
 A group is **eligible** when it is none of these: `default` (its job builds with `pnpm build` and runs a selection
 derived from the whole run, `E2E_PLAN` and `DEFAULT_BESIDE`, which do not cross to maws-app); on `MEASURED_E2E`; on
 `LIVE_E2E` or `LIVE_GUARD_E2E`; on `MAC_SECRET_E2E`; on `POOL_E2E` (those never take a Mac). A live run places no
-group hosted, and neither does a run on a reserved `ci/h-final-*` ref: a final-bundle group (connectors, dashboard,
-design) writes its bundle only there, on the private runner (architect, M3). `unit:darwin` and `packaged` are not e2e groups and stay on the mini.
+group hosted, and neither does a run on a reserved final ref (`ci/<label>-*` for each label in gate-plan's
+`FINAL_LABELS`: e1-final, e2-final, h-final, p3f-final, kept equal to the final-bundle reporters' by a test): a
+final-bundle group (connectors, dashboard, design) writes its bundle only there, on the private runner (architect,
+M3). `unit:darwin` and `packaged` are not e2e groups and stay on the mini.
 
 The `Lane:` trailer (the `lane` input on a dispatch; `ci-gate.sh --lane`) takes one value. An explicit lane decides for
 the groups it moves, and the lists decide the rest:
