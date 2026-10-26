@@ -730,6 +730,14 @@ M3's wave, from a worktree of MAWS master:
   `--label`, since runs on one ref cancel each other; one baseline serves several waves on one tree. Landed as
   MAWS f2c1be6d0 at 2026-10-26T10:05:36Z, which starts M4's clock (gate-offload Decision Log 108, 6492fd98f).
 
+- 2026-10-26 (executor, M3 waves 2 and 3, tree c9803aa1a): **admitted** to-human (2 passed), widgets (29), side (12),
+  supervisor (10), c12 (4), browser-import (6) and document (19), 3/3 in runs 40290693239, 40290750401, 40294506903
+  (W2) and 40293256908, 40293322930, 40295843922 (W3), counts equal to the host baseline 40302689449. **Set aside**:
+  c7, `composer.spec.ts:772` failing at `:824` (the copy controls at opacity 0 after focus; the architect reads it as
+  `:focus-within` matching only while the window has system focus). tools' red on this tree was the pre-#159 clamp
+  (`maws-tools.spec.ts:239`); it is admitted from W7. SSFSKIM/MAWS#163, landed as 32382abb5 (gate-offload Decision
+  Log 110).
+
 - 2026-10-26 (executor, M3 wave 5, tree e7ab5da39): **admitted** settings (12 passed), connectors (5),
   connectors-direct (15) and delivery (3), 3/3 in runs 40300743480, 40300806384 and 40300870157, counts equal to the
   host baseline 40300686375. SSFSKIM/MAWS#161. Hosting connectors and connectors-direct left
