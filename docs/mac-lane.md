@@ -275,7 +275,10 @@ ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none l
   parsecd's own start line (`===== Parsec: Started =====`, written at login, after a reboot or an update) clears every
   client, since none survives it, so a log that has rotated at parsecd's start reads `none` until someone connects.
   An absent log means no Parsec signal, while an unreadable log or one with neither a start line nor connection
-  history is unknown.
+  history is unknown. A parsecd killed by a signal or crashed writes no `disconnected.` line, so when the log shows a
+  client, a seventh read checks for Parsec's host process by its path (`*/Parsec.app/Contents/MacOS/parsecd` in
+  `ps -axo pid=,comm=`; Apple's CoreParsec runs a `parsecd` of its own): none running reads `none`, while a failed or
+  stalled table keeps the log's answer.
   Screen Sharing is `screensharingd` running, matched by its exact name in the same non-root `ps -axco pid=,comm=`
   table the computer-use read uses. launchd holds the Screen Sharing listener and starts the daemon when a viewer
   connects, so the read covers every transport the daemon serves: TCP 5900 or a remapped port, a tunnel, and

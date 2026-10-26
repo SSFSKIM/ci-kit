@@ -28,6 +28,21 @@ if [[ ${1:-} == --parsec ]]; then
   exit
 fi
 
+if [[ ${1:-} == --parsec-host ]]; then
+  # Parsec's host process, by its path: Apple's CoreParsec (Siri suggestions) runs a parsecd of its own, and `ps -c`
+  # prints both as parsecd.
+  if table=$(LC_ALL=C ps -axo pid=,comm= 2>/dev/null); then
+    LC_ALL=C awk '
+      { path=$0; if (!sub(/^ *[0-9]+ +/, "", path)) { bad=1; next }; rows++ }
+      path ~ /\/Parsec\.app\/Contents\/MacOS\/parsecd$/ { found=1 }
+      END { print found ? "running" : (rows && !bad ? "none" : "unknown") }
+    ' <<<"$table"
+  else
+    echo unknown
+  fi
+  exit
+fi
+
 if [[ ${1:-} == --screensharing ]]; then
   # screensharingd by its exact name, in the table the computer-use read uses. launchd holds the listener and starts the
   # daemon when a viewer connects, over whatever transport it serves; it exits about 15 s after the last viewer leaves.
@@ -100,6 +115,12 @@ display=$(probe "${CI_KIT_CURSOR_PARK:-$here/cursor-park}" --describe) || displa
 [[ $display =~ ^[0-9]+x[0-9]+@[0-9]+([.][0-9]+)?x$ ]] || display=unknown
 # Keep the remote reads independent: one stalled source must not erase the other's positive signal.
 parsec=$(probe /bin/bash "$0" --parsec) || parsec=unknown
+# parsecd killed by a signal, or crashed, writes no "disconnected." line, so the log keeps its last client connected until
+# Parsec next starts: with no host process running there is no client. Only a definite none overrides the log; a failed
+# or stalled process read keeps its answer.
+if [[ $parsec == parsec && $(probe /bin/bash "$0" --parsec-host) == none ]]; then
+  parsec=none
+fi
 sharing=$(probe /bin/bash "$0" --screensharing) || sharing=unknown
 if [[ $parsec == parsec && $sharing == screensharing ]]; then
   remote=parsec,screensharing

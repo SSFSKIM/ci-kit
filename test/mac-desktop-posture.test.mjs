@@ -27,6 +27,11 @@ const withinHangs = (run, hangs, deadline = scaled) => {
 const idle = '    1 launchd\n  410 Terminal\n  512 cursor-park\n  520 node\n  521 node_repl\n  540 SSMenuAgent\n  733 Google Chrome Helper (Renderer)\n';
 // A viewer attached: launchd has started screensharingd, and its agent with it.
 const sharing = `${idle}  690 screensharingd\n  691 ScreensharingAgent\n`;
+// The table `ps -axo pid=,comm=` prints: each executable's path. Parsec's host process runs beside Apple's CoreParsec
+// parsecd, which `ps -c` would print under the same name.
+const coreParsec = '94312 /System/Library/PrivateFrameworks/CoreParsec.framework/parsecd\n';
+const parsecRunning = `    1 /sbin/launchd\n  444 /Applications/Parsec.app/Contents/MacOS/parsecd\n${coreParsec}`;
+const parsecGone = `    1 /sbin/launchd\n${coreParsec}`;
 // What netstat prints inside a job hook on the mini (#50): exit 0 and no Internet section, while the Multipath, pfkey and
 // routing sections still carry a Local/Foreign Address header. Every fixture's netstat prints it, as every job's does.
 const jobNetstat = [
@@ -43,7 +48,7 @@ const jobNetstat = [
 ].join('\n');
 
 // Real hook wrappers and desktop reads; only the desktop, cursor, process-table, load and process-sweeping boundaries are faked.
-function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, missing = false, parsec, parsecHang = false, logFailure = false, frontStatus = 0, frontHang = false, processes = idle, psStatus = 0, psHang = false, loadavg = '{ 1.52 1.37 1.29 }\n', loadStatus = 0, loadHang = false, ignoreAlarm = false, clock = scaled, forkDelay = 0 } = {}) {
+function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, missing = false, parsec, parsecHang = false, logFailure = false, frontStatus = 0, frontHang = false, processes = idle, parsecHost = parsecRunning, psStatus = 0, psHang = false, loadavg = '{ 1.52 1.37 1.29 }\n', loadStatus = 0, loadHang = false, ignoreAlarm = false, clock = scaled, forkDelay = 0 } = {}) {
   const dir = mkdtempSync(join(root, 'job-'));
   const bin = join(dir, 'bin');
   const installed = join(dir, 'hooks');
@@ -63,7 +68,8 @@ function fixture({ display = '2560x1440@2x', displayStatus = 0, hang = false, mi
   // Builtin read/printf replay each table: no extra process for a loaded machine to schedule late.
   executable(join(bin, 'netstat'), `[[ $* == -an ]] || exit 92\nIFS= read -r -d '' replay < '${join(dir, 'netstat')}'; printf '%s' "$replay"; exit 0`);
   writeFileSync(join(dir, 'processes'), processes);
-  executable(join(bin, 'ps'), `[[ $* == '-axco pid=,comm=' ]] || exit 93\n${psHang ? hangingRead('ps') : ''}\nIFS= read -r -d '' replay < '${join(dir, 'processes')}'; printf '%s' "$replay"; exit ${psStatus}`);
+  writeFileSync(join(dir, 'paths'), parsecHost);
+  executable(join(bin, 'ps'), `case "$*" in '-axco pid=,comm=') table=processes ;; '-axo pid=,comm=') table=paths ;; *) exit 93 ;; esac\n${psHang ? hangingRead('ps') : ''}\nIFS= read -r -d '' replay < '${dir}'/$table; printf '%s' "$replay"; exit ${psStatus}`);
   // What macOS's sysctl prints for vm.loadavg: the 1, 5 and 15 minute averages, each %.2f, in braces.
   writeFileSync(join(dir, 'loadavg'), loadavg);
   executable(join(bin, 'sysctl'), `[[ $* == '-n vm.loadavg' ]] || exit 94\n${loadHang ? hangingRead('sysctl') : ''}\nIFS= read -r -d '' replay < '${join(dir, 'loadavg')}'; printf '%s' "$replay"; exit ${loadStatus}`);
@@ -195,10 +201,11 @@ test('one Parsec client disconnecting does not hide another client still connect
   }
 });
 
-// A hanging ps holds both process reads, Screen Sharing and computer use, each to its own deadline.
+// A hanging ps holds every process read, each to its own deadline: Screen Sharing, computer use and, when the log shows
+// a client, Parsec's host process, whose stalled read keeps the log's answer.
 for (const ignoreAlarm of [false, true]) {
   for (const [options, remote, computeruse, hangs, hangingSource] of [
-    [{ parsec: connected, psHang: true }, 'parsec', 'unknown', 2, 'ps'],
+    [{ parsec: connected, psHang: true }, 'parsec', 'unknown', 3, 'ps'],
     [{ parsecHang: true, processes: sharing }, 'screensharing', 'none', 1, 'parsec'],
   ]) {
     test(`${remote} remains positive when the other source hangs${ignoreAlarm ? ' and ignores SIGALRM' : ''}`, () => {
@@ -280,6 +287,21 @@ test('Screen Sharing is screensharingd running, by its exact name, whatever the 
     const run = fixture({ processes }).runPosture();
     assert.equal(run.status, 0, run.stderr);
     assert.match(posture(run.stdout)[0], new RegExp(` remote=${remote} `), processes);
+  }
+});
+
+test('a client the Parsec log still shows connected is gone once Parsec’s own parsecd is not running', () => {
+  // parsecd killed by a signal writes no "disconnected." line; only a process table that answers can override the log.
+  for (const [options, remote] of [
+    [{ parsec: connected, parsecHost: parsecGone }, 'none'],
+    [{ parsec: connected, parsecHost: parsecGone, processes: sharing }, 'screensharing'],
+    [{ parsec: connected, parsecHost: '' }, 'parsec'],
+    [{ parsec: connected, parsecHost: 'unrecognized output\n' }, 'parsec'],
+    [{ parsec: `${connected}\n${disconnected}\n`, parsecHost: parsecGone }, 'none'],
+  ]) {
+    const run = fixture(options).runPosture();
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(posture(run.stdout)[0], new RegExp(` remote=${remote} `), JSON.stringify(options));
   }
 });
 
