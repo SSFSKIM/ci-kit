@@ -124,7 +124,8 @@ The plan (`gate-plan.mjs`) decides, for each e2e group of a run on a macOS lane,
 A group is **eligible** when it is none of these: `default` (its job builds with `pnpm build` and runs a selection
 derived from the whole run, `E2E_PLAN` and `DEFAULT_BESIDE`, which do not cross to maws-app); on `MEASURED_E2E`; on
 `LIVE_E2E` or `LIVE_GUARD_E2E`; on `MAC_SECRET_E2E`; on `POOL_E2E` (those never take a Mac). A live run places no
-group hosted. `unit:darwin` and `packaged` are not e2e groups and stay on the mini.
+group hosted, and neither does a run on a reserved `ci/h-final-*` ref: a final-bundle group (connectors, dashboard,
+design) writes its bundle only there, on the private runner (architect, M3). `unit:darwin` and `packaged` are not e2e groups and stay on the mini.
 
 The `Lane:` trailer (the `lane` input on a dispatch; `ci-gate.sh --lane`) takes one value. An explicit lane decides for
 the groups it moves, and the lists decide the rest:
@@ -354,7 +355,8 @@ Groups are admitted in waves, and the architect lands each wave with its run ids
 - **`MAC_SECRET_E2E`**: a new list of the groups that need a credential or the login keychain's custody. They never
   go hosted. It starts with `connectors-oauth` and `discover`; Discover's custody conditions (a), (b) and (c) stand.
 - **Loosened bounds**: a group whose bound needs loosening on the hosted Mac uses `latency-budget.ts`'s load policy,
-  named in its spec, as the guest's did.
+  named in its spec, as the guest's did: a hosted flag that applies the guest's `LOADED_CEILING`, as its own PR, only
+  after a red on the hosted Mac and never for a measured group (architect, M3).
 - **Rollback**: emptying `HOSTED_MAC_E2E` puts every group back on the mini at once.
 - **The other direction**: `Lane: no-hosted` keeps every group of one run on the mini, for diagnosis.
 
@@ -480,6 +482,15 @@ The work:
 - Record each wave's run ids, verdicts and set-asides in this spec's Decision Log, and open the list change as a MAWS
   PR, each admitted group with its 3 run ids in a gate.yml comment. The architect lands it.
 - A group that fails for the 1x display, the 3 CPUs or the 7 GiB stays off the list, with the failure named.
+- Two small MAWS PRs come first, in any order: the reserved-final rule in `gate-plan.mjs` and its tests (Placement),
+  which connectors, dashboard and design wait on; and the MesloLGM Nerd Font cask in `.github/ci-kit.yml`, which
+  settings' count rule waits on (the mini has the font by hand; the guest takes it at its next bake).
+- The waves (architect, M3): W1 document-app, transcript, browser-chrome, available, artifacts; W2 to-human, widgets,
+  side, c7, tools; W3 supervisor, c12, browser-import, document, design-systems; W4 panel, code, scm, agents,
+  browser; W5 settings, connectors, connectors-direct, delivery; W6 library, deliverables, browser-cua,
+  presentations, terminal; then dashboard and design once the reserved-final rule lands. browser-comment stays off.
+- A baseline the mini refuses for its display (ci-kit#162 enforces 2560x1440@2x) is a signal about the desktop, not
+  the group's failure.
 
 Proves: acceptance 8.
 
@@ -683,6 +694,18 @@ M3's wave, from a worktree of MAWS master:
     tree. The overlay, the redaction and the scan never follow a symlink out of the export.
   - Proof requests carry no `Sminos-Session` trailer: they are protocol commits shaped as the waiter's. `main`'s
     commit carries it.
+
+- 2026-10-26 (architect, through CI-opt, at M2's landing, MAWS ddef5e294; gate-offload Decision Log 106 at
+  c9803aa1a records M1, M2, the recompute and these rulings):
+  - **The scale set-asides**: browser-comment stays off (its `devicePixelRatio` cases are later work, on MAWS's debt
+    list). library, deliverables, browser-cua, dashboard, terminal, design and presentations are ruled
+    scale-neutral. At presentations-export:846 the 1x canvas is still well above the 480x270 it is compared at, so
+    the 0.08 check still compares rendered content.
+  - **Final bundles, option (b)**: a run on a reserved `ci/h-final-*` ref hosts no group (Placement). Rejected:
+    keeping final-bundle groups off the list, which gives up their capacity on every ordinary run for a rare final
+    run; and leaving it to the final runs' callers to pass `--lane no-hosted`, which a caller can forget.
+  - **settings** gets the MesloLGM Nerd Font cask in `.github/ci-kit.yml`, so its font case runs on every desktop.
+  - **desk-web-hub** is not on `CLASS1_E2E`, so it is no candidate; no special case.
 
 - 2026-10-26 (executor, M2, on MAWS f783456c3):
   - **A `HOSTED_MAC_E2E` entry that is not eligible refuses every run**, Linux and class 1a static included, so the
