@@ -61,14 +61,14 @@ async function reconcile(preparation) {
     setup = null;
     throw err;
   })));
-  const { cfg, config, poolRepos, ec2, repoProviders } = await preparation.time('config', () => d.source());
+  const { cfg, config, ec2, repoProviders } = await preparation.time('config', () => d.source());
   const key = `${cfg.ledger.repo}#${cfg.ledger.issue_title}`;
   if (!d.ledgers.has(key)) d.ledgers.set(key, createGceLedger(d.gh, cfg.ledger, { log }));
   const error = (message, fields) => say('ERROR', message, fields);
   const providers = createProviders({ gce: d.gce, cfg, config, ec2, log, limits: d.limits });
   if (!d.credits.has(cfg.ledger.repo)) d.credits.set(cfg.ledger.repo, createCreditManager({ gh: d.gh, repo: cfg.ledger.repo, log }));
   const creditPreference = await preparation.time('credit', () => d.credits.get(cfg.ledger.repo).update(ec2));
-  const launcher = new Launcher({ provider: providers[0], providers, gh: d.gh, ledger: d.ledgers.get(key), cfg, config, poolRepos, ec2, repoProviders, creditPreference, log, error, stockouts: d.stockouts, providerState: d.providerState });
+  const launcher = new Launcher({ provider: providers[0], providers, gh: d.gh, ledger: d.ledgers.get(key), cfg, config, ec2, repoProviders, creditPreference, log, error, stockouts: d.stockouts, providerState: d.providerState });
   return { config: config.slice(0, 8), repos: cfg.repos.map((r) => r.repo), ...(await launcher.tick(preparation)), github: d.gh.stats() };
 }
 

@@ -33,7 +33,7 @@ function setup({ limits = LIVE, budgetMs } = {}) {
   let seq = 0;
   const reads = [];
   const launcher = new Launcher({
-    gce: w.gce, gh: w.github, ledger: createGceLedger(w.github, CFG.ledger, { now: w.now }), cfg: CFG, config: COMMIT, poolRepos: [],
+    gce: w.gce, gh: w.github, ledger: createGceLedger(w.github, CFG.ledger, { now: w.now }), cfg: CFG, config: COMMIT,
     now: w.now, random: () => (seq += 1), alert: async () => {}, log: (m) => w.log.push(`log ${m}`), after: w.after,
     limits: { get: async (placements) => { reads.push(placements.length); return limits; } }, ...(budgetMs ? { budgetMs } : {}),
   });

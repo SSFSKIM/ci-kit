@@ -1,4 +1,4 @@
-// The GCE backend's config (spec I12): pool/config/gce.json in the kit, beside pool.json. No secrets.
+// The GCE backend's config (spec I12): pool/config/gce.json in the kit. No secrets.
 // Capacity is an ordered list of placements (spec 2026-10-21 Placements): each a region and machine family the launcher
 // may create a VM in, with its zones, subnetwork, a machine for every size and the boot disk type.
 const REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
@@ -195,13 +195,3 @@ export function resolveRepoProviders(cfg, ec2, { log = () => {} } = {}) {
 // Every zone a placement names: where the launcher creates VMs, so the zones an instance listing must cover to be
 // complete.
 export const placementZones = (cfg) => [...new Set(cfg.placements.flatMap((p) => p.zones))];
-
-// One file per repo (spec §3a, Which backend serves a repo): a repo listed in gce.json and in pool.json is served by
-// neither, so no pool job is ever served by both backends. gceRepos: gce.json's entries; poolRepos: pool.json's names.
-export function servedRepos(gceRepos, poolRepos) {
-  const inPool = new Set(poolRepos.map((r) => r.toLowerCase()));
-  const served = [];
-  const both = [];
-  for (const { repo } of gceRepos) (inPool.has(repo.toLowerCase()) ? both : served).push(repo);
-  return { served, both };
-}

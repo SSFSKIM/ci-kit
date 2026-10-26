@@ -172,16 +172,16 @@ node setup/apply.mjs --mode bake --root /path/to/clone [--install]
 |---|---|---|
 | `hosted` | GitHub's `ubuntu-latest` | any repo |
 | `hosted-macos` | GitHub's `macos-latest` (free on public repos) | any repo |
-| `pool` | a GCE spot VM per job for repos in `pool/config/gce.json` (the frozen Hetzner pool for `pool.json`), `[self-hosted, ci-kit-pool, cpus-<N>]` | private repos only |
+| `pool` | a GCE or EC2 VM per job for repos in `pool/config/gce.json`, `[self-hosted, ci-kit-pool, cpus-<N>]` | private repos only |
 | `mac` | the mac lane's runners (the Mac mini and a second Mac), `[self-hosted, macOS, ARM64, ci-kit-mac]` | private repos only |
 
 A public repo whose config puts any gate on `pool` or `mac` fails its plan with
 `ci-kit: lane "pool" is for private repos only (gate "<name>")`: a stranger's fork PR must never reach a self-hosted
 machine.
 
-A `pool` gate needs the repo served by the pool and the `HCLOUD_TOKEN` secret; see [pool.md](pool.md), "Using the
-pool from a repo". The `plan` job then creates the box if none exists, and the gate's first run on a cold box waits
-about a minute for it (`ci-gate` prints `WAIT` after 2 minutes). Inside the job, `nproc` reports the gate's `cpus`.
+A `pool` gate needs the repo served by the launcher and the `ci-kit-runners` App installed; no cloud token is
+needed in the caller. See [pool.md](pool.md#using-the-pool-from-a-repo). The launcher provisions a VM for the
+queued job (`ci-gate` prints `WAIT` after 2 minutes). Inside the job, `nproc` reports the allocated vCPUs.
 
 ### Which gates run
 

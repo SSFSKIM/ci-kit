@@ -22,7 +22,7 @@ function setup() {
   const make = (l = ledger()) => {
     const providers = createProviders({ gce: w.gce, cfg, config: 'presend', ec2, now: w.now, awsFactory: () => f.aws });
     return new Launcher({ provider: providers[0], providers, ec2, cfg, config: 'presend', gh: w.github, ledger: l,
-      poolRepos: [], now: w.now, after: w.after, providerState, random: () => ++random });
+      now: w.now, after: w.after, providerState, random: () => ++random });
   };
   const queue = (cpus, provider) => w.sim.queue(repo, labels(cpus, provider));
   // Drive the actual launch path and fail at its durable-write boundary, rather than manufacturing a row.

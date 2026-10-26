@@ -357,7 +357,7 @@ test('the alert title is the contract: the machine, the canonical dialog name wh
     'ci-kit alert: pool server 123 is a smaller cpx31 (core limit)',
     'ci-kit alert: bake builder 77 left behind',
     'ci-kit alert: the bake could not create its builder',
-    'ci-kit alert: SSFSKIM/MAWS is in both gce.json and pool.json',
+    'ci-kit alert: SSFSKIM/MAWS has no available placement',
     'ci-kit alert: GCE VM ci-kit-gce-0a1b2c3d4e outlived its run limit',
   ]) assert.doesNotMatch(older, contract);
 });

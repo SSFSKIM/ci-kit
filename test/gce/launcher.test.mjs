@@ -20,10 +20,10 @@ const MIN = 60_000;
 const L = (n) => ['self-hosted', 'ci-kit-pool', `cpus-${n}`];
 const COMMIT = 'c0ffee00aabbccddeeff00112233445566778899';
 
-function setup({ cfg = CFG, poolRepos = [], start = T0, w = world({ start }), random } = {}) {
+function setup({ cfg = CFG, start = T0, w = world({ start }), random } = {}) {
   let seq = 0;
   const make = (overrides = {}) => new Launcher({
-    gce: w.gce, gh: w.github, ledger: createGceLedger(w.github, cfg.ledger, { now: w.now }), cfg, config: COMMIT, poolRepos,
+    gce: w.gce, gh: w.github, ledger: createGceLedger(w.github, cfg.ledger, { now: w.now }), cfg, config: COMMIT,
     now: w.now, random: random ?? (() => (seq += 1)), alert: async (a) => w.log.push(`alert ${a.title}`), ...overrides,
   });
   return { w, launcher: make(), make };
@@ -451,14 +451,6 @@ test('a repo removed from gce.json drains: its busy VM (a job over 5 min) finish
   const ends = [...rows(w).values()].flat().map((r) => [r.instance, r.state, r.end]);
   assert.deepEqual(ends.sort(), [[busy, 'final', 'done'], [idle, 'final', 'cancelled-idle']].sort());
   assert.deepEqual(leftovers(w), { instances: 0, disks: 0, runners: 0 });
-});
-
-test('a repo in both files is served by neither, and alerted', async () => {
-  const { w, launcher } = setup({ poolRepos: [SBX] });
-  w.sim.queue(SBX, L(4));
-  const out = await launcher.tick();
-  assert.deepEqual(out.launched, []);
-  assert.ok(w.log.some((l) => l.startsWith(`alert ci-kit alert: ${SBX} is in both`)));
 });
 
 test('a public repo is refused', async () => {
@@ -930,7 +922,7 @@ test('reads in parallel, launches before cleanup: the first insert comes a few c
   w.hooks.beforeInsert = () => { first ??= clock.layer; };
   const slow = new Launcher({
     gce: layered(w.gce, clock), gh: layered(w.github, clock), ledger: createGceLedger(layered(w.github, clock), cfg.ledger, { now: w.now }),
-    cfg, config: COMMIT, poolRepos: [], now: w.now, random: () => Math.floor(Math.random() * 36 ** 5), alert: async () => {},
+    cfg, config: COMMIT, now: w.now, random: () => Math.floor(Math.random() * 36 ** 5), alert: async () => {},
   });
   const out = await slow.tick();
   assert.equal(out.launched.length, 6);

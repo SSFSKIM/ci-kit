@@ -3,21 +3,20 @@
 // it; the signature is its only gate (receiver.mjs). It runs as ci-kit-webhook@, which may read the webhook secret and
 // publish to the topic ci-kit-tick-requests, and nothing else. The secret is a Cloud Run secret volume, which fetches
 // the latest version on each read, so a rotation reaches the receiver without a deploy.
-// Which repos are served is read from the gce.json and pool.json bundled with this deploy: a repo added on main
+// Which repos are served is read from the gce.json bundled with this deploy: a repo added on main
 // reaches the receiver at its next deploy, and until then its jobs wait for the scheduled tick as before M4.
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { accessToken } from '../../lib/gce.mjs';
-import { parseGceConfig, servedRepos } from '../launcher/config.mjs';
-import { poolRepos } from '../launcher/source.mjs';
+import { parseGceConfig } from '../launcher/config.mjs';
 import { createReceiver, createPublisher } from './receiver.mjs';
 
 const bundled = (name) => readFileSync(new URL(`../../pool/config/${name}`, import.meta.url), 'utf8');
 const say = (severity, message, extra = {}) => console.log(JSON.stringify({ severity, message, ...extra }));
 
 const cfg = parseGceConfig(bundled('gce.json'));
-const { served } = servedRepos(cfg.repos, poolRepos(bundled('pool.json')));
+const served = cfg.repos.map(({ repo }) => repo);
 const topic = process.env.CI_KIT_TOPIC;
 const secretFile = process.env.CI_KIT_WEBHOOK_SECRET_FILE;
 if (!topic || !secretFile) throw new Error('ci-kit-webhook: CI_KIT_TOPIC and CI_KIT_WEBHOOK_SECRET_FILE must be set (gce/deploy.sh webhook)');

@@ -17,7 +17,6 @@ import { keyOf, providerWalk, createAdmission, schedulingView } from './scheduli
 import { createProvider, gceWalkResult } from './providers/gce.mjs';
 import { createAlerts } from '../../pool/lib/alerts.mjs';
 import { queuedPoolJobs } from '../../pool/agent/logic.mjs';
-import { servedRepos } from './config.mjs';
 import {
   allocationId, repoLabel, planLaunches, runnersNeverOnline, quotaBlocks, insertOutcome, walkPlacements, stockoutMemory,
   jitRequest, reviewInstances, reviewRows, orphanRunners, reportable, claimedInstances,
@@ -40,10 +39,10 @@ const day = (ms) => new Date(ms).toISOString().slice(0, 10);
 const iso = (ms) => new Date(ms).toISOString();
 const NEVER = new Promise(() => {});
 
-// deps: {provider, gh, ledger, cfg, config, poolRepos, now, log, error, random, alert, after, stockouts}. A caller may
+// deps: {provider, gh, ledger, cfg, config, now, log, error, random, alert, after, stockouts}. A caller may
 // supply gce/limits instead of provider to construct the same GCE adapter. error(message, fields) logs at ERROR
 // what a log-based alert watches (gce/deploy.sh alert), log otherwise.
-// cfg: the gce.json it runs, config: that file's commit; poolRepos: the repo names in pool.json (one file per repo).
+// cfg: the gce.json it runs, config: that file's commit.
 // after(ms) → {promise, cancel}: a timer, the race's (tests run it on their clock).
 export class Launcher {
   constructor(deps) {
@@ -120,14 +119,7 @@ export class Launcher {
   // Everything at once, but for two orders that hold: the ledger is read before the instances, and each repo's
   // runners before its jobs.
   async observe(preparation) {
-    const { served: listed, both } = servedRepos(this.cfg.repos, this.poolRepos);
-    const alerted = Promise.all(both.map(async (repo) => {
-      this.log(`refusing ${repo}: it is in gce.json and pool.json, and a repo is served by one backend only`);
-      await this.alert({
-        title: `ci-kit alert: ${repo} is in both gce.json and pool.json`,
-        body: `The GCE launcher serves neither copy of ${repo} until one file lists it (spec §3a, one file per repo).`,
-      }).catch((err) => this.log(`alert: ${err.message}`));
-    }));
+    const listed = this.cfg.repos.map(({ repo }) => repo);
     // The ledger is read before the instances: a row seen running was written after its insert, so its VM is in the
     // listing that follows unless it is gone. (A row whose VM is missing is confirmed with a direct read anyway.)
     const rowsRead = (async () => {
@@ -172,7 +164,7 @@ export class Launcher {
     }
     const instances = [...inventories.values()].flatMap((v) => v.instances);
     const complete = inventories.get(providerKey({ provider: 'gce', account: this.cfg.project }))?.complete !== false;
-    // Public repos are refused, as on the Hetzner box; a repo whose visibility cannot be read is not served this tick.
+    // Public repos are refused; a repo whose visibility cannot be read is not served this tick.
     const served = [];
     for (const [repo, read] of reads) {
       const visible = await read.visible;
@@ -212,7 +204,6 @@ export class Launcher {
       demand.set(repo, runners.get(repo));
     }
     seen.reports = await reports;
-    await alerted;
     return { ...seen, demand, queued, jobs, runs, claimed: claimedInstances({ jobs, rows, reports: seen.reports }) };
   }
 

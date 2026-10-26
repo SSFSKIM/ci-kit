@@ -1,5 +1,5 @@
 // Where the launcher's config comes from (gce/launcher/source.mjs, spec §3a Which backend serves a repo): gce.json and
-// pool.json on the kit's main, each at the newest commit that changed it; a failed refresh keeps the last good copy
+// ec2.json on the kit's main, each at the newest commit that changed it; a failed refresh keeps the last good copy
 // (and its commit, which the launcher writes on every VM it creates: a stale `ci-kit-config` is how a move sees it);
 // before the first success, the copies bundled with the deployed code.
 import { test } from 'node:test';
@@ -40,32 +40,29 @@ const sha = (n) => String(n).repeat(40).slice(0, 40);
 test('the configs come from main, at the commit that last changed each; a commit already read is not fetched again', async () => {
   const files = {
     'pool/config/gce.json': { sha: sha(1), text: withRepos(GCE, [{ repo: SBX }]) },
-    'pool/config/pool.json': { sha: sha(2), text: JSON.stringify({ repos: [{ repo: MAWS, workflows: ['gate.yml'] }] }) },
   };
   const s = source({ main: () => files });
   const got = await s.load();
-  assert.deepEqual([got.cfg.repos, got.config, got.poolRepos], [[{ repo: SBX }], sha(1), [MAWS]]);
+  assert.deepEqual([got.cfg.repos, got.config], [[{ repo: SBX }], sha(1)]);
   await s.load();
-  assert.equal(s.reads.length, 2);
+  assert.equal(s.reads.length, 1);
 });
 
 test('a failed refresh keeps the last good copy and its commit (the stale ci-kit-config a move waits on)', async () => {
   let files = {
     'pool/config/gce.json': { sha: sha(1), text: withRepos(GCE, [{ repo: SBX }]) },
-    'pool/config/pool.json': { sha: sha(2), text: JSON.stringify({ repos: [] }) },
   };
   const s = source({ main: () => files });
   await s.load();
   // main moves the sandbox out of gce.json, but this launcher cannot read main.
-  files = { 'pool/config/gce.json': new Error('502'), 'pool/config/pool.json': new Error('502') };
+  files = { 'pool/config/gce.json': new Error('502') };
   const stale = await s.load();
-  assert.deepEqual([stale.cfg.repos, stale.config, stale.poolRepos], [[{ repo: SBX }], sha(1), []]);
+  assert.deepEqual([stale.cfg.repos, stale.config], [[{ repo: SBX }], sha(1)]);
 });
 
 test('a copy on main that does not parse is not run: the last good copy stays', async () => {
   let files = {
     'pool/config/gce.json': { sha: sha(1), text: withRepos(GCE, [{ repo: SBX }]) },
-    'pool/config/pool.json': { sha: sha(2), text: JSON.stringify({ repos: [] }) },
   };
   const s = source({ main: () => files });
   await s.load();
@@ -75,16 +72,11 @@ test('a copy on main that does not parse is not run: the last good copy stays', 
 
 test('before any success, the bundled copies, labelled with the deployed commit', async () => {
   const s = source({
-    main: () => ({ 'pool/config/gce.json': new Error('down'), 'pool/config/pool.json': new Error('down') }),
-    bundled: { 'gce.json': withRepos(GCE, [{ repo: SBX }]), 'pool.json': JSON.stringify({ repos: [{ repo: MAWS, workflows: ['gate.yml'] }] }) },
+    main: () => ({ 'pool/config/gce.json': new Error('down') }),
+    bundled: { 'gce.json': withRepos(GCE, [{ repo: SBX }]) },
   });
   const got = await s.load();
-  assert.deepEqual([got.cfg.repos, got.config, got.poolRepos], [[{ repo: SBX }], 'b0000000bundled', [MAWS]]);
-});
-
-test('a file main does not have (no commit ever changed it) lists no repos', async () => {
-  const s = source({ main: () => ({ 'pool/config/gce.json': { sha: sha(1), text: withRepos(GCE, []) }, 'pool/config/pool.json': null }) });
-  assert.deepEqual((await s.load()).poolRepos, []);
+  assert.deepEqual([got.cfg.repos, got.config], [[{ repo: SBX }], 'b0000000bundled']);
 });
 
 const EC2_PATH = 'pool/config/ec2.json';
@@ -192,4 +184,20 @@ test('a rejected repo-reference edit cannot prevent a subsequent valid disable o
   const deleted = await s.load();
   assert.equal(deleted.ec2, null);
   assert.deepEqual(deleted.repoProviders[SBX], [{ provider: 'gce', account: GCE.project }]);
+});
+
+// A retired provider must not remain a configuration dependency, even for a fresh deployment.
+test('a fresh launcher reads only the GCE and EC2 configs', async () => {
+  const paths = [];
+  const load = createConfigSource({
+    gh: { lastCommit: async (_repo, path) => { paths.push(path); return null; } },
+    fetchText: async () => { throw new Error('unexpected raw fetch'); },
+    readBundled: async (name) => {
+      if (name === 'gce.json') return withRepos(GCE, [{ repo: SBX }]);
+      throw Object.assign(new Error('not bundled'), { code: 'ENOENT' });
+    },
+    bundledCommit: 'bundled',
+  });
+  assert.deepEqual((await load()).cfg.repos, [{ repo: SBX }]);
+  assert.deepEqual(paths.sort(), ['pool/config/ec2.json', 'pool/config/gce.json']);
 });

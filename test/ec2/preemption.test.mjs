@@ -100,7 +100,7 @@ async function lifecycle(code = 'instance-terminated-by-experiment') {
   const make = () => {
     const providers = createProviders({ gce: w.gce, cfg, ec2, config: 'evidence', now: w.now, awsFactory: () => f.aws });
     return new Launcher({ provider: providers[0], providers, ec2, cfg, config: 'evidence', gh: w.github,
-      ledger: ledger(), poolRepos: [], now: w.now, after: w.after });
+      ledger: ledger(), now: w.now, after: w.after });
   };
   let gone = false;
   const live = { ...structuredClone(raw), State: { Code: 16, Name: 'running' }, StateReason: undefined, StateTransitionReason: '',

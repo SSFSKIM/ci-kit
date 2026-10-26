@@ -26,7 +26,7 @@ function setup({ cfg = CFG, history = { repo: SBX, gates: GATES }, repos } = {})
   const w = world({ start: T0, ...(repos ? { repos } : {}) });
   let seq = 0;
   const make = () => new Launcher({
-    gce: w.gce, gh: w.github, ledger: createGceLedger(w.github, cfg.ledger, { now: w.now }), cfg, config: COMMIT, poolRepos: [],
+    gce: w.gce, gh: w.github, ledger: createGceLedger(w.github, cfg.ledger, { now: w.now }), cfg, config: COMMIT,
     now: w.now, random: () => (seq += 1), alert: async () => {}, log: (m) => w.log.push(`log ${m}`),
   });
   // Three earlier runs of the workflow on the ledger, each a VM per gate.

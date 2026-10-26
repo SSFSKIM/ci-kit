@@ -1,6 +1,6 @@
 // The GCE launcher's decisions (gce/launcher/logic.mjs, spec §3a The launcher, M10 Decisions): demand per (repo,
 // label set) where a busy instance covers nothing, admission under max_vcpus, the order of zone, spot and on-demand
-// attempts, each cleanup predicate, and the one-file-per-repo rule. Instances and runners are recorded API shapes.
+// attempts and each cleanup predicate. Instances and runners are recorded API shapes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -10,7 +10,7 @@ import {
   placements, insertOutcome, walkPlacements, reviewInstances, reviewRows, orphanRunners, orphanDisks, newestReadyImage,
   jobInstance, reportable, claimedInstances, runnersNeverOnline,
 } from '../../gce/launcher/logic.mjs';
-import { parseGceConfig, servedRepos } from '../../gce/launcher/config.mjs';
+import { parseGceConfig } from '../../gce/launcher/config.mjs';
 import { ONE_REGION_CFG } from './config-fixtures.mjs';
 
 const CFG = ONE_REGION_CFG;
@@ -429,20 +429,6 @@ test('a ci-kit=gce disk with no user, older than 10 min, is an orphan; in use, y
   const disk = (name, { users, age = 11 * MIN, labels = { 'ci-kit': 'gce' } } = {}) => ({ name, zone: ZONE, users, labels, creationTimestamp: new Date(T0 - age).toISOString() });
   const disks = [disk('a'), disk('b', { users: ['x'] }), disk('c', { age: 9 * MIN }), disk('d', { labels: {} }), disk('e', { labels: { 'ci-kit': 'gce-builder' } })];
   assert.deepEqual(orphanDisks(disks, T0).map((d) => d.name), ['a']);
-});
-
-// One file per repo.
-test('a repo listed in both gce.json and pool.json is served by neither (by the launcher) and reported', () => {
-  const r = servedRepos([{ repo: SBX }, { repo: MAWS }], ['ssfskim/maws']);
-  assert.deepEqual(r.served, [SBX]);
-  assert.deepEqual(r.both, [MAWS]);
-});
-
-test('the kit\'s own pool.json and gce.json list no repo twice', () => {
-  const pool = JSON.parse(readFileSync(new URL('../../pool/config/pool.json', import.meta.url), 'utf8')).repos.map((r) => r.repo);
-  const shipped = parseGceConfig(readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
-  const gce = shipped.repos.map((r) => r.repo);
-  assert.deepEqual(servedRepos(shipped.repos, pool).both, [], `in both files: ${gce.filter((g) => pool.some((p) => p.toLowerCase() === g.toLowerCase()))}`);
 });
 
 test('the GCE config is validated: unknown keys and missing fields are refused, naming them', () => {

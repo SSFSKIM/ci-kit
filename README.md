@@ -1,6 +1,6 @@
 # ci-kit
 
-CI for SSFSKIM's repos without the MacBook: a per-repo config (`.github/ci-kit.yml`) and reusable workflow, an agent CLI (`ci-gate`), a runner pool for private repos (one GCE spot VM per job; the Hetzner pool is a frozen fallback), a Mac lane (the Mac mini and a second Mac), and a host janitor.
+CI for SSFSKIM's repos without the MacBook: a per-repo config (`.github/ci-kit.yml`) and reusable workflow, an agent CLI (`ci-gate`), a runner pool for private repos (one ephemeral GCE or EC2 VM per job), a Mac lane (the Mac mini and a second Mac), and a host janitor.
 
 Status: being built. The living spec: [docs/doperpowers/specs/2026-10-15-ci-kit-design.md](docs/doperpowers/specs/2026-10-15-ci-kit-design.md).
 
@@ -22,9 +22,9 @@ Status: being built. The living spec: [docs/doperpowers/specs/2026-10-15-ci-kit-
 | `bin/ci-gate`, `cli/` | `ci-gate`: arguments, git side, run watching; `ci-gate init` (`cli/init.mjs`) |
 | `.claude-plugin/`, `hooks/`, `skills/adopt/` | the Claude Code plugin: manifest, the session-start note for adopted repos, the adoption skill |
 | `vendor/yaml/` | the planner's YAML parser (yaml 2.9.1 from npm, its `dist/*.js`, `package.json` and `LICENSE`), vendored so the planner and `ci-gate init` run from a plain checkout or the plugin cache with no install |
-| `lib/github.mjs`, `lib/github-app.mjs`, `lib/hcloud.mjs` | the small GitHub REST client (gh's login or the App's tokens) and the Hetzner client |
-| `pool/`, `pool-ensure/` | the Hetzner pool: agent and watchdog (`pool/agent/`), runner image, bake, guard, config, and the ensure action; runbook in [docs/pool.md](docs/pool.md) |
+| `lib/github.mjs`, `lib/github-app.mjs` | the small GitHub REST client (gh's login or the App's tokens) |
+| `pool/`, `pool-ensure/` | shared GCE/EC2 runner image, container environment, bake preparation and config; ensure is a compatibility no-op; runbook in [docs/pool.md](docs/pool.md) |
 | `history/` | the test-history collector: reads each gate job's JUnit report (`junit.mjs`), builds its run line against the day's base (`record.mjs`, `store.mjs`) with its provenance (`provenance.mjs`); run daily by ci-kit-sandbox's `test-history.yml` into that repo's `test-history` branch ([spec](docs/doperpowers/specs/2026-10-21-test-history-design.md)) |
-| `.github/workflows/pool-guard.yml`, `pool-bake.yml` | the pool's scheduled backstop and its weekly image build |
+| `gce/`, `ec2/`, `.github/workflows/pool-guard.yml` | the multi-cloud launcher, image bakes, VM lifecycle and independent EC2 guard |
 | `.github/ci-kit.yml`, `.github/workflows/ci.yml` | the kit's own gates (it dogfoods itself) |
 | `test/` | `npm test` (`node --test`; no network) |
