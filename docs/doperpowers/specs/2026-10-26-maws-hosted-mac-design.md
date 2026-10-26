@@ -85,7 +85,8 @@ request commit carries `MAWS-Source-Tree: <the tree of sha>`, and it ran on `mac
   Log, 2026-10-26 "review round 1".
 - [x] (2026-10-26 05:58Z) M1: the filter, the overlay, the secret scan and the hosted Mac setup in MAWS (21bad077d,
   reviewed clean: a task review and reviewer-high, one fix wave); maws-app's `main` at 6d44bb9 and ruleset 25857219;
-  the public half proven by hand (Surprises & Discoveries). SSFSKIM/MAWS#151, for the architect to land.
+  the public half proven by hand (Surprises & Discoveries). SSFSKIM/MAWS#151, landed as master a61cab69d;
+  the architect's recompute of 21bad077d gave tree 6baa632e, maws-app `main`'s (acceptance 5).
 - [ ] M2: the routing, the waiter and the three readers in MAWS; the deploy key; acceptance 1–4 and 7.
 - [ ] M3: admission waves; `HOSTED_MAC_E2E` populated; acceptance 8.
 - [ ] M4: the collector and the before numbers; the after numbers seven days after M3's first wave lands;
