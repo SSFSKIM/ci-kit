@@ -76,7 +76,7 @@ request commit carries `MAWS-Source-Tree: <the tree of sha>`, and it ran on `mac
 - [x] (2026-10-26 02:0xZ) maws-app created: public, no licence; issues, wiki and projects off; fork-PR approval
   `all_external_contributors`. It holds commit 648b7e88 (MAWS e654db0cb6a5 through the spike's filter) and two spike
   commits on `main`.
-- [x] (2026-10-26 04:5xZ) Spec review round 1 (two adversarial reviews): the control plane moved to git refs, the
+- [x] (2026-10-26 05:1xZ) Spec review, two rounds (three adversarial reviews): the control plane moved to git refs, the
   ineligible groups and the three readers named, admission given its 1x rule, the acceptance list rewritten. Decision
   Log, 2026-10-26 "review round 1".
 - [ ] M1: the filter, the overlay and the hosted Mac setup in MAWS; maws-app's `main` and ruleset; the public half
@@ -205,9 +205,12 @@ A hosted run outlives its waiter in four cases, and each has an owner:
 | the waiter's box is preempted, then rerun | the next attempt's cancel (step 2.2) |
 | the waiter is lost with no rerun | the hosted job's stale guard if it has not started; its 60-minute timeout if it has |
 
-The **stale guard** is the hosted e2e job's first step. It reads `Hosted-Deadline:` from the request and exits 1 at
-once, `hosted: stale request`, when the job starts after it. A job that waited in GitHub's queue past its waiter's
-deadline so holds a Mac slot for seconds. The **sweep**, a scheduled job of `hosted-mac.yml` every 6 hours, deletes
+The **stale guard** is the hosted e2e job's first step. It exits 1 at once, `hosted: stale request`, when the job
+starts after the request's `Hosted-Deadline:`, or when the request's ref (`git ls-remote` of the public repository,
+no token) no longer points at the run's own commit: a cancel, a deletion or a newer push has replaced it. GitHub does
+not promise that a concurrency group sees two pushes in the order they were made, so a cancel can arrive before the
+request it cancels; the ref check makes that request inert anyway. A job that waited in GitHub's queue past its
+waiter's deadline, or past its cancel, so holds a Mac slot for seconds. The **sweep**, a scheduled job of `hosted-mac.yml` every 6 hours, deletes
 `ci/hosted/*` and `ci/result/*` refs whose commit is more than 6 hours old: no waiter lives that long, so the refs are
 dead.
 
@@ -484,7 +487,8 @@ the branch head, in a fresh `GIT_DIR`, commit with `main` as parent and the trai
 
 Then the cancel: push a second request (`m1-2-transcript`), and while its e2e job is queued or running, push a commit
 over it with the same tree, the request as parent and `Hosted-Cancel: m1 proof`. The request's run ends `cancelled`;
-the cancel's run plans nothing. Then the stale guard: a request whose `Hosted-Deadline` is in the past ends its e2e
+the cancel's run plans nothing. A third request whose ref is overwritten by a cancel before its e2e job starts stops
+at the stale guard, with no setup, build or test step run. Then the stale guard: a request whose `Hosted-Deadline` is in the past ends its e2e
 job within a minute with `hosted: stale request`. Then the sweep, by dispatch, deletes the refs older than 6 hours
 (none of these yet; dispatch it once to see it run green), and delete the proof refs by hand.
 
@@ -591,6 +595,9 @@ M3's wave, from a worktree of MAWS master:
     the eighth day, since an executor does not wait a week.
   - **M3's candidates** widen from `MAC_VM_E2E` to every eligible `CLASS1_E2E` group, `MAC_VM_E2E` first: the hosted
     Mac has 7 GiB and builds its own out/, so the guest's two limits (4 GiB, out/ from e2e-build) do not apply.
+  - Round 2 (one adversarial review): the stale guard also checks that the request's ref still points at the run's
+    commit. GitHub's concurrency ordering follows arrival at the group, which is not guaranteed to be push order, so
+    a cancel could be processed before its request; the request then started with a future deadline.
   - Not taken: a fallback to the mini for a request that has not started by a bound. It is the next lever if M4 shows
     deadline reds (Capacity and cost).
 
