@@ -98,11 +98,16 @@ request commit carries `MAWS-Source-Tree: <the tree of sha>`, and it ran on `mac
 
 ### The three desktops
 
-| Desktop | Machine | Display | Backing scale |
-|---|---|---|---|
-| Mac mini host (`ci-kit-mac-mini`) | M4 Mac mini, 16 GiB, macOS 27.0 | 2560x1440, BetterDisplay HiDPI virtual display | 2x |
-| Mac mini guest (`maws-vm-job-*`) | Tart VM, 4 GiB, macOS 27 golden | 2560x1440, scaling on | 2x |
-| Hosted (`macos-26`) | Apple M1 (Virtual), 3 CPUs, 7 GiB, macOS 26.6.2 | 1920x1080, set by the setup step | 1x |
+| Desktop | Machine | Display | Backing scale | Dock | Visible frame |
+|---|---|---|---|---|---|
+| Mac mini host (`ci-kit-mac-mini`) | M4 Mac mini, 16 GiB, macOS 27.0 | 2560x1440, BetterDisplay HiDPI virtual display | 2x | shown, bottom, tile size 32 (over ssh; a job's line pending) | a job's `MAWS desktop:` line pending |
+| Mac mini guest (`maws-vm-job-*`) | Tart VM, 4 GiB, macOS 27 golden | 2560x1440, scaling on | 2x | macOS's default (ci-kit never sets it; a job's line pending) | a job's line pending |
+| Hosted (`macos-26`) | Apple M1 (Virtual), 3 CPUs, 7 GiB, macOS 26.6.2 | 1920x1080, set by the setup step | 1x | hidden, set by the setup step | 1920x1049 at 0,0 (run 40293725380) |
+
+Every macOS lane prints its desktop from the job's own context: the hosted Mac in its `ci-kit desktop:` line, the mini
+host and guest in a `MAWS desktop:` line beside ci-kit's display line. With the default Dock the hosted visible frame
+was about 985 pt high, which clamped settings' 1512x982 window (`e2e/settings.spec.ts:478`); hidden, only the 31 pt
+menu bar is taken.
 
 The hosted runner's display starts at 1024x768. It offers 12 modes, from 640x480 to 1920x1080, all with scaling off.
 The e2e window is 1280x820 (`e2e/support/launch.ts`), and at 1024x768 macOS clamped it. That failed 7 width and click
