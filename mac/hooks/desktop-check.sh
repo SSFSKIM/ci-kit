@@ -41,7 +41,7 @@ refuse_dialog() {
       st_clear=0 st_clear_since=''
       save_state || true
     else
-      if [[ $st_phase == pending && $st_name == "$dialog" ]] && consecutive; then since=$st_since; fi
+      if [[ $st_phase == pending ]] && continues_pending; then since=$st_since; fi
       if start_episode "$since"; then opened=1; fi
     fi
   else

@@ -950,6 +950,50 @@ test('a display fault is seen even without a frontmost read; changing wrong mode
   assert.ok(run.marker);
 });
 
+test('changing display modes cannot mask a persistent dialog on a configured machine', () => {
+  const d = desktop({ env: { CI_KIT_DISPLAY: '2560x1440@2x' } });
+  const first = d.watch(security);
+  assert.deepEqual([first.state.phase, first.state.name], ['pending', 'SecurityAgent']);
+  assert.equal(first.marker, null);
+  d.display('1920x1080@1x');
+  let run = d.watch(security);
+  assert.deepEqual([run.state.phase, run.state.name, run.state.since], ['open', 'Display', iso(T0)]);
+  assert.ok(run.marker, 'the second blocked read holds the runner despite the attribution change');
+  for (const mode of ['2560x1440@2x', '1920x1080@1x']) {
+    d.display(mode);
+    run = run.watch(security);
+    assert.deepEqual([run.state.phase, run.state.since, run.state.clear], ['open', iso(T0), '0']);
+    assert.ok(run.marker);
+    assert.equal(creates(run).length, 1, 'changing attribution does not create another alert');
+  }
+});
+
+test('a refused job adopts a configured pending readiness read across attribution changes', () => {
+  for (const [before, after, kind] of [
+    ['2560x1440@2x', '1920x1080@1x', 'Display'],
+    ['1920x1080@1x', '2560x1440@2x', 'SecurityAgent'],
+  ]) {
+    const d = desktop({ env: { CI_KIT_DISPLAY: '2560x1440@2x' } });
+    d.display(before);
+    d.watch(security, { at: 0 });
+    d.display(after);
+    const job = d.hook(security, { at: 20 });
+    assert.equal(job.status, 1);
+    assert.deepEqual([job.state.phase, job.state.name, job.state.since], ['open', kind, iso(T0)]);
+    assert.equal(creates(job).length, 1);
+    assert.ok(argValue(creates(job)[0], '--body').includes(`First seen: ${iso(T0)}\n`));
+  }
+});
+
+test('an unconfigured refused job does not adopt a different pending dialog', () => {
+  const d = desktop();
+  d.watch(security, { at: 0 });
+  const job = d.hook(notification, { at: 20 });
+  assert.equal(job.status, 1);
+  assert.deepEqual([job.state.phase, job.state.name, job.state.since], ['open', 'UserNotificationCenter', iso(T0 + 20)]);
+  assert.equal(creates(job).length, 1);
+});
+
 test('changing dialogs cannot mask consecutive display faults or release their hold', () => {
   const d = desktop({ env: { CI_KIT_DISPLAY: '2560x1440@2x' } });
   d.display('1920x1080@1x');

@@ -8,9 +8,10 @@
 #   no AppleScript, no GUI action), so a dialog on screen without focus counts as one in front does.
 # - When CI_KIT_DISPLAY is configured, read_display checks it too (dialog.sh, including its bounded retries). A
 #   mismatch or persistent unreadable display shares the episode below; no GUI action restores it here.
-# - A dialog on two consecutive reads opens the machine's episode: the source is attributed once, and the alert issue
-#   is opened, unless the job hook opened it first. Three consecutive reads with no dialog close it (2026-10-17: a
-#   dismissed prompt came back within a minute, twice), and its alert with it: a close that fails is tried again at
+# - Two consecutive blocked reads open the machine's episode (dialog.sh's continues_pending): the source is attributed
+#   once, and the alert issue opens unless the job hook opened it first. Three consecutive reads with no dialog and a
+#   matching configured display close it (2026-10-17: a dismissed prompt came back within a minute, twice), and its alert
+#   with it: a close that fails is tried again at
 #   each read until it goes through (2026-10-20: it failed while the network came up after a reboot, and the open alert
 #   held every Mac job until it was closed by hand).
 # - While the episode is open every instance's runner is held (a marker each LaunchAgent's wrapper waits on) and stopped
@@ -55,7 +56,7 @@ watch_read() {
         fi
         ;;
       pending)
-        if [[ $st_name == "$dialog" ]] && consecutive; then
+        if continues_pending; then
           if start_episode "$st_since"; then
             log "$seen since $st_since: $source; the episode opens"
             alert_episode 'the dialog watcher (two reads in a row)'
@@ -96,9 +97,10 @@ first_read() {
   st_phase=pending st_name=$dialog st_since=$now st_at=$now_epoch st_source='' st_issue='' st_clear=0 st_clear_since=''
   st_cleared='' st_commented=''
   save_state || true
-  local condition='a system dialog'
+  local condition='a system dialog' next='sees it too'
   [[ $dialog != Display ]] || condition='a display fault'
-  log "$seen: $condition; the episode opens if the next read sees it too"
+  [[ -z $expected_display ]] || next='still finds the desktop blocked'
+  log "$seen: $condition; the episode opens if the next read $next"
 }
 
 # What an instance's runner is doing: `busy <pid>…`, `idle <listener log> <size>` or `stopped` (runner-state.py, which

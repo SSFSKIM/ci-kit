@@ -7,9 +7,9 @@
 # The episode is the state file below, rewritten whole (a rename) under a lock, so whichever side sees a dialog first
 # opens the one episode and both name it by the same first-seen time:
 #
-#   phase=pending  the watcher saw a dialog on one read; its next read opens the episode if that dialog is still there
+#   phase=pending  the watcher saw a blocked desktop on one read; continues_pending decides whether the next opens it
 #   phase=open     the alert issue (issue=, empty when its creation failed) names name= since= and source=; the watcher
-#                  closes it after three consecutive reads (clear=) that see no dialog
+#                  closes it after three consecutive reads (clear=) with no dialog and a matching configured display
 #   phase=closed   the episode closed at cleared=, but its alert's close failed: the issue is still open. Each watcher
 #                  read that sees no dialog tries again, the clear comment unless commented= says when it went through,
 #                  then the close, and the file goes once the close does. A close owed holds no runner and refuses no
@@ -116,9 +116,8 @@ read_display() {
   display_detail="display ${actual:-unreadable (three probe attempts)}, expected $expected_display"
 }
 
-# Display faults take stable precedence so changing dialogs cannot reset their pending episode. Neither condition may
-# clear the other's episode. Display is one single-word alert kind (MAWS parses that title); the observed/expected mode
-# goes in its source and body.
+# Display faults take precedence for attribution. Display is one stable, single-word alert kind (MAWS parses that title);
+# the observed/expected mode goes in its source and body. Neither condition may clear the other's episode.
 is_blocked() {
   if [[ -n $display_fault ]]; then
     dialog=Display dialog_pid='' dialog_held='does not match its configured display' dialog_window='' seen=$display_detail
@@ -358,6 +357,11 @@ drop_state() {
 }
 consecutive() { # whether this read follows the watcher's last one closely enough to continue its count
   ((now_epoch - st_at <= reads_apart))
+}
+# Whether a blocked read continues the pending episode: configured machines track readiness regardless of attribution;
+# without a display setting the same dialog must persist.
+continues_pending() {
+  [[ -n $expected_display || $st_name == "$dialog" ]] && consecutive
 }
 
 # One holder at a time: the watcher tries once and skips its read when the hook holds it; the hook waits (its job is

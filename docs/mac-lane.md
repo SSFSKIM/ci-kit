@@ -1013,10 +1013,10 @@ mode (`--disabled` turns off the runner, not the alerts), and removes with `--un
 
 A display mismatch or three failed display probe attempts counts as a blocked desktop just like a dialog below.
 The stable condition name is `Display`; the source names the observed and expected mode. Changes from one wrong mode
-to another are still blocked ticks, not a new pending condition. A display fault takes precedence while present, so
-changing dialogs cannot reset its pending reads. With a matching display, dialogs still block; either condition keeps
-the shared episode open until both clear. The drain is unchanged: it holds every instance and stops runners only
-between jobs, never cancels a job already running when the display changes.
+to another are still blocked ticks, not a new pending condition. A display fault takes precedence for attribution while
+present. With a matching display, dialogs still block; either condition keeps the shared episode open until both clear.
+The drain is unchanged: it holds every instance and stops runners only between jobs, never cancels a job already
+running when the display changes.
 
 **One episode per machine, from either side.** The watcher and the job hook share `mac/hooks/dialog.sh`: the dialog
 list, the read-only `lsappinfo` and `window-list` reads, the source attribution and the episode, kept in
@@ -1024,11 +1024,13 @@ list, the read-only `lsappinfo` and `window-list` reads, the source attribution 
 whichever side sees the dialog first. The state is the machine's own: a machine comments on and closes only the issue
 it opened, never another machine's.
 
-- **Opening.** The watcher opens an episode when a dialog is up, in front or on screen without focus, on two
-  consecutive reads, at most 150 s apart (a dialog that loses focus but stays on screen is the same episode), so a prompt answered within the minute alerts nobody. A refused job opens one at once, since a job was
-  already lost.
-- **First seen** is the first read that saw the dialog: the watcher's single read, if a job comes before its second.
-  The state keeps it, so every later refusal and the title carry the same time.
+- **Opening.** The watcher opens an episode after two consecutive blocked reads, at most 150 s apart. With
+  `CI_KIT_DISPLAY` configured, these count machine readiness: any dialog or display fault counts, even if the attribution
+  name changes between reads. Without a display setting, both reads must see the same dialog, in front or on screen
+  without focus (losing focus while staying on screen does not break the streak). A prompt answered within the minute
+  alerts nobody. A refused job opens one at once, since a job was already lost.
+- **First seen** is the first read of that pending streak. A refused job adopts that time when it continues the same
+  streak before the watcher's second read. The state keeps it, so every later refusal and the title carry the same time.
 - **The source** is attributed once, when the episode opens: the same log queries as before, at most three of 10 s
   each. A refusal during the episode reuses it.
 - **Closing.** The watcher closes the episode after three consecutive reads with no dialog and a matching display (when configured), about three minutes: it
