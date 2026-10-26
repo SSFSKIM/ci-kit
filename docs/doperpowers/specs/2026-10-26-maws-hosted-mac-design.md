@@ -303,8 +303,8 @@ what a push adds. The config is not published: the filter removes `.github/maws-
   2. checkout, with `persist-credentials: false`;
   3. `./.github/actions/setup` with `e2e: 'true'` and `libreoffice` from `Hosted-LibreOffice`. On a GitHub-hosted
      macOS runner the setup action now first sets the display with `displayplacer`: 1920x1080, 60 Hz, scaling off.
-     It prints `ci-kit desktop: <macOS version> <cpu> cpus <n> memory <GiB> display <WxH>@<scale>x`. It caches the
-     pnpm store and Electron's download, as it already does on hosted Linux;
+     It prints `ci-kit desktop: <macOS version> <cpu> cpus <n> memory <GiB> display <WxH>@<scale>x`. It caches nothing
+     there: a cache saved on a `ci/hosted/` branch is restorable only from that branch (Decision Log, M1);
   4. remove the quarantine flag from `/Applications/LibreOffice.app` and `Google Chrome.app` (an ephemeral VM, and a
      first launch would wait on Gatekeeper);
   5. `pnpm "$SCRIPT"` (`Hosted-Script`) through `.github/scripts/gate-run.sh` with gate.yml's count pattern, its
@@ -365,7 +365,7 @@ Groups are admitted in waves, and the architect lands each wave with its run ids
 - **Spike timings** (test minutes, hosted against the mini host): document-app 2.5 against 2.1, transcript 5.1
   against 5.0, presentations 6.6 against 3.6, browser-chrome 1.4 against 1.0, connectors 3.9 against 3.9.
 - **Per-job overhead**: about 2.3 minutes of cold setup (pnpm install, poppler, the LibreOffice cask, the engine) and
-  about 1.5 minutes of build. The pnpm and Electron caches cut part of the setup. The build stays per job, because
+  about 1.5 minutes of build. No cache cuts it (Decision Log, M1). The build stays per job, because
   sharing it would need a token to read the private run's artifact.
 - **Cost**: the hosted Macs and maws-app's Linux jobs are free. The waiters cost the pool's cpus-2 spot rate.
 
@@ -397,8 +397,7 @@ Touches:
   `maws-app-tree.sh <MAWS git dir> <sha> <empty dir>`.
 - `.github/maws-app/README.md` and `.github/maws-app/hosted-mac.yml` (new): the overlay (The hosted workflow). Start
   from the spike's `README.md` and `.github/workflows/mac-e2e.yml` on maws-app's `main`.
-- `.github/actions/setup/action.yml`: the hosted macOS display step and the desktop line; the pnpm and Electron
-  caches extended to GitHub-hosted macOS.
+- `.github/actions/setup/action.yml`: the hosted macOS display step and the desktop line.
 - `.github/scripts/maws-app-tree.test.mjs` (new).
 - `.github/scripts/maws-app-scan.sh`, `.github/maws-app/gitleaks.toml` and `.github/scripts/maws-app-scan.test.mjs`
   (new): the secret scan. The allowlist is built from a full scan of the current filtered tree.
@@ -666,6 +665,18 @@ M3's wave, from a worktree of MAWS master:
     ids, 600 catalog-fixture keys, saved third-party pages, desk-hub vectors, RFC sample values, test fakes, a pinned
     digest). Exact values for test fakes, so a real secret beside one is still found; shapes or paths for recurring
     kinds.
+  - **No cache on the hosted Macs** (revised; review of M1, CI-opt): GitHub restores a cache only from the run's own
+    branch or the default branch, and every request is a fresh `ci/hosted/` branch, so nothing a job saved could be
+    read again. The executor's `warm` job seeded `main`'s caches on the schedule; with both caches hit, setup took
+    111 s against 99 s cold (plus a 22 s cold save), so it bought nothing and cost a hosted Mac four times a day. Both
+    the job and the hosted-macOS cache lines were dropped. The setup's time is brew and the LibreOffice cask, in
+    ci-kit's setup.
+  - **The secret scan publishes nothing it did not scan** (review of M1): gitleaks' `useDefault` also brings its
+    global path allowlist, which skips `pnpm-lock.yaml`; a path-wide allowlist entry would let any new key beside
+    a known one pass. Every published file is scanned, and allowlist entries are values or value shapes, a path only
+    as an extra constraint.
+  - **The filter reads only git objects**: an overlay file that is a symlink would have copied a host file into the
+    tree. The overlay, the redaction and the scan never follow a symlink out of the export.
   - Proof requests carry no `Sminos-Session` trailer: they are protocol commits shaped as the waiter's. `main`'s
     commit carries it.
 
