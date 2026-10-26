@@ -93,6 +93,9 @@ request commit carries `MAWS-Source-Tree: <the tree of sha>`, and it ran on `mac
 - [x] (2026-10-26 11:52Z) M3: admission waves W1 to W8, 26 groups on `HOSTED_MAC_E2E` (SSFSKIM/MAWS #160, #161, #163, #164, #165,
   #167, landed as 8588a4a7a, and #169 for browser-cua after its fix), with the prerequisites #156, #158 and #159;
   acceptance 8 in run 40316974655.
+- [x] (2026-10-26 14:2xZ) After M3: the hosted setup skips LibreOffice and Poppler for groups that do not use them
+  (MAWS #170, #171), and hosted jobs share one out/ build per tree (MAWS #173); terminal, c7, browser and transcript
+  ruled in after #172 (31 groups; the list's PR, MAWS #175, is with the architect).
 - [ ] M4: the collector and the before numbers; the after numbers seven days after M3's first wave lands;
   acceptance 9; Outcomes.
 
@@ -315,7 +318,10 @@ what a push adds. The config is not published: the filter removes `.github/maws-
   `NODE_OPTIONS=--max-old-space-size=5120` (gate.yml's own). Its steps:
   1. the stale guard;
   2. checkout, with `persist-credentials: false`;
-  3. `./.github/actions/setup` with `e2e: 'true'` and `libreoffice` from `Hosted-LibreOffice`. On a GitHub-hosted
+  3. `./.github/actions/setup` with `e2e: 'true'`, `libreoffice` from `Hosted-LibreOffice` and `poppler` from
+     `Hosted-Poppler`. ci-kit's setup leaves `cask:libreoffice` and `brew:poppler` out (its `skip` input) unless the
+     group needs them; the flags come from `LIBREOFFICE_E2E` and `POPPLER_E2E`, the latter derived from the specs and
+     pinned by a test (MAWS #170, #171). On a GitHub-hosted
      macOS runner the setup action now first sets the display with `displayplacer`: 1920x1080, 60 Hz, scaling off.
      It prints `ci-kit desktop: <macOS version> <cpu> cpus <n> memory <GiB> display <WxH>@<scale>x`. It caches nothing
      there: a cache saved on a `ci/hosted/` branch is restorable only from that branch (Decision Log, M1);
@@ -323,7 +329,12 @@ what a push adds. The config is not published: the filter removes `.github/maws-
      first launch would wait on Gatekeeper);
   5. `pnpm "$SCRIPT"` (`Hosted-Script`) through `.github/scripts/gate-run.sh` with gate.yml's count pattern, its
      output also kept in a file. It uses `MAWS_E2E_BUILD_CACHE=$RUNNER_TEMP/maws-e2e-build` and
-     `MAWS_E2E_BUILD_KEY=$GITHUB_SHA`, so the script builds its out/ variant itself, about 80 to 90 s;
+     `MAWS_E2E_BUILD_KEY=<the request's tree>`. A step before it restores the out/ variant another maws-app run built
+     from the same tree: the newest unexpired artifact `e2e-build-<tree>-<variant>`, read with the job's own token
+     (`actions: read`) after the API shows its run is the hosted-mac workflow on a `ci/hosted/` branch whose head has
+     this tree; e2e-build.sh checks its digest. With none, the job builds (about 2.5 minutes) and uploads its build
+     before the tests, kept a day; a failed lookup, download or upload only logs (MAWS #173, gate-offload Decision
+     Log 119);
   6. `if: always()`: the job's `summary` output, the count lines and Playwright's numbered failure lines from that
      file, at most 100 lines;
   7. on failure, or when `Hosted-Evidence` is true, upload `playwright-report/` and `test-results/` as
@@ -379,9 +390,12 @@ Groups are admitted in waves, and the architect lands each wave with its run ids
   the next lever is a fallback to the mini for a group whose request has not started, which is not in this design.
 - **Spike timings** (test minutes, hosted against the mini host): document-app 2.5 against 2.1, transcript 5.1
   against 5.0, presentations 6.6 against 3.6, browser-chrome 1.4 against 1.0, connectors 3.9 against 3.9.
-- **Per-job overhead**: about 2.3 minutes of cold setup (pnpm install, poppler, the LibreOffice cask, the engine) and
-  about 1.5 minutes of build. No cache cuts it (Decision Log, M1). The build stays per job, because
-  sharing it would need a token to read the private run's artifact.
+- **Per-job overhead**: setup was about 2.3 minutes cold (pnpm install, poppler, the LibreOffice cask, the engine);
+  with the two skips, an unflagged group's setup is about 72 s (pnpm install 31 s, pnpm itself 12 s, displayplacer
+  11 s, Claude Code 12 s). A package cache does not cut it (Decision Log, M1). The build is about 2.5 minutes for the
+  first job of a tree and seconds for a job that restores it (Decision Log, 2026-10-26 "the out/ build is shared").
+- **Measured queue** (maws-app, 24 h to 10-26 13:00Z, 182 hosted Mac jobs, mostly M3's acceptance waves): the 5
+  slots were all busy for 170 minutes; a job waited a median 3.2 minutes for a slot, p90 20, at most 38.
 - **Cost**: the hosted Macs and maws-app's Linux jobs are free. The waiters cost the pool's cpus-2 spot rate.
 
 ## Plan of Work
@@ -635,7 +649,8 @@ M3's wave, from a worktree of MAWS master:
   the pool's cost for the same wait.
 - 2026-10-26 (CI-opt): `macos-26` is pinned, and the display is 1920x1080@1x, set in setup.
 - 2026-10-26 (CI-opt): the out/ build stays in each hosted job. Sharing the private run's e2e-build artifact would
-  need a cross-repository token, and the build costs about 1.5 minutes of free hosted time.
+  need a cross-repository token, and the build costs about 1.5 minutes of free hosted time. Superseded the same day
+  by "the out/ build is shared" below.
 - 2026-10-26 review round 1 (CI-opt, on two adversarial reviews):
   - **The control plane is git refs.** The first draft read the hosted run through the REST API with MAWS's
     `GITHUB_TOKEN` and cancelled it there. That token is scoped to MAWS: it cannot cancel a maws-app run, and an
@@ -826,6 +841,25 @@ M3's wave, from a worktree of MAWS master:
     refuses a `RUNNER_TEMP` outside `[A-Za-z0-9/._-]` before it writes the key, since `GIT_SSH_COMMAND` passes
     through a shell and `UserKnownHostsFile` through ssh's own list parser. Real runners' paths are plain.
 
+- 2026-10-26 (CI-opt, after M3): a hosted job installs LibreOffice and Poppler only when its group needs them. ci-kit's
+  setup gained `skip` (ci-kit #165, v1 at 2b2c6bf): the job leaves out declared packages it names, with the
+  declaration's hash unchanged. MAWS's composite names `cask:libreoffice` and `brew:poppler` only on a GitHub-hosted
+  Mac, from the request's flags (MAWS #170, #171). Self-hosted Macs keep the whole declaration, since their unit,
+  packaged and default jobs carry no per-group flag. In document-app the packages went from 54.7 s to 13.5 s.
+  Rejected: a declaration per lane, which would split the one environment the spec "projects declare their own CI
+  environment" gives each repository.
+- 2026-10-26 (CI-opt, after M3): **the out/ build is shared** inside maws-app. The decision above weighed only the
+  private run's artifact. maws-app's own token, with `actions: read`, reads another maws-app run's artifact without
+  a second credential. Hosted time is not free when the 5 slots are full (Capacity, measured queue). The build is
+  about as long as a job's setup and tests together, and 112 of 166 hosted jobs started after a job on the same tree
+  could have built it. The key is the request's tree, not `$GITHUB_SHA`, since each group's request is its own
+  commit. The architect's conditions (gate-offload Decision Log 119): provenance by the API (workflow path,
+  `ci/hosted/` branch, head tree) before any download, one day's retention, an upload failure never red, and a build
+  from the published tree alone; the one stamp from outside it, the builder request's short commit and time in
+  `__MAWS_BUILD__`, is kept by a restoring job and compared by no hosted spec. Proof, document-app twice on one head:
+  the build in maws-app 40334080617 (152 s, 16.1 MB uploaded in 5 s), the restore in 40335627636 (4 s, the same
+  digest), 20 passed each. Rejected: the pool's e2e-build out/ in the request commit, which would push about 18 MB
+  to the public repository per request and run the secret scan over minified bundles.
 - 2026-10-26 (executor, M4's collector, 455a87d and 72c24a3, reviewed clean):
   - A Mac job is one whose runner name starts with `ci-kit-mac-` (host and guest). A waiter is an `e2e:*` job whose
     labels are exactly `self-hosted`, `ci-kit-pool`, `cpus-2`: no other e2e job asks for cpus-2 today (desk-web is
