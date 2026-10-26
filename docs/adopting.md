@@ -258,14 +258,19 @@ docker build ${cache[@]+"${cache[@]}"} -t myimage .   # the ${...+...} form keep
 ```
 
 The caller's `on:` gains the seeds: its default branch (here `main`) in `push: branches`, and a schedule, for example
-just after the ISO week turns:
+just after the ISO week turns and again that morning:
 
 ```yaml
   push:
     branches: ['ci/**', main]
   schedule:
-    - cron: '10 0 * * 1'
+    - cron: '23 0 * * 1'
+    - cron: '47 6 * * 1'
 ```
+
+GitHub delays scheduled runs under load, worst at the start of each hour, and may drop them: doperpowers' first seed,
+at 00:10 on 2026-10-26, never ran, and its week's scope stayed cold until a seed by hand. Hence a minute away from the
+hour and a second fire, which seeds a dropped week and otherwise rebuilds a warm scope, finding every layer cached.
 
 A schedule runs on the default branch and plans every `build_cache` gate. A push to the default branch plans the
 `build_cache` gates whose `paths` match what it changed since the branch's tip before it, and every one of them when
