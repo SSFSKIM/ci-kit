@@ -31,7 +31,7 @@ function command(bin, args, { cwd, env, stream = false }) {
   });
 }
 
-export async function applySetup({ root = process.env.GITHUB_WORKSPACE || process.cwd(), mode = 'job', install = false, platform = process.platform } = {}) {
+export async function applySetup({ root = process.env.GITHUB_WORKSPACE || process.cwd(), mode = 'job', install = false, skip = '', platform = process.platform } = {}) {
   if (!['job', 'bake'].includes(mode)) throw new Error(`mode: expected job or bake, got ${mode}`);
   if (!['linux', 'darwin'].includes(platform)) throw new Error(`unsupported setup platform: ${platform}`);
   const start = performance.now();
@@ -39,6 +39,12 @@ export async function applySetup({ root = process.env.GITHUB_WORKSPACE || proces
   // Lane authorization belongs to the planner. This action can also be called from a repository's own workflow,
   // and validates its declaration without trying to infer visibility from an optional Actions event payload.
   const { setup } = parseConfig(await readFile(resolve(root, '.github/ci-kit.yml'), 'utf8'), { isPrivate: true });
+  const skipped = new Set(skip.split(/\s+/).filter(Boolean));
+  if (skipped.size && mode !== 'job') throw new Error('skip input: only supported in job mode');
+  const declared = new Set(['apt', 'brew', 'cask'].flatMap((kind) => setup[kind].map((name) => `${kind}:${name}`)));
+  for (const name of skipped) {
+    if (!declared.has(name)) throw new Error(`skip input: ${name} is not a declared apt:name, brew:name or cask:name package`);
+  }
   let scriptBytes;
   if (setup.script) {
     try { scriptBytes = await readFile(resolve(root, setup.script)); }
@@ -64,9 +70,12 @@ export async function applySetup({ root = process.env.GITHUB_WORKSPACE || proces
     return result.stdout;
   }
 
-  const apt = platform === 'linux' ? unique(setup.apt) : [];
-  const brew = platform === 'darwin' ? unique(setup.brew) : [];
-  const cask = platform === 'darwin' ? unique(setup.cask) : [];
+  // Filter only the job's package requests, never the declaration used for image identity.
+  const packages = (kind) => unique(setup[kind]).filter((name) => !skipped.has(`${kind}:${name}`));
+  const apt = platform === 'linux' ? packages('apt') : [];
+  const brew = platform === 'darwin' ? packages('brew') : [];
+  const cask = platform === 'darwin' ? packages('cask') : [];
+  if (skipped.size) console.log(`ci-kit setup: skipped ${[...skipped].join(' ')}`);
   const installed = [];
   const quarantined = [];
   if (apt.length) {
@@ -142,7 +151,8 @@ export async function applySetup({ root = process.env.GITHUB_WORKSPACE || proces
 
   if (setup.script) await run('bash', [resolve(root, setup.script)], `setup.script ${setup.script}`, true);
   const seconds = ((performance.now() - start) / 1000).toFixed(1);
-  console.log(`ci-kit setup: declared apt ${apt.length}, brew ${brew.length}, cask ${cask.length}, script ${setup.script ? 'yes' : 'no'}; installed ${installed.join(' ') || 'nothing'} in ${seconds} s`);
+  const count = (kind) => (kind === 'apt' ? platform === 'linux' : platform === 'darwin') ? unique(setup[kind]).length : 0;
+  console.log(`ci-kit setup: declared apt ${count('apt')}, brew ${count('brew')}, cask ${count('cask')}, script ${setup.script ? 'yes' : 'no'}; installed ${installed.join(' ') || 'nothing'} in ${seconds} s`);
   if (install && setup.install) await run('bash', ['-eo', 'pipefail', '-c', setup.install], 'setup.install', true);
   return { hash, installed: installed.join(' '), stale, quarantined };
 }

@@ -9,6 +9,10 @@ inputs:
     description: Also run setup.install after the packages and script
     required: false
     default: 'false'
+  skip:
+    description: Whitespace-separated declared apt:name, brew:name or cask:name packages to omit for this job (does not change the setup hash)
+    required: false
+    default: ''
 outputs:
   hash:
     description: This commit's setup hash (none without a declaration)

@@ -136,6 +136,24 @@ Inputs: `root` defaults to the workspace; `install` defaults to `false`. With `t
 runs after the script. The gates workflow uses the default because it keeps its own Install step, and skips the
 action altogether for an empty declaration or a gate with `setup: false`.
 
+`skip` (default empty) omits declared packages this job does not need, without changing the declaration or its hash:
+
+```yaml
+- uses: SSFSKIM/ci-kit/setup@v1
+  with:
+    install: true
+    skip: ${{ runner.os == 'macOS' && !matrix.libreoffice && 'cask:libreoffice' || '' }}
+```
+
+Use whitespace-separated `apt:name`, `brew:name` or `cask:name` entries, matching the declaration exactly (including
+any tap prefix). For example, `cask:libreoffice brew:owner/tap/tool`. Duplicates are ignored; malformed or undeclared
+entries fail before package commands or scripts run, so a typo cannot silently leave an expensive install enabled.
+Entries declared for the other platform are accepted but have no effect there. The log names the skipped entries;
+`installed` still names only packages actually installed. An entirely skipped list needs no presence query. This
+omits direct package requests, not dependencies of other packages, and never uninstalls anything already present.
+The script and optional install command still run unchanged; the caller must ensure neither needs the omitted
+packages. Image bakes always apply the full declaration; `skip` is a job-only action input, not a bake CLI option.
+
 Outputs: `hash`, the commit's setup hash (`none` without a declaration); `installed`, space-separated `apt:<name>`,
 `brew:<name>`, `cask:<name>` entries (empty if nothing was installed); `stale`, `true` only when an image hash was
 present and differed. The hash includes the canonical package lists, Node, pnpm, install command, script path and

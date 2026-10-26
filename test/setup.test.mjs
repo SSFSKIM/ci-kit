@@ -65,7 +65,7 @@ if (name === 'brew') {
 if (name === 'xattr') { code = (state.quarantined ?? []).includes(args.at(-1)) ? 0 : 1; out = code ? '' : '0081;test'; }
 process.stdout.write(out); process.stderr.write(err); process.exit(code);
 `;
-  const env = { ...process.env, FIXTURE: root, CI_KIT_SETUP_HASH: '', GITHUB_OUTPUT: '', CI: '', CI_KIT_SETUP_MODE: '', INPUT_ROOT: root, INPUT_INSTALL: 'false' };
+  const env = { ...process.env, FIXTURE: root, CI_KIT_SETUP_HASH: '', GITHUB_OUTPUT: '', CI: '', CI_KIT_SETUP_MODE: '', INPUT_ROOT: root, INPUT_INSTALL: 'false', INPUT_SKIP: '' };
   for (const [name, key] of Object.entries({ 'dpkg-query': 'DPKG_QUERY', 'apt-get': 'APT_GET', sudo: 'SUDO', brew: 'BREW', xattr: 'XATTR' })) {
     const path = join(root, name);
     writeFileSync(path, shim, { mode: 0o755 });
@@ -98,6 +98,78 @@ test('Linux checks once, ignores residual config, and installs only missing name
   assert.deepEqual(calls.filter((c) => c.name === 'apt-get').map((c) => c.args), [['update'], ['install', '-y', '--no-install-recommends', 'cowsay']]);
   assert.equal(calls.find((c) => c.name === 'apt-get' && c.args[0] === 'install').frontend, 'noninteractive');
   assert.match(r.stdout, /ci-kit setup: declared apt 2, brew 0, cask 0, script no; installed apt:cowsay in [\d.]+ s/);
+});
+
+test('a job skips only the named kind, preserves the declaration hash, and still runs script and install', (t) => {
+  const fields = { apt: ['libreoffice'], brew: ['libreoffice', 'owner/tap/tool'], cask: ['libreoffice'], script: 'setup.sh', install: 'cat ready > installed' };
+  const f = fixture(t, fields);
+  f.script('printf "%s" "$CI_KIT_SETUP_MODE" > ready');
+  const hash = setupHash(setup(fields), readFileSync(join(f.root, 'setup.sh')));
+  const declaration = readFileSync(join(f.root, '.github/ci-kit.yml'), 'utf8');
+  const r = f.run({ platform: 'darwin', skip: '  cask:libreoffice\n brew:owner/tap/tool\t cask:libreoffice ', install: true }, { CI_KIT_SETUP_HASH: hash });
+  successful(r);
+  assert.equal(r.result.hash, hash);
+  assert.equal(r.result.stale, false);
+  assert.equal(r.result.installed, 'brew:libreoffice');
+  assert.deepEqual(f.calls().map((c) => c.args), [
+    ['info', '--json=v2', '--installed', '--formula'], ['install', 'libreoffice'],
+  ]);
+  assert.match(r.stdout, /skipped cask:libreoffice brew:owner\/tap\/tool/);
+  assert.equal(readFileSync(join(f.root, 'installed'), 'utf8'), 'job');
+  assert.equal(readFileSync(join(f.root, '.github/ci-kit.yml'), 'utf8'), declaration);
+});
+
+test('Linux skips declared apt names and accepts skips declared for the other platform', (t) => {
+  const f = fixture(t, { apt: ['zsh', 'cowsay'], cask: ['libreoffice'] });
+  const r = f.run({ skip: 'apt:zsh cask:libreoffice' });
+  successful(r);
+  assert.equal(r.result.installed, 'apt:cowsay');
+  assert.deepEqual(f.calls().filter((c) => c.name === 'apt-get').map((c) => c.args), [
+    ['update'], ['install', '-y', '--no-install-recommends', 'cowsay'],
+  ]);
+});
+
+test('skipping the whole active package list avoids even its presence query', (t) => {
+  const f = fixture(t, { apt: ['zsh'], brew: ['hello'], cask: ['libreoffice'] }, { queryCode: 2 });
+  for (const platform of ['linux', 'darwin']) {
+    const r = f.run({ platform, skip: 'apt:zsh brew:hello cask:libreoffice' });
+    successful(r);
+    assert.equal(r.result.installed, '');
+  }
+  assert.deepEqual(f.calls(), []);
+});
+
+test('invalid and undeclared skips fail before any package or script side effects', (t) => {
+  const f = fixture(t, { apt: ['zsh'], cask: ['libreoffice'], script: 'setup.sh' });
+  f.script('touch ran');
+  for (const skip of ['libreoffice', 'casks:libreoffice', 'cask:', 'cask:libreoffice,cask:other', 'cask:libreoffic', 'brew:libreoffice', 'apt:zsh cask:typo']) {
+    const r = f.run({ skip });
+    assert.equal(r.status, 1, skip);
+    assert.match(r.stderr, /skip.*declared.*(apt|brew|cask):/i);
+  }
+  assert.deepEqual(f.calls(), []);
+  assert.equal(existsSync(join(f.root, 'ran')), false);
+});
+
+test('a bake cannot omit packages while recording the full declaration hash', (t) => {
+  const f = fixture(t, { apt: ['zsh'] });
+  const r = f.run({ mode: 'bake', skip: 'apt:zsh' });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /skip.*job/i);
+  assert.deepEqual(f.calls(), []);
+});
+
+test('the JavaScript action forwards skip and writes the unchanged hash with no installed packages', (t) => {
+  const fields = { apt: ['zsh'], brew: ['hello'], cask: ['libreoffice'] };
+  const f = fixture(t, fields, { queryCode: 2 });
+  const output = join(f.root, 'outputs');
+  const r = spawnSync(process.execPath, [ACTION], {
+    env: { ...f.env, INPUT_SKIP: 'apt:zsh brew:hello cask:libreoffice', GITHUB_OUTPUT: output }, encoding: 'utf8',
+  });
+  successful(r);
+  assert.equal(readFileSync(output, 'utf8'), `hash=${setupHash(setup(fields))}\ninstalled=\nstale=false\n`);
+  assert.match(r.stdout, /skipped .*cask:libreoffice/);
+  assert.deepEqual(f.calls(), []);
 });
 
 test('a matching image still checks packages and runs the script, but needs no install', (t) => {
@@ -238,6 +310,7 @@ test('the action manifest uses the runner Node and a resolvable entrypoint', () 
   assert.equal(action.runs.using, 'node24');
   assert.ok(existsSync(new URL(`../setup/${action.runs.main}`, import.meta.url)));
   assert.equal(action.inputs.install.default, 'false');
+  assert.equal(action.inputs.skip.default, '');
   assert.deepEqual(Object.keys(action.outputs).sort(), ['hash', 'installed', 'stale']);
 });
 
