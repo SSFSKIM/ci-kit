@@ -100,7 +100,7 @@ request commit carries `MAWS-Source-Tree: <the tree of sha>`, and it ran on `mac
 
 | Desktop | Machine | Display | Backing scale | Dock | Visible frame |
 |---|---|---|---|---|---|
-| Mac mini host (`ci-kit-mac-mini`) | M4 Mac mini, 16 GiB, macOS 27.0 | 2560x1440, BetterDisplay HiDPI virtual display | 2x | shown, bottom, tile size 32 (over ssh; a job's line pending) | a job's `MAWS desktop:` line pending |
+| Mac mini host (`ci-kit-mac-mini`) | M4 Mac mini, 16 GiB, macOS 27.0 | 2560x1440, BetterDisplay HiDPI virtual display | 2x | shown (`dock autohide off`), bottom, tile size 32 | 2560x1358 at 0,52 (run 40300686375, job 121498336010) |
 | Mac mini guest (`maws-vm-job-*`) | Tart VM, 4 GiB, macOS 27 golden | 2560x1440, scaling on | 2x | macOS's default (ci-kit never sets it; a job's line pending) | a job's line pending |
 | Hosted (`macos-26`) | Apple M1 (Virtual), 3 CPUs, 7 GiB, macOS 26.6.2 | 1920x1080, set by the setup step | 1x | hidden, set by the setup step | 1920x1049 at 0,0 (run 40293725380) |
 
