@@ -242,7 +242,8 @@ Each request's message is `MAWS <sha12> e2e:<group>` and ends with these trailer
 `MAWS-Source` is the run's own commit. Under ci-gate that is its nonce commit, whose tree is the requested sha's and
 whose first parent is the requested sha (`scripts/ci-gate.sh`, `commit-tree "$sha^{tree}" -p "$sha"`). So the tree
 the architect recomputes is the requested sha's. The check: run `maws-app-tree.sh <MAWS git dir> <MAWS-Source>
-<empty dir>`, `git add -A` it in a fresh repository, and compare `git write-tree` with the request's tree. `v1` was
+<empty dir>`, `git add -A --force` it in a fresh repository (MAWS tracks files its own `.gitignore` matches, which a
+plain `-A` drops), and compare `git write-tree` with the request's tree. `v1` was
 the spike's filter, which lived outside MAWS. `v2` is the first filter in MAWS; any change to the filter or the
 overlay bumps it.
 
@@ -262,8 +263,8 @@ From the MAWS tree (`git archive <sha>`, never the working tree), the filter rem
 
 It replaces the owner's four personal addresses with placeholders: `supremekim17@gmail.com` and
 `supremekim17@icloud.com` become `owner@example.com`, and the two test accounts become `test-account-1@example.com`
-and `test-account-2@example.com`. The redaction is Python 3 reading and writing with `newline=''`, so line endings are
-kept. The four specs that write evidence under `docs/doperpowers/evidence/<x>` when their SHOTS or EVIDENCE flags are
+and `test-account-2@example.com`. The redaction is Python 3 working on bytes, in every file, so line endings are kept
+and a file that is not UTF-8 is redacted too. The four specs that write evidence under `docs/doperpowers/evidence/<x>` when their SHOTS or EVIDENCE flags are
 set (c12-budget, c12-live, c12-prerun, code-editor) are checked in M1 for a recursive mkdir. The hosted lane never
 sets those flags.
 
@@ -501,8 +502,8 @@ Proves: acceptance 9.
 
 From a MAWS worktree on the milestone's branch:
 
-    .github/scripts/maws-app-tree.sh "$(git rev-parse --git-common-dir)" HEAD /tmp/maws-app-tree-a   # prints v2
-    .github/scripts/maws-app-tree.sh "$(git rev-parse --git-common-dir)" HEAD /tmp/maws-app-tree-b
+    .github/scripts/maws-app-tree.sh "$(git rev-parse --absolute-git-dir)" HEAD /tmp/maws-app-tree-a   # prints v2
+    .github/scripts/maws-app-tree.sh "$(git rev-parse --absolute-git-dir)" HEAD /tmp/maws-app-tree-b
     diff -rq /tmp/maws-app-tree-a /tmp/maws-app-tree-b && echo deterministic
     node --test .github/scripts/maws-app-tree.test.mjs
 
@@ -647,6 +648,27 @@ M3's wave, from a worktree of MAWS master:
     skipping on the 3-CPU, 1x box (a hardware-dependent skip) would stay green; a later check (ci-gate comparing a
     hosted job's skipped count with the mini's last run of the group) would catch it.
 
+- 2026-10-26 (executor, M1, on MAWS 24eb6903a; CI-opt's revisions in place):
+  - **A request's tree is the filter's output added with `git add -A --force`** (Provenance revised): MAWS tracks 175
+    files its own `.gitignore` matches (`spikes/p3-store/s1/out/*` and the like), which `-A` drops in a fresh
+    repository. The spike's 648b7e88 lacks them for that reason.
+  - **Concrete Steps pass `--absolute-git-dir`**, not `--git-common-dir`: from a worktree the common dir resolves
+    `HEAD` in the main checkout. The filter resolves `<sha>` to a commit once, at its start.
+  - **The redaction works on bytes, in every file** (revised from text I/O with `newline=''`), so a non-UTF-8 file is
+    redacted too. Today the 11 files that hold an address are all text.
+  - **The desktop line reads `NSScreen.mainScreen`**, and setup fails on any display other than 1920x1080@1x, so a
+    hosted result is a property of the group, as the architect asked.
+  - **The result body** is the count lines and Playwright's numbered failure lines, at most 100; when the stale guard
+    fired, its line.
+  - **Nothing in the scanned tree can quiet the scan**: inline `gitleaks:allow` and a `.gitleaksignore` in the tree
+    are not honoured, and `--config` takes precedence over a `.gitleaks.toml` there.
+  - **The allowlist**: 8 entries cover the full scan's 3,413 findings in 78 files, all false positives (2,745 message
+    ids, 600 catalog-fixture keys, saved third-party pages, desk-hub vectors, RFC sample values, test fakes, a pinned
+    digest). Exact values for test fakes, so a real secret beside one is still found; shapes or paths for recurring
+    kinds.
+  - Proof requests carry no `Sminos-Session` trailer: they are protocol commits shaped as the waiter's. `main`'s
+    commit carries it.
+
 - 2026-10-26 (executor, M4's collector, 455a87d and 72c24a3, reviewed clean):
   - A Mac job is one whose runner name starts with `ci-kit-mac-` (host and guest). A waiter is an `e2e:*` job whose
     labels are exactly `self-hosted`, `ci-kit-pool`, `cpus-2`: no other e2e job asks for cpus-2 today (desk-web is
@@ -676,6 +698,22 @@ M3's wave, from a worktree of MAWS master:
   its own repository whatever the other's visibility.
 - **The pool image has no `gh`** (ci-kit `pool/image/Dockerfile`; the actions-runner base installs git, curl and jq).
   The waiter needs none: git, ssh, python3 and jq.
+- **M1's public half** (maws-app runs 40272084391 request green, 20 passed at `display 1920x1080@1x`;
+  40272130960/40272211679 cancel; 40272348101 ref deleted before start, stale guard in 6 s; 40272478183/40272483081
+  cancel 2 s after its request, cancelled during `plan`; 40272484704 past deadline, stale in 4 s; 40273379322 sweep by
+  dispatch): `main` is 7beb2bfd, the v2 tree of MAWS 1f7c9581d with parent 4520bbab, moved after a clean full-tree
+  scan; ruleset 25857219 on `main` (deletion, non-fast-forward, no bypass), checked through the API only.
+  - **Deleting a `ci/hosted/` ref starts no run**, so the waiter's two-ref delete is inert.
+  - **A cancelled request still writes a result**: `result`'s `always()` runs on a run concurrency cancelled, even one
+    cancelled during `plan`. The waiter's cleanup deletes a `ci/result/<suffix>` that appears after its cancel; the
+    sweep takes any it misses.
+  - **The hosted Mac queue was seconds** on 10-26: each e2e job started 3 to 5 s after `plan`.
+  - **gitleaks' default rules pass an obviously fake PAT** (a repeated pattern); random ones are found. Tests and
+    acceptance 6's scratch token use random values.
+  - **A `git` call in the waiter's `--filter=blob:none` git dir lazily fetches** a missing object from maws-app, and a
+    MAWS sha there fails `not our ref`: the waiter keeps its MAWS-side git calls out of that `GIT_DIR`.
+  - **ci-kit's setup installs the LibreOffice cask on every macOS job**, `Hosted-LibreOffice` or not (the input is
+    Linux-only); it is part of the setup's brew time, and only ci-kit could skip it.
 - **`gh api` withholds a job log that holds terminal escapes** unless given `--allow-escape-sequences`; M4's collector
   passes it, or no `hosted: no result by` red could be read. The collector over all of 10-25: 383 Mac jobs, queue
   median 26.6 and p90 94.6 minutes, 1,082 Mac e2e job-minutes, in line with Purpose.
