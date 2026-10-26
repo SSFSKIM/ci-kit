@@ -750,6 +750,9 @@ M3's wave, from a worktree of MAWS master:
   `connection.ts:44`; the architect owns the fix). `ci-gate-alerts.test.mjs:57` spread static's env into gate-plan,
   `HOSTED_MAC_E2E` included, so a listed group left it no Mac job; it now passes the list empty. SSFSKIM/MAWS#164,
   landed as f752d9707 (gate-offload Decision Log 111).
+- 2026-10-26 (executor, M3 wave 7, tree e7ab5da39): **admitted** dashboard (12 passed), design (19), design-systems
+  (8) and tools (14), 3/3 in runs 40305202999, 40305270673 and 40305340291, counts equal to the host baseline
+  40300686375; none set aside. SSFSKIM/MAWS#165.
 - 2026-10-26 (architect, after wave 6): **W8**, one more three-run wave with a baseline on current master for c7,
   panel, browser and terminal. Every set-aside red so far ran on c9803aa1a, before #159 changed the hosted window's
   geometry, and tools went green by that move alone; terminal's 3 lines fit a few rows' difference across its
