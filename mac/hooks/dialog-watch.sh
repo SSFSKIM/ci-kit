@@ -6,6 +6,8 @@
 #
 # - Each run reads the frontmost app and the windows on screen, read-only (dialog.sh's lsappinfo read and window-list;
 #   no AppleScript, no GUI action), so a dialog on screen without focus counts as one in front does.
+# - When CI_KIT_DISPLAY is configured, read_display checks it too (dialog.sh, including its bounded retries). A
+#   mismatch or persistent unreadable display shares the episode below; no GUI action restores it here.
 # - A dialog on two consecutive reads opens the machine's episode: the source is attributed once, and the alert issue
 #   is opened, unless the job hook opened it first. Three consecutive reads with no dialog close it (2026-10-17: a
 #   dismissed prompt came back within a minute, twice), and its alert with it: a close that fails is tried again at
@@ -35,7 +37,7 @@ domain=gui/$(id -u)
 # One read's effect on the episode, under the lock.
 watch_read() {
   load_state
-  if is_dialog; then
+  if is_blocked; then
     case $st_phase in
       open)
         st_at=$now_epoch
@@ -74,10 +76,10 @@ watch_read() {
         fi
         st_at=$now_epoch
         if ((st_clear >= clear_reads)); then
-          log "$seen: no dialog on $clear_reads reads in a row; the episode of $st_name since $st_since closes"
+          log "$seen: $clear_condition on $clear_reads reads in a row; the episode of $st_name since $st_since closes"
           close_episode
         else
-          log "$seen: no dialog ($st_clear of $clear_reads reads)"
+          log "$seen: $clear_condition ($st_clear of $clear_reads reads)"
           save_state || true
         fi
         ;;
@@ -94,7 +96,9 @@ first_read() {
   st_phase=pending st_name=$dialog st_since=$now st_at=$now_epoch st_source='' st_issue='' st_clear=0 st_clear_since=''
   st_cleared='' st_commented=''
   save_state || true
-  log "$seen: a system dialog; the episode opens if the next read sees it too"
+  local condition='a system dialog'
+  [[ $dialog != Display ]] || condition='a display fault'
+  log "$seen: $condition; the episode opens if the next read sees it too"
 }
 
 # What an instance's runner is doing: `busy <pid>…`, `idle <listener log> <size>` or `stopped` (runner-state.py, which
@@ -223,12 +227,13 @@ note_windows() {
 held=
 read_front
 read_windows
+read_display
 clock
 note_windows
-[[ -n $name || -n $screen_dialog ]] || log "could not read the frontmost app; nothing changes"
-if [[ -e $dialog_state || -e $drain_marker ]] || is_dialog; then
+[[ -n $name || -n $screen_dialog || -n $display_fault ]] || log "could not read the frontmost app; nothing changes"
+if [[ -e $dialog_state || -e $drain_marker ]] || is_blocked; then
   if lock_state 0; then
-    [[ -z $name && -z $screen_dialog ]] || watch_read
+    [[ -z $name && -z $screen_dialog && -z $display_fault ]] || watch_read
     hold
     unlock_state
   else

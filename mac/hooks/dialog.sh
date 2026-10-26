@@ -1,7 +1,7 @@
 #!/bin/bash
 # Sourced by desktop-check.sh (the job-started hook) and dialog-watch.sh (the dialog watcher, every 60 s), so both work
 # from one definition of a system dialog, the same read-only reads of the frontmost app and the windows on screen, one
-# source attribution, and one dialog episode per machine with its alert issue (docs/mac-lane.md). The caller sets
+# source attribution, the optional expected-display check, and one desktop-blocking episode per machine with its alert issue (docs/mac-lane.md). The caller sets
 # log_tag before sourcing.
 #
 # The episode is the state file below, rewritten whole (a rename) under a lock, so whichever side sees a dialog first
@@ -79,6 +79,49 @@ is_dialog() {
   # Without a frontmost read, which app has focus is not known.
   dialog_held="is on screen${name:+ without focus}"
   seen+="; on screen: $dialog ($dialog_window)"
+}
+
+# The configured main display is part of the desktop contract, not a mode to set here. cursor-park --describe is
+# read-only and reports logical points and backing scale (the same probe as desktop-posture). A failed/invalid read
+# gets two retries, each with a 1 s deadline: a transient miss need not hold a machine, but three misses refuse a job
+# rather than run blind. The watcher still needs two blocked ticks to open and three clear ticks to close an episode.
+# No setting preserves the old behavior, including not calling the helper.
+expected_display=${CI_KIT_DISPLAY:-}
+clear_condition='no dialog'
+[[ -z $expected_display ]] || clear_condition+=' and the configured display matches'
+display_fault='' display_detail=''
+read_display() {
+  local out actual='' attempt
+  display_fault='' display_detail=''
+  [[ -n $expected_display ]] || return 0
+  out=$(mktemp) || out=''
+  if [[ -n $out ]]; then
+    for attempt in 1 2 3; do
+      if bounded 1 "${CI_KIT_CURSOR_PARK:-$(dirname "${BASH_SOURCE[0]}")/cursor-park}" --describe >"$out" 2>/dev/null; then
+        actual=$(head -c 512 "$out")
+        [[ $actual =~ ^[1-9][0-9]*x[1-9][0-9]*@[1-9][0-9]*([.][0-9]+)?x$ ]] && break
+      fi
+      actual=''
+    done
+    rm -f "$out" || true
+  fi
+  # Numeric comparison accepts an equivalent scale such as 2.0; dimensions stay integer points.
+  if [[ -n $actual ]] && awk -v actual="$actual" -v expected="$expected_display" 'BEGIN {
+    split(actual, a, /[x@]/); split(expected, e, /[x@]/);
+    exit !(a[1] == e[1] && a[2] == e[2] && a[3] + 0 == e[3] + 0)
+  }'; then
+    return 0
+  fi
+  display_fault=1
+  display_detail="display ${actual:-unreadable (three probe attempts)}, expected $expected_display"
+}
+
+# Dialogs take precedence when both are wrong, but neither condition may clear the other's episode. Display is one
+# stable, single-word alert kind (MAWS parses that title); the observed/expected mode goes in its source and body.
+is_blocked() {
+  is_dialog && return 0
+  [[ -n $display_fault ]] || return 1
+  dialog=Display dialog_held='does not match its configured display' seen=$display_detail
 }
 
 # The frontmost app, read with lsappinfo alone: AppleScript or System Events would raise TCC prompts.
@@ -220,6 +263,7 @@ dialog_source() {
   local predicate out process
   source='source unknown' source_line=''
   case $dialog in
+    Display) source=$display_detail; return 0 ;;
     UserNotificationCenter) predicate='process == "socketfilterfw" AND eventMessage CONTAINS "doask: sending prompt for a filtering decision on:"' ;;
     SecurityAgent) predicate='process == "security" OR eventMessage CONTAINS "SecKeychain" OR (eventMessage CONTAINS "SecurityAgent" AND (eventMessage CONTAINS[c] "spawn" OR eventMessage CONTAINS[c] "launch"))' ;;
     *) return 0 ;;
@@ -387,7 +431,7 @@ close_alert() {
     read_alert_token
     if [[ -z $st_commented ]]; then
       if alert_gh issue comment "$st_issue" --repo "$alert_repo" \
-        --body "cleared at $st_cleared: no dialog on $clear_reads reads in a row since $st_clear_since" >/dev/null 2>&1; then
+        --body "cleared at $st_cleared: $clear_condition on $clear_reads reads in a row since $st_clear_since" >/dev/null 2>&1; then
         st_commented=$now
       else
         log "dialog alert clear comment failed or timed out" || true

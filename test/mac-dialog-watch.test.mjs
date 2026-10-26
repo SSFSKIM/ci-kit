@@ -913,3 +913,53 @@ test('a window list that cannot be read is logged when that starts and when it e
   run = d.watch(terminal);
   assert.equal(count(run, 'the windows on screen read again'), 1, 'once');
 });
+
+test('display drift between jobs opens one episode, holds every runner, and clears only after matching reads', () => {
+  const d = desktop({ env: { CI_KIT_DISPLAY: '2560x1440@2x', CI_KIT_MACHINE: 'ec2' } });
+  d.instance(2, 'idle');
+  d.display('1920x1080@1x');
+  assert.equal(d.watch(terminal).state.phase, 'pending');
+  const held = d.watch(terminal);
+  assert.equal(held.state.phase, 'open');
+  assert.match(held.state.source, /display 1920x1080@1x, expected 2560x1440@2x/);
+  assert.ok(held.marker);
+  assert.equal(held.launchctl.filter((line) => line.startsWith('kill SIGTERM')).length, 2);
+  const refused = d.hook(terminal);
+  assert.equal(refused.status, 1);
+  assert.equal(refused.ghCalls.filter((call) => call[1] === 'create').length, 1);
+  d.display('2560x1440@2x');
+  assert.equal(d.watch(terminal).state.clear, '1');
+  d.display('fail');
+  assert.equal(d.watch(terminal).state.clear, '0', 'unreadable is not recovery');
+  d.display('2560x1440@2x');
+  assert.equal(d.watch(terminal).state.clear, '1');
+  assert.equal(d.watch(terminal).state.clear, '2');
+  const clear = d.watch(terminal);
+  assert.equal(clear.state, null);
+  assert.equal(clear.marker, null);
+  assert.equal(clear.ghCalls.filter((call) => call[1] === 'close').length, 1);
+});
+
+test('a display fault is seen even without a frontmost read; changing wrong modes still opens the episode', () => {
+  const d = desktop({ env: { CI_KIT_DISPLAY: '2560x1440@2x' } });
+  d.display('1920x1080@1x');
+  assert.equal(d.watch('').state.phase, 'pending');
+  d.display('1280x720@1x');
+  const run = d.watch('');
+  assert.equal(run.state.phase, 'open');
+  assert.ok(run.marker);
+});
+
+test('a watcher ignores transient probe misses but holds persistent ones; a dialog and display share recovery', () => {
+  const d = desktop({ env: { CI_KIT_DISPLAY: '2560x1440@2x' } });
+  d.display('fail\n2560x1440@2x');
+  assert.equal(d.watch(terminal).state, null);
+  d.display('fail');
+  assert.equal(d.watch(terminal).state.phase, 'pending');
+  assert.equal(d.watch(terminal).state.phase, 'open');
+  d.display('2560x1440@2x');
+  assert.equal(d.watch(asnShape('SecurityAgent')).state.clear, '0');
+  d.watch(terminal);
+  d.watch(terminal);
+  assert.equal(d.watch(terminal).state, null);
+});

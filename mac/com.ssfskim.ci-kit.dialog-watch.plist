@@ -3,7 +3,7 @@
 <!--
   The mac lane's dialog watcher (docs/mac-lane.md): every 60 s, in the logged-in user's GUI session where lsappinfo
   reads the frontmost app, it runs the dialog-watch.sh that mac/install.sh copies into the runner's hooks. install.sh
-  fills in __HOOKS_DIR__, __LOG_DIR__, __PATH__ and __MACHINE__ and installs it as
+  fills in __HOOKS_DIR__, __LOG_DIR__, __PATH__, __MACHINE__ and __DISPLAY__ and installs it as
   ~/Library/LaunchAgents/com.ssfskim.ci-kit.dialog-watch.plist.
 -->
 <plist version="1.0">
@@ -32,6 +32,8 @@
       <string>en_US.UTF-8</string>
       <key>CI_KIT_MACHINE</key>
       <string>__MACHINE__</string>
+      <key>CI_KIT_DISPLAY</key>
+      <string>__DISPLAY__</string>
     </dict>
     <!-- What it does goes to the hooks log; stderr is for crashes. -->
     <key>StandardOutPath</key>

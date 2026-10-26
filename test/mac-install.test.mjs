@@ -839,3 +839,50 @@ test('--vm without Tart on the PATH is a missing prerequisite, and nothing is in
   assert.match(result.stderr, /missing: Tart \(the VM lane\)/);
   assert.equal(existsSync(join(f.home, 'ci-kit-vm')), false);
 });
+
+test('the display and home settings persist across refreshes and reach every instance and watcher', macOnly, () => {
+  const f = fixture({ registered: null });
+  const shared = f.shared(2);
+  const first = f.run(undefined, ['--disabled', '--name', 'ci-kit-mac-mini', '--shared', '1', '--home', '--display', '2560x1440@2x'], {}, 'token\n');
+  assert.equal(first.status, 0, first.stdout + first.stderr);
+  const args = readFileSync(join(f.runner, 'config.args'), 'utf8').trim().split('\n');
+  assert.equal(args[args.indexOf('--labels') + 1], 'ci-kit-mac,ci-kit-mac-home');
+  const sharedArgs = readFileSync(join(shared, 'config.args'), 'utf8');
+  assert.doesNotMatch(sharedArgs, /ci-kit-mac-home/);
+  for (const run of [first, f.run()]) {
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.match(run.stdout, /ci-kit-mac-home/);
+    for (const root of [f.runner, shared]) {
+      assert.match(readFileSync(join(root, '.env'), 'utf8'), /^CI_KIT_DISPLAY=2560x1440@2x$/m);
+    }
+    assert.match(readFileSync(join(f.runner, '.env'), 'utf8'), /^CI_KIT_HOME=1$/m);
+    assert.doesNotMatch(readFileSync(join(shared, '.env'), 'utf8'), /CI_KIT_HOME/);
+    const plist = readFileSync(join(f.home, 'Library/LaunchAgents', `${watchAgent}.plist`), 'utf8');
+    assert.match(plist, /<key>CI_KIT_DISPLAY<\/key>\s*<string>2560x1440@2x<\/string>/);
+  }
+  assert.match(f.run().stdout, /keeps its labels.*ci-kit-mac-home.*by hand/);
+  const changed = f.run(undefined, ['--disabled', '--display', '1920x1080@1x']);
+  assert.equal(changed.status, 0, changed.stderr);
+  assert.match(readFileSync(join(f.runner, '.env'), 'utf8'), /^CI_KIT_DISPLAY=1920x1080@1x$/m);
+});
+
+test('a malformed or empty display setting refuses before changing the install', macOnly, () => {
+  for (const value of ['', '2560x1440', '0x1440@2x', '2560x1440@0x', '2560x1440@2x\nBAD=1']) {
+    const f = fixture();
+    const before = f.snapshot();
+    const run = f.run(undefined, ['--disabled', '--display', value]);
+    assert.notEqual(run.status, 0, value);
+    assert.match(run.stderr, /--display/);
+    assert.deepEqual(f.snapshot(), before);
+    assert.equal(existsSync(join(f.home, 'launchctl.calls')), false);
+  }
+});
+
+test('--home composes with the VM solo label without giving either to shared instances', macOnly, () => {
+  const f = laneFixture({ registered: null });
+  const shared = f.shared(2);
+  const result = f.run(undefined, ['--disabled', '--name', 'ci-kit-mac-mini', '--home', '--vm', '--shared', '1'], {}, 'token\n');
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(labelsOf(argsOf(f.runner)), ['self-hosted', 'macOS', 'ARM64', 'ci-kit-mac', 'ci-kit-mac-solo', 'ci-kit-mac-home']);
+  assert.deepEqual(labelsOf(argsOf(shared)), ['ci-kit-mac-shared']);
+});

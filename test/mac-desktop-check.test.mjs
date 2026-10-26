@@ -624,3 +624,76 @@ test("UserNotificationCenter on screen without focus is attributed through its o
   assert.match(run.stderr, /\(UserNotificationCenter: TCC requests before it came to front: SkyComputerUseService, CursorUIViewService, Finder\) is on screen without focus/);
   assert.equal(argValue(run.logCalls[1], '--predicate'), 'process == "launchservicesd" AND eventMessage CONTAINS "SETFRONT: pid=47183 "');
 });
+
+const expectedDisplay = { CI_KIT_DISPLAY: '2560x1440@2x' };
+
+test('without a display setting the hook does not probe or enforce the display', () => {
+  const d = check(terminal).desktop;
+  d.display('1920x1080@1x');
+  const run = d.hook(terminal);
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(run.displayCalls, []);
+});
+
+test('the expected display passes; either a wrong size or backing scale refuses before focus changes', () => {
+  const initial = check(terminal, 0, { env: expectedDisplay });
+  assert.equal(initial.status, 0, initial.stderr);
+  assert.deepEqual(initial.displayCalls, ['--describe']);
+  for (const value of ['1920x1080@2x', '2560x1440@1x']) {
+    const d = check(terminal, 0, { env: expectedDisplay }).desktop;
+    d.display(value);
+    const run = d.hook(asnShape('Finder'));
+    assert.equal(run.status, 1, run.stderr);
+    assert.match(run.stderr, new RegExp(`display ${value}, expected 2560x1440@2x`));
+    assert.deepEqual(run.opened, []);
+    assert.equal(run.state.phase, 'open');
+    assert.equal(run.state.name, 'Display');
+    const title = run.ghCalls.find((call) => call[1] === 'create');
+    assert.match(title[title.indexOf('--title') + 1], /^ci-kit alert: mini: Display since \S+ \(display /);
+    assert.deepEqual(run.logCalls, [], 'display faults need no dialog attribution');
+  }
+});
+
+test('a transient unreadable display retries before passing, without an episode', () => {
+  const d = check(terminal, 0, { env: expectedDisplay }).desktop;
+  d.display('fail\nunknown\n2560x1440@2.0x');
+  const run = d.hook(terminal);
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.displayCalls.length, 4); // the initial check, then three reads
+  assert.equal(run.state, null);
+  assert.deepEqual(run.ghCalls, []);
+});
+
+test('a persistently unreadable display fails closed, including when the frontmost app cannot be read', () => {
+  for (const value of ['fail', 'unknown', '0x1440@2x', '2560x1440@0x']) {
+    const d = check(terminal, 0, { env: expectedDisplay }).desktop;
+    d.display(value);
+    const run = d.hook('');
+    assert.equal(run.status, 1, run.stderr);
+    assert.match(run.stderr, /display unreadable.*expected 2560x1440@2x/);
+    assert.equal(run.state.phase, 'open');
+    assert.equal(run.displayCalls.length, 4);
+  }
+});
+
+test('display deadlines kill a stuck probe and refuse instead of running blind', () => {
+  const d = check(terminal, 0, { env: expectedDisplay }).desktop;
+  d.display('hang');
+  const run = d.hook(terminal);
+  assert.equal(run.status, 1, run.stderr);
+  assert.ok(run.elapsed < 6000, `took ${run.elapsed} ms`);
+  assert.deepEqual(run.ghSurvivors, []);
+  assert.equal(run.state.phase, 'open');
+});
+
+test('a missing display helper refuses a configured machine, but the read-only posture entry point never checks it', () => {
+  const env = { ...expectedDisplay, CI_KIT_CURSOR_PARK: '/no-such-ci-kit-display-helper' };
+  const blocked = check(terminal, 0, { env });
+  assert.equal(blocked.status, 1);
+  assert.match(blocked.stderr, /display unreadable/);
+  const read = check(terminal, 0, { env, readOnly: true });
+  assert.equal(read.status, 0);
+  assert.equal(read.stdout, '터미널\n');
+  assert.equal(read.state, null);
+  assert.deepEqual(read.ghCalls, []);
+});

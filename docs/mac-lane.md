@@ -24,7 +24,7 @@ On every machine:
 |---|---|
 | Session | `new`'s logged-in GUI session |
 | Registration | `SSFSKIM/MAWS`, at repository level, non-ephemeral |
-| Labels | the exclusive instance: `self-hosted`, `macOS`, `ARM64` (what MAWS's `gate.yml` targets), `ci-kit-mac`, and `ci-kit-mac-solo` with [the VM lane](#the-vm-lane); a shared instance: `ci-kit-mac-shared` alone |
+| Labels | the exclusive instance: `self-hosted`, `macOS`, `ARM64` (what MAWS's `gate.yml` targets), `ci-kit-mac`, `ci-kit-mac-home` with `--home` (the mini only), and `ci-kit-mac-solo` with [the VM lane](#the-vm-lane); a shared instance: `ci-kit-mac-shared` alone |
 | Directory | the exclusive instance: `~/actions-runner-maws` (work directory `~/actions-runner-maws/_work`); shared instance n: `~/actions-runner-maws-<n>` |
 | LaunchAgent | `com.ssfskim.ci-kit.mac-runner` (shared instance n: `com.ssfskim.ci-kit.mac-runner-<n>`) — RunAtLoad, KeepAlive, `ProcessType` Interactive, Aqua session only; its program is the instance's own `runner-hold.sh`, which execs the runner's `runsvc.sh` unless the dialog watcher holds the runners |
 | Hooks | `<instance>/ci-kit/hooks/job-started.sh` (admission on a Mac with shared instances, the desktop check, then the sweep), `job-completed.sh` (the [drain](#the-drain)'s job end, then the sweep, then the admission's release), a full copy from `mac/hooks/` in each instance |
@@ -35,10 +35,11 @@ On every machine:
 **Why a LaunchAgent.** Electron windows need a WindowServer, which only the user's GUI session has; a LaunchDaemon runs
 outside it. **Why one exclusive runner per machine.** e2e groups contend for the desktop (focus, pointer, clipboard), so
 a job that has not been shown to be safe beside another runs alone: on the machine's exclusive instance, the only one
-carrying the labels MAWS's jobs ask for. Every exclusive runner of the lane carries the same labels, so GitHub gives
-each job to whichever machine is idle, and one run's groups can split across the machines (the jobs API's
-`runner_name` says where each ran). SSFSKIM is a user account, which has no runner groups, and the lane has no
-per-machine label: to keep jobs off a machine, disable its agents (below). Groups shown to be safe beside each other
+carrying the labels MAWS's jobs ask for. The base labels are shared, so GitHub gives
+those jobs to whichever machine is idle, and one run's groups can split across the machines (the jobs API's
+`runner_name` says where each ran). `ci-kit-mac-home` is the exception: only the mini's exclusive instance carries it,
+for MAWS's measured and live e2e groups that require the home desktop. SSFSKIM is a user account with no runner groups;
+to keep all jobs off a machine, disable its agents (below). Groups shown to be safe beside each other
 ask for `ci-kit-mac-shared` instead and run on the shared instances ([below](#instances-and-the-shared-hold)).
 
 **Never other repositories' code.** The runners are registered to MAWS alone, and the kit's planner refuses the `mac`
@@ -76,7 +77,7 @@ instances pipes a token for theirs:
 
 ```bash
 gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token \
-  | ssh mini '~/Developer/GitHub/ci-kit/mac/install.sh --name ci-kit-mac-mini'
+  | ssh mini '~/Developer/GitHub/ci-kit/mac/install.sh --name ci-kit-mac-mini --home --display 2560x1440@2x'
 gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token \
   | ssh mini '~/Developer/GitHub/ci-kit/mac/install.sh --shared 2'   # ci-kit-mac-mini-2 and -3, installed disabled
 ```
@@ -92,6 +93,16 @@ gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token
   refuses any other name before anything changes. A new machine's short name, or that of one with shared instances,
   may not end in `-<number>`: `ci-kit-mac-mini-2` is the mini's first shared runner, and `--replace` would let a
   machine named `mini-2` take it over.
+- **Expected display.** `--display 2560x1440@2x` sets the main display's logical width and height in points and backing
+  scale, not physical panel pixels. A re-run keeps it from the exclusive instance's `.env`; passing `--display` again
+  replaces it. It reaches every instance and the watcher as `CI_KIT_DISPLAY`, alongside `CI_KIT_MACHINE`. A machine
+  never given a display setting behaves as before. This checks the display; it never sets a mode or starts BetterDisplay.
+- **Home desktop.** `--home` adds `ci-kit-mac-home` to a newly registered exclusive instance, never a shared instance.
+  Only the mini gets it, not the EC2 Mac. The exclusive `.env` keeps `CI_KIT_HOME=1`, so every refresh remembers the
+  choice and prints the label note. As with the VM lane's solo label, an existing registration keeps its labels: add
+  the label through GitHub's runner API or settings, not by registering again. The mini already has it (2026-10-26).
+  For an existing runner whose numeric id is `<id>`:
+  `gh api -X POST repos/SSFSKIM/MAWS/actions/runners/<id>/labels -f 'labels[]=ci-kit-mac-home'`.
 - **Shared instances.** `--shared <n>` sets their count: instances 2 to n+1, each named `ci-kit-mac-<machine>-<i>`
   after the machine and registered with `--labels ci-kit-mac-shared --no-default-labels`, so it carries that label
   alone. One token on stdin registers every instance that needs it. Without `--shared`, a re-run keeps the count
@@ -123,7 +134,8 @@ gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token
   updates itself, as GitHub requires.
 - **Environment.** `.env` sets `LANG=en_US.UTF-8` (the mini's locale is Korean, and jobs parse tool output), the two
   hook variables (each instance's own copy of the hooks), and `CI_KIT_MACHINE`, the machine's short name, the same in
-  every instance. A shared instance's adds `CI_KIT_SHARED_DESKTOP=1`, which its jobs read to know the desktop has
+  every instance; when configured, `CI_KIT_DISPLAY` is too. The exclusive instance remembers `--home` with
+  `CI_KIT_HOME=1`. A shared instance's adds `CI_KIT_SHARED_DESKTOP=1`, which its jobs read to know the desktop has
   neighbours (MAWS's latency budgets treat the host as loaded under it). `.path` is Homebrew's tools, then the
   system's.
 
@@ -200,11 +212,27 @@ layer 2002, 520x260 at 1020,400): …`); with the frontmost app unreadable the l
 `<machine>` is the runner's `CI_KIT_MACHINE` (`mini` on the mini). `<first seen>` is the dialog episode's, the same
 time its alert title carries ([below](#the-dialog-watcher)). Every refusal line starts with `ci-kit: ` and ends with
 `rerun`; MAWS's `scripts/ci-gate.sh` tells a refused job by that shape. Dismissing the dialog is the human's, in
-that machine's GUI session (never an agent, never cua). The check uses `lsappinfo` and `window-list` alone:
+that machine's GUI session (never an agent, never cua). The dialog read uses `lsappinfo` and `window-list` alone:
 AppleScript or System Events would raise TCC prompts. When `lsappinfo` fails or prints nothing, the job is not blocked
-unless a dialog is on screen; when `window-list` is missing (a failed compile), fails or passes its 5 s deadline, a
+unless a dialog is on screen or the configured display check fails; when `window-list` is missing (a failed compile), fails or passes its 5 s deadline, a
 dialog is seen only in front, as before it existed. Either miss is logged. Every check logs a `desktop-check` line (the
 frontmost app) to the job's log and the hooks log.
+
+**A configured display is checked before every job.** `--display` opts a machine into a read-only check of
+`cursor-park --describe`, the same main-display probe used in posture below. Either different logical dimensions or a
+different backing scale refuses the job before Terminal is opened, even if the frontmost app is unreadable. For example:
+
+```text
+ci-kit: display 1920x1080@1x, expected 2560x1440@2x on the ec2; desktop held since 2026-10-26T05:12Z — restore its display there and rerun
+```
+
+A missing, failed, timed-out or invalid probe gets two retries (three attempts total, each with a 1 s deadline).
+A successful retry is judged normally and a transient miss opens no episode. Three misses are `display unreadable`
+and refuse the job rather than running blind. The watcher uses the same retry policy, but still requires two blocked
+minute ticks before opening an episode between jobs. Once open, only three consecutive ticks with a matching display
+and no dialog release the runners; an unreadable display is never a clear read. A failed `cursor-park` compile therefore
+leaves a configured machine refusing jobs until the helper is restored. No setting means no extra probe or refusal.
+The check does not change display modes, launch BetterDisplay, or use AppleScript. The owner restores the desktop.
 
 **The alert.** A refused job opens the machine's dialog episode, and its `ci-kit-alert` issue in
 `SSFSKIM/ci-kit-sandbox`, when none is open. The dialog watcher ([below](#the-dialog-watcher)) shares the episode and
@@ -225,7 +253,7 @@ ci-kit: Terminal did not come to the front on the <machine> (<name> is) — chec
 ```
 
 Terminal is told by its bundle id, `com.apple.Terminal`: `lsappinfo`'s names are localized, and the mini shows
-Terminal as `터미널`. System dialogs are never touched, and an unreadable frontmost app still lets the job run. The hook
+Terminal as `터미널`. System dialogs are never touched, and an unreadable frontmost app alone still lets the job run. The hook
 acts only before the job, so it never fights MAWS's own `MAWS_E2E_FOREGROUND=1`, and it does take the front from
 whoever is using the machine's desktop when a job starts.
 
@@ -980,8 +1008,14 @@ fails leaves its candidate stopped; retire it before baking again under the same
 The job hook sees a dialog only when a job starts. On 2026-10-17 securityd crashed, and a SecurityAgent keychain-unlock
 dialog covered the mini for 12 minutes; MAWS was holding its runs, so no job started and nobody was told. The watcher,
 the LaunchAgent `com.ssfskim.ci-kit.dialog-watch`, reads the frontmost app and the windows on screen at load and every
-60 s, whether or not a job runs. It runs `~/actions-runner-maws/ci-kit/hooks/dialog-watch.sh`, which `install.sh` copies with the hooks, in every
+60 s, whether or not a job runs. When `CI_KIT_DISPLAY` is set, it checks that too. It runs `~/actions-runner-maws/ci-kit/hooks/dialog-watch.sh`, which `install.sh` copies with the hooks, in every
 mode (`--disabled` turns off the runner, not the alerts), and removes with `--uninstall`.
+
+A display mismatch or three failed display probe attempts counts as a blocked desktop just like a dialog below.
+The stable condition name is `Display`; the source names the observed and expected mode. Changes from one wrong mode
+to another are still blocked ticks, not a new pending condition. A dialog takes precedence if both are wrong; either
+one keeps the shared episode open until both clear. The drain is unchanged: it holds every instance and stops runners
+only between jobs, never cancels a job already running when the display changes.
 
 **One episode per machine, from either side.** The watcher and the job hook share `mac/hooks/dialog.sh`: the dialog
 list, the read-only `lsappinfo` and `window-list` reads, the source attribution and the episode, kept in
@@ -996,7 +1030,7 @@ it opened, never another machine's.
   The state keeps it, so every later refusal and the title carry the same time.
 - **The source** is attributed once, when the episode opens: the same log queries as before, at most three of 10 s
   each. A refusal during the episode reuses it.
-- **Closing.** The watcher closes the episode after three consecutive reads with no dialog, about three minutes: it
+- **Closing.** The watcher closes the episode after three consecutive reads with no dialog and a matching display (when configured), about three minutes: it
   comments `cleared at …` on the issue and closes it. On 2026-10-17 a dismissed prompt came back within a minute,
   twice. A dialog read from either side restarts the count.
 - **A close that fails is owed, not dropped.** On 2026-10-20 the mini closed an episode just after a reboot, before
@@ -1025,12 +1059,13 @@ format is pinned in `test/mac-dialog-watch.test.mjs`.
 ci-kit alert: <machine>: <dialog> since <YYYY-MM-DDTHH:MMZ>[ (<source>)]
 ci-kit alert: mini: SecurityAgent since 2026-10-17T05:12Z (security request from codesign)
 ci-kit alert: rental: loginwindow since 2026-10-17T05:12Z
+ci-kit alert: ec2: Display since 2026-10-26T05:12Z (display 1920x1080@1x, expected 2560x1440@2x)
 ```
 
 - `<machine>` is `CI_KIT_MACHINE`, which `install.sh` keeps to `[a-z0-9-]`.
-- `<dialog>` is the canonical name from the dialog list, whatever the display language.
+- `<dialog>` is the canonical name from the dialog list, whatever the display language, or `Display`.
 - `<YYYY-MM-DDTHH:MMZ>` is the first-seen minute, in UTC.
-- ` (<source>)` follows only when attribution found one.
+- ` (<source>)` follows when attribution found one; for `Display` it always names the observed (or unreadable) and expected display.
 
 The kit's other alerts (`ci-kit alert: pool hours on …`, `pool server …`, `bake builder …`, `GCE VM …`) and the
 dialog alerts opened before this format never match it. The body adds the time, the dialog and how it holds the
@@ -1150,8 +1185,9 @@ ssh mini 'xattr -p com.apple.quarantine /Applications/LibreOffice.app'
 
 ## Adding a Mac
 
-A second machine runs a second exclusive runner with the same labels, so MAWS's `[self-hosted, macOS, ARM64]` jobs go
-to whichever machine is idle. Below, `<host>` is the MacBook's `ssh` host for it and `<name>` its short name, a
+A second machine runs a second exclusive runner with the base labels, so MAWS's `[self-hosted, macOS, ARM64]` jobs go
+to whichever machine is idle. Do not give it `--home`: only the mini carries `ci-kit-mac-home`, which MAWS's measured
+and live e2e groups target. The EC2 M1 is named `ci-kit-mac-ec2`. Below, `<host>` is the MacBook's `ssh` host for it and `<name>` its short name, a
 lowercase word of letters, digits and `-`, not ending in `-<number>` (a shared runner's name does): the runner is
 `ci-kit-mac-<name>`, and its refusals and alert say "on the <name>", so pick a word that reads there.
 
@@ -1201,7 +1237,7 @@ ssh $host '/opt/homebrew/bin/brew install --cask betterdisplay'
 ssh $host 'git clone https://github.com/SSFSKIM/ci-kit ~/Developer/GitHub/ci-kit'
 ssh $host '~/Developer/GitHub/ci-kit/mac/install.sh --check'
 gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token \
-  | ssh $host "~/Developer/GitHub/ci-kit/mac/install.sh --disabled --name ci-kit-mac-$name"
+  | ssh $host "~/Developer/GitHub/ci-kit/mac/install.sh --disabled --name ci-kit-mac-$name --display 2560x1440@2x"
 ssh $host '~/Developer/GitHub/ci-kit/host/install.sh'
 printf '%s\n' "$(cat ~/.config/claude-secrets/CI_KIT_ALERT_TOKEN)" \
   | ssh $host 'umask 077; mkdir -p ~/.config/ci-kit && cat >~/.config/ci-kit/alert-token'
@@ -1216,7 +1252,7 @@ ssh $host 'GH_TOKEN=$(cat ~/.config/ci-kit/alert-token) /opt/homebrew/bin/gh iss
 - `--disabled` registers the runner and installs the hooks with the agent left off, so no MAWS job lands before step 3;
   step 4 turns it on. It also starts the [dialog watcher](#the-dialog-watcher), so from here a prompt left up for more
   than a minute, step 3's included, opens an alert that names the machine. It closes about three minutes after the
-  prompt is answered.
+  prompt is answered and the configured display matches.
 - The host janitor runs as on the mini ([host.md](host.md)), from the clone that stays.
 - The alert token is the owner's to make, once for every rented Mac: a fine-grained personal access token with resource
   owner SSFSKIM, repository access to `SSFSKIM/ci-kit-sandbox` alone, and Issues read and write. The owner stores it on
@@ -1229,7 +1265,9 @@ ssh $host 'GH_TOKEN=$(cat ~/.config/ci-kit/alert-token) /opt/homebrew/bin/gh iss
 - Open LibreOffice, Google Chrome and Terminal once each, and allow their first-launch prompts.
 - In BetterDisplay, make a 2560x1440 HiDPI virtual display the main display, and turn on its launch at login so the
   display comes back after a restart. The mini's posture line reads `display=2560x1440@2x`, and some MAWS specs read
-  `devicePixelRatio`.
+  `devicePixelRatio`; a smaller desktop clamps the 1280x820 e2e window. Step 2 saves this expectation with `--display`;
+  every refresh keeps it, and the hooks and watcher refuse/hold the machine if a reboot or VNC leaves another mode.
+  To enroll the existing mini, refresh it with `--home --display 2560x1440@2x` while it is idle.
 - System Settings → Privacy & Security → Full Disk Access: the + button, Cmd+Shift+G, `/bin/bash`.
 
 Then, from the MacBook:
