@@ -116,12 +116,15 @@ read_display() {
   display_detail="display ${actual:-unreadable (three probe attempts)}, expected $expected_display"
 }
 
-# Dialogs take precedence when both are wrong, but neither condition may clear the other's episode. Display is one
-# stable, single-word alert kind (MAWS parses that title); the observed/expected mode goes in its source and body.
+# Display faults take stable precedence so changing dialogs cannot reset their pending episode. Neither condition may
+# clear the other's episode. Display is one single-word alert kind (MAWS parses that title); the observed/expected mode
+# goes in its source and body.
 is_blocked() {
-  is_dialog && return 0
-  [[ -n $display_fault ]] || return 1
-  dialog=Display dialog_held='does not match its configured display' seen=$display_detail
+  if [[ -n $display_fault ]]; then
+    dialog=Display dialog_pid='' dialog_held='does not match its configured display' dialog_window='' seen=$display_detail
+    return 0
+  fi
+  is_dialog
 }
 
 # The frontmost app, read with lsappinfo alone: AppleScript or System Events would raise TCC prompts.

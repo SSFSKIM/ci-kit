@@ -950,6 +950,40 @@ test('a display fault is seen even without a frontmost read; changing wrong mode
   assert.ok(run.marker);
 });
 
+test('changing dialogs cannot mask consecutive display faults or release their hold', () => {
+  const d = desktop({ env: { CI_KIT_DISPLAY: '2560x1440@2x' } });
+  d.display('1920x1080@1x');
+  const first = d.watch(terminal);
+  assert.deepEqual([first.state.phase, first.state.name], ['pending', 'Display']);
+  assert.equal(first.marker, null);
+  assert.equal(creates(first).length, 0);
+  let run = d.watch(security);
+  assert.deepEqual([run.state.phase, run.state.name, run.state.since], ['open', 'Display', iso(T0)]);
+  assert.ok(run.marker, 'the second consecutive display fault holds the runner despite the dialog');
+  assert.equal(creates(run).length, 1);
+  for (const front of [terminal, security]) {
+    run = run.watch(front);
+    assert.deepEqual([run.state.phase, run.state.name, run.state.since], ['open', 'Display', iso(T0)]);
+    assert.ok(run.marker);
+    assert.equal(creates(run).length, 1, 'changing dialogs do not create another alert');
+  }
+  d.display('2560x1440@2x');
+  for (let i = 0; i < 3; i++) {
+    run = run.watch(security);
+    assert.deepEqual([run.state.phase, run.state.clear], ['open', '0']);
+    assert.ok(run.marker, 'restoring the display does not release a dialog-blocked desktop');
+  }
+  assert.equal(run.ghCalls.filter((call) => call[1] === 'close').length, 0);
+  run = clearReads(run, 2);
+  assert.equal(run.state.clear, '2');
+  assert.ok(run.marker);
+  run = run.watch(terminal);
+  assert.equal(run.state, null);
+  assert.equal(run.marker, null);
+  assert.equal(creates(run).length, 1);
+  assert.equal(run.ghCalls.filter((call) => call[1] === 'close').length, 1);
+});
+
 test('a watcher ignores transient probe misses but holds persistent ones; a dialog and display share recovery', () => {
   const d = desktop({ env: { CI_KIT_DISPLAY: '2560x1440@2x' } });
   d.display('fail\n2560x1440@2x');

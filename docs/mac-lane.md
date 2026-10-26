@@ -1013,9 +1013,10 @@ mode (`--disabled` turns off the runner, not the alerts), and removes with `--un
 
 A display mismatch or three failed display probe attempts counts as a blocked desktop just like a dialog below.
 The stable condition name is `Display`; the source names the observed and expected mode. Changes from one wrong mode
-to another are still blocked ticks, not a new pending condition. A dialog takes precedence if both are wrong; either
-one keeps the shared episode open until both clear. The drain is unchanged: it holds every instance and stops runners
-only between jobs, never cancels a job already running when the display changes.
+to another are still blocked ticks, not a new pending condition. A display fault takes precedence while present, so
+changing dialogs cannot reset its pending reads. With a matching display, dialogs still block; either condition keeps
+the shared episode open until both clear. The drain is unchanged: it holds every instance and stops runners only
+between jobs, never cancels a job already running when the display changes.
 
 **One episode per machine, from either side.** The watcher and the job hook share `mac/hooks/dialog.sh`: the dialog
 list, the read-only `lsappinfo` and `window-list` reads, the source attribution and the episode, kept in
