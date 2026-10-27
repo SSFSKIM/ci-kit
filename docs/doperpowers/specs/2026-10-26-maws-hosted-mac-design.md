@@ -888,6 +888,17 @@ M3's wave, from a worktree of MAWS master:
 - **`gh api` withholds a job log that holds terminal escapes** unless given `--allow-escape-sequences`; M4's collector
   passes it, or no `hosted: no result by` red could be read. The collector over all of 10-25: 383 Mac jobs, queue
   median 26.6 and p90 94.6 minutes, 1,082 Mac e2e job-minutes, in line with Purpose.
+- **`main`'s refresh rarely fires under gate-then-land** (10-27): `main` 6d44bb9 turned a day old at 05:51Z, and
+  every waiter after it logged `main is 24 h old, but MAWS … is not on master: main stays` (first: 40461665853,
+  06:32:45Z, for 063247a68). The verdict was right when it was made: the architect gates a merge commit before
+  pushing it, and 063247a68 reached master at 06:44:07Z, 11 minutes later. So `main` moves only when a hosted group
+  is gated on a commit already landed, the same gap the Decision Log's rejected "master's tip" rule had, in a
+  milder form. The cost at the time was none worth acting on (scan and push of 190 to 346 files, about 7 s a
+  group); it grows with `main`'s age. The fix, post-wave and in MAWS, builds `main`'s commit from master itself
+  instead of from a request. The architect's lean (37052769:335): when `main` is a day old, the waiter builds it
+  from `origin/master`'s filtered, scanned tree. That adds no trigger to a master that takes a records push every
+  few minutes, and `main` moves only when hosted work exists, which is when its age matters. The alternative, a
+  hosted job on each push to master, wins only if the waiter's one-off refresh latency turns out to matter.
 
 ## Outcomes & Retrospective
 
