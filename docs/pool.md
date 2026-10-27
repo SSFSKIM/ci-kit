@@ -124,7 +124,9 @@ GitHub. A tick:
 
 1. reads `gce.json` and `ec2.json` from the kit's main (the newest commit that changed each; on a failed read it
    keeps the last good copy, and at a cold start without main, the copy in its own build);
-2. reads, all at once: each repo's visibility (public repos are refused), its
+2. reads, all at once: each repo's visibility (public repos are refused, unless the repo's `gce.json` entry has
+   `"allow_public": true`: MAWS, public since 2026-10-26 by the owner's choice, with pull requests limited to
+   collaborators and every outside contributor's run held for approval), its
    `ci-kit-gce-*` runners and then its queued and in-progress runs and their jobs; the ledger's last 26 h on every
    open ledger issue (below) and then the `ci-kit=gce` instances and disks; the images; and, once the runners and
    instances are in, `ci-kit/job` of each VM whose runner is not busy;
