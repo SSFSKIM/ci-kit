@@ -899,6 +899,9 @@ M3's wave, from a worktree of MAWS master:
   from `origin/master`'s filtered, scanned tree. That adds no trigger to a master that takes a records push every
   few minutes, and `main` moves only when hosted work exists, which is when its age matters. The alternative, a
   hosted job on each push to master, wins only if the waiter's one-off refresh latency turns out to matter.
+  The same change puts `-q` first on that block's compare `curl` (p5-desk-track-owner, 10-27), so no `.curlrc` can
+  turn on a trace that writes the `Authorization` header to a file. Today's exposure is small: the call's stderr already
+  goes to `/dev/null`, and the pool image has no `.curlrc`.
 
 ## Outcomes & Retrospective
 
