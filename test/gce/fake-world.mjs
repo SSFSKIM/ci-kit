@@ -221,10 +221,10 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
   let runId = 1000;
   const sim = {
     // A job in a new run, or in `run` (another job's run_id) when given.
-    queue(repo, labels, { name = 'ci / gate', run: inRun } = {}) {
+    queue(repo, labels, { name = 'ci / gate', run: inRun, event = 'push' } = {}) {
       let run = gh.runs.find((r) => r.id === inRun);
       if (!run) {
-        run = { id: runId++, repo, status: 'queued', path: '.github/workflows/gate.yml', created_at: new Date(clock).toISOString() };
+        run = { id: runId++, repo, status: 'queued', event, path: '.github/workflows/gate.yml', created_at: new Date(clock).toISOString() };
         gh.runs.push(run);
       }
       const job = {

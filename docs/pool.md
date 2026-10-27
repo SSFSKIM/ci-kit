@@ -126,7 +126,13 @@ GitHub. A tick:
    keeps the last good copy, and at a cold start without main, the copy in its own build);
 2. reads, all at once: each repo's visibility (public repos are refused, unless the repo's `gce.json` entry has
    `"allow_public": true`: MAWS, public since 2026-10-26 by the owner's choice, with pull requests limited to
-   collaborators and every outside contributor's run held for approval), its
+   collaborators and every outside contributor's run held for approval). An allowed public repo is served only when
+   every queued or in-progress run's event is `push`, `workflow_dispatch` or `schedule`, including runs with no pool
+   jobs. Any other event (a same-repo `pull_request` included) refuses the whole repo this tick: no new VMs, its idle
+   unclaimed runners drained as on a public refusal, and its busy jobs left alone. The launcher logs the run id and
+   event and raises one `ci-kit-alert` issue per repo, deduplicated while open. An unreadable run list launches nothing
+   but does not trigger a drain, while a readable run list is still checked when its jobs cannot be read; private repos are unchanged. This checks the tick's snapshot, not a runner's job admission, and
+   does not guard persistent Mac runners. It reads the repo's
    `ci-kit-gce-*` runners and then its queued and in-progress runs and their jobs; the ledger's last 26 h on every
    open ledger issue (below) and then the `ci-kit=gce` instances and disks; the images; and, once the runners and
    instances are in, `ci-kit/job` of each VM whose runner is not busy;

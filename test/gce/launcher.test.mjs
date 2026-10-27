@@ -460,11 +460,124 @@ test('a public repo is refused', async () => {
   assert.deepEqual((await launcher.tick()).launched, []);
 });
 
-test('a public repo whose entry allows it is served', async () => {
+test('a public repo whose entry allows it is served for push, dispatch and schedule', async () => {
+  for (const event of ['push', 'workflow_dispatch', 'schedule']) {
+    const w = world({ start: T0, repos: { [SBX]: { private: false } } });
+    const { launcher } = setup({ w, cfg: { ...CFG, repos: [{ repo: SBX, allow_public: true }] } });
+    w.sim.queue(SBX, L(4), { event });
+    assert.equal((await launcher.tick()).launched.length, 1, event);
+  }
+});
+
+test('a public exception refuses the whole repo for any unsafe active run, even one with no pool job', async () => {
+  for (const status of ['queued', 'in_progress']) {
+    for (const event of ['pull_request', 'pull_request_target', 'issue_comment', 'workflow_run', 'repository_dispatch', 'unknown', null]) {
+      const w = world({ start: T0, repos: { [SBX]: { private: false } } });
+      const { make } = setup({ w, cfg: { ...CFG, repos: [{ repo: SBX, allow_public: true }] } });
+      const logs = [];
+      const launcher = make({ log: (line) => logs.push(line) });
+      w.sim.queue(SBX, L(4));
+      const other = w.sim.queue(SBX, ['ubuntu-latest'], { event });
+      w.gh.runs.find((r) => r.id === other.run_id).status = status;
+      assert.deepEqual((await launcher.tick()).launched, [], `${event} (${status})`);
+      assert.ok(logs.some((line) => line.includes(String(other.run_id)) && line.includes(event ?? 'unknown')), logs.join('\n'));
+      assert.equal(w.log.filter((line) => line.startsWith('alert ')).length, 1);
+    }
+  }
+});
+
+test('private repos keep serving unsafe events, even with allow_public set; completed public runs do not block', async () => {
+  for (const isPrivate of [true, false]) {
+    const w = world({ start: T0, repos: { [SBX]: { private: isPrivate } } });
+    const { launcher } = setup({ w, cfg: { ...CFG, repos: [{ repo: SBX, allow_public: true }] } });
+    const job = w.sim.queue(SBX, L(4), { event: 'pull_request' });
+    if (!isPrivate) {
+      job.status = 'completed';
+      w.gh.runs[0].status = 'completed';
+      w.sim.queue(SBX, L(4));
+    }
+    assert.equal((await launcher.tick()).launched.length, 1);
+    assert.equal(w.log.filter((line) => line.startsWith('alert ')).length, 0);
+  }
+});
+
+test('an unsafe public run drains idle runners, leaves busy jobs alone, and alerts once across ticks and restarts', async () => {
+  const w = world({ start: T0, repos: { [SBX]: { private: false } } });
+  const { make } = setup({ w, cfg: { ...CFG, repos: [{ repo: SBX, allow_public: true }] } });
+  const launcher = make({ alert: undefined }); // The production issue-backed deduplication, not setup's alert recorder.
+  const busyJob = w.sim.queue(SBX, L(4));
+  w.sim.queue(SBX, L(2));
+  await launcher.tick();
+  const busy = w.g.instances.find((v) => v.labels['ci-kit-cpus'] === '4').name;
+  const idle = w.g.instances.find((v) => v.name !== busy).name;
+  w.sim.boot(SBX, busy);
+  w.sim.take(SBX, busy, busyJob);
+  w.sim.boot(SBX, idle);
+  const unsafe = w.sim.queue(SBX, ['ubuntu-latest'], { event: 'pull_request_target' });
+  for (const current of [launcher, launcher, make({ alert: undefined })]) {
+    assert.deepEqual((await current.tick()).launched, []);
+    w.advance(MIN);
+  }
+  assert.deepEqual(vms(w), [busy]);
+  assert.ok(w.log.indexOf(`unregister ${idle}`) < w.log.indexOf(`delete ${idle}`));
+  const alerts = w.gh.issues.filter((i) => i.labels?.includes('ci-kit-alert'));
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0].body, new RegExp(`${unsafe.run_id}`));
+  assert.match(alerts[0].body, /pull_request_target/);
+  assert.match(alerts[0].body, /push.*workflow_dispatch.*schedule/);
+  assert.match(alerts[0].body, /docs\/pool.md/);
+  w.gh.runs.find((r) => r.id === unsafe.run_id).status = 'completed';
+  unsafe.status = 'completed';
+  assert.equal((await launcher.tick()).launched.length, 1, 'safe demand resumes once the unsafe run ends');
+});
+
+test('an unreadable public run list launches nothing without draining its idle runners', async () => {
   const w = world({ start: T0, repos: { [SBX]: { private: false } } });
   const { launcher } = setup({ w, cfg: { ...CFG, repos: [{ repo: SBX, allow_public: true }] } });
   w.sim.queue(SBX, L(4));
-  assert.equal((await launcher.tick()).launched.length, 1);
+  await launcher.tick();
+  const [idle] = vms(w);
+  w.sim.boot(SBX, idle);
+  w.sim.queue(SBX, L(2));
+  w.github.runsByStatus = async () => { throw new Error('unavailable'); };
+  const out = await launcher.tick();
+  assert.deepEqual([out.launched, out.deleted, out.unregistered], [[], [], []]);
+  assert.deepEqual(vms(w), [idle]);
+  assert.equal(w.sim.runner(SBX, idle).busy, false);
+  assert.equal(w.log.filter((line) => line.startsWith('alert ')).length, 0);
+});
+
+test('a failed job read still refuses an unsafe public run, and keeps a safe one\'s idle runners', async () => {
+  for (const event of ['pull_request_target', 'push']) {
+    const w = world({ start: T0, repos: { [SBX]: { private: false } } });
+    const { launcher } = setup({ w, cfg: { ...CFG, repos: [{ repo: SBX, allow_public: true }] } });
+    w.sim.queue(SBX, L(4));
+    await launcher.tick();
+    const [idle] = vms(w);
+    w.sim.boot(SBX, idle);
+    w.sim.queue(SBX, L(2), { event });
+    w.github.listJobs = async () => { throw new Error('502 Bad Gateway'); };
+    const out = await launcher.tick();
+    assert.deepEqual(out.launched, [], event);
+    if (event === 'push') {
+      assert.deepEqual([out.deleted, out.unregistered], [[], []]);
+      assert.deepEqual(vms(w), [idle]);
+      assert.equal(w.log.filter((line) => line.startsWith('alert ')).length, 0);
+    } else {
+      assert.deepEqual(vms(w), []);
+      assert.ok(w.log.indexOf(`unregister ${idle}`) < w.log.indexOf(`delete ${idle}`));
+      assert.equal(w.log.filter((line) => line.startsWith('alert ')).length, 1);
+    }
+  }
+});
+
+test('an alert failure never admits an unsafe public repo', async () => {
+  const w = world({ start: T0, repos: { [SBX]: { private: false } } });
+  const { make } = setup({ w, cfg: { ...CFG, repos: [{ repo: SBX, allow_public: true }] } });
+  w.sim.queue(SBX, L(4));
+  w.sim.queue(SBX, ['ubuntu-latest'], { event: 'issue_comment' });
+  const launcher = make({ alert: async () => { throw new Error('unavailable'); } });
+  assert.deepEqual((await launcher.tick()).launched, []);
 });
 
 test('the daily line is written once, early in the UTC day, from yesterday\'s final rows', async () => {
