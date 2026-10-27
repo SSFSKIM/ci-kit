@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createGitHub, ghToken } from '../lib/github.mjs';
 import { parseArgs, UsageError, USAGE } from './args.mjs';
-import { deleteRef, nonceCommit, pushRef, resolveRemote, resolveTarget, TargetError } from './git.mjs';
+import { assertCaller, deleteRef, nonceCommit, pushRef, resolveRemote, resolveTarget, TargetError } from './git.mjs';
 import { cleanLog, nonceMessage, refName, sanitizeLabel } from './naming.mjs';
 import { findRun } from './discover.mjs';
 import { createPacer } from './pace.mjs';
@@ -96,6 +96,7 @@ async function main(argv) {
   let remote;
   try {
     target = resolveTarget(opts.target);
+    assertCaller(target.dir, target.sha, CALLER);
     remote = resolveRemote(target.dir, opts.repo);
   } catch (e) {
     if (!(e instanceof TargetError)) throw e;

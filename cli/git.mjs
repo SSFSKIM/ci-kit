@@ -55,6 +55,21 @@ export function resolveTarget(target) {
   return { dir: '.', sha, branch: null, dirty: false };
 }
 
+// ci-gate follows the run of ci-kit's gates workflow, so the tested commit must call it from CALLER_PATH (cli/init.mjs
+// writes it). A repository whose CI runs from workflows of its own (one with an env-only ci-kit.yml, such as MAWS) is
+// refused before anything is pushed: a ci/ push there starts that repository's own runs, which ci-gate never finds.
+export function assertCaller(dir, sha, callerPath) {
+  const caller = tryGit(dir, ['show', `${sha}:${callerPath}`]);
+  if (caller === null) {
+    throw new TargetError(`${sha.slice(0, 8)} has no ${callerPath}, so this is not a repository ci-gate runs: its CI runs from its own workflows${ownScript(dir, sha)}`);
+  }
+  if (!/^\s*uses:.*\.github\/workflows\/gates\.yml/m.test(caller)) {
+    throw new TargetError(`${sha.slice(0, 8)}'s ${callerPath} does not call ci-kit's gates workflow, so ci-gate has no run to follow${ownScript(dir, sha)}`);
+  }
+}
+
+const ownScript = (dir, sha) => (tryGit(dir, ['cat-file', '-e', `${sha}:scripts/ci-gate.sh`]) === null ? '' : '; use its scripts/ci-gate.sh');
+
 // The remote to push to, and the repo it pushes to: the one whose push destination (`remote.<name>.pushurl`, else its
 // URL) is `repo` (origin first), and the repo origin pushes to when none is given. The run is polled in the repo the
 // ref lands in, so the fetch URL of a fork setup is never used. A remote with several push URLs pushes to all of

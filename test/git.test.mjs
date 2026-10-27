@@ -2,10 +2,11 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { deleteRef, nonceCommit, pushRef, resolveRemote, resolveTarget } from '../cli/git.mjs';
+import { dirname, join } from 'node:path';
+import { assertCaller, deleteRef, nonceCommit, pushRef, resolveRemote, resolveTarget } from '../cli/git.mjs';
+import { CALLER_PATH } from '../cli/init.mjs';
 
 let root;
 let work;
@@ -112,4 +113,33 @@ test('a transiently refused push is retried, and a lasting refusal still fails a
   const tries = [];
   assert.throws(() => pushRef(work, 'gone', commit, 'ci/y', { sleep: (ms) => tries.push(ms) }));
   assert.deepEqual(tries, [3000, 8000]);
+});
+
+test("a commit that does not call ci-kit's gates workflow is refused before anything is pushed", () => {
+  const repo = join(root, 'own-ci');
+  execFileSync('git', ['init', '-q', '-b', 'main', repo]);
+  git(repo, 'config', 'user.email', 't@example.com');
+  git(repo, 'config', 'user.name', 't');
+  const commitWith = (files) => {
+    for (const [path, body] of Object.entries(files)) {
+      mkdirSync(join(repo, dirname(path)), { recursive: true });
+      writeFileSync(join(repo, path), body);
+    }
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qm', 'c');
+    return git(repo, 'rev-parse', 'HEAD');
+  };
+  // An env-only ci-kit.yml with the repository's own workflow (MAWS's shape): no ci.yml at all.
+  let sha = commitWith({ '.github/ci-kit.yml': 'version: 1\nsetup:\n  node: "22"\n', '.github/workflows/gate.yml': 'on: push\n' });
+  assert.throws(() => assertCaller(repo, sha, CALLER_PATH), /has no \.github\/workflows\/ci\.yml, so this is not a repository ci-gate runs/);
+  sha = commitWith({ 'scripts/ci-gate.sh': '#!/bin/sh\n' });
+  assert.throws(() => assertCaller(repo, sha, CALLER_PATH), /use its scripts\/ci-gate\.sh$/);
+  // A ci.yml of the repository's own, not the caller ci-gate init writes.
+  sha = commitWith({ '.github/workflows/ci.yml': 'jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: make test}]\n' });
+  assert.throws(() => assertCaller(repo, sha, CALLER_PATH), /does not call ci-kit's gates workflow/);
+  // The caller, pinned (an adopter) or local (ci-kit itself), passes.
+  sha = commitWith({ '.github/workflows/ci.yml': 'jobs:\n  ci:\n    uses: SSFSKIM/ci-kit/.github/workflows/gates.yml@v1\n' });
+  assert.doesNotThrow(() => assertCaller(repo, sha, CALLER_PATH));
+  sha = commitWith({ '.github/workflows/ci.yml': 'jobs:\n  ci:\n    uses: ./.github/workflows/gates.yml\n' });
+  assert.doesNotThrow(() => assertCaller(repo, sha, CALLER_PATH));
 });
