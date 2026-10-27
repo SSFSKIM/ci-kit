@@ -130,8 +130,8 @@ GitHub. A tick:
    every queued or in-progress run's event is `push`, `workflow_dispatch` or `schedule`, including runs with no pool
    jobs. Any other event (a same-repo `pull_request` included) refuses the whole repo this tick: no new VMs, its idle
    unclaimed runners drained as on a public refusal, and its busy jobs left alone. The launcher logs the run id and
-   event and raises one `ci-kit-alert` issue per repo, deduplicated while open. An unreadable run list also refuses
-   the public repo; private repos are unchanged. This checks the tick's snapshot, not a runner's job admission, and
+   event and raises one `ci-kit-alert` issue per repo, deduplicated while open. An unreadable run list launches nothing
+   but does not trigger a drain; private repos are unchanged. This checks the tick's snapshot, not a runner's job admission, and
    does not guard persistent Mac runners. It reads the repo's
    `ci-kit-gce-*` runners and then its queued and in-progress runs and their jobs; the ledger's last 26 h on every
    open ledger issue (below) and then the `ci-kit=gce` instances and disks; the images; and, once the runners and

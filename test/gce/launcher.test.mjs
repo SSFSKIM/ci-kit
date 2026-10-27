@@ -531,16 +531,29 @@ test('an unsafe public run drains idle runners, leaves busy jobs alone, and aler
   assert.equal((await launcher.tick()).launched.length, 1, 'safe demand resumes once the unsafe run ends');
 });
 
-test('a public exception does not serve when active runs cannot be read, and alert failure does not admit it', async () => {
-  for (const failure of ['runs', 'alert']) {
-    const w = world({ start: T0, repos: { [SBX]: { private: false } } });
-    const { make } = setup({ w, cfg: { ...CFG, repos: [{ repo: SBX, allow_public: true }] } });
-    w.sim.queue(SBX, L(4));
-    if (failure === 'runs') w.github.runsByStatus = async () => { throw new Error('unavailable'); };
-    else w.sim.queue(SBX, ['ubuntu-latest'], { event: 'issue_comment' });
-    const launcher = make({ alert: async () => { throw new Error('unavailable'); } });
-    assert.deepEqual((await launcher.tick()).launched, []);
-  }
+test('an unreadable public run list launches nothing without draining its idle runners', async () => {
+  const w = world({ start: T0, repos: { [SBX]: { private: false } } });
+  const { launcher } = setup({ w, cfg: { ...CFG, repos: [{ repo: SBX, allow_public: true }] } });
+  w.sim.queue(SBX, L(4));
+  await launcher.tick();
+  const [idle] = vms(w);
+  w.sim.boot(SBX, idle);
+  w.sim.queue(SBX, L(2));
+  w.github.runsByStatus = async () => { throw new Error('unavailable'); };
+  const out = await launcher.tick();
+  assert.deepEqual([out.launched, out.deleted, out.unregistered], [[], [], []]);
+  assert.deepEqual(vms(w), [idle]);
+  assert.equal(w.sim.runner(SBX, idle).busy, false);
+  assert.equal(w.log.filter((line) => line.startsWith('alert ')).length, 0);
+});
+
+test('an alert failure never admits an unsafe public repo', async () => {
+  const w = world({ start: T0, repos: { [SBX]: { private: false } } });
+  const { make } = setup({ w, cfg: { ...CFG, repos: [{ repo: SBX, allow_public: true }] } });
+  w.sim.queue(SBX, L(4));
+  w.sim.queue(SBX, ['ubuntu-latest'], { event: 'issue_comment' });
+  const launcher = make({ alert: async () => { throw new Error('unavailable'); } });
+  assert.deepEqual((await launcher.tick()).launched, []);
 });
 
 test('the daily line is written once, early in the UTC day, from yesterday\'s final rows', async () => {

@@ -165,7 +165,7 @@ export class Launcher {
     const instances = [...inventories.values()].flatMap((v) => v.instances);
     const complete = inventories.get(providerKey({ provider: 'gce', account: this.cfg.project }))?.complete !== false;
     // A public exception serves only push, dispatch and scheduled runs. Any other active run drains the repo as a
-    // public refusal would; an unreadable visibility or run list cannot admit it either (docs/pool.md).
+    // public refusal would; an unreadable run list launches nothing without triggering a drain (docs/pool.md).
     const allowPublic = new Set(this.cfg.repos.filter((r) => r.allow_public === true).map((r) => r.repo));
     const served = [];
     for (const [repo, read] of reads) {
@@ -174,7 +174,8 @@ export class Launcher {
       else if (visible === false && allowPublic.has(repo)) {
         const active = await read.jobs;
         if (!active) {
-          this.log(`not serving ${repo} this tick: its active runs could not be read`);
+          this.log(`no launches for ${repo} this tick: its active runs could not be read; keeping its runners`);
+          served.push(repo);
           continue;
         }
         const unsafe = active.runs.find((run) => !['push', 'workflow_dispatch', 'schedule'].includes(run.event));
