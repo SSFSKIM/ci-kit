@@ -98,7 +98,7 @@ gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token
   replaces it. It reaches every instance and the watcher as `CI_KIT_DISPLAY`, alongside `CI_KIT_MACHINE`. A machine
   never given a display setting behaves as before. This checks the display; it never sets a mode or starts BetterDisplay.
 - **Home desktop.** `--home` adds `ci-kit-mac-home` to a newly registered exclusive instance, never a shared instance.
-  Only the mini gets it, not the EC2 Mac. The exclusive `.env` keeps `CI_KIT_HOME=1`, so every refresh remembers the
+  Only the mini gets it, never a second Mac. The exclusive `.env` keeps `CI_KIT_HOME=1`, so every refresh remembers the
   choice and prints the label note. As with the VM lane's solo label, an existing registration keeps its labels: add
   the label through GitHub's runner API or settings, not by registering again. The mini already has it (2026-10-26).
   For an existing runner whose numeric id is `<id>`:
@@ -1192,8 +1192,10 @@ ssh mini 'xattr -p com.apple.quarantine /Applications/LibreOffice.app'
 ## Adding a Mac
 
 A second machine runs a second exclusive runner with the base labels, so MAWS's `[self-hosted, macOS, ARM64]` jobs go
-to whichever machine is idle. Do not give it `--home`: only the mini carries `ci-kit-mac-home`, which MAWS's measured
-and live e2e groups target. The EC2 M1 is named `ci-kit-mac-ec2`. Below, `<host>` is the MacBook's `ssh` host for it and `<name>` its short name, a
+to whichever machine is idle. Do not give it `--home`: only the mini carries `ci-kit-mac-home`, which MAWS's measured,
+live and MAC_HOME_E2E e2e groups target (MAC_HOME_E2E: those needing what only the mini runs, such as ClaudeUsage's
+relay). An EC2 M1 (`mac2.metal`), `ci-kit-mac-ec2`, ran this way from 2026-10-26 to 10-27. It was released at the
+owner's call: once GitHub's hosted Macs took 31 of MAWS's e2e groups, the mini alone carried the rest. Below, `<host>` is the MacBook's `ssh` host for it and `<name>` its short name, a
 lowercase word of letters, digits and `-`, not ending in `-<number>` (a shared runner's name does): the runner is
 `ci-kit-mac-<name>`, and its refusals and alert say "on the <name>", so pick a word that reads there.
 
