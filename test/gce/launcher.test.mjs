@@ -460,6 +460,13 @@ test('a public repo is refused', async () => {
   assert.deepEqual((await launcher.tick()).launched, []);
 });
 
+test('a public repo whose entry allows it is served', async () => {
+  const w = world({ start: T0, repos: { [SBX]: { private: false } } });
+  const { launcher } = setup({ w, cfg: { ...CFG, repos: [{ repo: SBX, allow_public: true }] } });
+  w.sim.queue(SBX, L(4));
+  assert.equal((await launcher.tick()).launched.length, 1);
+});
+
 test('the daily line is written once, early in the UTC day, from yesterday\'s final rows', async () => {
   const start = Date.parse('2026-10-17T00:30:00Z');
   const { w, launcher } = setup({ start, w: world({ start }) });

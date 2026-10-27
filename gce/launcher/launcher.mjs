@@ -164,12 +164,14 @@ export class Launcher {
     }
     const instances = [...inventories.values()].flatMap((v) => v.instances);
     const complete = inventories.get(providerKey({ provider: 'gce', account: this.cfg.project }))?.complete !== false;
-    // Public repos are refused; a repo whose visibility cannot be read is not served this tick.
+    // Public repos are refused unless their entry says allow_public (the owner's acceptance of serving it while public);
+    // a repo whose visibility cannot be read is not served this tick.
+    const allowPublic = new Set(this.cfg.repos.filter((r) => r.allow_public === true).map((r) => r.repo));
     const served = [];
     for (const [repo, read] of reads) {
       const visible = await read.visible;
-      if (visible === true) served.push(repo);
-      else if (visible === false) this.log(`refusing ${repo}: it is public, and the pool serves private repos only`);
+      if (visible === true || (visible === false && allowPublic.has(repo))) served.push(repo);
+      else if (visible === false) this.log(`refusing ${repo}: it is public, and its entry in gce.json does not allow_public`);
       else this.log(`not serving ${repo} this tick: its visibility could not be read (${visible.message})`);
     }
     const rowOf = new Map(rows.map((r) => [r.alloc, r]));

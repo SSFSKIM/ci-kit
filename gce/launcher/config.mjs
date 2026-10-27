@@ -50,7 +50,8 @@ function checkRepo(r, i, errors) {
     errors.push(`${where} must name a repo as OWNER/NAME`);
     return;
   }
-  checkKeys(r, ['repo', 'providers'], where, errors);
+  checkKeys(r, ['repo', 'providers', 'allow_public'], where, errors);
+  if ('allow_public' in r && r.allow_public !== true) errors.push(`${where}.allow_public must be true when present`);
   if (!('providers' in r)) return;
   if (!Array.isArray(r.providers)) {
     errors.push(`${where}.providers must be a list`);
