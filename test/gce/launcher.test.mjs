@@ -547,6 +547,30 @@ test('an unreadable public run list launches nothing without draining its idle r
   assert.equal(w.log.filter((line) => line.startsWith('alert ')).length, 0);
 });
 
+test('a failed job read still refuses an unsafe public run, and keeps a safe one\'s idle runners', async () => {
+  for (const event of ['pull_request_target', 'push']) {
+    const w = world({ start: T0, repos: { [SBX]: { private: false } } });
+    const { launcher } = setup({ w, cfg: { ...CFG, repos: [{ repo: SBX, allow_public: true }] } });
+    w.sim.queue(SBX, L(4));
+    await launcher.tick();
+    const [idle] = vms(w);
+    w.sim.boot(SBX, idle);
+    w.sim.queue(SBX, L(2), { event });
+    w.github.listJobs = async () => { throw new Error('502 Bad Gateway'); };
+    const out = await launcher.tick();
+    assert.deepEqual(out.launched, [], event);
+    if (event === 'push') {
+      assert.deepEqual([out.deleted, out.unregistered], [[], []]);
+      assert.deepEqual(vms(w), [idle]);
+      assert.equal(w.log.filter((line) => line.startsWith('alert ')).length, 0);
+    } else {
+      assert.deepEqual(vms(w), []);
+      assert.ok(w.log.indexOf(`unregister ${idle}`) < w.log.indexOf(`delete ${idle}`));
+      assert.equal(w.log.filter((line) => line.startsWith('alert ')).length, 1);
+    }
+  }
+});
+
 test('an alert failure never admits an unsafe public repo', async () => {
   const w = world({ start: T0, repos: { [SBX]: { private: false } } });
   const { make } = setup({ w, cfg: { ...CFG, repos: [{ repo: SBX, allow_public: true }] } });

@@ -172,13 +172,13 @@ export class Launcher {
       const visible = await read.visible;
       if (visible === true) served.push(repo);
       else if (visible === false && allowPublic.has(repo)) {
-        const active = await read.jobs;
+        const active = await read.runs;
         if (!active) {
           this.log(`no launches for ${repo} this tick: its active runs could not be read; keeping its runners`);
           served.push(repo);
           continue;
         }
-        const unsafe = active.runs.find((run) => !['push', 'workflow_dispatch', 'schedule'].includes(run.event));
+        const unsafe = active.find((run) => !['push', 'workflow_dispatch', 'schedule'].includes(run.event));
         if (unsafe) {
           this.log(`refusing ${repo}: public run ${unsafe.id} has event ${unsafe.event ?? 'unknown'}`);
           await this.alert({
@@ -227,30 +227,40 @@ export class Launcher {
   }
 
   // A repo's GitHub reads, started together: whether it is private, and its runners, then its queued and running runs
-  // ({repo, id, path, event, attempt, message}) and their jobs, each with its run's workflow path. Runners are read first: a job taken
-  // between the two reads then shows as not queued, never as double demand. The queued runs are listed before the
+  // ({repo, id, path, event, attempt, message}), then their jobs, each with its run's workflow path. Runners are read first: a job
+  // taken between the two reads then shows as not queued, never as double demand. The queued runs are listed before the
   // running ones, so a run that starts between the two listings is in the second (listed at once, each could miss it),
-  // and a run in both is read once. A failed read resolves to null (visible: to the error), logged.
+  // and a run in both is read once. The runs stand without their jobs: the public guard reads them even when a job read
+  // fails. A failed read resolves to null (visible: to the error), logged.
   readRepo(repo, preparation) {
     const visible = preparation.time('github.getRepo', () => this.gh.getRepo(repo), { repo }).then((r) => r.private === true, (err) => err);
     const runners = this.listRunners(repo, preparation);
-    const jobs = runners.then(async (mine) => {
+    const listed = runners.then(async (mine) => {
       if (!mine) return null;
       try {
-        const listed = [...(await preparation.time('github.runs.queued', () => this.gh.runsByStatus(repo, 'queued'), { repo })),
+        const both = [...(await preparation.time('github.runs.queued', () => this.gh.runsByStatus(repo, 'queued'), { repo })),
           ...(await preparation.time('github.runs.in_progress', () => this.gh.runsByStatus(repo, 'in_progress'), { repo }))];
-        const runs = [...new Map(listed.map((run) => [run.id, run])).values()]; // one that started between is in both
-        const lists = await Promise.all(runs.map(async (run) => {
+        return [...new Map(both.map((run) => [run.id, run])).values()]; // one that started between is in both
+      } catch (err) {
+        this.log(`runs of ${repo}: ${err.message}`);
+        return null;
+      }
+    });
+    const runs = listed.then((all) => all && all.map((run) => ({ repo, id: run.id, path: run.path, event: run.event, attempt: run.run_attempt ?? 1, message: run.head_commit?.message })));
+    const jobs = listed.then(async (all) => {
+      if (!all) return null;
+      try {
+        const lists = await Promise.all(all.map(async (run) => {
           const jobs = await preparation.time('github.listJobs', () => this.gh.listJobs(repo, run.id), { repo, run: run.id });
           return jobs.map((j) => ({ ...j, repo, workflow: run.path }));
         }));
-        return { jobs: lists.flat(), runs: runs.map((run) => ({ repo, id: run.id, path: run.path, event: run.event, attempt: run.run_attempt ?? 1, message: run.head_commit?.message })) };
+        return { jobs: lists.flat(), runs: await runs };
       } catch (err) {
         this.log(`jobs of ${repo}: ${err.message}`);
         return null;
       }
     });
-    return { visible, runners, jobs };
+    return { visible, runners, runs, jobs };
   }
 
   async listRunners(repo, preparation) {
