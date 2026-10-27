@@ -164,14 +164,30 @@ export class Launcher {
     }
     const instances = [...inventories.values()].flatMap((v) => v.instances);
     const complete = inventories.get(providerKey({ provider: 'gce', account: this.cfg.project }))?.complete !== false;
-    // Public repos are refused unless their entry says allow_public (the owner's acceptance of serving it while public);
-    // a repo whose visibility cannot be read is not served this tick.
+    // A public exception serves only push, dispatch and scheduled runs. Any other active run drains the repo as a
+    // public refusal would; an unreadable visibility or run list cannot admit it either (docs/pool.md).
     const allowPublic = new Set(this.cfg.repos.filter((r) => r.allow_public === true).map((r) => r.repo));
     const served = [];
     for (const [repo, read] of reads) {
       const visible = await read.visible;
-      if (visible === true || (visible === false && allowPublic.has(repo))) served.push(repo);
-      else if (visible === false) this.log(`refusing ${repo}: it is public, and its entry in gce.json does not allow_public`);
+      if (visible === true) served.push(repo);
+      else if (visible === false && allowPublic.has(repo)) {
+        const active = await read.jobs;
+        if (!active) {
+          this.log(`not serving ${repo} this tick: its active runs could not be read`);
+          continue;
+        }
+        const unsafe = active.runs.find((run) => !['push', 'workflow_dispatch', 'schedule'].includes(run.event));
+        if (unsafe) {
+          this.log(`refusing ${repo}: public run ${unsafe.id} has event ${unsafe.event ?? 'unknown'}`);
+          await this.alert({
+            title: `ci-kit alert: public repo ${repo} has an unsafe workflow trigger`,
+            body: `Public repository ${repo} has active run https://github.com/${repo}/actions/runs/${unsafe.id} with event \`${unsafe.event ?? 'unknown'}\`. ` +
+              'The pool serves public repositories only for push, workflow_dispatch and schedule (docs/pool.md). ' +
+              'No new VMs will launch for this repo while an unsafe run is active; its idle unclaimed runners are drained. Check its workflow triggers before resuming.',
+          }).catch((err) => this.log(`alert: ${err.message}`));
+        } else served.push(repo);
+      } else if (visible === false) this.log(`refusing ${repo}: it is public, and its entry in gce.json does not allow_public`);
       else this.log(`not serving ${repo} this tick: its visibility could not be read (${visible.message})`);
     }
     const rowOf = new Map(rows.map((r) => [r.alloc, r]));
@@ -210,7 +226,7 @@ export class Launcher {
   }
 
   // A repo's GitHub reads, started together: whether it is private, and its runners, then its queued and running runs
-  // ({repo, id, path, attempt, message}) and their jobs, each with its run's workflow path. Runners are read first: a job taken
+  // ({repo, id, path, event, attempt, message}) and their jobs, each with its run's workflow path. Runners are read first: a job taken
   // between the two reads then shows as not queued, never as double demand. The queued runs are listed before the
   // running ones, so a run that starts between the two listings is in the second (listed at once, each could miss it),
   // and a run in both is read once. A failed read resolves to null (visible: to the error), logged.
@@ -227,7 +243,7 @@ export class Launcher {
           const jobs = await preparation.time('github.listJobs', () => this.gh.listJobs(repo, run.id), { repo, run: run.id });
           return jobs.map((j) => ({ ...j, repo, workflow: run.path }));
         }));
-        return { jobs: lists.flat(), runs: runs.map((run) => ({ repo, id: run.id, path: run.path, attempt: run.run_attempt ?? 1, message: run.head_commit?.message })) };
+        return { jobs: lists.flat(), runs: runs.map((run) => ({ repo, id: run.id, path: run.path, event: run.event, attempt: run.run_attempt ?? 1, message: run.head_commit?.message })) };
       } catch (err) {
         this.log(`jobs of ${repo}: ${err.message}`);
         return null;
