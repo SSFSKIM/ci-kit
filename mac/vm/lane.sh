@@ -74,7 +74,8 @@
 #      queued than it can take (one);
 #   3. nothing holds the lane: no vm-hold.<owner>, no vm-pause in force, and no claim (vm-claim.sh claims, read under
 #      the desktop lock: clear only when it exits 0 and prints nothing);
-#   4. no guest exists: vm-reserved absent, and Tart lists no maws-vm-* running (a maintenance VM keeps the lane shut,
+#   4. no guest exists: vm-reserved absent, and no `tart run` process names a maws-vm-* VM (options may precede or
+#      follow the VM operand; a maintenance VM keeps the lane shut,
 #      logged once per change and alerted after CI_KIT_VM_MAINTENANCE_ALERT s, 600);
 #   5. the memory guard and the disk reserve admit: pressure 1, available at least CI_KIT_VM_MEMORY_FLOOR % (57. V1's
 #      measure on the mini: a busy 4 GB guest moved the available figure at most 8 points, 24 with a host e2e job
@@ -91,6 +92,12 @@
 # read at every boot, the kit (CI_KIT_VM_KIT, ~/ci-kit-vm/kit)), and a window of CI_KIT_VM_PAUSE_WINDOWS (UTC HH:MM-HH:MM,
 # comma-separated, none by default) keeps the lane down. Missing parts alert after CI_KIT_VM_GOLDEN_ALERT s (3600) of a
 # job waiting. A hold is logged once per change and alerted, per owner, after CI_KIT_VM_HOLD_ALERT s (21600) on.
+#
+# TART'S LIST IS TRANSITION-ONLY: before an admitted boot, at verified teardown, and during start-up recovery;
+# never in the idle poll. Even the local list attaches every disk.img via diskutil image info, leaking APFS IOKit
+# objects on the mini: about 8 GB in a week, 232,825 AppleAPFSContainer objects and 9.76 of 16 GB wired (2026-10-28).
+# The resulting 15% free cannot meet the guest's 57% floor. Idle admission and maintenance detection read ps instead.
+# Failed transitions still retry; tart.sh documents the remaining few list/attach calls per job.
 #
 # THE MEMORY GUARD samples from tart run to the verified end, every CI_KIT_VM_SAMPLE s (15), into vm-lane.log:
 #   - pressure 2 on two samples in a row: a guest holding no job (booting, kicking, session, listening, as the step
@@ -492,20 +499,16 @@ give_up() { # <kind> <why>
   if wrapper_may_run; then ask_stop "$2"; else to_teardown "$2"; fi
 }
 
-# IDLE: one poll. Housekeeping first (the disk pause, the alerts that follow holds, maintenance VMs and missing parts),
-# then the boot rule.
+# IDLE: one poll. Housekeeping first (the disk pause and the alerts that follow holds and maintenance VMs), then
+# the boot rule. The parts/golden check belongs to the admitted boot, not this poll.
 idle_poll() {
-  local vms list_ok=1 running owners line owner kind since_file waiting
+  local process_ok=1 running owners line owner kind since_file
   disk_read || true
   follow_disk
   memory_read || true
-  vms=$(tart_vms) || list_ok=''
-  # Maintenance VMs, and job clones nothing reserved: either keeps the lane shut.
-  running=''
-  if [[ -n $list_ok ]]; then
-    running=$(awk -F'\t' '$1 ~ /^maws-vm-/ && $2 != "stopped" { print $1 }' <<<"$vms" | tr '\n' ' ')
-    running=${running% }
-  fi
+  # Maintenance VMs, and job clones nothing reserved: either keeps the lane shut. No disk-image attach to read them.
+  running=$(tart_run_vms) || process_ok=''
+  running=${running//$'\n'/ }
   if [[ -n $running ]]; then
     note maintenance "a maws-vm-* VM runs that this launcher did not boot ($running); nothing boots while it does"
     [[ -n ${maintenance_since:-} ]] || maintenance_since=$now_epoch
@@ -514,7 +517,7 @@ idle_poll() {
         "VMs: $running
 The launcher boots nothing while a maintenance VM (a golden, a candidate, a trial clone) runs: a maintenance procedure was released out of order. Finish or stop it with the verified stop."
     fi
-  elif [[ -n $list_ok ]]; then
+  elif [[ -n $process_ok ]]; then
     [[ -z ${maintenance_since:-} ]] || say 'no maws-vm-* VM runs any more'
     maintenance_since=''
     forget maintenance
@@ -552,33 +555,18 @@ The lane boots nothing while any vm-hold.<owner> exists; only its owner removes 
     alert_close memory "pressure 1, available $m_available%"
   fi
 
-  if [[ -z $list_ok ]] || ! parts_ready "$vms"; then
-    [[ -n $list_ok ]] || parts_why="Tart cannot list its VMs ($tart_bin list failed)"
-    note boot "no boot: $parts_why"
-    waiting=''
-    queue_read && wants_guest && waiting=1
-    if [[ -n $waiting ]]; then
-      [[ -n ${parts_since:-} ]] || parts_since=$now_epoch
-      if ((now_epoch - parts_since >= golden_alert)); then
-        alert_open parts "ci-kit alert: vm lane on $machine cannot boot since $(minute "$(date -u -r "$parts_since" +%Y-%m-%dT%H:%M:%SZ)"): $parts_why" \
-          "A job has waited for the guest since then: $want_why."
-      fi
-    else
-      parts_since=''
-    fi
+  if [[ -z $process_ok ]]; then note boot 'no boot: the process table cannot be read'; return; fi
+  if ! admit "$running"; then
+    # An unrelated refusal does not restart a known parts fault. Only a confirmed end to waiting does.
+    if [[ -n ${parts_since:-} ]] && queue_read && ! wants_guest; then parts_since=''; fi
     return
   fi
-  parts_since=''
-  alert_close parts 'the lane has its parts'
-  alert_close recover 'recovery went through'
-  admit "$vms" || return
   boot
 }
 
 # The boot rule's conditions read outside the lock: none of them is written by what the lock serializes. boot_reads
 # says what was read; false with the reason logged.
-admit() { # <tart_vms output>
-  local guest
+admit() { # <running maws-vm-* names, from the process table>
   if in_pause_window; then note boot "no boot: inside the pause window $window_seen (UTC)"; return 1; fi
   if ! holds_read; then note boot "no boot: ${h_owners//$'\n'/; }"; return 1; fi
   if [[ -n $p_reason ]]; then note boot "no boot: $(pause_line)"; return 1; fi
@@ -587,8 +575,7 @@ admit() { # <tart_vms output>
     reserved) note boot "no boot: the reservation stands ($(head -1 "$reserved_file" 2>/dev/null))"; return 1 ;;
     unknown) note boot "no boot: cannot tell whether a guest is reserved ($r_why)"; return 1 ;;
   esac
-  guest=$(awk -F'\t' '$1 ~ /^maws-vm-/ && $2 != "stopped" { print $1 }' <<<"$1" | tr '\n' ' ')
-  if [[ -n $guest ]]; then note boot "no boot: ${guest% } runs"; return 1; fi
+  if [[ -n $1 ]]; then note boot "no boot: $1 runs"; return 1; fi
   if [[ -z $m_pressure ]]; then note boot 'no boot: memory unknown (the read failed)'; return 1; fi
   if ((m_pressure != 1)); then
     note boot "no boot: memory pressure $m_pressure, not 1 ($(memory_line))" "pressure $m_pressure"
@@ -638,9 +625,9 @@ boot() {
   read_reservation
   [[ $r_state == none ]] || why="the reservation stands (${r_why:-$r_vm})"
   if [[ -z $why ]]; then
-    if ! entry=$(tart_vms); then
-      why='Tart cannot list its VMs'
-    elif awk -F'\t' '$1 ~ /^maws-vm-/ && $2 != "stopped" { found = 1 } END { exit !found }' <<<"$entry"; then
+    if ! entry=$(tart_run_vms); then
+      why='the process table cannot be read'
+    elif [[ -n $entry ]]; then
       why='a maws-vm-* VM runs'
     fi
   fi
@@ -649,6 +636,26 @@ boot() {
     note boot "no boot: $why"
     return
   fi
+  # Only a boot that otherwise admits reads Tart's state, once under the lock, for the golden/clone decision.
+  parts_why=''
+  if ! entry=$(tart_vms); then
+    parts_why="Tart cannot list its VMs ($tart_bin list failed)"
+  else
+    parts_ready "$entry" || true
+  fi
+  if [[ -n $parts_why ]]; then
+    unlock
+    note boot "no boot: $parts_why"
+    [[ -n ${parts_since:-} ]] || parts_since=$now_epoch
+    if ((now_epoch - parts_since >= golden_alert)); then
+      alert_open parts "ci-kit alert: vm lane on $machine cannot boot since $(minute "$(date -u -r "$parts_since" +%Y-%m-%dT%H:%M:%SZ)"): $parts_why" \
+        "A job has waited for the guest since then: $want_why."
+    fi
+    return
+  fi
+  parts_since=''
+  alert_close parts 'the lane has its parts'
+  alert_close recover 'recovery went through'
   res_since=$now res_golden=$g_name res_job=''
   if ! write_reservation "$name"; then
     unlock

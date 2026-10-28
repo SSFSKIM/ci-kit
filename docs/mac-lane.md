@@ -652,7 +652,7 @@ hold, and it logs what fails, once per change, and what it read at each boot:
 2. the host will not take it first: a `ci-kit-mac-vm` job always counts; a `ci-kit-mac-solo` job counts while the
    exclusive instance is busy, held by the dialog watcher or offline, or when more than one is queued;
 3. nothing holds the lane: no `vm-hold.<owner>`, no live `vm-claim.*`, no `vm-pause` in force;
-4. no guest exists: no `vm-reserved`, and Tart lists no `maws-vm-*` VM running;
+4. no guest exists: no `vm-reserved`, and the process table has no `tart run` of a `maws-vm-*` VM (options may come before or after its name);
 5. the memory guard and the disk reserve admit (below);
 6. the host's main display is at @2x, since the guest takes its density from it at boot;
 7. the mode allows it: `CI_KIT_VM_LANE_MODE` `always` (the default), or `hold-only` with every host instance held or
@@ -662,6 +662,14 @@ hold, and it logs what fails, once per change, and what it read at each boot:
 Conditions 3 and 4 are read again under `desktop.lock`, in the one step that writes the reservation, clones and spawns
 `tart run`; nothing can release the reservation between its write and the run. The lane never stops a running guest to
 admit anything else: a measured job, a timed hold and the maintenance procedure each wait for it.
+
+The idle poll reads processes, never `tart list`. The launcher reads Tart's local JSON list only on transitions:
+just before an otherwise-admitted boot (including checking the golden), at verified teardown and deletion, and in
+start-up recovery. Failed transitions retry until they settle; maintenance procedures also retain their state checks.
+Even `tart list --source local` runs `diskutil image info --plist` on every local `disk.img`, attaching it and leaking
+APFS IOKit objects on the mini. On 2026-10-28, a week of polling had left 232,825 AppleAPFSContainer objects and
+9.76 of 16 GB wired (about 8 GB leaked); 15% free could not meet the guest's 57% boot floor. Only a reboot reclaimed
+it. A normal job still pays three list calls (boot, verified end, deletion), but an unchanged idle lane pays none.
 
 **Host jobs and the guest.**
 - **A measured job** keeps the guest out through settle ([the measured-job guard](#the-measured-job-guard)): `vm:
