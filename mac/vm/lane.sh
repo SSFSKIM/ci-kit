@@ -74,8 +74,8 @@
 #      queued than it can take (one);
 #   3. nothing holds the lane: no vm-hold.<owner>, no vm-pause in force, and no claim (vm-claim.sh claims, read under
 #      the desktop lock: clear only when it exits 0 and prints nothing);
-#   4. no guest exists: vm-reserved absent, and no `tart run` process names a maws-vm-* VM as its last argument
-#      (a maintenance VM keeps the lane shut,
+#   4. no guest exists: vm-reserved absent, and no `tart run` process names a maws-vm-* VM (options may precede or
+#      follow the VM operand; a maintenance VM keeps the lane shut,
 #      logged once per change and alerted after CI_KIT_VM_MAINTENANCE_ALERT s, 600);
 #   5. the memory guard and the disk reserve admit: pressure 1, available at least CI_KIT_VM_MEMORY_FLOOR % (57. V1's
 #      measure on the mini: a busy 4 GB guest moved the available figure at most 8 points, 24 with a host e2e job
@@ -556,7 +556,11 @@ The lane boots nothing while any vm-hold.<owner> exists; only its owner removes 
   fi
 
   if [[ -z $process_ok ]]; then note boot 'no boot: the process table cannot be read'; return; fi
-  if ! admit "$running"; then parts_since=''; return; fi
+  if ! admit "$running"; then
+    # An unrelated refusal does not restart a known parts fault. Only a confirmed end to waiting does.
+    if [[ -n ${parts_since:-} ]] && queue_read && ! wants_guest; then parts_since=''; fi
+    return
+  fi
   boot
 }
 

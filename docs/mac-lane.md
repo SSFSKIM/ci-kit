@@ -652,7 +652,7 @@ hold, and it logs what fails, once per change, and what it read at each boot:
 2. the host will not take it first: a `ci-kit-mac-vm` job always counts; a `ci-kit-mac-solo` job counts while the
    exclusive instance is busy, held by the dialog watcher or offline, or when more than one is queued;
 3. nothing holds the lane: no `vm-hold.<owner>`, no live `vm-claim.*`, no `vm-pause` in force;
-4. no guest exists: no `vm-reserved`, and the process table has no `tart run` whose last argument is a `maws-vm-*` VM;
+4. no guest exists: no `vm-reserved`, and the process table has no `tart run` of a `maws-vm-*` VM (options may come before or after its name);
 5. the memory guard and the disk reserve admit (below);
 6. the host's main display is at @2x, since the guest takes its density from it at boot;
 7. the mode allows it: `CI_KIT_VM_LANE_MODE` `always` (the default), or `hold-only` with every host instance held or

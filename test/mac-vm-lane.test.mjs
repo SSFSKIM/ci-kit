@@ -24,7 +24,8 @@ const root = realpathSync(mkdtempSync(join(tmpdir(), 'ci-kit-vm-lane-')));
 const cleanups = [];
 after(() => {
   for (const cleanup of cleanups.splice(0)) try { cleanup(); } catch {}
-  rmSync(root, { recursive: true, force: true });
+  // Terminated fixture helpers can finish a final mkdir while the tree is removed.
+  rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 const executable = (path, body) => { writeFileSync(path, `#!/bin/bash\n${body}\n`); chmodSync(path, 0o755); };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -76,7 +77,10 @@ case $command in
     mkdir "$vms/$2" || exit 1
     echo stopped > "$vms/$2/state" ;;
   run)
-    name=\${!#} dir=$vms/\${!#}
+    # Tart accepts the operand before or after options; select the existing fake VM, not the final argument.
+    name=''
+    for arg; do [[ ! -d $vms/$arg ]] || { name=$arg; break; }; done
+    dir=$vms/$name
     [[ -d $dir && $(state "$name") != running ]] || { echo "Error: cannot run $name" >&2; exit 1; }
     printf '%s\\n' "$@" > "$dir/run.args"
     # A guest's pasteboard is never the host's: every run of the lane's carries --no-clipboard.
@@ -258,9 +262,10 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/disk3s5
     },
     powerOff: (name) => writeFileSync(join(vms, name, 'poweroff'), ''),
     // A maintenance VM runs outside the launcher, but appears in the same process table.
-    async runVm(name) {
+    async runVm(name, optionsAfterName = false) {
       m.vm(name);
-      const child = spawn(join(bin, 'tart'), ['run', '--no-clipboard', name], { stdio: 'ignore', env: base });
+      const args = optionsAfterName ? [name, '--no-graphics', '--no-clipboard'] : ['--no-clipboard', name];
+      const child = spawn(join(bin, 'tart'), ['run', ...args], { stdio: 'ignore', env: base });
       host.push(child);
       const exited = once(child, 'exit');
       await m.until(() => existsSync(join(vms, name, 'run.pid')), 'the maintenance VM running');
@@ -534,9 +539,9 @@ exec /bin/mv "$@"`);
     await finish(m, a);
   });
 
-  test('idle process-table maintenance detection blocks boot and alerts without listing Tart', async () => {
+  test('idle process-table maintenance detection finds options after the VM name and blocks boot without listing Tart', async () => {
     const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_MAINTENANCE_ALERT: '1' } });
-    const vm = await m.runVm('maws-vm-x');
+    const vm = await m.runVm('maws-vm-x', true);
     // A stale Tart list must not hide a live process; idle must not consult it at all.
     writeFileSync(join(m.vms, 'maws-vm-x', 'listed'), 'stopped\n');
     const a = m.start();
@@ -549,6 +554,24 @@ exec /bin/mv "$@"`);
     await m.booted();
     assert.match(m.log(), /no maws-vm-\* VM runs any more/);
     assert.equal(m.closed().length, 1, 'the maintenance alert closes');
+    await finish(m, a);
+  });
+
+  test('the locked boot recheck sees a maintenance VM started after the idle process read', async () => {
+    const m = lane();
+    const a = m.start();
+    await m.waitLog(/no boot: no queued job for the guest$/m);
+    const lock = await m.holdLock();
+    m.queue(['ci-kit-mac-vm']);
+    // The job read comes after idle admission has sampled ps; boot is now waiting for our lock.
+    await m.until(() => m.ghCalls().some((call) => /\/runs\/101\/jobs\?/.test(call[1] ?? '')), 'the queued job read');
+    const vm = await m.runVm('maws-vm-late', true);
+    await lock.release();
+    await m.waitLog(/no boot: a maws-vm-\* VM runs$/m);
+    assert.equal(m.calls().filter((call) => call.startsWith('list ')).length, 1, 'the locked refusal also avoids Tart list');
+    assert.equal(m.clones().length, 0);
+    await vm.stop();
+    await m.booted();
     await finish(m, a);
   });
 
@@ -1553,6 +1576,46 @@ exec /bin/mv "$@"`);
     writeFileSync(join(m.vmHome, 'golden'), `${GOLDEN}\n`);
     await m.booted();
     assert.equal(m.closed().length, 1);
+    await finish(m, a);
+  });
+
+  test('a known missing golden keeps its alert interval across unrelated memory refusals', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_GOLDEN_ALERT: '8' } });
+    rmSync(join(m.vmHome, 'golden'));
+    const a = m.start();
+    await m.waitLog(/no boot: no golden pointer at /);
+    m.memory({ available: 56 });
+    await m.waitLog(/no boot: memory available 56%, under the floor/);
+    const lists = m.calls().filter((call) => call.startsWith('list ')).length;
+    await sleep(8500);
+    assert.equal(m.calls().filter((call) => call.startsWith('list ')).length, lists, 'memory refusals do not list Tart');
+    m.memory();
+    await m.until(() => m.alerts().length === 1, 'the already-due parts alert after memory recovers', 5000);
+    writeFileSync(join(m.vmHome, 'golden'), `${GOLDEN}\n`);
+    await m.booted();
+    assert.equal(m.closed().length, 1);
+    await finish(m, a);
+  });
+
+  test('the parts alert interval ends when queued work disappears during a memory refusal', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_GOLDEN_ALERT: '8' } });
+    rmSync(join(m.vmHome, 'golden'));
+    const a = m.start();
+    await m.waitLog(/no boot: no golden pointer at /);
+    m.memory({ available: 56 });
+    await m.waitLog(/no boot: memory available 56%, under the floor/);
+    m.queue();
+    const reads = m.ghCalls().length;
+    await m.until(() => m.ghCalls().length >= reads + 2, 'the vanished work read while memory refuses');
+    await sleep(8500);
+    const lists = m.calls().filter((call) => call.startsWith('list ')).length;
+    m.queue(['ci-kit-mac-vm']);
+    m.memory();
+    await m.until(() => m.calls().filter((call) => call.startsWith('list ')).length > lists, 'the new job checking the golden');
+    await sleep(2000);
+    assert.deepEqual(m.alerts(), [], 'new work does not inherit a finished waiting interval');
+    writeFileSync(join(m.vmHome, 'golden'), `${GOLDEN}\n`);
+    await m.booted();
     await finish(m, a);
   });
 

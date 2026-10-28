@@ -47,21 +47,38 @@ tart_state_in() { # <tart_vms output> <name>: its state, or nothing when it is n
 }
 
 # The pids of a VM's `tart <subcommand>` processes, one per line, from the process table: a process with the
-# subcommand right after a `tart` and, for run, the VM's name last; for exec, right after the subcommand. False when
-# the table cannot be read. With run and no name, returns the names of all running maws-vm-* VMs instead.
+# subcommand right after a `tart`; run accepts options on either side of the VM operand, exec names it immediately.
+# False when the table cannot be read. With run and no name, returns all running maws-vm-* names instead.
+# The valued options below are from `tart run --help`; --option=value needs no following word consumed.
 tart_pids() { # run|exec [<name>]
   local table
   table=$(LC_ALL=C bounded 10 "${CI_KIT_VM_PS:-/bin/ps}" -axww -o pid=,command= 7>&- 8>&- 2>/dev/null) || return 1
   perl -e '
     my ($sub, $name) = @ARGV[0, 1];
     @ARGV = ();
-    while (<STDIN>) {
+    my %valued = map { $_ => 1 } qw(
+      --serial-path --disk --rosetta --dir --net-bridged --net-softnet-allow --net-softnet-block
+      --net-softnet-control-fd --net-softnet-expose --root-disk-opts --provisioning-opts
+    );
+    PROCESS: while (<STDIN>) {
       my ($pid, @argv) = split " ";
       for my $i (0 .. $#argv - 2) {
         next unless $argv[$i] =~ m{(?:^|/)tart$} && $argv[$i + 1] eq $sub;
-        if ($sub eq "run" && $name eq "") {
-          if ($argv[-1] =~ /^maws-vm-/) { print "$argv[-1]\n"; last }
-        } elsif ($sub eq "run" ? $argv[-1] eq $name : $argv[$i + 2] eq $name) { print "$pid\n"; last }
+        if ($sub ne "run") {
+          if ($argv[$i + 2] eq $name) { print "$pid\n"; next PROCESS }
+          next;
+        }
+        my $literal = 0;
+        for (my $j = $i + 2; $j <= $#argv; $j++) {
+          my $arg = $argv[$j];
+          if (!$literal && $arg eq "--") { $literal = 1; next }
+          if (!$literal && $valued{$arg}) { $j++; next }
+          next if !$literal && $arg =~ /^-/;
+          # ps flattens spaced option values into words: do not mistake their first leftover word for the VM.
+          next unless $name eq "" ? $arg =~ /^maws-vm-/ : $arg eq $name;
+          print $name eq "" ? "$arg\n" : "$pid\n";
+          next PROCESS;
+        }
       }
     }' "$1" "${2:-}" <<<"$table"
 }
