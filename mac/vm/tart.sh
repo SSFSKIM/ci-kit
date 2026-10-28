@@ -3,8 +3,10 @@
 # under a deadline (dialog.sh's bounded, which the caller sources first), in the C locale, and with the descriptors of
 # the desktop lock (8) and the launcher's own lock (7) closed, so nothing Tart leaves behind can hold either.
 #
-# Tart is read as JSON (`tart list --format json`: Name, State, Running, Source), never the table, whose columns the
-# mini prints in Korean. A VM's end is verified, not assumed: Tart lists it stopped (or not at all) and no `tart run` of
+# Tart is read as JSON (`tart list --source local --format json`: Name, State, Running), never the table, whose columns
+# the mini prints in Korean. Local VMs only: the lane polls the list every 15 s, and Tart sizes each cached OCI image
+# through `diskutil image info`, a disk-image attach that kept storagekitd and diskarbitrationd busy on the mini
+# (1.91 s a list with its two cached images, 0.57 s local only; 2026-10-28, inside a MAWS measured job). A VM's end is verified, not assumed: Tart lists it stopped (or not at all) and no `tart run` of
 # its name is in the process table. A stop goes through `tart stop --timeout`, Tart's graceful stop and then its force,
 # and is verified the same way. Tart refuses to delete a running VM (VMDirectory.delete(), 2.41.1), but nothing here
 # relies on that alone: a delete comes only after a verified stop.
@@ -25,7 +27,7 @@ tart_call() { # <seconds> <tart arguments...>
 # whenever Running says so. False when the list cannot be read or parsed.
 tart_vms() {
   local out
-  out=$(tart_call 30 list --format json 2>/dev/null) || return 1
+  out=$(tart_call 30 list --source local --format json 2>/dev/null) || return 1
   perl -MJSON::PP -e '
     my $vms = eval { JSON::PP->new->decode(do { local $/; <STDIN> }) };
     exit 1 unless ref $vms eq "ARRAY";
