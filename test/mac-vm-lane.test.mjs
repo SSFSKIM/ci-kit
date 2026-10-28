@@ -836,7 +836,9 @@ exec /bin/mv "$@"`);
   // RECOVERY, at the start only, over job clones only.
   test('recovery touches job clones alone: a running candidate, golden and trial clone are left as they are, nothing boots while they run, and an alert follows', async () => {
     const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_MAINTENANCE_ALERT: '1' } });
-    for (const name of ['maws-vm-candidate-20261021', 'maws-vm-golden-20261019', 'maws-vm-trial-20261021T120000Z']) m.vm(name, 'running');
+    const maintenance = [];
+    for (const name of ['maws-vm-candidate-20261021', 'maws-vm-golden-20261019', 'maws-vm-trial-20261021T120000Z']) maintenance.push(await m.runVm(name));
+    const before = m.calls().length;
     // A job clone of this slot nothing reserved (a reservation write that failed): reserved first, then torn down.
     const orphan = `maws-vm-job-${m.slot}-20261021T110000Z`;
     m.orphan(orphan);
@@ -848,9 +850,9 @@ exec /bin/mv "$@"`);
     await m.until(() => m.alerts().length === 1, 'the alert');
     assert.match(m.alerts()[0], /^ci-kit alert: vm lane on mini found maws-vm-candidate-20261021 maws-vm-golden-20261019 maws-vm-trial-20261021T120000Z running since /);
     await sleep(1500);
-    assert.deepEqual(m.calls().filter((call) => /^(stop|delete|clone|run) /.test(call)), [`delete ${orphan}`]);
+    assert.deepEqual(m.calls().slice(before).filter((call) => /^(stop|delete|clone|run) /.test(call)), [`delete ${orphan}`]);
     for (const name of ['maws-vm-candidate-20261021', 'maws-vm-golden-20261019', 'maws-vm-trial-20261021T120000Z']) assert.equal(m.state(name), 'running');
-    for (const name of ['maws-vm-candidate-20261021', 'maws-vm-golden-20261019', 'maws-vm-trial-20261021T120000Z']) m.vm(name, 'stopped');
+    await Promise.all(maintenance.map((vm) => vm.stop()));
     await m.waitLog(/no maws-vm-\* VM runs any more/);
     await m.until(() => m.closed().length === 1, 'the close');
     await m.booted();
