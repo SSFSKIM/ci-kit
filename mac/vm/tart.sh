@@ -3,15 +3,20 @@
 # under a deadline (dialog.sh's bounded, which the caller sources first), in the C locale, and with the descriptors of
 # the desktop lock (8) and the launcher's own lock (7) closed, so nothing Tart leaves behind can hold either.
 #
-# Tart is read as JSON (`tart list --source local --format json`: Name, State, Running), never the table, whose columns
-# the mini prints in Korean. Local VMs only: the lane polls the list every 15 s, and Tart sizes each cached OCI image
-# through `diskutil image info`, a disk-image attach that kept storagekitd and diskarbitrationd busy on the mini
-# (1.91 s a list with its two cached images, 0.57 s local only; 2026-10-28, inside a MAWS measured job). A VM's end is verified, not assumed: Tart lists it stopped (or not at all) and no `tart run` of
-# its name is in the process table. A stop goes through `tart stop --timeout`, Tart's graceful stop and then its force,
+# Tart's list is read only on a transition, never on the launcher's idle poll (which reads `tart run` processes).
+# Even `tart list --source local` sizes each local disk.img through `diskutil image info --plist`: an image attach
+# whose IOKit objects macOS never freed on the mini (2026-10-28: 232,825 AppleAPFSContainer objects, about 8 GB leaked
+# in a week, 9.76 of 16 GB wired; 15% free could not meet the guest's 57% boot floor). JSON (Name, State, Running),
+# never the locale-dependent table; --source local also avoids attaching cached OCI images.
+# A VM's end is verified, not assumed: Tart lists it stopped (or not at all) and no `tart run` of its name is in the
+# process table. This retains a few leaking list calls per job (normally boot, verified end, then delete: three
+# lists, each attaching every local image), not two per idle poll. A failed transition retries until it settles.
+# A stop goes through `tart stop --timeout`, Tart's graceful stop and then its force,
 # and is verified the same way. Tart refuses to delete a running VM (VMDirectory.delete(), 2.41.1), but nothing here
 # relies on that alone: a delete comes only after a verified stop.
 #
-# CI_KIT_TART names the binary (tart on the PATH); CI_KIT_VM_GUEST_KIT is where a clone sees the kit share
+# CI_KIT_TART names the binary (tart on the PATH); CI_KIT_VM_PS moves the process-table read (/bin/ps) for tests.
+# CI_KIT_VM_GUEST_KIT is where a clone sees the kit share
 # (/Users/admin/ci-kit, the image's symlink to /Volumes/My Shared Files/kit). Bash 3.2: macOS's own.
 tart_bin=${CI_KIT_TART:-tart}
 tart_guest_kit=${CI_KIT_VM_GUEST_KIT:-/Users/admin/ci-kit}
@@ -43,10 +48,10 @@ tart_state_in() { # <tart_vms output> <name>: its state, or nothing when it is n
 
 # The pids of a VM's `tart <subcommand>` processes, one per line, from the process table: a process with the
 # subcommand right after a `tart` and, for run, the VM's name last; for exec, right after the subcommand. False when
-# the table cannot be read.
-tart_pids() { # run|exec <name>
+# the table cannot be read. With run and no name, returns the names of all running maws-vm-* VMs instead.
+tart_pids() { # run|exec [<name>]
   local table
-  table=$(LC_ALL=C bounded 10 /bin/ps -axww -o pid=,command= 7>&- 8>&- 2>/dev/null) || return 1
+  table=$(LC_ALL=C bounded 10 "${CI_KIT_VM_PS:-/bin/ps}" -axww -o pid=,command= 7>&- 8>&- 2>/dev/null) || return 1
   perl -e '
     my ($sub, $name) = @ARGV[0, 1];
     @ARGV = ();
@@ -54,12 +59,17 @@ tart_pids() { # run|exec <name>
       my ($pid, @argv) = split " ";
       for my $i (0 .. $#argv - 2) {
         next unless $argv[$i] =~ m{(?:^|/)tart$} && $argv[$i + 1] eq $sub;
-        if ($sub eq "run" ? $argv[-1] eq $name : $argv[$i + 2] eq $name) { print "$pid\n"; last }
+        if ($sub eq "run" && $name eq "") {
+          if ($argv[-1] =~ /^maws-vm-/) { print "$argv[-1]\n"; last }
+        } elsif ($sub eq "run" ? $argv[-1] eq $name : $argv[$i + 2] eq $name) { print "$pid\n"; last }
       }
-    }' "$1" "$2" <<<"$table"
+    }' "$1" "${2:-}" <<<"$table"
 }
 tart_run_pids() { # <name>: its `tart run` processes
   tart_pids run "$1"
+}
+tart_run_vms() { # all maws-vm-* names with a `tart run` process; false when the table cannot be read
+  tart_pids run
 }
 
 # Whether a VM's end is verified: 0 when Tart lists it stopped or not at all and no `tart run` of it runs, 1 when it

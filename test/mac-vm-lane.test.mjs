@@ -183,6 +183,10 @@ function lane({ queue = [], memory = {}, disk = 120, display = '2560x1440@2x', e
   mkdirSync(join(vms, GOLDEN));
   writeFileSync(join(vms, GOLDEN, 'state'), 'stopped\n');
   executable(join(bin, 'tart'), fakeTart);
+  // Each fixture is one Mac: keep real processes, but do not see another concurrent fixture's VMs.
+  executable(join(bin, 'ps'), `set -o pipefail
+[[ ! -e $HOME/fail-ps ]] || exit 1
+/bin/ps "$@" | awk -v tart="$HOME/bin/tart " 'index($0, tart)'`);
   executable(join(bin, 'gh'), fakeGh);
   // sysctl -n of the three memory reads, from the memory file; with swap-grow, swap grows 10 MB a read.
   executable(join(bin, 'sysctl'), `[[ $* == '-n kern.memorystatus_vm_pressure_level kern.memorystatus_level vm.swapusage' ]] || exit 64
@@ -203,6 +207,7 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/disk3s5
   const base = {
     HOME: home, PATH: `${bin}:/usr/bin:/bin:/usr/sbin`, CI_KIT_MACHINE: 'mini', CI_KIT_TART: join(bin, 'tart'), CI_KIT_GH_BIN: join(bin, 'gh'),
     CI_KIT_VM_SYSCTL: join(bin, 'sysctl'), CI_KIT_VM_DF: join(bin, 'df'), CI_KIT_CURSOR_PARK: join(bin, 'cursor-park'), CI_KIT_VM_KIT: mac,
+    CI_KIT_VM_PS: join(bin, 'ps'),
     CI_KIT_VM_SLOT: slot, CI_KIT_VM_TICK: '0.2', CI_KIT_VM_POLL: '1', CI_KIT_VM_SAMPLE: '1', CI_KIT_VM_SWAP_GAP: '1', CI_KIT_VM_SPAWN_CHECK: '1',
     GH_TOKEN: 'a-job-token', PERL5LIB: perlLib, PERL5OPT: '-MFixtureClock',
   };
@@ -252,7 +257,15 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/disk3s5
       renameSync(join(out, `.${name}.tmp`), join(out, name));
     },
     powerOff: (name) => writeFileSync(join(vms, name, 'poweroff'), ''),
-    // A VM of the maintenance procedure's, as Tart lists it: running, with no tart run of this launcher's.
+    // A maintenance VM runs outside the launcher, but appears in the same process table.
+    async runVm(name) {
+      m.vm(name);
+      const child = spawn(join(bin, 'tart'), ['run', '--no-clipboard', name], { stdio: 'ignore', env: base });
+      host.push(child);
+      const exited = once(child, 'exit');
+      await m.until(() => existsSync(join(vms, name, 'run.pid')), 'the maintenance VM running');
+      return { stop: async () => { m.powerOff(name); await exited; } };
+    },
     orphan(name) { orphans.add(name); m.vm(name, 'stopped'); },
     vm(name, state = 'stopped') { mkdirSync(join(vms, name), { recursive: true }); writeFileSync(join(vms, name, 'state'), `${state}\n`); },
     // A wait whose failure shows the launcher's log and stderr.
@@ -509,6 +522,36 @@ exec /bin/mv "$@"`);
     await finish(m, a);
   });
 
+  test('idle polls with no queued work never list Tart after recovery', async () => {
+    const m = lane();
+    const a = m.start();
+    await m.waitLog(/no boot: no queued job for the guest$/m);
+    const lists = () => m.calls().filter((call) => call.startsWith('list '));
+    assert.equal(lists().length, 1, 'only start-up recovery lists VMs');
+    const reads = m.ghCalls().length;
+    await m.until(() => m.ghCalls().length >= reads + 6, 'several more idle queue polls');
+    assert.equal(lists().length, 1, 'idle polls do not attach any disk image');
+    await finish(m, a);
+  });
+
+  test('idle process-table maintenance detection blocks boot and alerts without listing Tart', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']], env: { CI_KIT_VM_MAINTENANCE_ALERT: '1' } });
+    const vm = await m.runVm('maws-vm-x');
+    // A stale Tart list must not hide a live process; idle must not consult it at all.
+    writeFileSync(join(m.vms, 'maws-vm-x', 'listed'), 'stopped\n');
+    const a = m.start();
+    await m.waitLog(/no boot: maws-vm-x runs$/m);
+    await m.until(() => m.alerts().some((title) => /found maws-vm-x running/.test(title)), 'the maintenance alert');
+    assert.match(m.log(), /a maws-vm-\* VM runs that this launcher did not boot \(maws-vm-x\)/);
+    assert.equal(m.calls().filter((call) => call.startsWith('list ')).length, 1, 'only recovery lists VMs');
+    assert.equal(m.calls().filter((call) => call.startsWith('clone ')).length, 0);
+    await vm.stop();
+    await m.booted();
+    assert.match(m.log(), /no maws-vm-\* VM runs any more/);
+    assert.equal(m.closed().length, 1, 'the maintenance alert closes');
+    await finish(m, a);
+  });
+
   // The boot rule (lane.sh's header): each condition failing alone keeps the lane down, logged once with what was read;
   // the same lane boots once the condition holds. Every case has a ci-kit-mac-vm job queued unless it says otherwise.
   const idleRead = (m) => m.waitLog(/recovery: no job clone and no reservation; idle/);
@@ -526,8 +569,10 @@ exec /bin/mv "$@"`);
       refusal: /no boot: a claim holds the lane \(vm-claim\.\d+-\S+: run 7 job e2e \(worker \d+\); vm-claims exit 0\)$/m, lift: (m, claim) => claim.kill() },
     { name: '4, a reservation', after: (m) => writeFileSync(join(m.logs, 'vm-reserved'), 'reserved since 2026-10-21T12:00:00Z: vm=maws-vm-job-x\nvm=maws-vm-job-x\n'),
       refusal: /no boot: the reservation stands \(reserved since 2026-10-21T12:00:00Z: vm=maws-vm-job-x\)$/m, lift: (m) => rmSync(join(m.logs, 'vm-reserved')) },
-    { name: '4, a maintenance VM running', before: (m) => m.vm('maws-vm-candidate-20261021', 'running'),
-      refusal: /no boot: maws-vm-candidate-20261021 runs$/m, lift: (m) => m.vm('maws-vm-candidate-20261021', 'stopped') },
+    { name: '4, a maintenance VM running', before: (m) => m.runVm('maws-vm-candidate-20261021'),
+      refusal: /no boot: maws-vm-candidate-20261021 runs$/m, lift: (m, vm) => vm.stop() },
+    { name: '4, an unreadable process table', before: (m) => writeFileSync(join(m.home, 'fail-ps'), ''),
+      refusal: /no boot: the process table cannot be read$/m, lift: (m) => rmSync(join(m.home, 'fail-ps')) },
     { name: '5, memory pressure', options: { memory: { pressure: 2 } }, refusal: /no boot: memory pressure 2, not 1 \(pressure 2, available 60%, swap 500 MB\)$/m, lift: (m) => m.memory() },
     { name: '5, available memory under the floor (57 by default)', options: { memory: { available: 56 } }, refusal: /no boot: memory available 56%, under the floor of 57%$/m, lift: (m) => m.memory({ available: 57 }) },
     { name: '5, swap growing', before: (m) => writeFileSync(join(m.home, 'swap-grow'), '500\n'), refusal: /no boot: swap grew from \d+ MB to \d+ MB in \d+ s$/m,
@@ -548,7 +593,10 @@ exec /bin/mv "$@"`);
     if (afterStart) { await idleRead(m); afterStart(m); }
     await m.waitLog(refusal);
     await sleep(2500);
-    assert.equal(m.calls().filter((call) => /^(clone|run) /.test(call)).length, 0, 'nothing cloned or run');
+    assert.equal(m.calls().filter((call) => /^(clone|run) .*maws-vm-job-/.test(call)).length, 0, 'no job cloned or run');
+    if (!name.startsWith('the lane\'s parts')) {
+      assert.equal(m.calls().filter((call) => call.startsWith('list ')).length, 1, 'a failed boot rule never lists Tart after recovery');
+    }
     assert.equal(m.log().split('\n').filter((line) => refusal.test(line)).length, 1, 'logged once, not at every poll');
     await lift(m, held);
     await m.waitLog(/booting maws-vm-job-\S+ from the golden image/);
