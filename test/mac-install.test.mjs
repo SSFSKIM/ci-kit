@@ -492,6 +492,33 @@ test('a restart timeout leaves that instance running but finishes publication an
   assert.ok(!readdirSync(join(f.home, 'ci-kit-vm')).some((name) => name.startsWith('.kit.')), 'VM staging is published and cleaned');
 });
 
+test('an enabled VM lane is published, unfenced and reloaded while a host runner waits for its job', macOnly, () => {
+  const f = laneFixture();
+  assert.equal(f.run(undefined, ['--vm']).status, 0);
+  spawnSync(join(f.bin, 'launchctl'), ['enable', `gui/${uidOf()}/${vmAgent}`], { env: f.env });
+  rmSync(join(f.home, 'launchctl.calls'));
+  runnerStates(f, { 1: ['idle Runner.log 10', 'busy 123', 'idle Runner.log 30', 'idle Runner.log 30'] });
+  // Observe the first wait, while the host still has a worker. A final-state assertion would miss a launcher
+  // restored only after the job finished. The state reader changed after the first install, proving publication.
+  f.executable(join(f.bin, 'sleep'), `if [[ ! -f $HOME/calls-during-wait ]]; then
+  cp "$HOME/launchctl.calls" "$HOME/calls-during-wait"
+  cp "$HOME/reads-1" "$HOME/reads-during-wait"
+  cmp -s "$HOME/kit/mac/hooks/runner-state.py" "$HOME/ci-kit-vm/kit/hooks/runner-state.py"
+  echo $? > "$HOME/published-during-wait"
+  perl -MFcntl=:flock -e 'open(my $fh, ">>", $ARGV[0]) or die $!; exit(flock($fh, LOCK_EX | LOCK_NB) ? 0 : 1)' "$HOME/Library/Logs/ci-kit/vm-lane.lock"
+  echo $? > "$HOME/fence-during-wait"
+fi`);
+  const result = f.run(undefined, ['--vm']);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(readFileSync(join(f.home, 'reads-during-wait'), 'utf8'), '2', 'observation is during the busy read, not after the job');
+  const during = readFileSync(join(f.home, 'calls-during-wait'), 'utf8').trim().split('\n');
+  assert.ok(during.includes(`bootstrap gui/${uidOf()} ${vmPlist(f)}`), 'VM launcher is already reloaded while the host job runs');
+  assert.ok(!during.includes(`bootout gui/${uidOf()}/${runnerAgent}`), 'host job has not been stopped');
+  assert.equal(readFileSync(join(f.home, 'published-during-wait'), 'utf8'), '0\n', 'new VM kit is already published');
+  assert.equal(readFileSync(join(f.home, 'fence-during-wait'), 'utf8'), '0\n', 'install no longer holds the VM lane lock');
+  assert.equal(readFileSync(join(f.home, 'reads-1'), 'utf8'), '4', 'host restart still waits for stable idle reads');
+});
+
 test('an uninstall timeout retains the busy agent, watcher and holds for a retry', macOnly, () => {
   const f = fixture();
   assert.equal(f.run().status, 0);

@@ -556,31 +556,9 @@ unload "$WATCH_AGENT"
 launchctl enable "$domain/$WATCH_AGENT"
 launchctl bootstrap "$domain" "$WATCH_PLIST"
 say "the dialog watcher $WATCH_AGENT runs"
-seen=()
-for ((n = 1; n <= last; n++)); do
-  agent=$(agent_of "$n")
-  if ! unload_idle "$n"; then seen+=(-); continue; fi
-  if [[ -z ${enabled[n - 1]} ]]; then
-    launchctl disable "$domain/$agent"
-    what=$agent
-    ((n == 1)) || what="${names[n - 1]} ($agent)"
-    say "installed, disabled: $what is not loaded (enable: launchctl enable $domain/$agent && launchctl bootstrap $domain $(plist_of "$n"))"
-    seen+=(-)
-    continue
-  fi
-  seen+=("$(stat -f %z "$LOG_DIR/$(log_name_of "$n").out.log" 2>/dev/null || echo 0)")
-  launchctl enable "$domain/$agent"
-  launchctl bootstrap "$domain" "$(plist_of "$n")"
-done
-# Shared instances above the count: unloaded and their LaunchAgents removed; the registrations and directories stay.
-for n in $(present_instances); do
-  ((n > last)) && [[ -f $(plist_of "$n") ]] || continue
-  unload_idle "$n" || continue
-  rm -f "$(plist_of "$n")"
-  say "removed: $(agent_of "$n") is unloaded and its LaunchAgent removed; its registration and $(root_of "$n") stay"
-done
 # The VM lane, its launcher booted out (step 5): the kit published, the slots made, and its LaunchAgent reloaded as
-# launchd had it; or, with --no-vm, its LaunchAgent removed.
+# launchd had it; or, with --no-vm, its LaunchAgent removed. Finish before the host-runner waits: the lane
+# needs the published hooks and environment, not reloaded listeners, and VM-safe host jobs must not hold it off.
 if ((vm == 1)); then
   swap_in "$kit_staged" "$VM_KIT"
   rm -rf "$kit_staged"
@@ -611,8 +589,32 @@ if ((vm == 1)); then
   fi
 elif [[ -n $vm_before ]]; then
   rm -f "$VM_PLIST"
+  vm_unfence
   say "removed: the VM lane's launcher $VM_AGENT is unloaded and its LaunchAgent removed; $VM_HOME stays"
 fi
+seen=()
+for ((n = 1; n <= last; n++)); do
+  agent=$(agent_of "$n")
+  if ! unload_idle "$n"; then seen+=(-); continue; fi
+  if [[ -z ${enabled[n - 1]} ]]; then
+    launchctl disable "$domain/$agent"
+    what=$agent
+    ((n == 1)) || what="${names[n - 1]} ($agent)"
+    say "installed, disabled: $what is not loaded (enable: launchctl enable $domain/$agent && launchctl bootstrap $domain $(plist_of "$n"))"
+    seen+=(-)
+    continue
+  fi
+  seen+=("$(stat -f %z "$LOG_DIR/$(log_name_of "$n").out.log" 2>/dev/null || echo 0)")
+  launchctl enable "$domain/$agent"
+  launchctl bootstrap "$domain" "$(plist_of "$n")"
+done
+# Shared instances above the count: unloaded and their LaunchAgents removed; the registrations and directories stay.
+for n in $(present_instances); do
+  ((n > last)) && [[ -f $(plist_of "$n") ]] || continue
+  unload_idle "$n" || continue
+  rm -f "$(plist_of "$n")"
+  say "removed: $(agent_of "$n") is unloaded and its LaunchAgent removed; its registration and $(root_of "$n") stay"
+done
 if [[ -n $home ]]; then
   if [[ -n $new_machine ]]; then
     say "$RUNNER_NAME registered with ci-kit-mac-home (only the home Mac carries this label)"

@@ -116,10 +116,11 @@ gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token
   disabling it or lowering the shared count), it waits for `stopped` or two identical `idle <log> <size>` reads five
   seconds apart, as in [the drain](#the-drain). A new offer changes the log before its worker exists; a changed or
   unreadable answer keeps the instance running. This narrows the race to the final read and bootout, rather than the
-  whole publication. It reports the wait once a minute and gives each instance about two hours
-  (`CI_KIT_INSTALL_IDLE_WAIT`, seconds; default `7200`). At the limit it leaves that agent's loaded/enabled state
-  alone, finishes the other instances and the VM lane, then exits nonzero naming the pending restart/removal and
-  asking for a re-run. Published hooks, environment and plists stay complete; an unrestarted listener keeps its old
+  whole publication. The VM lane's publication and reload (or removal) finish and release its lock **before** these
+  host-runner waits, so a VM-safe host job does not keep the VM launcher offline. It reports the wait once a minute
+  and gives each instance about two hours (`CI_KIT_INSTALL_IDLE_WAIT`, seconds; default `7200`). At the limit it leaves
+  that agent's loaded/enabled state alone, finishes the other instances, then exits nonzero naming the pending
+  restart/removal and asking for a re-run. Published hooks, environment and plists stay complete; an unrestarted listener keeps its old
   environment until the retry. On success the exclusive instance ends enabled, as before. **A shared instance keeps
   the enabled state launchd has for it** (`launchctl print-disabled`; a state that cannot be read counts as disabled),
   and a new one is installed disabled,
