@@ -412,6 +412,130 @@ test('a job found by its executable path refuses a re-run and an uninstall', mac
   }
 });
 
+// Script the state reader at its process boundary. Each instance has an independent sequence; its last
+// answer persists. This models the offer's log growth before a worker exists, not merely a busy worker.
+function runnerStates(f, states) {
+  for (const [n, sequence] of Object.entries(states)) {
+    writeFileSync(join(f.home, `states-${n}.json`), JSON.stringify(sequence));
+  }
+  writeFileSync(join(f.kit, 'mac/hooks/runner-state.py'), `import json, os, sys
+from pathlib import Path
+home = Path(os.environ['HOME'])
+n = sys.argv[1].rsplit('actions-runner-maws', 1)[1].lstrip('-') or '1'
+source = home / ('states-' + n + '.json')
+if not source.exists():
+    print('stopped')
+    sys.exit(0)
+count = home / ('reads-' + n)
+i = int(count.read_text()) if count.exists() else 0
+count.write_text(str(i + 1))
+sequence = json.loads(source.read_text())
+state = sequence[min(i, len(sequence) - 1)]
+if state == 'unknown':
+    sys.exit(2)
+print(state)
+`);
+  f.executable(join(f.bin, 'sleep'), 'echo "$*" >> "$HOME/idle-sleeps"');
+}
+
+test('reload, disable, shared removal and uninstall wait out an offer arriving after the initial check', macOnly, () => {
+  for (const operation of ['reload', 'disable', 'remove', 'uninstall']) {
+    const f = fixture();
+    f.shared(2, 'ci-kit-mac-mini-2');
+    assert.equal(f.run(undefined, ['--shared', '1']).status, 0);
+    spawnSync(join(f.bin, 'launchctl'), ['enable', `gui/${uidOf()}/${sharedAgent(2)}`], { env: f.env });
+    rmSync(join(f.home, 'launchctl.calls'));
+    const n = operation === 'disable' ? 1 : 2;
+    runnerStates(f, { [n]: [
+      'idle Runner_before.log 10', // initial refusal check
+      'idle Runner_before.log 10', // immediately before stopping this instance
+      'idle Runner_before.log 20', // offer: no worker yet, but its log grew
+      'busy 123', 'unknown', // unreadable state must not permit a stop either
+      'idle Runner_after.log 30', 'idle Runner_after.log 30',
+    ] });
+    const agent = n === 1 ? runnerAgent : sharedAgent(n);
+    const launchctl = join(f.bin, 'launchctl');
+    writeFileSync(launchctl, readFileSync(launchctl, 'utf8').replace('db=$HOME/launchctl.db', `
+if [[ $1 == bootout && $2 == */${agent} ]]; then
+  cat "$HOME/reads-${n}" > "$HOME/reads-at-stop"
+fi
+db=$HOME/launchctl.db`));
+    const args = { reload: [], disable: ['--disabled'], remove: ['--shared', '0'], uninstall: ['--uninstall'] }[operation];
+    const result = f.run(undefined, args);
+    assert.equal(result.status, 0, `${operation}: ${result.stdout}${result.stderr}`);
+    assert.equal(readFileSync(join(f.home, 'reads-at-stop'), 'utf8'), '7', `${operation}: no stop before the job ends and idle settles`);
+    assert.match(result.stdout, /waiting.*idle/);
+    const gaps = readFileSync(join(f.home, 'idle-sleeps'), 'utf8').trim().split('\n').map(Number);
+    assert.equal(gaps.length, 5, 'each unsettled read waits before checking again');
+    assert.ok(gaps.every((gap) => gap >= 5), 'idle reads are separated by the acquisition gap');
+    assert.ok(calls(f).some((call) => call === `bootout gui/${uidOf()}/${agent}`));
+    if (operation === 'reload') assert.ok(calls(f).includes(`bootstrap gui/${uidOf()} ${join(f.home, `Library/LaunchAgents/${agent}.plist`)}`));
+  }
+});
+
+test('a restart timeout leaves that instance running but finishes publication and the VM lane', macOnly, () => {
+  const f = laneFixture();
+  assert.equal(f.run(undefined, ['--vm']).status, 0);
+  spawnSync(join(f.bin, 'launchctl'), ['enable', `gui/${uidOf()}/${vmAgent}`], { env: f.env });
+  f.shared(2, 'ci-kit-mac-mini-2');
+  rmSync(join(f.home, 'launchctl.calls'));
+  runnerStates(f, { 1: ['idle Runner.log 10', 'busy 123'] });
+  const result = f.run(undefined, ['--vm', '--shared', '1'], { CI_KIT_INSTALL_IDLE_WAIT: '0' });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /pending.*re-run/);
+  assert.ok(!calls(f).some((call) => /^(bootout|enable|disable) /.test(call) && call.endsWith(`/${runnerAgent}`)), 'busy instance is untouched');
+  assert.ok(calls(f).includes(`bootout gui/${uidOf()}/${sharedAgent(2)}`), 'other instances still finish');
+  assertNewHooks(f);
+  assert.equal(readFileSync(join(f.home, 'ci-kit-vm/kit/hooks/runner-state.py'), 'utf8'), readFileSync(join(f.kit, 'mac/hooks/runner-state.py'), 'utf8'));
+  assert.ok(calls(f).includes(`bootstrap gui/${uidOf()} ${vmPlist(f)}`), 'enabled VM launcher is restored after publication');
+  assert.match(result.stdout, /VM lane's launcher/);
+  assert.ok(!readdirSync(join(f.home, 'ci-kit-vm')).some((name) => name.startsWith('.kit.')), 'VM staging is published and cleaned');
+});
+
+test('an enabled VM lane is published, unfenced and reloaded while a host runner waits for its job', macOnly, () => {
+  const f = laneFixture();
+  assert.equal(f.run(undefined, ['--vm']).status, 0);
+  spawnSync(join(f.bin, 'launchctl'), ['enable', `gui/${uidOf()}/${vmAgent}`], { env: f.env });
+  rmSync(join(f.home, 'launchctl.calls'));
+  runnerStates(f, { 1: ['idle Runner.log 10', 'busy 123', 'idle Runner.log 30', 'idle Runner.log 30'] });
+  // Observe the first wait, while the host still has a worker. A final-state assertion would miss a launcher
+  // restored only after the job finished. The state reader changed after the first install, proving publication.
+  f.executable(join(f.bin, 'sleep'), `if [[ ! -f $HOME/calls-during-wait ]]; then
+  cp "$HOME/launchctl.calls" "$HOME/calls-during-wait"
+  cp "$HOME/reads-1" "$HOME/reads-during-wait"
+  cmp -s "$HOME/kit/mac/hooks/runner-state.py" "$HOME/ci-kit-vm/kit/hooks/runner-state.py"
+  echo $? > "$HOME/published-during-wait"
+  perl -MFcntl=:flock -e 'open(my $fh, ">>", $ARGV[0]) or die $!; exit(flock($fh, LOCK_EX | LOCK_NB) ? 0 : 1)' "$HOME/Library/Logs/ci-kit/vm-lane.lock"
+  echo $? > "$HOME/fence-during-wait"
+fi`);
+  const result = f.run(undefined, ['--vm']);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(readFileSync(join(f.home, 'reads-during-wait'), 'utf8'), '2', 'observation is during the busy read, not after the job');
+  const during = readFileSync(join(f.home, 'calls-during-wait'), 'utf8').trim().split('\n');
+  assert.ok(during.includes(`bootstrap gui/${uidOf()} ${vmPlist(f)}`), 'VM launcher is already reloaded while the host job runs');
+  assert.ok(!during.includes(`bootout gui/${uidOf()}/${runnerAgent}`), 'host job has not been stopped');
+  assert.equal(readFileSync(join(f.home, 'published-during-wait'), 'utf8'), '0\n', 'new VM kit is already published');
+  assert.equal(readFileSync(join(f.home, 'fence-during-wait'), 'utf8'), '0\n', 'install no longer holds the VM lane lock');
+  assert.equal(readFileSync(join(f.home, 'reads-1'), 'utf8'), '4', 'host restart still waits for stable idle reads');
+});
+
+test('an uninstall timeout retains the busy agent, watcher and holds for a retry', macOnly, () => {
+  const f = fixture();
+  assert.equal(f.run().status, 0);
+  const marker = join(f.home, 'Library/Logs/ci-kit/runner-drained');
+  writeFileSync(marker, 'held\n');
+  rmSync(join(f.home, 'launchctl.calls'));
+  const before = f.snapshot();
+  runnerStates(f, { 1: ['idle Runner.log 10', 'unknown'] });
+  const result = f.run(undefined, ['--uninstall'], { CI_KIT_INSTALL_IDLE_WAIT: '0' });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /pending.*re-run/);
+  assert.ok(!calls(f).some((call) => call.startsWith('bootout')));
+  for (const agent of [runnerAgent, watchAgent]) assert.ok(existsSync(join(f.home, `Library/LaunchAgents/${agent}.plist`)));
+  assert.ok(existsSync(marker));
+  assert.deepEqual(f.snapshot(), before);
+});
+
 test('--uninstall unloads and removes both LaunchAgents and the marker, and keeps the registration and hooks', macOnly, () => {
   const f = fixture();
   assert.equal(f.run().status, 0);
@@ -422,7 +546,7 @@ test('--uninstall unloads and removes both LaunchAgents and the marker, and keep
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /uninstalled: .* the registration and .* stay/);
   const domain = `gui/${uidOf()}`;
-  assert.deepEqual(calls(f).filter((call) => call.startsWith('bootout')), [`bootout ${domain}/${watchAgent}`, `bootout ${domain}/${runnerAgent}`]);
+  assert.deepEqual(calls(f).filter((call) => call.startsWith('bootout')), [`bootout ${domain}/${runnerAgent}`, `bootout ${domain}/${watchAgent}`]);
   assert.ok(!calls(f).some((call) => call.startsWith('bootstrap')));
   for (const agent of [watchAgent, runnerAgent]) assert.equal(existsSync(join(f.home, `Library/LaunchAgents/${agent}.plist`)), false);
   assert.equal(existsSync(marker), false);
@@ -572,7 +696,7 @@ test('a job on a shared instance refuses a re-run and an uninstall; --uninstall 
   const result = f.run(undefined, ['--uninstall']);
   assert.equal(result.status, 0, result.stderr);
   const domain = `gui/${uidOf()}`;
-  assert.deepEqual(calls(f).filter((call) => call.startsWith('bootout')), [`bootout ${domain}/${watchAgent}`, `bootout ${domain}/${runnerAgent}`, `bootout ${domain}/${sharedAgent(2)}`]);
+  assert.deepEqual(calls(f).filter((call) => call.startsWith('bootout')), [`bootout ${domain}/${runnerAgent}`, `bootout ${domain}/${sharedAgent(2)}`, `bootout ${domain}/${watchAgent}`]);
   for (const agent of [runnerAgent, sharedAgent(2)]) assert.equal(existsSync(join(f.home, `Library/LaunchAgents/${agent}.plist`)), false);
   assert.match(result.stdout, new RegExp(`uninstalled: ${watchAgent} and ${runnerAgent}, ${sharedAgent(2)} are unloaded and removed`));
   assert.ok(existsSync(join(dir, '.runner')));

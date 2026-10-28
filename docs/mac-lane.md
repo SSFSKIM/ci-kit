@@ -110,10 +110,20 @@ gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token
   unloads the extra instances and removes their LaunchAgents; their registrations and directories stay, as an
   uninstall leaves them.
 - **Re-running** (no token, no name) refreshes every instance's hooks, `.env` and `.path`, and every LaunchAgent, and
-  reloads them, the watcher's first. It refuses while a job runs on any instance, because reloading an agent kills its
-  job; a job is a process whose executable is that instance's `Runner.Worker` (`runner-state.py`, below). The
-  exclusive instance ends enabled, as before. **A shared instance keeps the enabled state launchd has for it**
-  (`launchctl print-disabled`; a state that cannot be read counts as disabled), and a new one is installed disabled,
+  reloads them, the watcher's first. Before staging it refuses while a job runs on any instance; a job is a process
+  whose executable is that instance's `Runner.Worker` (`runner-state.py`, below). That check is not enough: GitHub
+  can offer a job while the files are being published. Immediately before stopping **each** instance (also when
+  disabling it or lowering the shared count), it waits for `stopped` or two identical `idle <log> <size>` reads five
+  seconds apart, as in [the drain](#the-drain). A new offer changes the log before its worker exists; a changed or
+  unreadable answer keeps the instance running. This narrows the race to the final read and bootout, rather than the
+  whole publication. The VM lane's publication and reload (or removal) finish and release its lock **before** these
+  host-runner waits, so a VM-safe host job does not keep the VM launcher offline. It reports the wait once a minute
+  and gives each instance about two hours (`CI_KIT_INSTALL_IDLE_WAIT`, seconds; default `7200`). At the limit it leaves
+  that agent's loaded/enabled state alone, finishes the other instances, then exits nonzero naming the pending
+  restart/removal and asking for a re-run. Published hooks, environment and plists stay complete; an unrestarted listener keeps its old
+  environment until the retry. On success the exclusive instance ends enabled, as before. **A shared instance keeps
+  the enabled state launchd has for it** (`launchctl print-disabled`; a state that cannot be read counts as disabled),
+  and a new one is installed disabled,
   so a refresh never turns a shared instance on or off: that is done per instance (below). While the watcher holds the
   runner, the install loads it held and says so (`loaded, held by the dialog watcher (…)`) instead of waiting for it
   to listen: it starts when the episode closes. New hooks and the optional
@@ -158,7 +168,10 @@ a machine kept off CI still reports a dialog.
 
 Remove, one machine at a time (`config.sh remove` deletes only the registration that machine holds). `--uninstall`
 unloads and removes every instance's LaunchAgent and the watcher's, the watcher's hold and the shared hold, and refuses
-while a job runs on any instance:
+while a job runs on any instance at the initial check. It uses the same per-instance idle wait immediately before
+stopping each runner. If one times out, already-idle instances are removed, but the busy instance's agent, the watcher,
+its holds and the VM lane stay; it exits nonzero and asks for a re-run. Only after every runner is stopped does it
+remove the watcher and holds:
 
 ```bash
 host=mini   # the machine's ssh host

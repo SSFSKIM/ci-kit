@@ -43,9 +43,11 @@
 #
 # The registration token is read from stdin, only when some instance is not registered yet, and handed to the runner's
 # config through its environment, never its arguments or a file. Re-running refreshes every instance's hooks (each its
-# own copy, under its own directory), environment and LaunchAgent; it refuses while a job is running on any instance,
-# since reloading an agent would kill its job. The watcher runs in every mode: --disabled turns off the runners, not the
-# alerts. Prerequisites are checked first and a gap stops the install: they are reported, never installed.
+# own copy, under its own directory), environment and LaunchAgent; it refuses while a job is running on any instance.
+# Before stopping each instance it checks again, waiting for two equal idle reads five seconds apart (or stopped).
+# After two hours it leaves that instance alone, finishes the other work, and exits nonzero naming what needs a retry.
+# The watcher runs in every mode: --disabled turns off the runners, not the alerts. Prerequisites are checked first
+# and a gap stops the install: they are reported, never installed.
 #
 # --vm installs the VM lane (docs/mac-lane.md, the VM lane): the launcher's LaunchAgent com.ssfskim.ci-kit.vm-lane
 # (mac/vm/com.ssfskim.ci-kit.vm-lane.plist), the slots' directories under ~/ci-kit-vm (vm and vm-trial, each with
@@ -154,6 +156,36 @@ refuse_job() { # <instance>
   die "a job is running on shared runner $1; re-run when every instance is idle"
 }
 
+# Recheck each instance at its stop, not just before staging. As in the watcher's drain, an offer changes the
+# listener's log before its worker exists: two identical idle reads five seconds apart cover that acquisition gap.
+# No work goes between the final read and bootout. A failed read is not permission to stop a runner.
+# A timeout skips this instance, not the rest of publication: the hooks and .env are already live by step 6.
+idle_wait=${CI_KIT_INSTALL_IDLE_WAIT:-7200} # two hours covers a MAWS job's roughly 100-minute maximum
+[[ $idle_wait =~ ^(0|[1-9][0-9]{0,5})$ ]] || die 'CI_KIT_INSTALL_IDLE_WAIT must be seconds (0 to 999999)'
+pending=()
+unload_idle() { # <instance>
+  local root agent title state previous= start=$SECONDS notice=$SECONDS
+  root=$(root_of "$1") agent=$(agent_of "$1") title=$(title_of "$1")
+  while :; do
+    state=$(python3 -I "$here/hooks/runner-state.py" "$root" 2>/dev/null) || state=unknown
+    if [[ $state == stopped || ( $state == idle\ * && $state == "$previous" ) ]]; then
+      unload "$agent"
+      return 0
+    fi
+    if ((SECONDS - start >= idle_wait)); then
+      say "timeout waiting for $title to be idle ($state); left running as it was, restart/removal pending"
+      pending+=("$agent")
+      return 1
+    fi
+    if ((SECONDS >= notice)); then
+      say "waiting for $title to be idle before stopping it ($state; $((SECONDS - start)) s elapsed, limit $idle_wait s)"
+      notice=$((SECONDS + 60))
+    fi
+    previous=$state
+    sleep 5
+  done
+}
+
 # The VM lane. Its reservation means a guest may run, whose kit share a publish would pull from under it and whose
 # launcher a reload would restart; a maintenance hold means the procedure runs with the launcher booted out, which a
 # reload would bring back. Either refuses, before anything changes. A lookup that fails counts as a reservation.
@@ -249,21 +281,23 @@ done
 if [[ $mode == uninstall ]]; then
   [[ -z $name && -z $shared && -z $vm && -z $display_given && -z $home ]] || usage
   if running=$(job_running); then refuse_job "$running"; fi
+  if vm_installed; then vm_refusals; fi
+  agents='' roots=''
+  for n in $(present_instances); do
+    unload_idle "$n" || continue
+    rm -f "$(plist_of "$n")"
+    agents+="${agents:+, }$(agent_of "$n")" roots+="${roots:+, }$(root_of "$n")"
+  done
+  # Keep the watcher, holds and VM lane intact while any instance could still be running a job.
+  ((${#pending[@]} == 0)) || die "uninstall pending for ${pending[*]}; idle instances removed, watcher and holds kept; re-run when idle"
   lane=''
   if vm_installed; then
-    vm_refusals
     vm_quiesce
     vm_fence
     rm -f "$VM_PLIST"
     lane=", and the VM lane's $VM_AGENT ($VM_HOME stays)"
   fi
   unload "$WATCH_AGENT"
-  agents='' roots=''
-  for n in $(present_instances); do
-    unload "$(agent_of "$n")"
-    rm -f "$(plist_of "$n")"
-    agents+="${agents:+, }$(agent_of "$n")" roots+="${roots:+, }$(root_of "$n")"
-  done
   rm -f "$WATCH_PLIST" "$DRAIN_MARKER" "$SHARED_HOLD" "$LOG_DIR"/shared-running-*
   say "uninstalled: $WATCH_AGENT and $agents are unloaded and removed$lane; the registration and $roots stay (docs/mac-lane.md)"
   exit 0
@@ -522,31 +556,9 @@ unload "$WATCH_AGENT"
 launchctl enable "$domain/$WATCH_AGENT"
 launchctl bootstrap "$domain" "$WATCH_PLIST"
 say "the dialog watcher $WATCH_AGENT runs"
-seen=()
-for ((n = 1; n <= last; n++)); do
-  agent=$(agent_of "$n")
-  unload "$agent"
-  if [[ -z ${enabled[n - 1]} ]]; then
-    launchctl disable "$domain/$agent"
-    what=$agent
-    ((n == 1)) || what="${names[n - 1]} ($agent)"
-    say "installed, disabled: $what is not loaded (enable: launchctl enable $domain/$agent && launchctl bootstrap $domain $(plist_of "$n"))"
-    seen+=(-)
-    continue
-  fi
-  seen+=("$(stat -f %z "$LOG_DIR/$(log_name_of "$n").out.log" 2>/dev/null || echo 0)")
-  launchctl enable "$domain/$agent"
-  launchctl bootstrap "$domain" "$(plist_of "$n")"
-done
-# Shared instances above the count: unloaded and their LaunchAgents removed; the registrations and directories stay.
-for n in $(present_instances); do
-  ((n > last)) && [[ -f $(plist_of "$n") ]] || continue
-  unload "$(agent_of "$n")"
-  rm -f "$(plist_of "$n")"
-  say "removed: $(agent_of "$n") is unloaded and its LaunchAgent removed; its registration and $(root_of "$n") stay"
-done
 # The VM lane, its launcher booted out (step 5): the kit published, the slots made, and its LaunchAgent reloaded as
-# launchd had it; or, with --no-vm, its LaunchAgent removed.
+# launchd had it; or, with --no-vm, its LaunchAgent removed. Finish before the host-runner waits: the lane
+# needs the published hooks and environment, not reloaded listeners, and VM-safe host jobs must not hold it off.
 if ((vm == 1)); then
   swap_in "$kit_staged" "$VM_KIT"
   rm -rf "$kit_staged"
@@ -577,8 +589,32 @@ if ((vm == 1)); then
   fi
 elif [[ -n $vm_before ]]; then
   rm -f "$VM_PLIST"
+  vm_unfence
   say "removed: the VM lane's launcher $VM_AGENT is unloaded and its LaunchAgent removed; $VM_HOME stays"
 fi
+seen=()
+for ((n = 1; n <= last; n++)); do
+  agent=$(agent_of "$n")
+  if ! unload_idle "$n"; then seen+=(-); continue; fi
+  if [[ -z ${enabled[n - 1]} ]]; then
+    launchctl disable "$domain/$agent"
+    what=$agent
+    ((n == 1)) || what="${names[n - 1]} ($agent)"
+    say "installed, disabled: $what is not loaded (enable: launchctl enable $domain/$agent && launchctl bootstrap $domain $(plist_of "$n"))"
+    seen+=(-)
+    continue
+  fi
+  seen+=("$(stat -f %z "$LOG_DIR/$(log_name_of "$n").out.log" 2>/dev/null || echo 0)")
+  launchctl enable "$domain/$agent"
+  launchctl bootstrap "$domain" "$(plist_of "$n")"
+done
+# Shared instances above the count: unloaded and their LaunchAgents removed; the registrations and directories stay.
+for n in $(present_instances); do
+  ((n > last)) && [[ -f $(plist_of "$n") ]] || continue
+  unload_idle "$n" || continue
+  rm -f "$(plist_of "$n")"
+  say "removed: $(agent_of "$n") is unloaded and its LaunchAgent removed; its registration and $(root_of "$n") stay"
+done
 if [[ -n $home ]]; then
   if [[ -n $new_machine ]]; then
     say "$RUNNER_NAME registered with ci-kit-mac-home (only the home Mac carries this label)"
@@ -608,3 +644,4 @@ for ((n = 1; n <= last; n++)); do
   done
   die "$(title_of "$n") did not report 'Listening for Jobs' within 30 s; see $out_log and $(root_of "$n")/_diag"
 done
+((${#pending[@]} == 0)) || die "restart/removal pending for ${pending[*]}; files published and other agents finished; re-run when idle"
