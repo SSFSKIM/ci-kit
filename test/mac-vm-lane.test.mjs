@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 // recovery, the idle handshake, the memory guard, the disk reserve, the failures and the alerts. Each test is one Mac:
 // a HOME with the slot's directories, the golden pointer and the host's exclusive instance. Tart is a fake that keeps
 // its VMs as directories and records its calls: its `run` is a real process (`tart run … <name>` in the process
-// table, as the launcher reads it) that blocks until the VM is powered off or stopped, its `list --format json`
+// table, as the launcher reads it) that blocks until the VM is powered off or stopped, its `list --source local --format json`
 // reports each VM's state, or the state the test sets, and its `delete` refuses a running VM as Tart does. gh serves
 // the queue and records the alerts; the memory, disk and display reads are fakes the test sets. The guest is the test,
 // writing out/ markers as wrapper.sh does. The desktop lock, the markers, the claims (vm-claim.sh) and the processes
@@ -47,7 +47,7 @@ command=$1; shift
 state() { cat "$vms/$1/state" 2>/dev/null; }
 case $command in
   list)
-    [[ $* == '--format json' ]] || exit 64
+    [[ $* == '--source local --format json' ]] || exit 64
     [[ ! -e $t/fail-list ]] || { echo 'Error: list failed' >&2; exit 1; }
     # Undo reads once to verify the stop, then again to decide whether it must delete. Fail only the latter onward.
     if [[ -e $t/fail-undo-list && -e $t/run-failed ]]; then

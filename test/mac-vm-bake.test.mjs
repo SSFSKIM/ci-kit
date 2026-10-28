@@ -49,7 +49,7 @@ command=$1; shift
 state() { cat "$vms/$1/state" 2>/dev/null; }
 case $command in
   list)
-    [[ $* == '--format json' ]] || exit 64
+    [[ $* == '--source local --format json' ]] || exit 64
     [[ ! -e $t/fail-list ]] || { echo 'Error: list failed' >&2; exit 1; }
     sep=''; printf '['
     for dir in "$vms"/*/; do
@@ -754,7 +754,7 @@ else echo '01c1;date;Homebrew;uuid'; fi`);
     assert.equal(existsSync(join(f.guest, 'maws-firstrun')), false);
     const calls = f.calls();
     const shutdown = calls.indexOf(`exec ${CANDIDATE} sudo -n /sbin/shutdown -h now`);
-    assert.ok(shutdown >= 0 && calls.slice(shutdown + 1).includes('list --format json'), calls.join('\n'));
+    assert.ok(shutdown >= 0 && calls.slice(shutdown + 1).includes('list --source local --format json'), calls.join('\n'));
     assert.equal(f.state(CANDIDATE), 'stopped');
     assert.match(run.output(), /its end is verified/);
     assert.match(f.log(), /deliverables: 12\/12/);
