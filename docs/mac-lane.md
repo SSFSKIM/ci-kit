@@ -433,6 +433,30 @@ same on every refused job, and is fixed on the machine. No read starts after the
 the bound and one read. The wait counts toward the job's `timeout-minutes`, which the caller sizes for the bound and the
 measured run together.
 
+**Keeping other work off the Mac while it measures.** The guard reads the load only before the job. Work started on
+the machine afterwards still lands in the measurement: Claude sessions living there, or evals and renders that other
+sessions start there over ssh. On 2026-10-28, three of four MAWS idle-bound runs were void at loads of 11 to 26 that
+way, while two eval scripts ran there. Two files tell such work to wait:
+
+- **A measured job is running:** its claim, `~/Library/Logs/ci-kit/vm-claim.*`, has a first line starting
+  `measured claim since` (on a Mac with the VM lane). The claim exists from the guard's first read until the job's
+  job-completed hook removes it.
+- **A measurement window is held:** `~/.local/state/ci-hold`, written by whoever coordinates a set of measured runs
+  back to back, so the gaps between jobs are covered too. It holds `until=<UTC, ISO 8601>` and `by=<who, what for>`,
+  and its writer removes it when the set ends. An `until` in the past counts as no hold.
+
+A launcher that runs heavy work on the Mac waits while either is present, and does well to wait while the 1-minute load
+is 5 or more as well (the guard's own bound):
+
+```sh
+held() {
+  local until
+  until=$(sed -n 's/^until=//p' ~/.local/state/ci-hold 2>/dev/null)
+  [[ -n $until && $(date -u +%Y-%m-%dT%H:%M:%SZ) < $until ]] && return 0
+  grep -lqs '^measured claim since' ~/Library/Logs/ci-kit/vm-claim.* 2>/dev/null
+}
+```
+
 ## Instances and the shared hold
 
 A Mac's jobs run one at a time on its **exclusive instance**, and, once the machine has **shared instances**
