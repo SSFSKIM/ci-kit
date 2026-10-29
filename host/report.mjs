@@ -105,16 +105,37 @@ export function scanWorktrees(root) {
 
 const firstLine = (err) => String(err.stderr || err.message).trim().split('\n')[0];
 
-// `tart list --format json` names the running VMs; each one's age is that of its `tart run <name>` process.
-export function runningVms(tartListJson, procs) {
-  const running = JSON.parse(tartListJson).filter((vm) => vm.Running === true || vm.State === 'running');
-  return running.map(({ Name: name }) => {
-    const proc = procs.find((p) => {
-      const [exe, sub, ...args] = p.command.split(/\s+/);
-      return basename(exe) === 'tart' && sub === 'run' && args.includes(name);
-    });
-    return { name, age: proc ? proc.age : null };
-  });
+// Valued options from `tart run --help`, also used by mac/vm/tart.sh. Equals values consume no following word.
+const TART_RUN_VALUED = new Set([
+  '--serial-path', '--disk', '--rosetta', '--dir', '--net-bridged', '--net-softnet-allow',
+  '--net-softnet-block', '--net-softnet-control-fd', '--net-softnet-expose', '--root-disk-opts', '--provisioning-opts',
+]);
+
+function tartRunName(command) {
+  const [exe, sub, ...args] = command.split(/\s+/);
+  if (basename(exe) !== 'tart' || sub !== 'run') return null;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--') return args[i + 1] ?? null;
+    if (TART_RUN_VALUED.has(arg)) { i++; continue; }
+    if (!arg.startsWith('-')) return arg;
+  }
+  return null;
+}
+
+// Read names and ages from the existing process snapshot: even a local `tart list` attaches disk images and leaks
+// APFS objects on the mini. Options may come before or after the name. ps flattens argv, so a spaced option value
+// before the name can leave a word mistaken for the name (and spaced names are truncated); the age is still the
+// real process age. Unlike the VM lane, this report accepts arbitrary names, not only maws-vm-*; it never stops VMs.
+export function runningVms(procs, uid) {
+  const running = new Map();
+  for (const proc of procs) {
+    // Tart's store is per user; other users' VMs must not appear or supply the age of a same-named VM.
+    if (proc.uid !== uid) continue;
+    const name = tartRunName(proc.command);
+    if (name !== null && !running.has(name)) running.set(name, { name, age: proc.age });
+  }
+  return [...running.values()];
 }
 
 // The app bundle a process belongs to (its helpers fold into it), else its executable's name.
@@ -177,9 +198,7 @@ export function renderReport({ host, at, dryRun, minAgeHours, vmReportHours, kil
   }
 
   out.push(`## VMs running more than ${vmReportHours} h`, '');
-  if (vms === null) out.push('`tart` is not installed.', '');
-  else if (typeof vms === 'string') out.push(vms, '');
-  else out.push(table(['VM', 'running for'], vms.map((v) => [v.name, v.age === null ? 'unknown' : formatAge(v.age)])));
+  out.push(table(['VM', 'running for'], vms.map((v) => [v.name, formatAge(v.age)])));
 
   out.push('## Top memory users by category', '');
   out.push('Resident memory summed per app or executable, every user. Shared pages count once per process, so the');

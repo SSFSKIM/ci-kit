@@ -45,17 +45,6 @@ function loadConfig(path, home) {
   return { config, rules, reposRoot: config.repos_root.replace(/^~(?=\/|$)/, home) };
 }
 
-// tart's running VMs, aged; null when tart is not installed, a message when it fails.
-async function longRunningVms(procs, hours) {
-  try {
-    const { stdout } = await execFileAsync('tart', ['list', '--format', 'json'], { timeout: 60_000 });
-    return runningVms(stdout, procs).filter((vm) => vm.age === null || vm.age > hours * 3600);
-  } catch (err) {
-    if (err.code === 'ENOENT') return null;
-    return `tart list failed: ${String(err.stderr || err.message).trim().split('\n')[0]}`;
-  }
-}
-
 async function notify(message) {
   if (process.platform !== 'darwin') return;
   const script = `display notification ${JSON.stringify(message)} with title "ci-kit janitor"`;
@@ -96,7 +85,7 @@ async function main() {
     killed: results,
     spared: spare,
     worktrees: scanWorktrees(reposRoot),
-    vms: await longRunningVms(procs, config.vm_report_hours),
+    vms: runningVms(procs, process.getuid()).filter((vm) => vm.age > config.vm_report_hours * 3600),
     memory: memoryByCategory(procs),
   });
   const reportPath = join(logDir, 'report.md');
