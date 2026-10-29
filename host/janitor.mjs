@@ -85,7 +85,7 @@ async function main() {
     killed: results,
     spared: spare,
     worktrees: scanWorktrees(reposRoot),
-    vms: runningVms(procs).filter((vm) => vm.age > config.vm_report_hours * 3600),
+    vms: runningVms(procs, process.getuid()).filter((vm) => vm.age > config.vm_report_hours * 3600),
     memory: memoryByCategory(procs),
   });
   const reportPath = join(logDir, 'report.md');

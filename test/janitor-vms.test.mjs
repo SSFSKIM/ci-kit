@@ -21,10 +21,12 @@ function fixture(t) {
   }));
   writeFileSync(join(bin, 'ps'), '#!/bin/sh\n/bin/cat "$HOME/ps.txt"\n', { mode: 0o755 });
   writeFileSync(join(home, 'ps.txt'), [
-    '501 101 1 13:05:00 100 Thu Oct 29 00:00:00 2026 /opt/homebrew/bin/tart run --disk maws-vm-value old-vm --no-graphics',
-    '501 102 1 12:00:00 100 Thu Oct 29 01:05:00 2026 tart run threshold-vm',
-    '501 103 1 01:00:00 100 Thu Oct 29 12:05:00 2026 tart run young-vm',
-    '501 104 1 20:00:00 100 Wed Oct 28 17:05:00 2026 tart exec not-running command',
+    `${process.getuid() + 1} 99 1 25:00:00 100 Wed Oct 28 12:05:00 2026 tart run foreign-vm`,
+    `${process.getuid() + 1} 100 1 24:00:00 100 Wed Oct 28 13:05:00 2026 tart run old-vm`,
+    `${process.getuid()} 101 1 13:05:00 100 Thu Oct 29 00:00:00 2026 /opt/homebrew/bin/tart run --disk maws-vm-value old-vm --no-graphics`,
+    `${process.getuid()} 102 1 12:00:00 100 Thu Oct 29 01:05:00 2026 tart run threshold-vm`,
+    `${process.getuid()} 103 1 01:00:00 100 Thu Oct 29 12:05:00 2026 tart run young-vm`,
+    `${process.getuid()} 104 1 20:00:00 100 Wed Oct 28 17:05:00 2026 tart exec not-running command`,
     '',
   ].join('\n'));
   return {

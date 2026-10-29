@@ -127,9 +127,11 @@ function tartRunName(command) {
 // APFS objects on the mini. Options may come before or after the name. ps flattens argv, so a spaced option value
 // before the name can leave a word mistaken for the name (and spaced names are truncated); the age is still the
 // real process age. Unlike the VM lane, this report accepts arbitrary names, not only maws-vm-*; it never stops VMs.
-export function runningVms(procs) {
+export function runningVms(procs, uid) {
   const running = new Map();
   for (const proc of procs) {
+    // Tart's store is per user; other users' VMs must not appear or supply the age of a same-named VM.
+    if (proc.uid !== uid) continue;
     const name = tartRunName(proc.command);
     if (name !== null && !running.has(name)) running.set(name, { name, age: proc.age });
   }

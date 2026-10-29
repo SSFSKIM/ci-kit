@@ -91,19 +91,19 @@ test('with an origin, merged means merged into the remote default branch', () =>
 
 test('running VMs and their ages come only from tart run processes, with exact names and no duplicates', () => {
   const procs = [
-    { age: 13 * 3600, command: '/opt/homebrew/Cellar/tart/2.30/tart.app/Contents/MacOS/tart run --no-graphics cua-clean' },
-    { age: 20 * 3600, command: '/opt/homebrew/bin/tart run cua-clean-2 --no-graphics' },
-    { age: 10, command: 'tart run cua-clean' },
-    { age: 100, command: 'tart exec ghost command' },
-    { age: 100, command: 'not-tart run lookalike' },
-    { age: 100, command: 'echo tart run mentioned' },
-    { age: 100, command: 'tart run --no-graphics' },
+    { uid: 501, age: 13 * 3600, command: '/opt/homebrew/Cellar/tart/2.30/tart.app/Contents/MacOS/tart run --no-graphics cua-clean' },
+    { uid: 501, age: 20 * 3600, command: '/opt/homebrew/bin/tart run cua-clean-2 --no-graphics' },
+    { uid: 501, age: 10, command: 'tart run cua-clean' },
+    { uid: 501, age: 100, command: 'tart exec ghost command' },
+    { uid: 501, age: 100, command: 'not-tart run lookalike' },
+    { uid: 501, age: 100, command: 'echo tart run mentioned' },
+    { uid: 501, age: 100, command: 'tart run --no-graphics' },
   ];
-  assert.deepEqual(runningVms(procs), [
+  assert.deepEqual(runningVms(procs, 501), [
     { name: 'cua-clean', age: 13 * 3600 },
     { name: 'cua-clean-2', age: 20 * 3600 },
   ]);
-  assert.deepEqual(runningVms([]), []);
+  assert.deepEqual(runningVms([], 501), []);
 });
 
 test('Tart flags, valued options and equals values can precede or follow the VM operand', () => {
@@ -114,7 +114,7 @@ test('Tart flags, valued options and equals values can precede or follow the VM 
     'tart run --dir maws-vm-not-an-operand unrelated --disk maws-vm-not-a-guest',
     'tart run --no-graphics -- -dash-name',
   ];
-  assert.deepEqual(runningVms(commands.map((command) => ({ command, age: 123 }))), [
+  assert.deepEqual(runningVms(commands.map((command) => ({ uid: 501, command, age: 123 })), 501), [
     { name: 'maws-vm-golden', age: 123 },
     { name: 'maws-vm-operand', age: 123 },
     { name: 'maws-vm-valued', age: 123 },
@@ -129,17 +129,26 @@ test('every valued Tart option consumes a separate VM-shaped value, or an equals
     '--net-softnet-block', '--net-softnet-control-fd', '--net-softnet-expose', '--root-disk-opts', '--provisioning-opts',
   ]) {
     for (const args of [`${option} maws-vm-value guest`, `${option}=maws-vm-value guest`, `guest ${option} maws-vm-value`]) {
-      assert.deepEqual(runningVms([{ command: `tart run ${args}`, age: 42 }]), [{ name: 'guest', age: 42 }], args);
+      assert.deepEqual(runningVms([{ uid: 501, command: `tart run ${args}`, age: 42 }], 501), [{ name: 'guest', age: 42 }], args);
     }
-    assert.deepEqual(runningVms([{ command: `tart run ${option} maws-vm-value`, age: 42 }]), [], option);
+    assert.deepEqual(runningVms([{ uid: 501, command: `tart run ${option} maws-vm-value`, age: 42 }], 501), [], option);
   }
 });
 
 test('ps loses spaced option-value boundaries: the first leftover word is reported with the real process age', () => {
   assert.deepEqual(runningVms([{
+    uid: 501,
     command: '/opt/homebrew/bin/tart run --dir /tmp/My Shared Files maws-vm-spaced --no-graphics',
     age: 13 * 3600,
-  }]), [{ name: 'Shared', age: 13 * 3600 }]);
+  }], 501), [{ name: 'Shared', age: 13 * 3600 }]);
+});
+
+test('only the janitor user owns reported VMs, including names shared with another user', () => {
+  assert.deepEqual(runningVms([
+    { uid: 502, age: 25 * 3600, command: 'tart run foreign-vm' },
+    { uid: 502, age: 24 * 3600, command: 'tart run own-vm' },
+    { uid: 501, age: 13 * 3600, command: 'tart run own-vm' },
+  ], 501), [{ name: 'own-vm', age: 13 * 3600 }]);
 });
 
 test('memory is grouped by app bundle, else by executable name', () => {
