@@ -325,11 +325,10 @@ the full path because zsh has a `log` builtin). The names were checked on the Ma
 processes carrying them, and the mini's (macOS 27) `ps -c` output read-only.
 
 Screen Sharing is a **daemon signal, not authentication proof**. launchd starts `screensharingd` when a connection
-arrives, before anyone authenticates, so a viewer still at the login prompt reads `screensharing`. The daemon exits
-about 15 s after the last viewer leaves, so `screensharing` can trail a session by up to that much. Observed twice on
-the mini (macOS 27) on 2026-10-18: `No viewers so time to exit` 15 s after the last viewer was removed, then launchd's
-`service inactive: com.apple.screensharing`; `ScreensharingAgent` went with the daemon, and `SSMenuAgent` was running
-afterwards. `none` means the daemon was not running; remote control that does not go through it is not covered. The
+arrives, before anyone authenticates, so a viewer still at the login prompt reads `screensharing`. The daemon can
+linger about 5 min after the last viewer leaves (the mini, macOS 27, 2026-10-22); two earlier reads on 10-18 saw it exit
+after 15 s. `ScreensharingAgent` went with the daemon, and `SSMenuAgent` was running afterwards. `none` means the daemon
+was not running; remote control that does not go through it is not covered. The
 read used to be `netstat -an`'s incoming 5900 sockets, which works from ssh and launchd agents but not in a job hook:
 inside Runner.Worker's process tree the kernel's Internet socket list is withheld (likely Local Network privacy, not
 proven), netstat exits 0 without its `Active Internet connections` section, and the read printed `none` with a viewer
@@ -445,6 +444,18 @@ did not, it names that one's. A cause that persists, a display left at @1x or a 
 same on every refused job, and is fixed on the machine. No read starts after the bound: a refused job has waited at most
 the bound and one read. The wait counts toward the job's `timeout-minutes`, which the caller sizes for the bound and the
 measured run together.
+
+**A remote viewer alone refuses after 6 min.** With `remote: none`, if a viewer is the only failed condition in every
+read for 6 min, the guard refuses early, naming the viewer and how long it alone held the job. Screen Sharing's daemon
+can linger about 5 min after disconnect, so a viewer just closed still gets time to clear; a forgotten viewer no longer
+costs the whole 15-min bound (MAWS lost about 30 min that way on 2026-10-28). A read with another failed condition —
+load, display, computer use, VM or an unknown read — or with no viewer restarts that window. Those conditions still
+wait to the bound, as does any remote-only stretch shorter than 6 min. `remote: any` changes nothing, and a shorter
+bound still governs. The early refusal has the same `ci-kit: … rerun` shape and the same two logs:
+
+```text
+ci-kit: the mini did not settle for a measured job (screensharingd alone for 360 s); waited 360 s; start: frontmost=Terminal display=2560x1440@2x remote=screensharing load=1.52/6.00/5.00 computeruse=none; refusal: frontmost=Terminal display=2560x1440@2x remote=screensharing load=1.52/6.00/5.00 computeruse=none — fix that there and rerun
+```
 
 **Keeping other work off the Mac while it measures.** The guard reads the load only before the job. Work started on
 the machine afterwards still lands in the measurement: Claude sessions living there, or evals and renders that other
@@ -1239,10 +1250,14 @@ ssh mini 'xattr -p com.apple.quarantine /Applications/LibreOffice.app'
 A second machine runs a second exclusive runner with the base labels, so MAWS's `[self-hosted, macOS, ARM64]` jobs go
 to whichever machine is idle. Do not give it `--home`: only the mini carries `ci-kit-mac-home`, which MAWS's measured,
 live and MAC_HOME_E2E e2e groups target (MAC_HOME_E2E: those needing what only the mini runs, such as ClaudeUsage's
-relay). An EC2 M1 (`mac2.metal`), `ci-kit-mac-ec2`, ran this way from 2026-10-26 to 10-27. It was released at the
-owner's call: once GitHub's hosted Macs took 31 of MAWS's e2e groups, the mini alone carried the rest. Below, `<host>` is the MacBook's `ssh` host for it and `<name>` its short name, a
-lowercase word of letters, digits and `-`, not ending in `-<number>` (a shared runner's name does): the runner is
-`ci-kit-mac-<name>`, and its refusals and alert say "on the <name>", so pick a word that reads there.
+relay). An EC2 M1 (`mac2.metal`), `ci-kit-mac-ec2`, ran this way from 2026-10-26 to 10-27, then was released at the
+owner's call once hosted Macs took 31 of MAWS's e2e groups. Since 10-28, a `mac-m4.metal` in us-east-2c is back as the
+second exclusive Mac: `ci-kit-mac-ec2`, runner id 6951, reached as `ssh ec2-mac`.
+
+Below, `<host>` is the MacBook's `ssh` host for it and `<name>` its short name, a lowercase word of letters, digits and
+`-`, not ending in `-<number>` (a shared runner's name does): the runner is `ci-kit-mac-<name>`, and its refusals and
+alert say "on the <name>", so pick a word that reads there. EC2 Mac capacity comes and goes within hours; a successful
+dedicated-host allocation starts billing at once, for at least 24 h.
 
 **The instance count.** A new machine starts with its exclusive instance alone. Shared instances are added once the
 machine is accepted (step 5), with `install.sh --shared <n>` and a registration token as in
@@ -1313,6 +1328,60 @@ ssh $host 'GH_TOKEN=$(cat ~/.config/ci-kit/alert-token) /opt/homebrew/bin/gh iss
   or printed. The last line checks it reads the sandbox's issues. When it expires, the alert fails (the hooks log says
   `dialog alert issue creation failed or timed out`), and the job is still refused.
 
+**2a. On an EC2 Mac, keep the internal SSD's locked volumes unmounted.** It boots from EBS, but the physical Mac's
+internal SSD still holds AWS's macOS install. Its FileVault-locked `InternalDisk` and `Data` volumes raise a
+SecurityAgent DiskUnlock password prompt at login (about 12 s after auto-login on the mac-m4). Before the owner's VNC
+step, derive their UUIDs from this host, not a previous host or an AMI. The physical stores' `Internal` flag excludes
+EBS and disk images; only FileVault-locked volumes in those containers get `noauto`.
+
+From the MacBook (`host=ec2-mac`), as `ec2-user` on the host, whose sudo is passwordless:
+
+```bash
+internal_noauto=$(ssh -l ec2-user "$host" '/opt/homebrew/bin/python3 -I -' <<'PY'
+import plistlib, subprocess
+
+def diskutil(*args):
+    return plistlib.loads(subprocess.check_output(["diskutil", *args]))
+
+lines = []
+for container in diskutil("apfs", "list", "-plist")["Containers"]:
+    locked = [v for v in container["Volumes"] if v["FileVault"] and v["Locked"]]
+    stores = container["PhysicalStores"]
+    if locked and stores and all(diskutil("info", "-plist", s["DeviceIdentifier"])["Internal"] for s in stores):
+        lines.extend("UUID=" + v["APFSVolumeUUID"] + " none apfs rw,noauto" for v in locked)
+if not lines:
+    raise SystemExit("No internal FileVault-locked volumes found; inspect diskutil apfs list before continuing")
+print("\n".join(lines))
+PY
+) && printf '%s\n' "$internal_noauto"
+#   expect: UUID=<this host's InternalDisk UUID> none apfs rw,noauto
+#           UUID=<this host's Data UUID> none apfs rw,noauto
+ssh "$host" 'diskutil apfs list'
+#   expect: those UUIDs are the internal container's FileVault: Yes (Locked) volumes, not the EBS boot volumes
+printf '%s\n' "$internal_noauto" | ssh -l ec2-user "$host" '
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    grep -Fqx "$line" /etc/fstab 2>/dev/null || printf "%s\n" "$line" | sudo -n tee -a /etc/fstab >/dev/null || exit 1
+  done
+  cat /etc/fstab'
+#   expect: both derived lines, each once; existing unrelated lines stay
+```
+
+This changes mounting policy, not FileVault, and answers no password dialog. A failed derivation means inspect the
+volumes before continuing; a sudo password requirement goes to the owner. On an AMI restored onto another physical
+host, repeat this step: `/etc/fstab` in the image has the old host's UUIDs, which do not cover the new one's SSD.
+
+Only the EC2 Mac's exclusive runner carries `ci-kit-mac-ec2`; MAWS's
+[#322](https://github.com/SSFSKIM/MAWS/pull/322) (in review) targets `[self-hosted, macOS, ARM64, ci-kit-mac-ec2]` for
+hosted-eligible groups during hosted-queue peaks. An existing registration keeps its labels, so add this through the
+runner API, like `ci-kit-mac-home` above, not by registering again:
+
+```bash
+id=$(gh api repos/SSFSKIM/MAWS/actions/runners --jq '.runners[]|select(.name=="ci-kit-mac-ec2").id')
+gh api -X POST repos/SSFSKIM/MAWS/actions/runners/$id/labels -f 'labels[]=ci-kit-mac-ec2' --jq '[.labels[].name]|join(",")'
+#   expect: self-hosted,macOS,ARM64,ci-kit-mac,ci-kit-mac-ec2
+```
+
 **3. The owner, once, in the machine's GUI (VNC).**
 
 - Open LibreOffice, Google Chrome and Terminal once each, and allow their first-launch prompts.
@@ -1344,6 +1413,40 @@ everything `/bin/bash` is responsible for on that machine. The mini holds no Acc
 bash, the runner or Electron, so the new Mac gets none either: the goal is parity. A prompt for anything not granted
 still refuses that machine's jobs through the desktop check, and its alert names the machine. While the alert is
 open, the watcher holds that machine's runner, so the mini takes its jobs.
+
+**3a. Reboot before enabling the runner, then save the EC2 image.** With the runner still disabled, reboot once
+(the owner on a non-EC2 Mac). After SSH returns and auto-login and BetterDisplay have finished, check the desktop
+again; include the first minute after login so a delayed DiskUnlock prompt is not missed:
+
+```bash
+ssh -l ec2-user "$host" 'sudo -n reboot'   # EC2 only; SSH disconnects
+#   after the machine returns:
+ssh "$host" '~/actions-runner-maws/ci-kit/hooks/cursor-park --describe'
+#   expect: 2560x1440@2x
+ssh "$host" '~/actions-runner-maws/ci-kit/hooks/window-list | cut -f8 | grep -c SecurityAgent'
+#   expect: 0 (grep exits 1 for no matches); repeat after the first minute of the GUI session
+ssh "$host" '/usr/bin/log show --last 10m --predicate '\''process == "authd"'\'' | grep DiskUnlock'
+#   expect: no DiskUnlock prompt since this boot
+```
+
+A SecurityAgent window goes to the owner in VNC, never an agent. Before releasing a configured EC2 Mac, save an AMI
+with `ci-kit=mac-ec2`; releasing the first one without an image cost the full setup and the owner's first-run session
+again on 10-28. Save after the reboot check, with the runner still disabled (image creation may reboot it again for a
+consistent snapshot):
+
+```bash
+instance='<instance-id>'   # this EC2 Mac, not its dedicated host id
+ami=$(aws --profile ci-kit-ops --region us-east-2 ec2 create-image --instance-id "$instance" \
+  --name "ci-kit-mac-ec2-$(date -u +%Y%m%dT%H%M%SZ)" \
+  --tag-specifications 'ResourceType=image,Tags=[{Key=ci-kit,Value=mac-ec2}]' --query ImageId --output text)
+aws --profile ci-kit-ops --region us-east-2 ec2 wait image-available --image-ids "$ami"
+aws --profile ci-kit-ops --region us-east-2 ec2 describe-images --image-ids "$ami" \
+  --query 'Images[].{Image:ImageId,State:State,Tags:Tags}'
+#   expect: the saved ami-…, State available, tag ci-kit=mac-ec2
+```
+
+The mac-m4's saved image on 2026-10-28 is `ami-00350dccb0d943b11` in us-east-2. A restore still needs step 2a for the
+new host's internal SSD and this reboot check; the saved UUIDs are not portable.
 
 **4. Turn it on.**
 

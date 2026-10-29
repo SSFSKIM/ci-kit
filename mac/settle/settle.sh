@@ -10,6 +10,9 @@
 # the job is refused with the job-started check's `ci-kit: … rerun` line, which MAWS's ci-gate.sh counts as refused,
 # not red; the line names what kept the last reads from settling and what they read. Settled or refused, that one line
 # goes to the job's log and to the hooks log.
+# A remote viewer alone in every read for 6 min refuses early: screensharingd can linger about 5 min after disconnect,
+# so a just-closed viewer still clears, but a forgotten one does not consume the whole 15-min bound. Any other failed
+# condition (unknown included), or a read with no viewer, restarts that window. The bound still governs if sooner.
 #
 # The reads are desktop-posture.sh --read from this action's own checkout: the guard and the reads it judges ship under
 # one tag, so moving v1 never meets an installed hook set that lacks them. Only the display helper comes from the
@@ -24,7 +27,7 @@
 # Bash 3.2: macOS's own.
 set -uo pipefail
 here=$(dirname "$0")
-interval=30
+interval=30 remote_window=360
 machine=${CI_KIT_MACHINE:-mini}
 installed=$(dirname "${ACTIONS_RUNNER_HOOK_JOB_STARTED:-$HOME/actions-runner-maws/ci-kit/hooks/job-started.sh}")
 
@@ -104,7 +107,7 @@ if [[ -n $lane && $want_vm != any ]]; then
   claim="claim: $claim; "
 fi
 read_posture
-first=$posture previous=''
+first=$posture previous='' remote_since=''
 while :; do
   # No read comes after the bound: when the next would, the job is refused on what the last two read.
   waited=$(($(date -u +%s) - start))
@@ -112,6 +115,15 @@ while :; do
     record "ci-kit: the $machine did not settle for a measured job within $bound min (${failed:-$previous}); waited $waited s; ${claim}start: $first; refusal: $posture — fix that there and rerun" 2
     exit 1
   fi
+  case $failed in
+    parsec|screensharingd|'parsec, screensharingd')
+      [[ -n $remote_since ]] || remote_since=$waited
+      if ((waited - remote_since >= remote_window)); then
+        record "ci-kit: the $machine did not settle for a measured job ($failed alone for $((waited - remote_since)) s); waited $waited s; ${claim}start: $first; refusal: $posture — fix that there and rerun" 2
+        exit 1
+      fi ;;
+    *) remote_since='' ;;
+  esac
   previous=$failed
   sleep "$interval"
   read_posture
