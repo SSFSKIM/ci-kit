@@ -425,6 +425,14 @@ canceled.", beside "has exceeded the maximum execution time". So a reader that m
 test goes by the runner (`ci-kit-gce-*`) and those annotations, or by the ledger's `preempted` row, which names the
 job.
 
+An EC2 spot interruption reads differently. AWS terminates the instance, and its runner dies without a shutdown its
+job can report, so GitHub declares it lost about 10 minutes later. The job concludes `failure`, with the one
+annotation "The self-hosted runner lost communication with the server", no log, and no concluded step after setup.
+On 2026-10-29 AWS reclaimed boxes about 6 minutes into their jobs, so the lost jobs read about 16 minutes long. The
+same annotation also follows a box its job starved, which AWS did not reclaim. So the evidence of a preemption is
+the ledger's `preempted` row, or the instance's state reason `Server.SpotInstanceTermination` while EC2 still lists it
+(`aws ec2 describe-instances`, about an hour after termination).
+
 Every resource carries a `ci-kit` label: `gce-builder` (builders and smoke VMs, with `ci-kit-run=<run id>` and
 `ci-kit-role`), `gce-image` (images, with `ci-kit-commit` and `ci-kit-ready`). The bake selects by label and checks
 the label again before it acts.
