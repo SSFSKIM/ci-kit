@@ -209,6 +209,75 @@ test('at the bound the job is refused with a ci-kit: … rerun line naming each 
   }
 });
 
+test('a remote viewer alone refuses at six minutes, naming the viewer and its uninterrupted hold in both logs', () => {
+  for (const [entry, remote, reason] of [
+    [{ processes: `${idle}  690 screensharingd\n` }, 'screensharing', 'screensharingd'],
+    [{ parsec: connected }, 'parsec', 'parsec'],
+    [{ parsec: connected, processes: `${idle}  690 screensharingd\n` }, 'parsec,screensharing', 'parsec, screensharingd'],
+  ]) {
+    const run = guard([entry], { env: { CI_KIT_MACHINE: 'rental' } });
+    assert.equal(run.status, 1, run.stderr);
+    assert.equal(run.stdout, '');
+    const line = `ci-kit: the rental did not settle for a measured job (${reason} alone for 360 s); waited 360 s; start: ${posture({ remote })}; refusal: ${posture({ remote })} — fix that there and rerun`;
+    assert.equal(run.stderr, `${line}\n`);
+    assert.match(line, refusalShape);
+    assert.equal(run.log, `2026-10-19T05:18:34Z settle run=123456 job=e2e ${line}\n`);
+    assert.deepEqual(run.sleeps, Array(12).fill(30));
+  }
+});
+
+test('a viewer that clears just before six minutes still releases after two clean reads', () => {
+  const viewer = { processes: `${idle}  690 screensharingd\n` };
+  const run = guard([...Array(11).fill(viewer), {}]); // clears at 330 s; second clean read at 360 s
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stdout, `ci-kit settle: settled in 360 s; start: ${posture({ remote: 'screensharing' })}; release: ${posture()}\n`);
+  assert.equal(run.stderr, '');
+});
+
+test('a viewer plus load waits to the bound, and any other failed condition breaks the remote-only window', () => {
+  const viewer = { processes: `${idle}  690 screensharingd\n` };
+  const loaded = guard([{ ...viewer, load: '7.20' }]);
+  assert.equal(loaded.status, 1, loaded.stderr);
+  assert.match(loaded.stderr, /within 15 min \(load 7\.20, screensharingd\); waited 900 s;/);
+  for (const [other, options] of [
+    [{ load: '7.20' }, {}],
+    [{ display: '2560x1440@1x' }, {}],
+    [{ processes: `${idle}  690 screensharingd\n  702 cua-driver\n` }, {}],
+    [{ reserved: true }, { lane: true }],
+    [{ loadStatus: 1 }, {}],
+    [{ psStatus: 1 }, {}],
+  ]) {
+    // One bad read at 270 s prevents early refusal at 360 s; the fresh window cannot finish before the 9-min bound.
+    const run = guard([...Array(9).fill(viewer), { ...viewer, ...other }, viewer], { ...options, inputs: { bound: '9' } });
+    assert.equal(run.status, 1, run.stderr);
+    assert.match(run.stderr, /within 9 min \(screensharingd\); waited 540 s;/);
+    assert.deepEqual(run.sleeps, Array(18).fill(30));
+  }
+});
+
+test('six minutes is a continuous remote-only window, not time since the job started or a sum of separate holds', () => {
+  const viewer = { processes: `${idle}  690 screensharingd\n` };
+  for (const middle of [{}, { ...viewer, load: '7.20' }]) {
+    const run = guard([...Array(6).fill(viewer), middle, viewer]); // interruption at 180 s, window restarts at 210 s
+    assert.equal(run.status, 1, run.stderr);
+    assert.match(run.stderr, /\(screensharingd alone for 360 s\); waited 570 s;/);
+    assert.deepEqual(run.sleeps, Array(19).fill(30));
+  }
+  const slow = guard([viewer], { readSeconds: 7 });
+  assert.equal(slow.status, 1, slow.stderr);
+  assert.match(slow.stderr, /\(screensharingd alone for 370 s\); waited 377 s;/);
+});
+
+test('remote: any never refuses early, even with a viewer present for longer than six minutes', () => {
+  const viewer = { processes: `${idle}  690 screensharingd\n` };
+  const quietRun = guard([viewer], { inputs: { remote: 'any' } });
+  assert.equal(quietRun.status, 0, quietRun.stderr);
+  assert.deepEqual(quietRun.sleeps, [30]);
+  const loaded = guard([{ ...viewer, load: '7.20' }], { inputs: { remote: 'any', bound: '7' } });
+  assert.equal(loaded.status, 1, loaded.stderr);
+  assert.match(loaded.stderr, /within 7 min \(load 7\.20\); waited 420 s;/);
+});
+
 test('the refusal line carries the posture at start and at refusal, and names the machine', () => {
   const run = guard([{ load: '15.70', display: '2560x1440@1x', parsec: connected }, { load: '9.40' }, { load: '7.20' }], { inputs: { bound: '1' }, env: { CI_KIT_MACHINE: 'rental' } });
   assert.equal(run.status, 1, run.stderr);
