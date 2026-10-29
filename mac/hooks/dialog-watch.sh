@@ -16,7 +16,7 @@
 #   held every Mac job until it was closed by hand).
 # - While the episode is open every instance's runner is held (a marker each LaunchAgent's wrapper waits on) and stopped
 #   between jobs: when its job ends, or once it is confirmed idle. Queued jobs then go to another Mac or wait instead of
-#   each being refused here in seconds. The episode's close releases them.
+#   each being refused here in seconds. The hold releases when no episode or daily quiet window remains.
 # - While the shared hold is up (shared-hold.sh), each read reconciles it: a crashed exclusive job's hold is dropped
 #   once its work directory is swept.
 #
@@ -31,6 +31,8 @@ here=$(dirname "$0")
 source "$here/dialog.sh"
 # shellcheck source=instances.sh
 source "$here/instances.sh"
+# shellcheck source=quiet.sh
+source "$here/quiet.sh"
 
 drain_marker=$ci_kit_logs/runner-drained
 domain=gui/$(id -u)
@@ -111,10 +113,10 @@ runner_state() { # <instance root>
 }
 
 # The drain. A runner whose hook refuses every job in seconds draws most of the queue and fails it, while another Mac
-# is busy. While the episode is open the marker holds the runner: the agent's program, runner-hold.sh, waits instead of
+# is busy. While an episode or quiet window holds the marker, runner-hold.sh waits instead of
 # starting it, after a stop, a crash or a reboot alike. The runner is stopped with SIGTERM to the agent (runsvc.sh
-# turns it into the listener's graceful stop) and KeepAlive brings back only the waiting wrapper. Once the episode
-# closes, removing the marker lets the wrapper start the runner. The watcher never loads, unloads, enables or disables
+# turns it into the listener's graceful stop) and KeepAlive brings back only the waiting wrapper. Once every reason
+# clears, removing the marker lets the wrapper start the runner. The watcher never loads, unloads, enables or disables
 # anything, so a runner disabled by hand or by `install.sh --disabled` stays off.
 #
 # A stop must land between jobs. The listener asks for the next job the moment a job's worker exits: on 2026-10-18 the
@@ -122,20 +124,38 @@ runner_state() { # <instance root>
 # 60 s tick (job_end below). A stop while a worker runs cancels its job. A stop after the listener has been offered a
 # job, before its worker starts, leaves that job acquired and never run: in progress on an offline runner (09:59:18,
 # when the drain read idle in the second a job was offered; stop_idle below).
-hold() { # under the episode lock: the hold follows the episode as it stands now; an alert close owed holds nothing
+hold() { # under the episode lock: any active reason holds; an alert close owed holds nothing
+  local reason='' previous='' line noted=$ci_kit_logs/quiet-invalid.lines
   load_state
+  quiet_read
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    if ! grep -Fxq -- "$line" "$noted" 2>/dev/null; then
+      log "quiet window: ignored malformed line in $HOME/.local/state/ci-quiet: $line"
+      printf '%s\n' "$line" >>"$noted"
+    fi
+  done <<<"$quiet_invalid"
+  reason=$quiet_windows
   if [[ $st_phase == open ]]; then
-    if [[ ! -e $drain_marker ]]; then
-      if ! printf 'held at %s: %s since %s\n' "$now" "${st_name:-a system dialog}" "$st_since" >"$drain_marker"; then
+    reason="${reason:+$reason; }${st_name:-a system dialog} since $st_since"
+  fi
+  if [[ -n $reason ]]; then
+    [[ ! -e $drain_marker ]] || IFS= read -r previous <"$drain_marker" || true
+    if [[ ${previous#*: } != "$reason" ]]; then
+      if ! { printf 'held at %s: %s\n' "$now" "$reason" >"$drain_marker.tmp" && mv -f "$drain_marker.tmp" "$drain_marker"; }; then
         log "drain: could not write $drain_marker; the runner is not held"
         return 0
       fi
-      log "drain: holding the runner while ${st_name:-a system dialog} is up (since $st_since)"
+      if [[ -n $quiet_windows ]]; then
+        log "drain: holding the runners: $reason"
+      else
+        log "drain: holding the runner while ${st_name:-a system dialog} is up (since $st_since)"
+      fi
     fi
     held=1
   elif [[ (-z $st_phase || $st_phase == closed) && -e $drain_marker ]]; then
     if rm -f "$drain_marker"; then
-      log "drain: released the runner: the episode closed"
+      log "drain: released the runner: the episode closed and no quiet window is in force"
     else
       log "drain: could not remove $drain_marker; the runner stays held"
     fi
@@ -145,7 +165,7 @@ stop_runner() { # <instance root> <why>
   local agent
   agent=$(instance_agent "$1")
   if bounded 10 launchctl kill SIGTERM "$domain/$agent" >/dev/null 2>&1; then
-    log "drain: stopped $(instance_title "$1") ($2); it waits for the episode to close"
+    log "drain: stopped $(instance_title "$1") ($2); it waits for the drain to release"
   else
     log "drain: SIGTERM to $agent failed or timed out; retrying at the next read"
   fi
@@ -225,15 +245,15 @@ note_windows() {
 # One locked step per run: the read's effect on the episode, then the hold that follows from it. The job hook
 # publishes an episode under the same lock, so a release never acts on a phase the hook has since replaced. A run
 # that finds the lock taken changes nothing and tries again a minute later. A read that cannot tell the app in front
-# changes nothing either, unless a dialog is on screen: that one is up whatever is in front.
+# leaves the episode alone, unless a dialog is on screen. The quiet schedule is read independently.
 held=
 read_front
 read_windows
 read_display
 clock
 note_windows
-[[ -n $name || -n $screen_dialog || -n $display_fault ]] || log "could not read the frontmost app; nothing changes"
-if [[ -e $dialog_state || -e $drain_marker ]] || is_blocked; then
+[[ -n $name || -n $screen_dialog || -n $display_fault ]] || log "could not read the frontmost app; the episode is unchanged"
+if [[ -e $dialog_state || -e $drain_marker || -e $HOME/.local/state/ci-quiet ]] || is_blocked; then
   if lock_state 0; then
     [[ -z $name && -z $screen_dialog && -z $display_fault ]] || watch_read
     hold

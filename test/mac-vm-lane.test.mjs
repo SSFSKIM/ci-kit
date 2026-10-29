@@ -821,6 +821,48 @@ exec /bin/mv "$@"`);
     assert.equal(existsSync(join(home, 'owned')), false);
   });
 
+  test('a daily quiet window prevents a guest boot without an alert, then releases without stopping an existing guest', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    mkdirSync(join(m.home, '.local/state'), { recursive: true });
+    writeFileSync(join(m.home, '.local/state/ci-quiet'), '23:00Z 23:50Z coordinator update\n');
+    writeFileSync(join(m.home, 'quiet-clock'), '23:00\n');
+    executable(join(m.home, 'bin/date'), `if [[ $* == '-u +%H:%M' ]]; then cat "$HOME/quiet-clock"; else exec /bin/date "$@"; fi`);
+    const a = m.start();
+    await m.until(() => /no boot: quiet window/.test(m.log()) || m.clones().length > 0, 'a quiet hold or an incorrect boot');
+    assert.equal(m.clones().length, 0, m.log());
+    await sleep(1500);
+    assert.equal(m.calls().filter((call) => call.startsWith('clone ')).length, 0);
+    assert.match(m.log(), /no boot: quiet window 23:00Z 23:50Z coordinator update/);
+    assert.deepEqual(m.alerts(), []);
+    writeFileSync(join(m.home, 'quiet-clock'), '23:50\n');
+    await m.booted();
+    writeFileSync(join(m.home, 'quiet-clock'), '23:10\n');
+    await sleep(1500);
+    assert.equal(m.calls().filter((call) => call.startsWith('stop ')).length, 0, 'an existing guest is left to finish');
+    assert.deepEqual(m.alerts(), []);
+    await finish(m, a);
+  });
+
+  test('a quiet window starting during cloning prevents the spawn and releases the unused clone', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    mkdirSync(join(m.home, '.local/state'), { recursive: true });
+    writeFileSync(join(m.home, '.local/state/ci-quiet'), '23:00Z 23:50Z coordinator update\n');
+    writeFileSync(join(m.home, 'quiet-clock'), '22:59\n');
+    executable(join(m.home, 'bin/date'), `if [[ $* == '-u +%H:%M' ]]; then cat "$HOME/quiet-clock"; else exec /bin/date "$@"; fi`);
+    m.flag('block-clone');
+    const a = m.start();
+    await m.until(() => existsSync(join(m.home, 'tart/clone-waiting')), 'clone in progress before the window');
+    writeFileSync(join(m.home, 'quiet-clock'), '23:00\n');
+    m.flag('clone-go');
+    await m.waitLog(/no boot: quiet window .*nothing of .* is left, and the reservation is released/);
+    assert.equal(m.calls().filter((call) => call.startsWith('run ')).length, 0);
+    assert.equal(m.reserved(), null);
+    assert.equal(m.clones().length, 0);
+    assert.doesNotMatch(m.log(), /failure \(image\)/);
+    assert.deepEqual(m.alerts(), []);
+    await finish(m, a);
+  });
+
   test('holds have owners: two overlap, one is removed, the lane stays held; with both gone a clone boots', async () => {
     const m = lane({ queue: [['ci-kit-mac-vm']] });
     writeFileSync(join(m.logs, 'vm-hold.CI-opt-a45b97a3'), 'timed since 2026-10-21T12:00:00Z\n');

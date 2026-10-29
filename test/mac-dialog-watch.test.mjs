@@ -231,7 +231,7 @@ test('an unreadable frontmost app changes nothing', () => {
   const run = d.watch('', { at: 0 });
   assert.equal(run.status, 0, run.stderr);
   assert.equal(run.stateText, null);
-  assert.match(run.log, /dialog-watch .*could not read the frontmost app; nothing changes/);
+  assert.match(run.log, /dialog-watch .*could not read the frontmost app; the episode is unchanged/);
 });
 
 test('the job hook and the watcher share one episode: one issue, one first-seen time, from either side', () => {
@@ -373,6 +373,131 @@ test('an app that only shares a name or a bundle prefix is not a dialog', () => 
 const marker = (run) => join(run.desktop.dir, 'Library/Logs/ci-kit/runner-drained');
 const kill = `kill SIGTERM gui/${uid}/${runnerAgent}`;
 
+const quietSchedule = (d, text) => {
+  const state = join(d.dir, '.local/state');
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(state, 'ci-quiet'), text);
+};
+
+test('a daily quiet window drains all instances without an episode or alert, and releases at its end', () => {
+  const d = desktop();
+  d.instance(2, 'idle Runner_20261021-100000-utc.log 4096');
+  d.instance(3, 'busy');
+  quietSchedule(d, '05:13Z 05:16Z coordinator market-open update\n');
+  assert.equal(d.watch(terminal, { at: 25 }).marker, null, 'before the start');
+  const run = d.watch(terminal, { at: 26 });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.marker, /quiet window 05:13Z 05:16Z coordinator market-open update/);
+  assert.match(run.log, /drain: .*quiet window 05:13Z 05:16Z coordinator market-open update/);
+  assert.deepEqual(run.launchctl, [kill, `${kill}-2`]);
+  assert.deepEqual(run.python.map((call) => call.split('/').at(-1)), ['actions-runner-maws', 'actions-runner-maws-2', 'actions-runner-maws-3', 'actions-runner-maws', 'actions-runner-maws-2']);
+  assert.match(run.log, /shared runner 3 stops when it ends/);
+  assert.equal(run.stateText, null);
+  assert.deepEqual(run.ghCalls, [], 'a scheduled hold opens no issue');
+  const released = d.watch(terminal, { at: 206 });
+  assert.equal(released.marker, null, 'the end minute is excluded');
+  assert.match(released.log, /drain: released/);
+  assert.deepEqual(released.ghCalls, []);
+});
+
+test('a dated operator drain holds only its span, including across midnight, and leaves expired lines alone', () => {
+  const d = desktop({ now: '2026-10-29T23:54:00Z' });
+  const declaration = '2026-10-29T23:55Z 2026-10-30T00:05Z coordinator packaged-app build\n';
+  quietSchedule(d, declaration);
+  assert.equal(d.watch(terminal, { at: 59 }).marker, null, 'a future one-off does not hold');
+  const active = d.watch(terminal, { at: 60 });
+  assert.match(active.marker, /quiet window 2026-10-29T23:55Z 2026-10-30T00:05Z coordinator packaged-app build/);
+  assert.deepEqual(active.launchctl, [kill]);
+  assert.match(d.watch(terminal, { at: 6 * 60 }).marker, /packaged-app build/);
+  const expired = d.watch(terminal, { at: 11 * 60 });
+  assert.equal(expired.marker, null, 'the end is excluded');
+  assert.equal(d.watch(terminal, { at: 86460 }).marker, null, 'it does not recur tomorrow');
+  assert.deepEqual(expired.ghCalls, []);
+  assert.equal(readFileSync(join(d.dir, '.local/state/ci-quiet'), 'utf8'), declaration, 'the operator owns the file');
+});
+
+test('dated quiet windows validate calendar dates and ordering, and coexist with daily holds', () => {
+  const d = desktop({ now: '2028-02-29T05:12:34Z' });
+  const bad = [
+    '2027-02-29T05:00Z 2028-03-01T06:00Z non-leap February',
+    '2028-02-30T05:00Z 2028-03-01T06:00Z nonexistent day',
+    '2028-02-29T05:00Z 2028-02-29T05:00Z empty span',
+    '2028-02-29T06:00Z 2028-02-29T05:00Z reversed span',
+    '2028-02-29T05:00Z 06:00Z mixed forms',
+    '2028-02-29T05:00Z 2028-02-29T24:00Z invalid hour',
+  ];
+  quietSchedule(d, `${bad.join('\n')}\n`);
+  const invalid = d.watch(terminal);
+  assert.equal(invalid.marker, null);
+  assert.equal(invalid.log.match(/quiet window: ignored malformed line/g)?.length, bad.length);
+  quietSchedule(d, '05:00Z 05:20Z daily owner\n2028-02-29T05:00Z 2028-03-01T06:00Z leap-day owner\n');
+  const both = d.watch(terminal);
+  assert.match(both.marker, /daily owner.*leap-day owner/);
+  assert.match(d.watch(terminal, { at: 446 }).marker, /leap-day owner/);
+  assert.equal(d.watch(terminal, { at: 86400 + 2846 }).marker, null);
+});
+
+test('quiet windows wrap midnight, overlap, and recur daily', () => {
+  const d = desktop({ now: '2026-10-17T23:29:00Z' });
+  quietSchedule(d, '23:30Z 00:20Z night coordinator\n00:10Z 00:30Z morning coordinator');
+  assert.equal(d.watch(terminal, { at: 0 }).marker, null);
+  assert.match(d.watch(terminal, { at: 60 }).marker, /night coordinator/);
+  assert.match(d.watch(terminal, { at: 31 * 60 }).marker, /night coordinator/);
+  const both = d.watch(terminal, { at: 41 * 60 });
+  assert.match(both.marker, /night coordinator.*morning coordinator/);
+  const later = d.watch(terminal, { at: 51 * 60 });
+  assert.doesNotMatch(later.marker, /night coordinator/);
+  assert.match(later.marker, /morning coordinator/);
+  assert.equal(d.watch(terminal, { at: 61 * 60 }).marker, null);
+  assert.match(d.watch(terminal, { at: 86460 }).marker, /night coordinator/);
+});
+
+test('a dialog closing during a quiet window and a window ending during a dialog retain the other hold', () => {
+  const d = desktop();
+  quietSchedule(d, '05:12Z 05:20Z coordinator update\n');
+  d.watch(security, { at: 0 });
+  const open = d.watch(security, { at: 60 });
+  const closed = clearReads(open);
+  assert.equal(closed.stateText, null);
+  assert.match(closed.marker, /coordinator update/);
+  assert.equal(creates(closed).length, 1, 'only the dialog alerts');
+  assert.equal(d.watch(terminal, { at: 446 }).marker, null);
+
+  const other = desktop();
+  quietSchedule(other, '05:12Z 05:14Z coordinator update\n');
+  other.watch(security, { at: 0 });
+  other.watch(security, { at: 60 });
+  const ended = other.watch(security, { at: 86 });
+  assert.match(ended.marker, /SecurityAgent/);
+  assert.doesNotMatch(ended.marker, /coordinator update/);
+  assert.equal(clearReads(ended).marker, null);
+});
+
+test('malformed quiet declarations hold nothing and each is logged once across watcher runs', () => {
+  const d = desktop();
+  const bad = ['25:00Z 05:30Z bad hour', '05:00Z 05:60Z bad minute', '05:12Z 05:12Z empty window', '5:00Z 06:00Z short hour', '05:00Z 06:00Z', 'not a schedule'];
+  quietSchedule(d, `# daily UTC\n\n${bad.join('\n')}\n`);
+  let run;
+  for (let i = 0; i < 3; i++) run = d.watch(terminal);
+  assert.equal(run.marker, null);
+  assert.deepEqual(run.launchctl, []);
+  assert.deepEqual(run.ghCalls, []);
+  assert.equal(run.log.match(/quiet window: ignored malformed line/g)?.length, bad.length);
+  for (const line of bad) assert.ok(run.log.includes(line), line);
+  quietSchedule(d, `${bad.join('\n')}\n05:00Z 06:00Z valid neighbour\n`);
+  run = d.watch(terminal);
+  assert.match(run.marker, /valid neighbour/);
+  assert.equal(run.log.match(/quiet window: ignored malformed line/g)?.length, bad.length);
+});
+
+test('a quiet window drains even without a desktop read, and removing its declaration releases', () => {
+  const d = desktop({ status: 3 });
+  quietSchedule(d, '05:00Z 06:00Z coordinator update\n');
+  assert.match(d.watch('').marker, /coordinator update/);
+  quietSchedule(d, '');
+  assert.equal(d.watch('').marker, null);
+});
+
 test('while an episode is open the runner is held, an idle runner is stopped, and both are logged', () => {
   const d = desktop();
   const pending = d.watch(security, { at: 0 });
@@ -384,7 +509,7 @@ test('while an episode is open the runner is held, an idle runner is stopped, an
   assert.equal(run.runner, 'stopped');
   assert.deepEqual(run.python, Array(2).fill(`-I ${hooks}runner-state.py ${d.dir}/actions-runner-maws`), 'idle, confirmed by a second read');
   assert.match(run.log, new RegExp(`dialog-watch .*drain: holding the runner while SecurityAgent is up \\(since ${iso(T0)}\\)`));
-  assert.match(run.log, /drain: stopped the runner \(no job running or offered on two reads 0 s apart\); it waits for the episode to close/);
+  assert.match(run.log, /drain: stopped the runner \(no job running or offered on two reads 0 s apart\); it waits for the drain to release/);
   const later = run.watch(security);
   assert.deepEqual(later.launchctl, [kill], 'a stopped runner is not signalled again');
 });
@@ -444,7 +569,7 @@ test('a dialog holds every instance: each idle one is stopped on two matching re
   assert.equal(run.status, 0, run.stderr);
   assert.deepEqual(run.launchctl, [kill, `${kill}-2`]);
   assert.match(run.log, /drain: stopped the runner \(no job running or offered on two reads 0 s apart\)/);
-  assert.match(run.log, /drain: stopped shared runner 2 \(no job running or offered on two reads 0 s apart\); it waits for the episode to close/);
+  assert.match(run.log, /drain: stopped shared runner 2 \(no job running or offered on two reads 0 s apart\); it waits for the drain to release/);
   assert.match(run.log, /drain: a job is running on shared runner 3 \(busy 4242\); shared runner 3 stops when it ends/);
   assert.deepEqual(run.python.map((call) => call.split('/').at(-1)), ['actions-runner-maws', 'actions-runner-maws-2', 'actions-runner-maws-3', 'actions-runner-maws', 'actions-runner-maws-2']);
   // When its job ends, the next read stops it.
@@ -751,7 +876,7 @@ async function jobEnd({ held = true, whileFinishing = () => {}, finishing = 400,
   const fakes = join(home, 'fakes');
   const temp = join(home, 'tmp');
   for (const dir of [installed, workspace, logs, fakes, temp, join(runner, 'bin')]) mkdirSync(dir, { recursive: true });
-  for (const file of ['job-completed.sh', 'dialog.sh', 'dialog-watch.sh', 'runner-state.py', 'instances.sh']) copyFileSync(join(hooks, file), join(installed, file));
+  for (const file of ['job-completed.sh', 'dialog.sh', 'dialog-watch.sh', 'quiet.sh', 'runner-state.py', 'instances.sh']) copyFileSync(join(hooks, file), join(installed, file));
   const script = (path, body) => { writeFileSync(path, `#!/bin/bash\n${body}\n`); chmodSync(path, 0o755); };
   script(join(installed, 'desktop-posture.sh'), 'exit 0');
   script(join(fakes, 'node'), 'echo "sweep $*"'); // the sweep's selection is mac-strays' to test
@@ -802,6 +927,18 @@ async function jobEnd({ held = true, whileFinishing = () => {}, finishing = 400,
   }
 }
 
+test('a quiet-window drain stops a busy runner only after its job reports and exits', macOnly, async () => {
+  const d = desktop({ runner: 'busy' });
+  quietSchedule(d, '05:00Z 06:00Z coordinator update\n');
+  const held = d.watch(terminal);
+  assert.deepEqual(held.launchctl, [], 'the running job is not signalled');
+  const run = await jobEnd({ held: false, whileFinishing: (marker) => writeFileSync(marker, held.marker) });
+  assert.equal(run.stops.length, 1);
+  assert.ok(run.stops[0].at >= run.events.reported.at, 'the stop follows the result report');
+  assert.ok(run.stops[0].at - run.events.reported.at < nextJobAfter, 'before the next job is acquired');
+  assert.equal(run.errors, '');
+});
+
 test('a held runner is stopped when its job ends: after the worker reports and exits, before the next job', macOnly, async () => {
   const run = await jobEnd();
   assert.equal(run.events['hook closed'].code, 0, run.events['hook closed'].output);
@@ -817,7 +954,7 @@ test('a held runner is stopped when its job ends: after the worker reports and e
   assert.deepEqual([stop.tracking, stop.cwd], ['unset', '/']);
   assert.ok(run.detached.waiters.length > 0, 'a waiter while the worker finishes');
   for (const [pid, group] of run.detached.waiters) assert.notEqual(group, run.detached.group, `${pid} is out of the job's process group`);
-  assert.match(run.log, /dialog-watch run=39116987843 job=e2e drain: stopped the runner \(its job ended while it was held\); it waits for the episode to close/);
+  assert.match(run.log, /dialog-watch run=39116987843 job=e2e drain: stopped the runner \(its job ended while it was held\); it waits for the drain to release/);
   // The hook returns only once the worker is watched, so even a worker that exits the moment the hook closes is seen.
   const abrupt = await jobEnd({ finishing: 0 });
   assert.deepEqual(abrupt.stops.map((stop) => stop.call), [`kill SIGTERM gui/${uid}/${runnerAgent}`], abrupt.log);
@@ -826,7 +963,7 @@ test('a held runner is stopped when its job ends: after the worker reports and e
 test('a held shared runner is stopped at its own job end, through its own agent', macOnly, async () => {
   const run = await jobEnd({ instance: 'actions-runner-maws-2' });
   assert.deepEqual(run.stops.map((stop) => stop.call), [`kill SIGTERM gui/${uid}/${runnerAgent}-2`], run.log + run.errors);
-  assert.match(run.log, /drain: stopped shared runner 2 \(its job ended while it was held\); it waits for the episode to close/);
+  assert.match(run.log, /drain: stopped shared runner 2 \(its job ended while it was held\); it waits for the drain to release/);
 });
 
 test('the job-end decision is the marker at the worker\'s exit: an episode opening while the job finishes stops it, one closing does not', macOnly, async () => {

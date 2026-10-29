@@ -460,21 +460,26 @@ ci-kit: the mini did not settle for a measured job (screensharingd alone for 360
 **Keeping other work off the Mac while it measures.** The guard reads the load only before the job. Work started on
 the machine afterwards still lands in the measurement: Claude sessions living there, or evals and renders that other
 sessions start there over ssh. On 2026-10-28, three of four MAWS idle-bound runs were void at loads of 11 to 26 that
-way, while two eval scripts ran there. Two files tell such work to wait:
+way, while two eval scripts ran there. The claims and holds tell such work to wait:
 
 - **A measured job is running:** its claim, `~/Library/Logs/ci-kit/vm-claim.*`, has a first line starting
   `measured claim since` (on a Mac with the VM lane). The claim exists from the guard's first read until the job's
   job-completed hook removes it.
 - **A measurement window is held:** `~/.local/state/ci-hold`, written by whoever coordinates a set of measured runs
   back to back, so the gaps between jobs are covered too. It holds `until=<UTC, ISO 8601>` and `by=<who, what for>`,
-  and its writer removes it when the set ends. An `until` in the past counts as no hold.
+  and its writer removes it when the set ends. An `until` in the past counts as no hold. For a daily window or an on-demand operator drain, the
+  operator writes `~/.local/state/ci-quiet` instead: `<HH:MM>Z <HH:MM>Z <who, what for>`, one UTC window per line
+  (the [drain](#the-drain) below). Unlike `ci-hold`, a quiet window also drains CI runners and prevents VM boots.
 
-A launcher that runs heavy work on the Mac waits while either is present, and does well to wait while the 1-minute load
+A launcher that runs heavy work on the Mac waits while any is in force, and does well to wait while the 1-minute load
 is 5 or more as well (the guard's own bound):
 
-```sh
+```bash
+source ~/actions-runner-maws/ci-kit/hooks/quiet.sh
 held() {
   local until
+  quiet_read
+  [[ -z $quiet_windows ]] || return 0
   until=$(sed -n 's/^until=//p' ~/.local/state/ci-hold 2>/dev/null)
   [[ -n $until && $(date -u +%Y-%m-%dT%H:%M:%SZ) < $until ]] && return 0
   grep -lqs '^measured claim since' ~/Library/Logs/ci-kit/vm-claim.* 2>/dev/null
@@ -1182,8 +1187,9 @@ dismissed and the episode closes.
   which delays a stop by one read. Two matching idle reads therefore saw no job running and none given in between.
   On 2026-10-18 at 09:59:18 the drain stopped the mini on a single idle read in the second it was given a job, and the
   job stayed in progress on the offline runner.
-- **Releasing.** When the episode closes, the watcher removes the marker, and every wrapper starts its runner within
-  5 s. A marker left while no episode is pending or open goes at the next read. The watcher writes and removes the
+- **Releasing.** When the episode closes and no quiet window is in force, the watcher removes the marker, and every
+  wrapper starts its runner within 5 s. A marker left while no episode is pending or open and no quiet window is in
+  force goes at the next read. The watcher writes and removes the
   marker under the episode's lock, in the same step as its read, so it never releases a runner for an episode a job
   hook has just opened.
 - **An operator's runner stays the operator's.** The watcher never loads, unloads, enables or disables the runner's
@@ -1199,7 +1205,47 @@ dismissed and the episode closes.
   instance as `shared runner <n>`. Each wrapper's own `runner-hold:` lines are in its instance's
   `mac-runner[-<n>].out.log`.
 
-**Cheap and bounded.** A read with no dialog and no episode costs two `lsappinfo` calls and one `window-list` run, 5 s
+**Quiet windows, daily or on demand.** The operator writes `~/.local/state/ci-quiet`, one UTC window per line:
+
+```text
+23:00Z 23:50Z semis-research-coordinator's market-open update (no CI from 23:30Z)
+```
+
+The form is `<HH:MM>Z <HH:MM>Z <who, what for>`. The start is included and the end excluded. An end before the start
+wraps midnight; equal endpoints are malformed, not an all-day hold. Blank lines and lines starting with `#` are
+ignored. For an on-demand operator drain, use dated endpoints in the same file:
+
+```text
+2026-10-29T12:00Z 2026-10-29T12:10Z coordinator packaged-app build
+```
+
+That form is `<YYYY-MM-DDTHH:MMZ> <YYYY-MM-DDTHH:MMZ> <who, what for>`, with valid calendar dates and an end after the
+start. It holds only during that span, not every day. Expired lines remain in the operator-owned file and silently
+hold nothing; remove them when convenient. Both forms can coexist and overlap.
+
+Each malformed line holds nothing and is logged once in `mac-runner-hooks.log` (`quiet window: ignored
+malformed line`); `quiet-invalid.lines` beside it remembers which were reported. Other valid lines still apply.
+
+The watcher reads the schedule on its usual 60 s tick and uses the same drain, not a second hold: every exclusive and
+shared runner waits on `runner-drained`, idle runners stop on two matching reads, and busy runners stop when their
+jobs end. A window does not cancel a running job or open an alert issue. Its declaration, including its writer and
+purpose, appears on the marker's first line and in `dialog-watch … drain: holding the runners: quiet window …`.
+Overlapping windows all appear there. Closing a dialog during a window keeps the hold; ending a window during an
+open dialog keeps it too. Removing the declaration releases its reason at the next read.
+
+Put the lead into the window itself: `23:00Z` leaves half an hour for jobs already running to finish before a
+`23:30Z` measurement. The drain is polled, not a timer interrupt at the start minute, and a busy job is always left to
+finish. Include the watcher's tick and the idle confirmation in that lead. The VM launcher reads the same schedule at
+admission and again before spawning, so it boots no guest in a window, independently of the watcher's tick. A guest
+already booted is left to finish; a dialog alone still permits the VM fallback as before. The existing VM-only pause
+windows and owner holds are unchanged. Local heavy-work launchers use `quiet_read` in the check above, so they do not
+have to wait for the drain marker either.
+
+To see it holding, read `~/Library/Logs/ci-kit/runner-drained` and the `drain:` lines in `mac-runner-hooks.log`.
+`vm-lane.log` says `no boot: quiet window …`; each runner's `mac-runner[-<n>].out.log` says `runner-hold: …; waiting`
+once that runner has stopped. There is no quiet-window alert issue to close.
+
+**Cheap and bounded.** A read with no dialog, episode or quiet schedule costs two `lsappinfo` calls and one `window-list` run, 5 s
 deadline each, and writes nothing. A window list that cannot be read is logged when that starts and when it ends, not
 at every read. Every other external call has its own supervised deadline, which kills and reaps it even when it ignores
 SIGALRM: 10 s for each `log`, `gh` and `launchctl` call and for the runner-state read. The watcher never clicks,
@@ -1211,7 +1257,7 @@ Check by hand:
 ssh mini 'launchctl print gui/$(id -u)/com.ssfskim.ci-kit.dialog-watch | grep -E "state =|runs =|last exit code"'
 #   expect: runs = <n>, last exit code = 0 (state = not running between reads)
 ssh mini 'cat ~/Library/Logs/ci-kit/dialog-alert.state ~/Library/Logs/ci-kit/runner-drained 2>/dev/null; grep dialog-watch ~/Library/Logs/ci-kit/mac-runner-hooks.log | tail -5'
-#   expect, with no dialog: no output from the state files (phase=closed is an alert close still owed; the log says why)
+#   expect, with no dialog or quiet window: no output from the state files (phase=closed is an alert close still owed; the log says why)
 gh issue list -R SSFSKIM/ci-kit-sandbox -l ci-kit-alert
 ```
 

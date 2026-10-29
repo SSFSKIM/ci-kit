@@ -73,7 +73,7 @@
 #      exclusive instance is busy, held (the dialog watcher's drain) or offline (runner-state.py), or more of them are
 #      queued than it can take (one);
 #   3. nothing holds the lane: no vm-hold.<owner>, no vm-pause in force, and no claim (vm-claim.sh claims, read under
-#      the desktop lock: clear only when it exits 0 and prints nothing);
+#      the desktop lock: clear only when it exits 0 and prints nothing), and no daily quiet window in ~/.local/state/ci-quiet;
 #   4. no guest exists: vm-reserved absent, and no `tart run` process names a maws-vm-* VM (options may precede or
 #      follow the VM operand; a maintenance VM keeps the lane shut,
 #      logged once per change and alerted after CI_KIT_VM_MAINTENANCE_ALERT s, 600);
@@ -136,6 +136,8 @@ source "$hooks/dialog.sh"
 source "$hooks/desktop-lock.sh"
 # shellcheck source=../hooks/instances.sh
 source "$hooks/instances.sh"
+# shellcheck source=../hooks/quiet.sh
+source "$hooks/quiet.sh"
 # shellcheck source=tart.sh
 source "$here/tart.sh"
 # shellcheck source=guest/diag.sh
@@ -567,6 +569,8 @@ The lane boots nothing while any vm-hold.<owner> exists; only its owner removes 
 # The boot rule's conditions read outside the lock: none of them is written by what the lock serializes. boot_reads
 # says what was read; false with the reason logged.
 admit() { # <running maws-vm-* names, from the process table>
+  quiet_read
+  if [[ -n $quiet_windows ]]; then note boot "no boot: $quiet_windows"; return 1; fi
   if in_pause_window; then note boot "no boot: inside the pause window $window_seen (UTC)"; return 1; fi
   if ! holds_read; then note boot "no boot: ${h_owners//$'\n'/; }"; return 1; fi
   if [[ -n $p_reason ]]; then note boot "no boot: $(pause_line)"; return 1; fi
@@ -619,6 +623,8 @@ boot() {
     note boot "no boot: a claim holds the lane (${claims//$'\n'/; }${claims:+; }vm-claims exit $status)"
     return
   fi
+  quiet_read
+  [[ -z $quiet_windows ]] || why=$quiet_windows
   holds_read || why="${h_owners//$'\n'/; }"
   pause_read
   [[ -z $p_reason ]] || why=$(pause_line)
@@ -673,6 +679,11 @@ boot() {
   if ! why=$(tart_clone "$g_name" "$clone" 2>&1); then
     why="tart clone $g_name $clone failed: $(tail -1 <<<"$why")"
     boot_undo "$why"
+    return
+  fi
+  quiet_read
+  if [[ -n $quiet_windows ]]; then
+    boot_undo "$quiet_windows" no-image-failure
     return
   fi
   printf '%s %s: tart run\n' "$now" "$clone" >>"$run_log" 2>/dev/null
