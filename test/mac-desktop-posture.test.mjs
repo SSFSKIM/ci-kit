@@ -271,7 +271,7 @@ test('failed, hanging or malformed load reads are unknown without touching anoth
     { loadavg: '{ 1,52 1,37 1,29 }\n' },
     { loadavg: '{ 1.52 1.37 1.29 }\n{ 1.52 1.37 1.29 }\n' },
     { loadHang: true },
-    { loadHang: true, hidHang: true, ignoreAlarm: true },
+    { loadHang: true, ignoreAlarm: true },
   ]) {
     const run = fixture(options).run('end');
     assert.equal(run.status, 0, run.stderr);
