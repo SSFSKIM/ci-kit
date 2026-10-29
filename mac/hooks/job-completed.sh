@@ -12,7 +12,7 @@
 # (the worker waits up to 5 s for it to close). The hook returns once that process is watching the worker, so the
 # worker cannot exit unseen, and after 5 s at most: the job's end is never held up by the drain.
 here=$(dirname "$0")
-"$here/desktop-posture.sh" end || true
+"$here/desktop-posture.sh" end "$PPID" || true
 {
   [[ $here == /* ]] || here=$PWD/$here
   logs=$HOME/Library/Logs/ci-kit
