@@ -11,7 +11,7 @@ const repo = fileURLToPath(new URL('../', import.meta.url));
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'ci-kit-install-')));
 after(() => rmSync(root, { recursive: true, force: true }));
 const python = spawnSync('python3', ['-I', '-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).stdout.trim();
-const hookFiles = ['job-started.sh', 'job-completed.sh', 'desktop-check.sh', 'desktop-posture.sh', 'dialog.sh', 'dialog-watch.sh', 'runner-hold.sh', 'runner-state.py', 'sweep.mjs', 'strays.mjs', 'terminate.mjs', 'instances.sh', 'shared-hold.sh', 'desktop-lock.sh', 'vm-claim.sh'];
+const hookFiles = ['job-started.sh', 'job-completed.sh', 'desktop-check.sh', 'desktop-posture.sh', 'dialog.sh', 'dialog-watch.sh', 'quiet.sh', 'runner-hold.sh', 'runner-state.py', 'sweep.mjs', 'strays.mjs', 'terminate.mjs', 'instances.sh', 'shared-hold.sh', 'desktop-lock.sh', 'vm-claim.sh'];
 const watchAgent = 'com.ssfskim.ci-kit.dialog-watch';
 const runnerAgent = 'com.ssfskim.ci-kit.mac-runner';
 const macOnly = { skip: process.platform !== 'darwin' };
