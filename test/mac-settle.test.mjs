@@ -61,10 +61,10 @@ function guard(world, { inputs = {}, hooks = 'actions-runner-maws/ci-kit/hooks',
   const now = (name) => `'${file(`now/${name}`)}'`;
   // Each read's desktop, written whole into world/<n>/ and copied into now/ for read 0 and by each sleep after it.
   world.forEach((entry, n) => {
-    const { load, loadavg = `{ ${load} 6.00 5.00 }\n`, loadStatus = 0, display, displayStatus = 0, processes, psStatus = 0, parsec, reserved } = { ...quiet, ...entry };
+    const { load, loadavg = `{ ${load} 6.00 5.00 }\n`, loadStatus = 0, display, displayStatus = 0, processes, psStatus = 0, parsec, reserved, hidIdle = '600000000000' } = { ...quiet, ...entry };
     const at = file(`world/${n}`);
     mkdirSync(at, { recursive: true });
-    for (const [name, value] of Object.entries({ loadavg, 'load-status': loadStatus, display, 'display-status': displayStatus, processes, 'ps-status': psStatus })) {
+    for (const [name, value] of Object.entries({ loadavg, 'load-status': loadStatus, display, 'display-status': displayStatus, processes, 'ps-status': psStatus, 'hid-idle': hidIdle })) {
       writeFileSync(join(at, name), String(value));
     }
     if (parsec !== undefined) writeFileSync(join(at, 'parsec'), parsec);
@@ -95,6 +95,7 @@ echo "$1" >> '${file('sleeps')}'
 echo $(($(cat '${file('clock')}') + $1)) > '${file('clock')}'
 n=$(($(cat '${file('reads')}') + 1)); echo "$n" > '${file('reads')}'
 apply "$n"`);
+  executable(join(bin, 'ioreg'), `printf '"HIDIdleTime" = %s\\n' "$(cat ${now('hid-idle')})"`);
   executable(join(bin, 'lsappinfo'), `if [[ $1 == front ]]; then echo ASN:0x0-1:; else printf '"LSDisplayName"="Terminal"\\n'; fi`);
   executable(join(bin, 'ps'), `[[ $* == '-axco pid=,comm=' ]] || exit 93\ncat ${now('processes')}; exit $(cat ${now('ps-status')})`);
   // The load read also marks each read's start on the clock (no other fake moves it), then spends readSeconds.
@@ -149,7 +150,7 @@ cat ${now('loadavg')}; exit $(cat ${now('load-status')})`);
 }
 
 const posture = ({ display = '2560x1440@2x', remote = 'none', load = '1.52', computeruse = 'none' } = {}) =>
-  `frontmost=Terminal display=${display} remote=${remote} load=${load === 'unknown' ? load : `${load}/6.00/5.00`} computeruse=${computeruse}`;
+  `frontmost=Terminal display=${display} remote=${remote} hid_idle_s=600 load=${load === 'unknown' ? load : `${load}/6.00/5.00`} computeruse=${computeruse}`;
 // MAWS's scripts/ci-gate-refusals.sh counts a failed job as refused by this shape, on a line of its own.
 const refusalShape = /^ci-kit: .*rerun$/;
 
@@ -328,12 +329,12 @@ test('a read that fails counts as not settled without stopping the guard, and th
   for (const env of [{ PERL5OPT: '-MNoSuchModule' }, { GITHUB_ACTION_PATH: checkout }]) {
     const unreadable = guard([{}], { inputs: { bound: '1' }, env });
     assert.equal(unreadable.status, 1, unreadable.stderr);
-    assert.match(unreadable.stderr, /within 1 min \(load unknown, display unknown, remote unknown, computeruse unknown\); waited 60 s; start: frontmost=unknown display=unknown remote=unknown load=unknown computeruse=unknown; /);
+    assert.match(unreadable.stderr, /within 1 min \(load unknown, display unknown, remote unknown, computeruse unknown\); waited 60 s; start: frontmost=unknown display=unknown remote=unknown hid_idle_s=unknown load=unknown computeruse=unknown; /);
   }
   // A failed read that recovers settles like any other.
   const recovered = guard([{ loadStatus: 1 }, {}]);
   assert.equal(recovered.status, 0, recovered.stderr);
-  assert.match(recovered.stdout, /^ci-kit settle: settled in 60 s; start: frontmost=Terminal display=2560x1440@2x remote=none load=unknown computeruse=none; /);
+  assert.match(recovered.stdout, /^ci-kit settle: settled in 60 s; start: frontmost=Terminal display=2560x1440@2x remote=none hid_idle_s=600 load=unknown computeruse=none; /);
 });
 
 test('the display helper is the runner’s installed one: where its hook variable says, else in its fixed directory', () => {
@@ -440,4 +441,13 @@ test('without the VM lane, a reservation changes nothing and settle writes nothi
   assert.equal(run.stdout, `ci-kit settle: settled in 30 s; start: ${posture()}; release: ${posture()}\n`);
   assert.deepEqual(run.claims, []);
   assert.equal(run.locked, false);
+});
+
+test('HID activity is visible but is not a new measured-job admission condition', () => {
+  for (const [hidIdle, hidSeconds] of [['0', '0'], ['unreadable', 'unknown']]) {
+    const run = guard([{ hidIdle }]);
+    assert.equal(run.status, 0, run.stderr);
+    assert.deepEqual(run.sleeps, [30]);
+    assert.match(run.stdout, new RegExp(`hid_idle_s=${hidSeconds} `));
+  }
 });

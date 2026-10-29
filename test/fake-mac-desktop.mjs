@@ -93,6 +93,11 @@ export function desktop({ status = 0, afterOpen, openStatus = 0, logOutput = '',
     mkdirSync(file('.config/ci-kit'), { recursive: true });
     writeFileSync(file('.config/ci-kit/alert-token'), alertToken);
   }
+  // Desktop activity boundaries: default to no viewer, with an idle HID device.
+  writeFileSync(file('hid-idle'), '600000000000');
+  writeFileSync(file('remote-processes'), '    1 launchd\n');
+  executable(join(bin, 'ioreg'), `printf '    | |     "HIDIdleTime" = %s\\n' "$(cat '${file('hid-idle')}')"`);
+  executable(join(bin, 'ps'), `cat '${file('remote-processes')}'`);
   const front = file('out.txt');
   if (afterOpen !== undefined) writeFileSync(file('after.txt'), afterOpen);
   executable(join(bin, 'lsappinfo'), `[[ \${FAKE_FRONT_HANG:-0} == 1 ]] && { ${hangs(dir).replace(/\n/g, '; ')}; }

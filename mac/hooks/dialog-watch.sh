@@ -16,7 +16,7 @@
 #   held every Mac job until it was closed by hand).
 # - While the episode is open every instance's runner is held (a marker each LaunchAgent's wrapper waits on) and stopped
 #   between jobs: when its job ends, or once it is confirmed idle. Queued jobs then go to another Mac or wait instead of
-#   each being refused here in seconds. The hold releases when no episode or daily quiet window remains.
+#   each being refused here in seconds. The hold releases when no episode, quiet window or desktop-use reason remains.
 # - While the shared hold is up (shared-hold.sh), each read reconciles it: a crashed exclusive job's hold is dropped
 #   once its work directory is swept.
 #
@@ -113,7 +113,7 @@ runner_state() { # <instance root>
 }
 
 # The drain. A runner whose hook refuses every job in seconds draws most of the queue and fails it, while another Mac
-# is busy. While an episode or quiet window holds the marker, runner-hold.sh waits instead of
+# is busy. While an episode, quiet window or desktop use holds the marker, runner-hold.sh waits instead of
 # starting it, after a stop, a crash or a reboot alike. The runner is stopped with SIGTERM to the agent (runsvc.sh
 # turns it into the listener's graceful stop) and KeepAlive brings back only the waiting wrapper. Once every reason
 # clears, removing the marker lets the wrapper start the runner. The watcher never loads, unloads, enables or disables
@@ -124,6 +124,21 @@ runner_state() { # <instance root>
 # 60 s tick (job_end below). A stop while a worker runs cancels its job. A stop after the listener has been offered a
 # job, before its worker starts, leaves that job acquired and never run: in progress on an offline runner (09:59:18,
 # when the drain read idle in the second a job was offered; stop_idle below).
+# A remote viewer merely watching is harmless. Recent HID input plus a viewer holds the host's runners; the
+# headless VM has its own desktop. Use posture's bounded probes so the two logs mean the same thing by remote/input.
+desktop_activity() {
+  local activity remote idle
+  desktop_in_use=''
+  activity=$("$here/desktop-posture.sh" --activity) || return 0
+  read -r remote idle <<<"$activity"
+  remote=${remote#remote=} idle=${idle#hid_idle_s=}
+  case $remote in parsec | screensharing | parsec,screensharing) ;; *) return 0 ;; esac
+  if [[ $idle =~ ^[0-9]+$ ]] && ((idle < desktop_idle_seconds)); then
+    desktop_in_use="desktop in use (remote=$remote, input within $desktop_idle_seconds s)"
+  fi
+}
+desktop_idle_seconds=${CI_KIT_DESKTOP_IDLE_SECONDS:-120}
+[[ $desktop_idle_seconds =~ ^[1-9][0-9]{0,4}$ ]] || desktop_idle_seconds=120
 hold() { # under the episode lock: any active reason holds; an alert close owed holds nothing
   local reason='' previous='' line noted=$ci_kit_logs/quiet-invalid.lines
   load_state
@@ -136,6 +151,9 @@ hold() { # under the episode lock: any active reason holds; an alert close owed 
     fi
   done <<<"$quiet_invalid"
   reason=$quiet_windows
+  if [[ -n $desktop_in_use ]]; then
+    reason="${reason:+$reason; }$desktop_in_use"
+  fi
   if [[ $st_phase == open ]]; then
     reason="${reason:+$reason; }${st_name:-a system dialog} since $st_since"
   fi
@@ -146,7 +164,7 @@ hold() { # under the episode lock: any active reason holds; an alert close owed 
         log "drain: could not write $drain_marker; the runner is not held"
         return 0
       fi
-      if [[ -n $quiet_windows ]]; then
+      if [[ -n $quiet_windows || -n $desktop_in_use ]]; then
         log "drain: holding the runners: $reason"
       else
         log "drain: holding the runner while ${st_name:-a system dialog} is up (since $st_since)"
@@ -155,7 +173,7 @@ hold() { # under the episode lock: any active reason holds; an alert close owed 
     held=1
   elif [[ (-z $st_phase || $st_phase == closed) && -e $drain_marker ]]; then
     if rm -f "$drain_marker"; then
-      log "drain: released the runner: the episode closed and no quiet window is in force"
+      log "drain: released the runner: the episode closed, no quiet window is in force and the desktop is not in use"
     else
       log "drain: could not remove $drain_marker; the runner stays held"
     fi
@@ -245,15 +263,16 @@ note_windows() {
 # One locked step per run: the read's effect on the episode, then the hold that follows from it. The job hook
 # publishes an episode under the same lock, so a release never acts on a phase the hook has since replaced. A run
 # that finds the lock taken changes nothing and tries again a minute later. A read that cannot tell the app in front
-# leaves the episode alone, unless a dialog is on screen. The quiet schedule is read independently.
+# leaves the episode alone, unless a dialog is on screen. The quiet schedule and desktop activity are read independently.
 held=
 read_front
 read_windows
 read_display
+desktop_activity
 clock
 note_windows
 [[ -n $name || -n $screen_dialog || -n $display_fault ]] || log "could not read the frontmost app; the episode is unchanged"
-if [[ -e $dialog_state || -e $drain_marker || -e $HOME/.local/state/ci-quiet ]] || is_blocked; then
+if [[ -n $desktop_in_use || -e $dialog_state || -e $drain_marker || -e $HOME/.local/state/ci-quiet ]] || is_blocked; then
   if lock_state 0; then
     [[ -z $name && -z $screen_dialog && -z $display_fault ]] || watch_read
     hold

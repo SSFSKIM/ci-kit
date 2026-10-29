@@ -535,7 +535,7 @@ test('the guest hooks: a wide @2x desktop passes, Terminal in front, the posture
   assert.equal(started.status, 0, started.stderr);
   assert.equal(started.stderr, '');
   const line = started.stdout.split('\n').find((text) => text.startsWith('ci-kit desktop (start): '));
-  assert.match(line, /^ci-kit desktop \(start\): vm=vm clone=maws-vm-job-20261021-1 frontmost=터미널 display=2560x1440@2x remote=\S+ load=\S+ computeruse=\S+$/);
+  assert.match(line, /^ci-kit desktop \(start\): vm=vm clone=maws-vm-job-20261021-1 frontmost=터미널 display=2560x1440@2x remote=\S+ hid_idle_s=\S+ load=\S+ computeruse=\S+$/);
   assert.match(started.stdout, /cursor-park run=18750 job=e2e cursor before=1,1/);
   assert.match(vm.hooksLog(), /run=18750 job=e2e ci-kit desktop \(start\): vm=vm clone=/);
   assert.equal(vm.out('refused'), null);

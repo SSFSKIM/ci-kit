@@ -1178,3 +1178,70 @@ test('a watcher ignores transient probe misses but holds persistent ones; a dial
   d.watch(terminal);
   assert.equal(d.watch(terminal).state, null);
 });
+
+// Exercise the real activity reader: fake only ioreg and the remote process/log sources.
+function activity(d, idleSeconds, remote = 'screensharing') {
+  writeFileSync(join(d.dir, 'hid-idle'), String(idleSeconds * 1e9));
+  writeFileSync(join(d.dir, 'remote-processes'), `    1 launchd\n${remote === 'screensharing' ? '  690 screensharingd\n' : remote === 'parsec' ? '  444 /Applications/Parsec.app/Contents/MacOS/parsecd\n' : ''}`);
+  mkdirSync(join(d.dir, '.parsec'), { recursive: true });
+  writeFileSync(join(d.dir, '.parsec/log.txt'), remote === 'parsec' ? '[I 2026-10-29 08:00:00] owner#123 connected.\n' : '[F 2026-10-29 08:00:00] ===== Parsec: Started =====\n');
+}
+
+test('desktop in use holds every host runner without an alert, leaving a busy job alone', () => {
+  for (const remote of ['screensharing', 'parsec']) {
+    const d = desktop();
+    d.instance(2, 'idle'); d.instance(3, 'busy');
+    activity(d, 20, remote);
+    const run = d.watch(terminal);
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.marker, new RegExp(`desktop in use.*remote=${remote}.*120 s`));
+    assert.match(run.log, /drain: holding the runners: desktop in use/);
+    assert.deepEqual(run.launchctl, [kill, `${kill}-2`]);
+    assert.match(run.log, /shared runner 3 stops when it ends/);
+    assert.equal(run.stateText, null);
+    assert.deepEqual(run.ghCalls, []);
+  }
+});
+
+test('desktop activity needs both a viewer and recent input, releasing at the span or viewer exit', () => {
+  for (const [seconds, remote] of [[120, 'screensharing'], [1000, 'screensharing'], [0, 'none']]) {
+    const d = desktop(); activity(d, seconds, remote);
+    assert.equal(d.watch(terminal).marker, null);
+  }
+  for (const releaseBy of ['idle', 'disconnect']) {
+    const d = desktop(); activity(d, 119);
+    assert.notEqual(d.watch(terminal).marker, null);
+    activity(d, releaseBy === 'idle' ? 120 : 0, releaseBy === 'idle' ? 'screensharing' : 'none');
+    const released = d.watch(terminal);
+    assert.equal(released.marker, null);
+    assert.match(released.log, /drain: released/);
+    assert.deepEqual(released.ghCalls, []);
+  }
+});
+
+test('desktop activity coexists with quiet windows and an open episode; each reason releases independently', () => {
+  const d = desktop(); activity(d, 0);
+  quietSchedule(d, '05:12Z 05:14Z coordinator update\n');
+  d.watch(security, { at: 0 });
+  const all = d.watch(security, { at: 60 });
+  assert.match(all.marker, /quiet window/); assert.match(all.marker, /desktop in use/); assert.match(all.marker, /SecurityAgent/);
+  activity(d, 120);
+  const other = d.watch(security, { at: 70 });
+  assert.doesNotMatch(other.marker, /desktop in use/);
+  assert.match(other.marker, /quiet window.*SecurityAgent/);
+  activity(d, 0);
+  const onlyActivity = clearReads(other);
+  assert.match(onlyActivity.marker, /desktop in use/);
+  assert.doesNotMatch(onlyActivity.marker, /quiet window|SecurityAgent/);
+  assert.equal(creates(onlyActivity).length, 1, 'only the dialog opens an issue');
+  activity(d, 120);
+  assert.equal(d.watch(terminal).marker, null);
+});
+
+test('desktop activity uses the operator threshold and unknown HID input never holds', () => {
+  const d = desktop({ env: { CI_KIT_DESKTOP_IDLE_SECONDS: '30' } });
+  activity(d, 29); assert.match(d.watch(terminal).marker, /30 s/);
+  activity(d, 30); assert.equal(d.watch(terminal).marker, null);
+  activity(d, 1); writeFileSync(join(d.dir, 'hid-idle'), 'not readable');
+  assert.equal(d.watch(terminal).marker, null);
+});

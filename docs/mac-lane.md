@@ -274,8 +274,8 @@ whoever is using the machine's desktop when a job starts.
 cleanup can hide a leaked app, `desktop-posture.sh` prints one line to stdout and the hooks log:
 
 ```text
-ci-kit desktop (start): frontmost=Terminal display=2560x1440@2x remote=parsec load=3.12/2.87/2.51 computeruse=none
-ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none load=15.70/11.06/6.38 computeruse=SkyComputerUseService,cua-sandbox-golden
+ci-kit desktop (start): frontmost=Terminal display=2560x1440@2x remote=parsec hid_idle_s=356 load=3.12/2.87/2.51 computeruse=none
+ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none hid_idle_s=20 load=15.70/11.06/6.38 computeruse=SkyComputerUseService,cua-sandbox-golden
 ```
 
 - `frontmost`: the same localized `lsappinfo` name the desktop check reads, through its read-only `--frontmost` mode.
@@ -289,7 +289,7 @@ ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none l
   client, since none survives it, so a log that has rotated at parsecd's start reads `none` until someone connects.
   An absent log means no Parsec signal, while an unreadable log or one with neither a start line nor connection
   history is unknown. A parsecd killed by a signal or crashed writes no `disconnected.` line, so when the log shows a
-  client, a seventh read checks for Parsec's host process by its path (`*/Parsec.app/Contents/MacOS/parsecd` in
+  client, another read checks for Parsec's host process by its path (`*/Parsec.app/Contents/MacOS/parsecd` in
   `ps -axo pid=,comm=`; Apple's CoreParsec runs a `parsecd` of its own): none running reads `none`, while a failed or
   stalled table keeps the log's answer.
   Screen Sharing is `screensharingd` running, matched by its exact name in the same non-root `ps -axco pid=,comm=`
@@ -299,6 +299,13 @@ ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none l
   UDP. `SSMenuAgent`, which keeps running after a session, and this Mac's own outgoing viewer (`Screen Sharing`) are
   not counted.
   Failed, timed-out or unrecognized reads give `unknown` unless another signal already establishes a remote connection.
+- `hid_idle_s`: seconds since the last HID input, rounded down from `IOHIDSystem`'s `HIDIdleTime` nanoseconds
+  (`ioreg -c IOHIDSystem -d 4`, read-only, no TCC). A failed, timed-out or malformed read gives `unknown`. This is
+  input reaching the desktop, not proof of a person's action: computer-use automation can reset it too. CDP's
+  synthetic hover is not HID input. `cursor-park` uses `CGWarpMouseCursorPosition`, which
+  [generates no mouse event](https://developer.apple.com/library/archive/documentation/GraphicsImaging/Conceptual/QuartzDisplayServicesConceptual/Articles/MouseCursor.html),
+  and does not reset this timer. Checked read-only on the mini on 2026-10-29: at 08:27:12Z the idle age was 658 s
+  (last input about 08:16:14Z), despite its 08:17:02Z park moving the cursor from `66,0` to `1280,2` and three later parks.
 - `load`: the 1, 5 and 15 minute load averages, `/`-separated, each exactly as `sysctl -n vm.loadavg` prints it (two
   decimals). It lets a reader tell a red caused by the machine's load from the branch's own: on 2026-10-18 three of
   MAWS's timing-measured groups went red on the mini at a 1-minute load of 15.7–17.3, from another session's parallel
@@ -315,6 +322,15 @@ ci-kit desktop (end): frontmost=Google Chrome display=2560x1440@1x remote=none l
   `SkyComputerUseSe`. A cua runtime's `node` and `node_repl`, which every session with the cua plugin loaded keeps, and
   ci-kit's own `cursor-park` are not counted. A failed, timed-out, empty or unrecognized read gives `unknown` unless it
   already found a computer-use name.
+
+The start hook records a post-park boundary in `~/Library/Logs/ci-kit/desktop-input-<worker pid>`. At end, input newer
+than that boundary produces `::warning::ci-kit desktop input during this job: hid_idle_s=… remote=…
+computeruse_start=… computeruse_end=…` in the job log and hooks log. The warning says the input may be a person's or
+computer-use automation's, including the job itself, not proof of human interference. It helps diagnose a hover or
+focus red without changing the job's result. The worker and run/attempt/job identity keep concurrent jobs separate;
+end consumes the record. Missing records or unknown idle reads produce no warning. A one-second margin avoids
+blaming input on the rounded start boundary; this is an end snapshot, not an event recorder, and cannot establish
+who supplied input. The boundary begins after Terminal/cursor work, not when the worker was first assigned.
 
 Computer use is a **presence snapshot at the job's two edges**. It is the evidence for MAWS's rule (its gate-offload
 Decision Log 58) that a computer-use session drives the shared desktop only between jobs: a name at `start` was running
@@ -335,13 +351,13 @@ proven), netstat exits 0 without its `Active Internet connections` section, and 
 attached ([#50](https://github.com/SSFSKIM/ci-kit/issues/50)). The process table is not filtered there: a job's `ps`
 lists root's processes, `screensharingd` among them.
 
-The six posture reads — frontmost, display, Parsec, Screen Sharing, load and computer use — each have an independent,
+The seven posture reads — frontmost, display, Parsec, Screen Sharing, HID idle, load and computer use — each have an independent,
 unconditional 1 s Perl-supervisor deadline, which kills and reaps a hanging probe even if it ignores SIGALRM.
 Supervision covers the direct child before it has established its process group, as well as the group's descendants.
 Results are combined only afterward, so a positive Parsec read survives a hanging Screen Sharing read and vice versa.
-All six timing out takes about 6 s plus process overhead. Local positive fixtures scale the supervisor's clock only
+All seven timing out takes about 7 s plus process overhead. Local positive fixtures scale the supervisor's clock only
 inside their test processes so scheduling load does not look like a failed read; hanging fakes sleep far beyond it. The
-all-six-hung and delayed-process-group regressions use the real, unscaled clock. Fixtures also cover interleaved
+all-seven-hung and delayed-process-group regressions use the real, unscaled clock. Fixtures also cover interleaved
 Parsec clients and both positive/hanging directions with and without SIGALRM ignored, including strict-shell runs.
 The probes only read state: no GUI actions, AppleScript, new permissions or remote-session changes, and no signal to
 any process the computer-use read finds. Posture and hooks-log failures never affect the sweep's or the job's outcome.
@@ -416,9 +432,9 @@ ancestors, the desktop lock not taken) refuses the job at once with a `ci-kit: �
 nor waits. Without the lane the input changes nothing and the line is as below.
 
 **Settled** is two reads 30 s apart that each meet every condition, so a quiet desktop releases the job 30 s in. A read
-is `desktop-posture.sh --read`: the posture line's six reads under their 1 s deadlines, printed without the line's label
-and logged nowhere. A read that fails is `unknown`, and unknown meets no condition: an unreadable load holds the job as
-a high one does.
+is `desktop-posture.sh --read`: the posture line's seven reads under their 1 s deadlines, printed without the line's label
+and logged nowhere. A read that fails is `unknown`, and unknown meets no checked condition: an unreadable load holds
+the job as a high one does. `hid_idle_s` is informational here, not an additional measured-job condition.
 
 **Where the reads come from.** The guard runs `desktop-posture.sh` from the action's own checkout
 (`_work/_actions/SSFSKIM/ci-kit/v1/`), not from the installed hooks: the guard and the reads it judges move together when
@@ -1187,9 +1203,9 @@ dismissed and the episode closes.
   which delays a stop by one read. Two matching idle reads therefore saw no job running and none given in between.
   On 2026-10-18 at 09:59:18 the drain stopped the mini on a single idle read in the second it was given a job, and the
   job stayed in progress on the offline runner.
-- **Releasing.** When the episode closes and no quiet window is in force, the watcher removes the marker, and every
-  wrapper starts its runner within 5 s. A marker left while no episode is pending or open and no quiet window is in
-  force goes at the next read. The watcher writes and removes the
+- **Releasing.** When the episode closes, no quiet window is in force and the desktop is no longer in use (below),
+  the watcher removes the marker, and every wrapper starts its runner within 5 s. A marker left while no episode is
+  pending or open and neither other reason holds goes at the next read. The watcher writes and removes the
   marker under the episode's lock, in the same step as its read, so it never releases a runner for an episode a job
   hook has just opened.
 - **An operator's runner stays the operator's.** The watcher never loads, unloads, enables or disables the runner's
@@ -1245,9 +1261,29 @@ To see it holding, read `~/Library/Logs/ci-kit/runner-drained` and the `drain:` 
 `vm-lane.log` says `no boot: quiet window …`; each runner's `mac-runner[-<n>].out.log` says `runner-hold: …; waiting`
 once that runner has stopped. There is no quiet-window alert issue to close.
 
+**Desktop in use.** A remote viewer (`remote=parsec`, `screensharing`, or both) **and** HID input less than 120 s ago
+hold the same drain. A viewer who is only watching holds nothing, and input without a viewer holds nothing. The
+120 s span bridges the watcher's 60 s ticks and short pauses in a sitting without reserving the desktop for an idle
+viewer. The operator can set `CI_KIT_DESKTOP_IDLE_SECONDS` in the watcher's LaunchAgent environment (a positive integer
+of up to five digits; invalid values use 120). No separate schedule or state file is needed.
+
+The watcher uses the posture reader's same bounded remote and HID probes (`desktop-posture.sh --activity`). The reason
+is `desktop in use (remote=screensharing, input within 120 s)` in `runner-drained` and in
+`dialog-watch … drain: holding the runners: …`. Like a quiet window it opens no alert and cancels no running job.
+The idle-confirmation and job-end drains still stop only between jobs. At the first tick seeing idle age at least
+120 s, or no remote signal, this reason releases; an open dialog or quiet window keeps its own reason. Unknown input
+or remote reads do not establish use. Screen Sharing's daemon can linger after disconnection (above); the idle
+threshold then releases the hold even while it lingers. The hold is polled, not instantaneous protection for a job
+already running or a job starting before the next tick.
+
+HID input does not identify its author: computer-use work can keep this hold up while a viewer watches it. That job
+is left to finish, and its end warning explicitly allows its own automation as the source. The **VM lane stays
+eligible**: `mac/vm/tart.sh` launches `tart run --no-graphics --no-clipboard`, so the guest has no host window to take
+the pointer. Host input does not reach that separate desktop. Quiet windows still block VM boots as above.
+
 **Cheap and bounded.** A read with no dialog, episode or quiet schedule costs two `lsappinfo` calls and one `window-list` run, 5 s
-deadline each, and writes nothing. A window list that cannot be read is logged when that starts and when it ends, not
-at every read. Every other external call has its own supervised deadline, which kills and reaps it even when it ignores
+deadline each, plus the remote and HID reads (each supervised at 1 s), and writes nothing. A window list that cannot
+be read is logged when that starts and when it ends, not at every read. Every other external call has its own supervised deadline, which kills and reaps it even when it ignores
 SIGALRM: 10 s for each `log`, `gh` and `launchctl` call and for the runner-state read. The watcher never clicks,
 types, dismisses or focuses anything, and uses no AppleScript and no new permission.
 
@@ -1257,7 +1293,7 @@ Check by hand:
 ssh mini 'launchctl print gui/$(id -u)/com.ssfskim.ci-kit.dialog-watch | grep -E "state =|runs =|last exit code"'
 #   expect: runs = <n>, last exit code = 0 (state = not running between reads)
 ssh mini 'cat ~/Library/Logs/ci-kit/dialog-alert.state ~/Library/Logs/ci-kit/runner-drained 2>/dev/null; grep dialog-watch ~/Library/Logs/ci-kit/mac-runner-hooks.log | tail -5'
-#   expect, with no dialog or quiet window: no output from the state files (phase=closed is an alert close still owed; the log says why)
+#   expect, with no dialog, quiet window or desktop use: no output from the state files (phase=closed is an alert close still owed; the log says why)
 gh issue list -R SSFSKIM/ci-kit-sandbox -l ci-kit-alert
 ```
 

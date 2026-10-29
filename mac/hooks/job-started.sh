@@ -46,5 +46,5 @@ if [[ -x $here/cursor-park ]]; then
       tee -a "$HOME/Library/Logs/ci-kit/mac-runner-hooks.log"
   } || true
 fi
-"$here/desktop-posture.sh" start || true
+"$here/desktop-posture.sh" start "$PPID" || true
 exec node "$here/sweep.mjs" job-started

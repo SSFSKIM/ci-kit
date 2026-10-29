@@ -51,7 +51,7 @@ lane=''
 if source "$here/../hooks/instances.sh" 2>/dev/null && vm_lane_installed; then lane=1; fi
 
 # One read: posture (the posture line's fields) and failed (each condition it does not meet, with what it read).
-fields='^frontmost=(.*) display=([^ ]*) remote=([^ ]*) load=([^ ]*) computeruse=(.*)$'
+fields='^frontmost=(.*) display=([^ ]*) remote=([^ ]*) hid_idle_s=[^ ]* load=([^ ]*) computeruse=(.*)$'
 read_posture() {
   local display remote load computeruse scale
   posture=$(CI_KIT_CURSOR_PARK=$installed/cursor-park bash "$here/../hooks/desktop-posture.sh" --read 2>/dev/null)
@@ -59,7 +59,7 @@ read_posture() {
     display=${BASH_REMATCH[2]} remote=${BASH_REMATCH[3]} load=${BASH_REMATCH[4]%%/*} computeruse=${BASH_REMATCH[5]}
   else
     display=unknown remote=unknown load=unknown computeruse=unknown
-    posture="frontmost=unknown display=unknown remote=unknown load=unknown computeruse=unknown"
+    posture="frontmost=unknown display=unknown remote=unknown hid_idle_s=unknown load=unknown computeruse=unknown"
   fi
   failed=''
   if [[ $want_load != any ]]; then
