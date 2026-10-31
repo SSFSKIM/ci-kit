@@ -76,7 +76,7 @@ Registering (a new machine, or the mini again after a removal) pipes a token and
 instances pipes a token for theirs:
 
 ```bash
-repo=${CI_KIT_VM_REPO:-SSFSKIM/MAWS}  # use the Mac’s stored value when registering more instances
+repo=$(ssh mini 'source ~/Developer/GitHub/ci-kit/mac/repo.sh; ci_kit_repo')
 gh api -X POST "repos/$repo/actions/runners/registration-token" --jq .token \
   | ssh mini "CI_KIT_VM_REPO=$repo ~/Developer/GitHub/ci-kit/mac/install.sh --name ci-kit-mac-mini --home --display 2560x1440@2x"
 gh api -X POST "repos/$repo/actions/runners/registration-token" --jq .token \

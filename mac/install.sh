@@ -11,7 +11,7 @@
 #   ci-kit-mac-<machine>-<i> and labelled ci-kit-mac-shared alone, so only a job that asks for that label reaches them.
 #   They run beside each other, never beside an exclusive job (hooks/shared-hold.sh).
 #
-#   repo=${CI_KIT_VM_REPO:-SSFSKIM/MAWS}
+#   repo=$(ssh <mac> 'source <kit>/mac/repo.sh; ci_kit_repo')
 #   gh api -X POST "repos/$repo/actions/runners/registration-token" --jq .token |
 #     ssh <mac> "CI_KIT_VM_REPO=$repo <kit>/mac/install.sh --name ci-kit-mac-<machine>"
 #                                           register, then install
