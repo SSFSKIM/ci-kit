@@ -17,7 +17,7 @@
 #   runner <version> <sha256> <machine>  the runner at install.sh's pin in ~/actions-runner-maws, its .env and .path
 #                                        (env below), and ~/ci-kit -> the kit share, which keeps a space out of the
 #                                        hook paths
-#   workrepo                             a shallow master from the read-only maws share in the runner's work folder,
+#   workrepo [owner/repository]          a shallow master from the read-only maws share in the runner's work folder,
 #                                        with GitHub as origin: checkout reuses its objects and fetches only the delta
 #   env <machine>                        the runner's .env and .path alone
 #   helpers                              cursor-park and window-list compiled into ~/ci-kit-helpers (the kit share is
@@ -275,6 +275,8 @@ sys.exit(0 if valid else 1)' <<<"$indexing" || fail "Spotlight indexing is not v
     say "runner $version in $vm_runner"
     ;;
   workrepo)
+    source "$here/../repo.sh"
+    target_repo=${1:-$(ci_kit_repo)}
     [[ -d $vm_runner ]] || fail "no runner at $vm_runner"
     # .runner is JSON (possibly with a BOM). Honor its workFolder when provision is repeated on a configured runner;
     # normal bakes precede registration, whose --work uses runner_work below. No identity is made or kept here.
@@ -299,7 +301,7 @@ print(os.path.join(runner, work))' "$vm_runner" "$runner_work") || fail 'cannot 
     git -c safe.directory='*' clone --quiet --no-local --depth=1 --single-branch --branch master --no-tags "$vm_shares/maws" "$repo"
     # checkout v7's prepareExistingDirectory requires .git and this exact origin (no .git suffix), then detaches,
     # deletes local branches and runs clean -ffdx / reset --hard HEAD. A fresh clone satisfies those checks.
-    git -C "$repo" remote set-url origin https://github.com/SSFSKIM/MAWS
+    git -C "$repo" remote set-url origin "https://github.com/$target_repo"
     say "MAWS work repository $repo: master $(git -C "$repo" rev-parse --short HEAD), $(du -sk "$repo" | awk '{print $1}') KiB (tree and .git)"
     ;;
   env)

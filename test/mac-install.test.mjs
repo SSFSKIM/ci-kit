@@ -128,6 +128,19 @@ test('a fresh host can check and register before a job installs project applicat
   assertNewHooks(f);
 });
 
+test('registration uses and persists the configured repository, including on a later install', macOnly, () => {
+  const f = fixture({ registered: null });
+  const install = f.run(undefined, ['--disabled', '--name', 'ci-kit-mac-mini'], { CI_KIT_VM_REPO: 'neworg/MAWS' }, 'fixture-token\n');
+  assert.equal(install.status, 0, install.stdout + install.stderr);
+  const args = readFileSync(join(f.home, 'config.args'), 'utf8').trim().split('\n');
+  assert.equal(args[args.indexOf('--url') + 1], 'https://github.com/neworg/MAWS');
+  assert.match(readFileSync(join(f.runner, '.env'), 'utf8'), /^CI_KIT_VM_REPO=neworg\/MAWS$/m);
+  rmSync(join(f.runner, '.runner'));
+  const again = f.run(undefined, ['--disabled', '--name', 'ci-kit-mac-mini'], {}, 'fixture-token\n');
+  assert.equal(again.status, 0, again.stdout + again.stderr);
+  assert.match(readFileSync(join(f.home, 'config.args'), 'utf8'), /https:\/\/github.com\/neworg\/MAWS/);
+});
+
 test('a partial hook copy leaves the complete old hooks and environment untouched', macOnly, () => {
   const f = fixture();
   const before = f.snapshot();
@@ -219,11 +232,12 @@ print(reads)
   assertNewHooks(f);
 });
 
-const envFile = (f, machine) => [
+const envFile = (f, machine, shared = false) => [
   'LANG=en_US.UTF-8',
   `ACTIONS_RUNNER_HOOK_JOB_STARTED=${f.hooks}/job-started.sh`,
   `ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${f.hooks}/job-completed.sh`,
   `CI_KIT_MACHINE=${machine}`,
+  ...(shared ? [] : ['CI_KIT_VM_REPO=SSFSKIM/MAWS']),
   '',
 ].join('\n');
 
@@ -761,7 +775,7 @@ test('--vm installs the launcher disabled, the kit laid out as mac/ is, the slot
   // Every host instance can read the lane's actual reservation, even while the launcher is disabled.
   const reservation = `CI_KIT_VM_RESERVATION=${join(f.home, 'Library/Logs/ci-kit/vm-reserved')}\n`;
   assert.equal(readFileSync(join(f.runner, '.env'), 'utf8'), `${envFile(f, 'mini')}${reservation}`);
-  assert.equal(readFileSync(join(shared, '.env'), 'utf8'), `${envFile({ hooks: join(shared, 'ci-kit/hooks') }, 'mini')}CI_KIT_SHARED_DESKTOP=1\n${reservation}`);
+  assert.equal(readFileSync(join(shared, '.env'), 'utf8'), `${envFile({ hooks: join(shared, 'ci-kit/hooks') }, 'mini', true)}CI_KIT_SHARED_DESKTOP=1\n${reservation}`);
   assertNewHooks(f);
 });
 
@@ -796,7 +810,7 @@ test('a re-run migrates the static flag and keeps the launcher\'s enabled state;
   assert.equal(existsSync(join(f.home, 'ci-kit-vm/kit/stale')), false, 'the kit is republished whole');
   const reservation = `CI_KIT_VM_RESERVATION=${join(f.home, 'Library/Logs/ci-kit/vm-reserved')}\n`;
   assert.equal(readFileSync(join(f.runner, '.env'), 'utf8'), `${envFile(f, 'mini')}${reservation}`);
-  assert.equal(readFileSync(join(shared, '.env'), 'utf8'), `${envFile({ hooks: join(shared, 'ci-kit/hooks') }, 'mini')}CI_KIT_SHARED_DESKTOP=1\n${reservation}`);
+  assert.equal(readFileSync(join(shared, '.env'), 'utf8'), `${envFile({ hooks: join(shared, 'ci-kit/hooks') }, 'mini', true)}CI_KIT_SHARED_DESKTOP=1\n${reservation}`);
   rmSync(join(f.home, 'launchctl.calls'));
   assert.equal(f.run(undefined, ['--disabled']).status, 0);
   assert.ok(calls(f).includes(`disable ${domain}/${vmAgent}`) && !calls(f).some((call) => call.startsWith('bootstrap') && call.includes(vmAgent)));
@@ -807,7 +821,7 @@ test('a re-run migrates the static flag and keeps the launcher\'s enabled state;
   assert.equal(existsSync(vmPlist(f)), false);
   assert.match(removed.stdout, new RegExp(`removed: the VM lane's launcher ${vmAgent} is unloaded and its LaunchAgent removed; .*ci-kit-vm stays`));
   assert.equal(readFileSync(join(f.runner, '.env'), 'utf8'), envFile(f, 'mini'));
-  assert.equal(readFileSync(join(shared, '.env'), 'utf8'), `${envFile({ hooks: join(shared, 'ci-kit/hooks') }, 'mini')}CI_KIT_SHARED_DESKTOP=1\n`);
+  assert.equal(readFileSync(join(shared, '.env'), 'utf8'), `${envFile({ hooks: join(shared, 'ci-kit/hooks') }, 'mini', true)}CI_KIT_SHARED_DESKTOP=1\n`);
   assert.ok(existsSync(join(f.home, 'ci-kit-vm/kit/vm/lane.sh')));
   rmSync(join(f.home, 'launchctl.calls'));
   assert.equal(f.run(undefined, []).status, 0);

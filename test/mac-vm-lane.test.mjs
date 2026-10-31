@@ -1852,6 +1852,20 @@ exec /bin/mv "$@"`);
 
 
 describe('clone-scoped JIT credentials', macOnly, () => {
+  test('the persisted repo reaches queue reads and JIT POST/DELETE without a LaunchAgent override', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    writeFileSync(join(m.home, 'actions-runner-maws/.env'), 'CI_KIT_VM_REPO=neworg/MAWS\n');
+    const a = m.start();
+    try {
+      const clone = await m.booted();
+      assert.ok(m.ghCalls().some((c) => c.includes('repos/neworg/MAWS/actions/runners/generate-jitconfig')));
+      m.queue();
+      await m.finished(clone);
+      await m.until(() => m.ghCalls().some((c) => c.includes('repos/neworg/MAWS/actions/runners/1') && c.includes('DELETE')), 'new repo registration cleanup');
+      assert.ok(!m.ghCalls().flat().some((arg) => arg.includes('repos/SSFSKIM/MAWS/')));
+    } finally { await finish(m, a); }
+  });
+
   test('each clone mints one private config, shares only it, and deletes its registration on teardown', async () => {
     const m = lane({ queue: [['ci-kit-mac-vm']] });
     rmSync(join(m.slotDir, 'identity'), { recursive: true }); // no persistent registration is needed

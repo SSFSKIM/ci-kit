@@ -76,11 +76,44 @@ Registering (a new machine, or the mini again after a removal) pipes a token and
 instances pipes a token for theirs:
 
 ```bash
-gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token \
-  | ssh mini '~/Developer/GitHub/ci-kit/mac/install.sh --name ci-kit-mac-mini --home --display 2560x1440@2x'
-gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token \
-  | ssh mini '~/Developer/GitHub/ci-kit/mac/install.sh --shared 2'   # ci-kit-mac-mini-2 and -3, installed disabled
+repo=${CI_KIT_VM_REPO:-SSFSKIM/MAWS}  # use the Mac’s stored value when registering more instances
+gh api -X POST "repos/$repo/actions/runners/registration-token" --jq .token \
+  | ssh mini "CI_KIT_VM_REPO=$repo ~/Developer/GitHub/ci-kit/mac/install.sh --name ci-kit-mac-mini --home --display 2560x1440@2x"
+gh api -X POST "repos/$repo/actions/runners/registration-token" --jq .token \
+  | ssh mini "CI_KIT_VM_REPO=$repo ~/Developer/GitHub/ci-kit/mac/install.sh --shared 2"   # ci-kit-mac-mini-2 and -3, installed disabled
 ```
+
+**One repository setting.** `CI_KIT_VM_REPO` is an `owner/repository`, defaulting to `SSFSKIM/MAWS`.
+The installer stores it in the exclusive runner's `~/actions-runner-maws/.env`; re-installs preserve it.
+`mac/repo.sh` reads only that key as data, never sources `.env`. Registration, the installed VM launcher's queue
+and JIT calls, and `bake.sh` all use that same setting. An explicit process/LaunchAgent environment wins over
+`.env` (useful for a rehearsal); do not duplicate it in the VM plist if `.env` is the source you intend to edit.
+The baker passes the resolved name to the guest's `workrepo` step for the seed's origin. JIT cleanup keeps the
+repo recorded at mint time, so changing the setting never redirects a pending DELETE to another repository.
+
+To deploy this support, refresh the checkout, then run `mac/install.sh` on the drained Mac with its existing VM
+lane installed. This republishes the whole `~/ci-kit-vm/kit` (including the new `repo.sh` and updated `install.sh`,
+`vm/lane.sh`, `vm/bake.sh`, `vm/provision.sh`), writes `CI_KIT_VM_REPO=SSFSKIM/MAWS` in the exclusive runner's `.env`,
+and reloads the enabled services. The shared instances' hooks and environments are refreshed too; their disabled
+state is preserved. No guest image rebuild is needed to install the setting; a later bake uses it for the seed.
+
+At a repository move, drain first, edit that **one line** in `~/actions-runner-maws/.env`, then boot out and bootstrap
+`com.ssfskim.ci-kit.vm-lane` in `gui/$(id -u)` using its existing plist in `~/Library/LaunchAgents/` (only if enabled).
+The launcher reads the setting at startup; the next bake or install reads it on invocation. Existing host runner
+registrations are not changed by this edit, and need no restart just to retain them. Verify their association in
+the destination repository before electing to re-register. If a registration was lost, remove its old server record
+if still present, and its local `.runner`, `.credentials` and `.credentials_rsaparams` while drained, then run the
+registration command above with a destination token. `--uninstall` alone retains those files and cannot re-register.
+
+A fresh **EC2 Mac** registration does not restore its manually assigned `ci-kit-mac-ec2` routing label. Snapshot
+labels before re-registration, then find the new runner id and restore it (and any other missing snapshot labels):
+
+```bash
+# repo is the same target used for registration; id is the new ci-kit-mac-ec2 runner id.
+gh api -X POST "repos/$repo/actions/runners/$id/labels" -f 'labels[]=ci-kit-mac-ec2'
+```
+
+Compare all labels against the snapshot, not just the runner name; keep the mini's shared instances disabled.
 
 - **The token** is read from stdin only while the runner is unregistered, and handed to the runner's `config.sh`
   through its environment (`ACTIONS_RUNNER_INPUT_TOKEN`), so it never lands in a file, an argument list or `ps`. It

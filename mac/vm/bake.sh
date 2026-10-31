@@ -107,7 +107,8 @@ kit=${CI_KIT_VM_KIT:-$vm_home/kit}
 golden_pointer=${CI_KIT_VM_GOLDEN:-$vm_home/golden}
 pointer_lock_file=$vm_home/golden.lock
 trials=$vm_home/trials
-repo=${CI_KIT_VM_REPO:-SSFSKIM/MAWS}
+source "$here/../repo.sh"
+repo=$(ci_kit_repo) || exit 1
 base=${CI_KIT_VM_BASE:-ghcr.io/cirruslabs/macos-golden-gate-base:latest}
 maws=${CI_KIT_VM_MAWS:-$HOME/Developer/GitHub/MAWS}
 gh_bin=${CI_KIT_GH_BIN:-gh}
@@ -330,7 +331,7 @@ do_bake() {
   disk_follow
   in_guest 900 "the runner $version (runner)" /bin/bash "$provision" runner "$version" "$sha" "$machine-vm"
   disk_follow
-  in_guest "$provision_wait" 'the seeded MAWS work repository (workrepo)' /bin/bash "$provision" workrepo
+  in_guest "$provision_wait" 'the seeded MAWS work repository (workrepo)' /bin/bash "$provision" workrepo "$repo"
   disk_follow
   in_guest 900 'the compiled helpers (helpers)' /bin/bash "$provision" helpers
   disk_follow

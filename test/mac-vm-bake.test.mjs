@@ -337,6 +337,14 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.match(f.run(['--bake']).stderr, /45 GB free .* under the reserve of 50 GB/);
   });
 
+  test('--bake sends the persisted repository to the guest seed step', () => {
+    const f = fixture();
+    writeFileSync(join(f.home, 'actions-runner-maws/.env'), 'CI_KIT_VM_REPO=neworg/MAWS\n');
+    const result = f.run(['--bake', '--name', CANDIDATE]);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.ok(f.exec(CANDIDATE).includes('/bin/bash /Volumes/My Shared Files/kit/vm/provision.sh workrepo neworg/MAWS'), f.exec(CANDIDATE).join('\n'));
+  });
+
   test('--bake: the candidate cloned from the base, set at 4 CPUs, 4096 MB, 2560x1440pt and a 60 GB disk before its first boot, provisioned through tart exec (the disk grown and the display set first), its stop verified, then the human\'s steps', () => {
     const f = fixture();
     const result = f.run(['--bake', '--name', CANDIDATE]);
@@ -348,7 +356,7 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.ok(f.calls().findIndex((call) => call.startsWith(`set ${CANDIDATE} `)) < f.calls().findIndex((call) => call.startsWith('run ')), f.calls().join('\n'));
     assert.deepEqual(text(join(f.vms, CANDIDATE, 'run.args')).trim().split('\n'), ['--no-graphics', '--no-clipboard', `--dir=kit:${mac}:ro`, `--dir=maws:${f.maws}:ro`, CANDIDATE]);
     const script = '/bin/bash /Volumes/My Shared Files/kit/vm/provision.sh';
-    assert.deepEqual(f.exec(CANDIDATE), [`${script} check`, `${script} disk 60`, `${script} quiet`, `${script} display`, `${script} node 11.23.0`, `${script} setup`, `${script} runner ${installPin('RUNNER_VERSION')} ${installPin('RUNNER_SHA256')} mini-vm`, `${script} workrepo`, `${script} helpers`]);
+    assert.deepEqual(f.exec(CANDIDATE), [`${script} check`, `${script} disk 60`, `${script} quiet`, `${script} display`, `${script} node 11.23.0`, `${script} setup`, `${script} runner ${installPin('RUNNER_VERSION')} ${installPin('RUNNER_SHA256')} mini-vm`, `${script} workrepo SSFSKIM/MAWS`, `${script} helpers`]);
     assert.match(result.stdout, /the seeded MAWS work repository \(workrepo\)/);
     assert.match(result.stdout, /MAWS.*declaration.*\(setup\)/);
     assert.match(result.stdout, /Open each app below/);
@@ -1243,6 +1251,14 @@ describe('the bake\'s provisioning in the guest (provision.sh)', macOnly, () => 
     writeFileSync(join(source, 'untracked'), 'host scratch\n');
     return source;
   };
+
+  test('workrepo uses the repository passed by the host rather than the historical origin', () => {
+    const g = guest();
+    mawsShare(g);
+    const result = g.run(['workrepo', 'neworg/MAWS']);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(git(join(g.runner, '_work/MAWS/MAWS'), 'remote', 'get-url', 'origin'), 'https://github.com/neworg/MAWS');
+  });
 
   for (const configured of [null, 'custom work', 'absolute']) {
     test(`workrepo: a self-contained shallow master in the runner's ${configured ?? 'default'} work folder survives checkout v7's preparation and a repeat bake`, () => {
