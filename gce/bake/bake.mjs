@@ -16,11 +16,12 @@ import { readFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createGce, accessToken, GceError } from '../../lib/gce.mjs';
+import { createBakeAccess } from '../../pool/bake/github.mjs';
 import { createAppTokens } from '../../lib/github-app.mjs';
 import { createGitHub } from '../../lib/github.mjs';
 import { checkStale } from './stale.mjs';
 import { parseGceConfig, parseEc2Config } from '../launcher/config.mjs';
-import { resolveManifest, verifyManifest, manifestLabels, bakeProviders, bakeScope, logRepoResults } from '../../pool/bake/manifest.mjs';
+import { resolveManifest, verifyManifest, manifestLabels, bakeProviders, logRepoResults } from '../../pool/bake/manifest.mjs';
 import {
   reportOutcome, checkOutcome, ownsBakeInstance, ownsBakeImage, refusedOutright, staleBakeInstances, staleBakeRunners, imagesToPrune, placements,
   smokeMachines, refusal, bakeRunId, bakeNames, builderInstance, smokeInstance, checkInstance, checkJitRequest, imageBody, fillBuilderScript,
@@ -308,11 +309,10 @@ async function main() {
   const cfg = parseGceConfig(await readFile(new URL('../../pool/config/gce.json', import.meta.url), 'utf8'));
   const googleToken = accessToken();
   const gce = createGce({ project: cfg.project, token: googleToken });
-  const app = { appId: (await gce.secret('ci-kit-app-id')).trim(), pem: await gce.secret('ci-kit-app-key'), owner: 'SSFSKIM' };
+  const app = { appId: (await gce.secret('ci-kit-app-id')).trim(), pem: await gce.secret('ci-kit-app-key') };
   // One-hour builder tokens: contents read on the served repositories, never the real-job credentials.
-  const scope = bakeScope(cfg.repos);
-  const token = await createAppTokens({ ...app, scope })();
-  const contents = createGitHub(token);
+  const access = createBakeAccess(app, cfg.repos);
+  const contents = access.gh;
   let ec2Config = null;
   try { ec2Config = parseEc2Config(await readFile(new URL('../../pool/config/ec2.json', import.meta.url), 'utf8')); }
   catch (err) { if (err.code !== 'ENOENT') throw err; }
@@ -325,13 +325,13 @@ async function main() {
   const sha = process.env.CI_KIT_COMMIT || (await mainHead());
   const runId = process.env.CI_KIT_BAKE_RUN || bakeRunId(new Date());
   // The real job's: ci-kit-sandbox only, minted as needed, so it is fresh after a long build.
-  const gh = createGitHub(createAppTokens({ ...app, scope: CHECK_SCOPE }));
+  const gh = createGitHub(createAppTokens({ ...app, repo: 'SSFSKIM/ci-kit-sandbox', scope: CHECK_SCOPE }));
   const script = fillBuilderScript(await readFile(new URL('./builder.sh', import.meta.url), 'utf8'), { sha });
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   log(`bake ${runId}: kit ${sha.slice(0, 8)}, project ${cfg.project}, ${accounts.length} EC2 accounts`);
   await bakeProviders({
     resolve: () => resolveManifest({ sha, gh: contents, repos: cfg.repos }),
-    gce: (manifest) => runBake(gce, { cfg, sha, manifest, runId, token, gh, script, sleep, log }),
+    gce: async (manifest) => runBake(gce, { cfg, sha, manifest, runId, token: await access.builderToken(), gh, script, sleep, log }),
     accounts,
     ec2: async (account, manifest) => {
       const { createAws } = await import('../../lib/aws.mjs');
@@ -340,7 +340,7 @@ async function main() {
       const aws = createAws({ roleArn: account.roles.bake, region: account.region, log });
       const runtimeAws = createAws({ roleArn: account.roles.launcher, region: account.region, log });
       return runEc2Bake(aws, { runtimeAws, cfg: account, manifest, runId,
-        token: await createAppTokens({ ...app, scope })(), gh,
+        token: await access.builderToken(), gh,
         script: await readFile(new URL('../../ec2/bake/builder.sh', import.meta.url), 'utf8'), sleep, log });
     },
   });

@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { createGitHub } from '../../lib/github.mjs';
+import * as collector from '../../history/collect.mjs';
 import { ArchiveDefect, collectRepo, formatCounts, readArtifact } from '../../history/collect.mjs';
 import { parseJUnit } from '../../history/junit.mjs';
 import { membershipOf, skippedOf, summarize } from '../../history/record.mjs';
@@ -919,4 +920,31 @@ test('an artifact naming another shard count beside a recorded attempt is refuse
     ], NOTHING]);
   }
   assert.ok(readFileSync(join(root, REPO, 'runs', '2026-10-21.jsonl')).equals(stored));
+});
+
+test('repo aliases select the live repo while retaining the existing store namespace through a transfer', async t => {
+  const root=mkdtempSync(join(tmpdir(),'history-alias-'));
+  t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const {repo}=scenario(), fake=fakeGitHub(repo), paths=[];
+  const gh=createGitHub('t',{fetchImpl:async (url,init)=>{paths.push(new URL(url).pathname);return fake.fetchImpl(url,init);}});
+  const jobs=['unit','unit:darwin'];
+  await collectRepo({gh,repo:'SSFSKIM/MAWS',jobs,root,now:NOW});
+  const names=readDir(join(root,'SSFSKIM/MAWS'));
+  const before=names.map(name=>readFileSync(join(root,'SSFSKIM/MAWS',name)));
+  paths.length=0;
+  const result=await collectRepo({gh,repo:'neworg/MAWS',alias:'SSFSKIM/MAWS',jobs,root,now:NOW});
+  assert.deepEqual(result.errors,[]);
+  assert.equal(result.counts.written,0,'reuse stored artifact identities rather than collecting anew');
+  assert.ok(paths.length>0 && paths.every(path=>path.startsWith('/repos/neworg/MAWS/')));
+  assert.equal(existsSync(join(root,'neworg')),false);
+  assert.deepEqual(names.map(name=>readFileSync(join(root,'SSFSKIM/MAWS',name))),before);
+});
+
+test('--repo selects the stable alias, defaulting to the current full name when absent', () => {
+  const initial=[{repo:'SSFSKIM/MAWS',jobs:['unit']}];
+  assert.deepEqual(collector.selectRepos(initial,'SSFSKIM/MAWS'),[{...initial[0],alias:'SSFSKIM/MAWS'}]);
+  const moved=[{repo:'neworg/MAWS',alias:'SSFSKIM/MAWS',jobs:['unit']}];
+  assert.deepEqual(collector.selectRepos(moved,'SSFSKIM/MAWS'),moved);
+  assert.deepEqual(collector.selectRepos(moved),moved);
+  assert.throws(()=>collector.selectRepos(moved,'neworg/MAWS'),/not in history/);
 });

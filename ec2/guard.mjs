@@ -199,7 +199,7 @@ async function main(argv) {
   if (!cfg) throw new Error(`guard: account ${argv[1]} is not configured`);
   const { ledger } = JSON.parse(await readFile(new URL('../pool/config/gce.json', import.meta.url), 'utf8'));
   const gh = createGitHub(createAppTokens({ appId: process.env.CI_KIT_APP_ID?.trim(), pem: process.env.CI_KIT_APP_KEY,
-    owner: ledger.repo.split('/')[0], scope: { repositories: [ledger.repo.split('/')[1]], permissions: { issues: 'read' } } }));
+    repo: ledger.repo, scope: { repositories: [ledger.repo.split('/')[1]], permissions: { issues: 'read' } } }));
   const aws = await createGuardAws(cfg);
   try { if (await runEc2Guard({ ec2: aws.ec2, gh, ledger, account: cfg.account })) process.exitCode = 1; }
   finally { aws.ec2.destroy(); }

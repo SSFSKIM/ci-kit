@@ -32,7 +32,7 @@ async function fixture(t,failPhase,{ script = true } = {}) {
       await writeFile(join(source,'.git/objects/pack/fixture.pack'),Buffer.alloc(1024*1024));
     }
     if(bin==='docker' && args[0]==='run') {
-      const root=join(dir,'cache','work','ci-kit-setup-ssfskim-one');
+      const root=join(dir,'cache','work',args[args.indexOf('--name')+1]);
       if(!args.includes('--setup')) {
         assert.equal(await readlink(join(root,'source-link')),'source',
           'relative links must still resolve inside the full disposable work copy');
@@ -122,4 +122,20 @@ for(const script of [false,true]) test(`retains only pristine smoke inputs and c
   assert.equal(Number(original)-Number(retained),Number(removed));
   await api.smokeJobImages(f.options);
   assert.match(f.logs.at(-1),new RegExp(`setup ${f.hash}: installed nothing`));
+});
+
+test('multi-owner builder transport selects only the clone owner token, never the map or another owner', async t => {
+  const f=await fixture(t);
+  f.manifest.repos['neworg/one']={...f.manifest.repos['SSFSKIM/one']};
+  await api.bakeJobImages({...f.options,token:JSON.stringify({ssfskim:'personal-secret',neworg:'org-secret'})});
+  const fetches=f.calls.filter(c=>c.bin==='git' && c.args.includes('fetch'));
+  assert.deepEqual(fetches.map(c=>Buffer.from(c.options.env.GIT_CONFIG_VALUE_0.split(' ').at(-1),'base64').toString()),
+    ['x-access-token:personal-secret','x-access-token:org-secret']);
+  assert.ok(!JSON.stringify(f.calls.filter(c=>c.bin!=='git')).includes('secret'));
+});
+
+test('a missing owner token fails before any clone fetch', async t => {
+  const f=await fixture(t);
+  await assert.rejects(api.bakeJobImages({...f.options,token:JSON.stringify({neworg:'org-secret'})}), /token.*SSFSKIM/i);
+  assert.equal(f.calls.filter(c=>c.bin==='git' && c.args.includes('fetch')).length,0);
 });

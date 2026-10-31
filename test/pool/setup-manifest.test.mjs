@@ -56,6 +56,14 @@ test('cloud records contain only infrastructure pins and declared repository ide
   assert.equal(api.manifestTags(built())['ci-kit-setup:owner/project'],hash);
   assert.deepEqual(Object.keys(api.manifestLabels(built())).sort(), ['ci-kit-commit', 'ci-kit-node-22', 'ci-kit-node-24', 'ci-kit-runner', 'ci-kit-setup-owner-project']);
   assert.deepEqual(api.bakeScope([{repo:'SSFSKIM/ci-kit-sandbox'},{repo:'owner/project'}]),{
-    repositories:['ci-kit-sandbox','project'],permissions:{contents:'read'},
+    ssfskim: { repo: 'SSFSKIM/ci-kit-sandbox', scope: { repositories: ['ci-kit-sandbox'], permissions: { contents: 'read' } } },
+    owner: { repo: 'owner/project', scope: { repositories: ['project'], permissions: { contents: 'read' } } },
+  });
+});
+
+test('bake scope groups repositories by owner, preserving same-named repositories in different installations', () => {
+  assert.deepEqual(api.bakeScope([{repo:'SSFSKIM/MAWS'}, {repo:'neworg/MAWS'}, {repo:'ssfskim/ci-kit-sandbox'}, {repo:'SSFSKIM/MAWS'}]), {
+    ssfskim: { repo:'SSFSKIM/MAWS', scope:{repositories:['MAWS','ci-kit-sandbox'],permissions:{contents:'read'}} },
+    neworg: { repo:'neworg/MAWS', scope:{repositories:['MAWS'],permissions:{contents:'read'}} },
   });
 });

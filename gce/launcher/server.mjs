@@ -48,7 +48,7 @@ async function deps(preparation) {
     preparation.time('secret.appId', () => gce.secret('ci-kit-app-id')),
     preparation.time('secret.appKey', () => gce.secret('ci-kit-app-key')),
   ]);
-  const gh = createGitHub(createAppTokens({ appId: appId.trim(), pem, owner: 'SSFSKIM' }));
+  const gh = createGitHub(createAppTokens({ appId: appId.trim(), pem }));
   const source = createConfigSource({ gh, fetchText, readBundled: bundled, bundledCommit: process.env.CI_KIT_COMMIT || 'bundled', log });
   github = gh;
   // stockouts: capacity refusals remembered across ticks (logic.mjs stockoutMemory), for this process's life; limits:

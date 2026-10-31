@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // The test-history collector (test history spec, Design "Collector"):
-//   node history/collect.mjs [--repo <owner/name>] --store <dir>
+//   node history/collect.mjs [--repo <alias>] --store <dir>
 // For each repo in history/repos.json (or the one named), it records every gate job's JUnit report into the store
 // directory: one run line per (run, attempt, job), the day's base and durations. A job a matrix shards, `<job> <k>/<n>`
 // uploading `test-results-<slug>-<k>of<n>-<attempt>`, makes one line of `<job>` from all n shards of the attempt.
@@ -112,10 +112,10 @@ const describe = (err) => {
 
 // One repo's pass. `jobs`: its reporting set, the job names that upload a report. → counts, and `errors`, one
 // line each, naming runs and jobs only. A failed item writes nothing and is tried again by the next pass.
-export async function collectRepo({ gh, repo, jobs, root, now = Date.now(), readZip = readArtifact }) {
+export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Date.now(), readZip = readArtifact }) {
   const counts = { artifacts: 0, lines: 0, present: 0, missing: 0, unparseable: 0, rejected: 0, relinked: 0, failures: 0, written: 0 };
   const errors = [];
-  const store = openStore(root, repo);
+  const store = openStore(root, alias);
   const bySlug = new Map(jobs.map((j) => [jobSlug(j), j]));
   const reporting = new Set(jobs);
 
@@ -389,11 +389,11 @@ export const formatCounts = (repo, c, errors) =>
   `${repo}: artifacts ${c.artifacts}, lines ${c.lines} (present ${c.present}, missing ${c.missing}, unparseable ${c.unparseable}, rejected ${c.rejected}), relinked ${c.relinked}, failures ${c.failures}, errors ${errors}, files written ${c.written}`;
 
 function tokenFor(repo) {
-  const [owner, name] = repo.split('/');
+  const name = repo.split('/')[1];
   const appId = process.env.CI_KIT_APP_ID?.trim();
   const pem = process.env.CI_KIT_APP_KEY;
   if (appId && pem) {
-    return createAppTokens({ appId, pem, owner, scope: { repositories: [name], permissions: { actions: 'read', contents: 'read' } } });
+    return createAppTokens({ appId, pem, repo, scope: { repositories: [name], permissions: { actions: 'read', contents: 'read' } } });
   }
   const token = ghToken();
   if (!token) throw new Error('history: no credentials: set CI_KIT_APP_ID and CI_KIT_APP_KEY, or log gh in');
@@ -407,18 +407,25 @@ function parseArgs(argv) {
     else if (argv[i] === '--store') opts.store = argv[++i];
     else throw new Error(`history: unknown argument ${argv[i]}`);
   }
-  if (!opts.store) throw new Error('history: usage: collect.mjs [--repo <owner/name>] --store <dir>');
+  if (!opts.store) throw new Error('history: usage: collect.mjs [--repo <alias>] --store <dir>');
   return opts;
+}
+
+// The alias is the store/CLI identity; repo is the current GitHub API identity.
+export function selectRepos(repos, alias) {
+  const named = repos.map(r => ({ ...r, alias: r.alias ?? r.repo }));
+  const chosen = alias ? named.filter(r => r.alias === alias) : named;
+  if (chosen.length === 0) throw new Error(`history: ${alias} is not in history/repos.json`);
+  return chosen;
 }
 
 async function main(argv) {
   const opts = parseArgs(argv);
   const repos = JSON.parse(readFileSync(new URL('./repos.json', import.meta.url), 'utf8'));
-  const chosen = opts.repo ? repos.filter((r) => r.repo === opts.repo) : repos;
-  if (chosen.length === 0) throw new Error(`history: ${opts.repo} is not in history/repos.json`);
+  const chosen = selectRepos(repos, opts.repo);
   let failed = false;
-  for (const { repo, jobs } of chosen) {
-    const { counts, errors } = await collectRepo({ gh: createGitHub(tokenFor(repo)), repo, jobs, root: opts.store });
+  for (const { repo, alias, jobs } of chosen) {
+    const { counts, errors } = await collectRepo({ gh: createGitHub(tokenFor(repo)), repo, alias, jobs, root: opts.store });
     for (const e of errors) console.error(`${repo}: ${e}`);
     console.log(formatCounts(repo, counts, errors.length));
     if (errors.length > 0) failed = true;

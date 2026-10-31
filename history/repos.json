@@ -1,1 +1,1 @@
-[{ "repo": "SSFSKIM/MAWS", "jobs": ["unit", "unit:darwin"] }]
+[{ "alias": "SSFSKIM/MAWS", "repo": "SSFSKIM/MAWS", "jobs": ["unit", "unit:darwin"] }]
