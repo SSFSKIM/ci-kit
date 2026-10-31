@@ -11,8 +11,10 @@
 #   ci-kit-mac-<machine>-<i> and labelled ci-kit-mac-shared alone, so only a job that asks for that label reaches them.
 #   They run beside each other, never beside an exclusive job (hooks/shared-hold.sh).
 #
-#   gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token |
-#     ssh <mac> <kit>/mac/install.sh --name ci-kit-mac-<machine>    register, then install
+#   repo=$(ssh <mac> 'source <kit>/mac/repo.sh; ci_kit_repo')
+#   gh api -X POST "repos/$repo/actions/runners/registration-token" --jq .token |
+#     ssh <mac> "CI_KIT_VM_REPO=$repo <kit>/mac/install.sh --name ci-kit-mac-<machine>"
+#                                           register, then install
 #   ssh <mac> <kit>/mac/install.sh               re-run on a registered runner: refresh and reload
 #   ssh <mac> <kit>/mac/install.sh --shared 2    two shared instances (a token on stdin registers new ones)
 #   ssh <mac> <kit>/mac/install.sh --vm          the VM lane's launcher as well (installed disabled), or --no-vm to remove it
@@ -63,7 +65,6 @@
 # which removes the launcher's agent with the rest. Without the lane, nothing of it is installed or read.
 set -euo pipefail
 
-REPO_URL=https://github.com/SSFSKIM/MAWS
 RUNNER_PREFIX=ci-kit-mac-
 RUNNER_LABELS=ci-kit-mac # the exclusive instance's; the runner adds self-hosted, macOS and ARM64 itself
 SHARED_LABELS=ci-kit-mac-shared # a shared instance's only label: registered with --no-default-labels
@@ -91,6 +92,9 @@ VM_LOCK=$LOG_DIR/vm-lane.lock
 # The PATH jobs and hooks start with: Homebrew's tools, then the system's. Jobs install their own Node and pnpm.
 RUNNER_PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 here=$(cd "$(dirname "$0")" && pwd)
+source "$here/repo.sh"
+repo=$(ci_kit_repo)
+REPO_URL=https://github.com/$repo
 domain=gui/$(id -u)
 tmp=
 staged=()
@@ -414,7 +418,7 @@ fi
 token=
 for ((n = 1; n <= last; n++)); do
   [[ ! -f $(root_of "$n")/.runner ]] || continue
-  [[ -t 0 ]] && die 'pipe a registration token on stdin (gh api -X POST repos/SSFSKIM/MAWS/actions/runners/registration-token --jq .token)'
+  [[ -t 0 ]] && die "pipe a registration token on stdin (gh api -X POST repos/$repo/actions/runners/registration-token --jq .token)"
   IFS= read -r token || true
   [[ -n $token ]] || die 'no registration token on stdin'
   break
@@ -506,7 +510,7 @@ if ((vm == 1)); then
     vm/guest/kickoff.sh vm/guest/wrapper.sh vm/guest/hooks/common.sh vm/guest/hooks/job-started.sh \
     vm/guest/hooks/job-completed.sh vm/guest/hooks/desktop-check.sh hooks/cursor-park.swift hooks/window-list.swift \
     vm/setup.mjs setup/apply.mjs setup/hash.mjs plan/config.mjs plan/glob.mjs vendor/yaml/dist/index.js \
-    install.sh "${hook_files[@]/#/hooks/}"; do
+    install.sh repo.sh "${hook_files[@]/#/hooks/}"; do
     [[ -f $kit_staged/$file && -r $kit_staged/$file ]] || die "staged kit file missing or unreadable: $file"
   done
   while IFS= read -r -d '' file; do
@@ -532,6 +536,7 @@ for ((n = 1; n <= last; n++)); do
     echo "ACTIONS_RUNNER_HOOK_JOB_STARTED=$root/ci-kit/hooks/job-started.sh"
     echo "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=$root/ci-kit/hooks/job-completed.sh"
     echo "CI_KIT_MACHINE=$machine"
+    ((n != 1)) || echo "CI_KIT_VM_REPO=$repo"
     [[ -z $display ]] || echo "CI_KIT_DISPLAY=$display"
     [[ -z $home || $n != 1 ]] || echo CI_KIT_HOME=1
     ((n == 1)) || echo CI_KIT_SHARED_DESKTOP=1

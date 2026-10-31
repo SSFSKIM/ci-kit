@@ -164,7 +164,8 @@ slot_dir=$vm_home/$slot
 out=$slot_dir/out
 kit=${CI_KIT_VM_KIT:-$vm_home/kit}
 golden_pointer=${CI_KIT_VM_GOLDEN:-$vm_home/golden}
-repo=${CI_KIT_VM_REPO:-SSFSKIM/MAWS}
+source "$here/../repo.sh"
+repo=$(ci_kit_repo) || exit 1
 display_read=${CI_KIT_CURSOR_PARK:-$lane_root/ci-kit/hooks/cursor-park}
 lane_mode=${CI_KIT_VM_LANE_MODE:-always}
 pause_windows=${CI_KIT_VM_PAUSE_WINDOWS:-}
