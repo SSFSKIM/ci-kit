@@ -52,7 +52,11 @@ async function workCopy(repo, { sources, cache, exec }) {
 }
 
 export async function bakeJobImages({ manifest, token, kit = KIT, cache = CACHE, sources = SOURCES, exec = command, log = console.log }) {
-  const tokens = token.startsWith('{') ? JSON.parse(token) : null;
+  let tokens = null;
+  if (token.startsWith('{')) {
+    try { tokens = JSON.parse(token); }
+    catch { throw new Error('invalid builder GitHub token map'); } // SyntaxError can quote credentials.
+  }
   // This precedes every clone, even when there are no declarations yet.
   await blockMetadata(exec);
   await mkdir(sources, { recursive: true });
