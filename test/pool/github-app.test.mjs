@@ -91,3 +91,13 @@ test('one client routes two owners to their installations and caches each owner 
     'GET /repos/neworg/MAWS/installation', 'POST /app/installations/91/access_tokens',
   ]);
 });
+
+test('a transferred repository redirect cannot cache the destination installation under its old owner', async () => {
+  const api = fakeApi();
+  const tokens = createAppTokens({ appId: '1', pem, now: () => Date.parse('2026-10-15T12:00:00Z'), fetchImpl: async (url, init) => {
+    if (url.endsWith('/repos/SSFSKIM/moved/installation')) return new Response(JSON.stringify({ id: 91, account: { login: 'neworg' } }));
+    return api.fetchImpl(url, init);
+  } });
+  await assert.rejects(tokens('SSFSKIM/moved'), /SSFSKIM\/moved.*neworg.*canonical/i);
+  assert.equal(await tokens('SSFSKIM/MAWS'), 'tok-1', 'old owner must still resolve its own installation');
+});
