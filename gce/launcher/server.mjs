@@ -14,9 +14,7 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { createGce, accessToken } from '../../lib/gce.mjs';
-import { createGitHub } from '../../lib/github.mjs';
-import { createAppTokens } from '../../lib/github-app.mjs';
-import { createConfigSource } from './source.mjs';
+import { createLauncherGitHub } from './github.mjs';
 import { createGceLedger } from './ledger-store.mjs';
 import { createCreditManager } from './credit.mjs';
 import { Launcher } from './launcher.mjs';
@@ -42,14 +40,14 @@ async function fetchText(url) {
 let setup = null;
 let github = null; // the App's client once set up: its budget gates requested ticks
 async function deps(preparation) {
-  const { project } = JSON.parse(await bundled('gce.json'));
+  const { project, ledger } = JSON.parse(await bundled('gce.json'));
   const gce = createGce({ project, token: accessToken() });
   const [appId, pem] = await Promise.all([
     preparation.time('secret.appId', () => gce.secret('ci-kit-app-id')),
     preparation.time('secret.appKey', () => gce.secret('ci-kit-app-key')),
   ]);
-  const gh = createGitHub(createAppTokens({ appId: appId.trim(), pem, owner: 'SSFSKIM' }));
-  const source = createConfigSource({ gh, fetchText, readBundled: bundled, bundledCommit: process.env.CI_KIT_COMMIT || 'bundled', log });
+  const { gh, source } = createLauncherGitHub({ app: { appId: appId.trim(), pem }, ledgerRepo: ledger.repo,
+    fetchText, readBundled: bundled, bundledCommit: process.env.CI_KIT_COMMIT || 'bundled', log });
   github = gh;
   // stockouts: capacity refusals remembered across ticks (logic.mjs stockoutMemory), for this process's life; limits:
   // the placements' quota limits (room.mjs), read live and kept for minutes.

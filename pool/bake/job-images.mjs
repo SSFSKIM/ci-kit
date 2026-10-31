@@ -52,6 +52,11 @@ async function workCopy(repo, { sources, cache, exec }) {
 }
 
 export async function bakeJobImages({ manifest, token, kit = KIT, cache = CACHE, sources = SOURCES, exec = command, log = console.log }) {
+  let tokens = null;
+  if (token.startsWith('{')) {
+    try { tokens = JSON.parse(token); }
+    catch { throw new Error('invalid builder GitHub token map'); } // SyntaxError can quote credentials.
+  }
   // This precedes every clone, even when there are no declarations yet.
   await blockMetadata(exec);
   await mkdir(sources, { recursive: true });
@@ -62,11 +67,13 @@ export async function bakeJobImages({ manifest, token, kit = KIT, cache = CACHE,
     // Results handed over by another provider are evidence, never this builder's results.
     delete entry.apply; delete entry.warm;
     try {
+      const credential = tokens ? tokens[repo.split('/')[0].toLowerCase()] : token;
+      if (typeof credential !== 'string' || !credential) throw new Error(`missing builder token for ${repo}`);
       await exec('git', ['init', '--quiet', source]);
       await exec('git', ['-C', source, 'remote', 'add', 'origin', `https://github.com/${repo}.git`]);
       await exec('git', ['-C', source, 'fetch', '--quiet', '--depth', '1', 'origin', entry.revision], { env: {
         GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
-        GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`,
+        GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${credential}`).toString('base64')}`,
       } });
       await exec('git', ['-C', source, 'checkout', '--quiet', '--detach', 'FETCH_HEAD']);
       // Apply and warm keep the full clone; only pristine declaration inputs survive on the VM image.

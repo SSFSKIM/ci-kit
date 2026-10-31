@@ -13,6 +13,14 @@ Status: being built. The living spec: [docs/doperpowers/specs/2026-10-15-ci-kit-
   in adopted repos to verify with it, and adds the `ci-kit:adopt` skill ("set up CI for this repo"). Outside Claude
   Code, `./install.sh` from a long-lived checkout links `ci-gate` into `~/.local/bin`.
 
+## Test history identity
+
+`history/repos.json` separates each repository's current `repo` (GitHub API target) from its stable `alias`
+(store directory and `collect.mjs --repo` selection key). Omitted aliases default to the full repo name.
+MAWS's alias is explicitly `SSFSKIM/MAWS`: transferring it changes only `repo`, retaining the existing
+`SSFSKIM/MAWS/` history and the command `node history/collect.mjs --repo SSFSKIM/MAWS --store <dir>`.
+The sandbox's scheduled collector checks out ci-kit main, so merged changes need no separate collector deployment.
+
 ## Layout
 
 | Path | What it is |

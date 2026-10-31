@@ -47,6 +47,37 @@ by ci-kit's EC2 guard and ci-kit-sandbox's history/probe workflows. Keep `CI_KIT
 both repositories. The GCP key serves the launcher and cloud bakes; it is not baked into GCE images or EC2 AMIs.
 See the GCE credential details below before rotating either key. No cloud token is required in pool callers.
 
+### App access across owners
+
+The launcher resolves an installation directly with `GET /repos/{owner}/{repo}/installation` under the App JWT,
+then caches the installation and its expiring token per owner. It never enumerates the App's installations.
+A 404 names the repository: check both the account's installation and its selected-repository grants.
+The baker groups contents-read scopes by owner; a repository name in one owner's scope grants nothing in another's.
+
+Before changing the served set, check each repository using gcloud's default account (as boot-sample does):
+
+```sh
+node gce/tools/app-access.mjs SSFSKIM/MAWS SSFSKIM/ci-kit-sandbox
+```
+
+This reads the App credentials from Secret Manager, looks up **each** repository (even siblings), and mints a
+repo-scoped token. It prints the account and installation id, never credentials, and exits nonzero if any check
+fails. For a transfer, check the destination name too, after the App is granted access there.
+
+**Rolling out owner routing:** from merged main, deploy `gce/deploy.sh launcher`, then
+`gce/deploy.sh bake bake-check`. These are `ci-kit-launcher`, `ci-kit-bake` and `ci-kit-bake-check`; the bake
+orchestrator drives both GCE and EC2 builders. Both builders check out the manifest's kit commit, which must
+include the owner-aware clone reader before a multi-owner bake. Their existing credential transport remains a
+plain token for one owner; for multiple owners it carries an owner-to-token JSON map. Only the builder host
+selects a token, and only the selected token reaches that repository's git fetch environment. Each provider gets
+fresh builder tokens. Run a bake from the updated commit to exercise both providers and their smoke/real-job checks.
+The EC2 guard and sandbox history collector pick up ci-kit main on their next workflow runs; operator tools run
+from the updated checkout. No key, IAM, scheduler or App-setting change is needed for this code rollout.
+
+The webhook does not mint tokens and needs no deployment for routing alone. When the served set changes later,
+its bundled list **does** need `gce/deploy.sh webhook`, along with launcher and both bake jobs rebuilt from that
+same configuration. Deploy owner routing before making the App public or depending on a second owner.
+
 ## Re-bake
 
 GCE and EC2 share the bake manifest and preparation. Their Cloud Run bake jobs and the independent bake-check
@@ -546,7 +577,7 @@ smoke 2.5 min).
 
 **Per-repository job images (GCE and EC2).** The orchestrator resolves each served repository's default revision
 and setup hash once, into `repos` in `/etc/ci-kit/bake-manifest.json`. Both builders fetch those exact commits with
-a contents-read token scoped to the served repositories. The Docker metadata firewall is installed before these
+contents-read tokens scoped to each owner’s served repositories. The Docker metadata firewall is installed before these
 clones; each container proves IPv4/IPv6 metadata and the IMDSv2 token endpoint unreachable and the clone's git config
 credential-free before applying any repository code. The token exists only in the host's fetch environment.
 

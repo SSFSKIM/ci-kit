@@ -4,7 +4,16 @@ import { setupHash } from '../../setup/hash.mjs';
 
 export const repoSlug = repo => repo.toLowerCase().replace(/[^a-z0-9-]/g, '-');
 export const jobImage = repo => `ci-kit-job/${repoSlug(repo)}:latest`;
-export const bakeScope = repos => ({ repositories: [...new Set(repos.map(({repo}) => repo.split('/')[1]))], permissions: { contents: 'read' } });
+export function bakeScope(repos) {
+  const groups = new Map();
+  for (const { repo } of repos) {
+    const [owner, name] = repo.split('/'), key = owner.toLowerCase();
+    if (!groups.has(key)) groups.set(key, { repo, scope: { repositories: [], permissions: { contents: 'read' } } });
+    const names = groups.get(key).scope.repositories;
+    if (!names.includes(name)) names.push(name);
+  }
+  return Object.fromEntries(groups);
+}
 
 const canonical = (value) => JSON.stringify(value, (_key, v) => v && typeof v === 'object' && !Array.isArray(v)
   ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, v[k]])) : v);

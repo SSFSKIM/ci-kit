@@ -1,4 +1,4 @@
-// The store directory (test history spec, Design "Store"): under <root>/<owner>/<repo>/,
+// The store directory (test history spec, Design "Store"): under <root>/<alias>/ (default alias: owner/repo),
 //   runs/<YYYY-MM-DD>.jsonl              one line per (run, attempt, job), by the job's completion day (UTC)
 //   base/<YYYY-MM-DD>/<job>.json.gz      the day's first complete unselected report, which delta lines refer to
 //   durations/<YYYY-MM-DD>/<job>.json.gz the day's last unselected green report's file durations
@@ -15,8 +15,8 @@ export const dayOf = (iso) => iso.slice(0, 10);
 const readLines = (path) => readFileSync(path, 'utf8').split('\n').filter((l) => l !== '').map((l) => JSON.parse(l));
 const readGz = (path) => (existsSync(path) ? JSON.parse(gunzipSync(readFileSync(path)).toString('utf8')) : null);
 
-export function openStore(root, repo) {
-  const dir = join(root, repo);
+export function openStore(root, alias) {
+  const dir = join(root, alias);
   const lines = [];
   const runsDir = join(dir, 'runs');
   if (existsSync(runsDir)) {

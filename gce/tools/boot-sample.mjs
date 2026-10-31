@@ -183,7 +183,7 @@ async function main(argv) {
   const { placement, machine } = samplePlacement(cfg, opts);
   const token = accessToken();
   const gce = createGce({ project: cfg.project, token });
-  const app = { appId: (await gce.secret('ci-kit-app-id')).trim(), pem: await gce.secret('ci-kit-app-key'), owner: 'SSFSKIM' };
+  const app = { appId: (await gce.secret('ci-kit-app-id')).trim(), pem: await gce.secret('ci-kit-app-key'), repo: 'SSFSKIM/ci-kit-sandbox' };
   const gh = createGitHub(createAppTokens({ ...app, scope: CHECK_SCOPE }));
   if ((await gh.getRepo(CHECK.repo)).private !== true) throw new Error(`${CHECK.repo} is not private`);
   mkdirSync(opts.out, { recursive: true });
