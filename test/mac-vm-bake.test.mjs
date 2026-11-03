@@ -361,9 +361,11 @@ describe('the VM lane\'s maintenance procedure (bake.sh)', { concurrency: 4, ...
     assert.match(result.stdout, /MAWS.*declaration.*\(setup\)/);
     assert.match(result.stdout, /Open each app below/);
     assert.match(result.stdout, /\/Applications\/Extra App.app/);
-    // Its end verified before the step reports done: a stop, then Tart's list.
+    // Its end verified before the step reports done: the guest's own shutdown after the last step, then Tart's list.
     const calls = f.calls();
-    assert.ok(calls.indexOf(`stop ${CANDIDATE} --timeout 5`) > calls.lastIndexOf(`exec ${CANDIDATE} ${script} helpers`), calls.join('\n'));
+    const shutdown = calls.indexOf(`exec ${CANDIDATE} sudo -n /sbin/shutdown -h now`);
+    assert.ok(shutdown > calls.lastIndexOf(`exec ${CANDIDATE} ${script} helpers`), calls.join('\n'));
+    assert.ok(calls.slice(shutdown + 1).includes('list --source local --format json'), calls.join('\n'));
     assert.match(result.stdout, /baked: maws-vm-candidate-20261022, stopped; the lowest free space during the bake was 120 GB/);
     assert.match(result.stdout, /120 GB free on the volume of .* \(reserve 40 GB\)/);
     // The human's window step, printed for CI-opt to relay: graphics, the maws share, the notification prompt.
