@@ -55,6 +55,20 @@ class Classification(unittest.TestCase):
         self.assertFalse(measure.is_mac(job("unit", runner="ci-kit-ec2-abc12", labels=WAITER)))
         self.assertFalse(measure.is_mac(skipped("packaged")))
 
+    def test_mac_machine_by_runner_name(self):
+        self.assertEqual(measure.mac_machine(job("e2e:x", runner="ci-kit-mac-mini")), "mini")
+        self.assertEqual(measure.mac_machine(job("e2e:x", runner="ci-kit-mac-mini-2")), "mini")
+        self.assertEqual(measure.mac_machine(job("e2e:x", runner="ci-kit-mac-mini-maws-vm-job-vm-20261025T224551Z")),
+                         "mini guest")
+        self.assertEqual(measure.mac_machine(job("e2e:x", runner="ci-kit-mac-ec2")), "ec2")
+
+    def test_direct_hosted_is_an_e2e_job_on_a_hosted_macos_image(self):
+        self.assertTrue(measure.is_hosted_direct(job("e2e:agents", runner="GitHub Actions 3", labels=["macos-26"])))
+        self.assertTrue(measure.is_hosted_direct(job("e2e:agents", labels=["macos-15-xlarge"])))
+        self.assertFalse(measure.is_hosted_direct(job("unit:darwin", labels=["macos-26"])))
+        self.assertFalse(measure.is_hosted_direct(job("e2e:discover", labels=["self-hosted", "macOS", "ARM64"])))
+        self.assertFalse(measure.is_hosted_direct(job("e2e:x", runner="ci-kit-ec2-x", labels=WAITER)))
+
     def test_waiter_is_an_e2e_job_on_the_waiter_box(self):
         self.assertTrue(measure.is_waiter(job("e2e:document-app", runner="ci-kit-ec2-x", labels=WAITER), WAITER))
         self.assertTrue(measure.is_waiter(
@@ -128,6 +142,28 @@ class Measure(unittest.TestCase):
             ])
         self.assertEqual(out["hosted_share"], {"hosted_minutes": 10, "mac_minutes": 30, "share": 0.25})
         self.assertEqual(out["hosted_queue"], {"n": 1, "median": 4, "p90": 4})
+
+    def test_direct_hosted_jobs_count_beside_the_mirror_by_route(self):
+        out = run(
+            maws=[
+                job("e2e:a", ran_min=30),                                                   # mini e2e
+                job("e2e:b", runner="ci-kit-mac-ec2", queued_min=6, ran_min=10),            # EC2 e2e
+                job("unit:darwin", runner="ci-kit-mac-ec2", queued_min=2, ran_min=50),      # EC2, not e2e
+                job("e2e:c", runner="GitHub Actions 3", labels=HOSTED, queued_min=1, ran_min=20),  # direct
+                job("e2e:d", runner="ci-kit-ec2-x", labels=WAITER, ran_min=12),             # waiter: not hosted
+            ],
+            app=[job("e2e", runner="GitHub Actions 7", labels=HOSTED, queued_min=5, ran_min=10)])
+        self.assertEqual(out["hosted_share"], {"hosted_minutes": 30, "mac_minutes": 40, "share": round(30 / 70, 4)})
+        self.assertEqual(out["hosted_minutes_by_route"], {"mirror": 10, "direct": 20})
+        self.assertEqual(out["hosted_queue"], {"n": 2, "median": 3, "p90": 5})
+        self.assertEqual(out["hosted_queue_by_route"]["direct"], {"n": 1, "median": 1, "p90": 1})
+        self.assertEqual(out["mac_queue"]["n"], 3)
+        self.assertEqual(out["mac_by_machine"], {
+            "ec2": {"queue": {"n": 2, "median": 4, "p90": 6}, "e2e_minutes": 10},
+            "mini": {"queue": {"n": 1, "median": 0, "p90": 0}, "e2e_minutes": 30}})
+        text = measure.render(out)
+        self.assertIn("  ec2: 2 jobs", text)
+        self.assertIn("  direct route: hosted 20.0 min", text)
 
     def test_waiters_minutes_cost_and_deadline_reds(self):
         out = run(maws=[
@@ -242,6 +278,13 @@ class RunKinds(unittest.TestCase):
         self.assertEqual(out["hosted_queue_by_kind"]["default"], {"n": 1, "median": 2, "p90": 2})
         self.assertEqual(out["hosted_queue_by_kind"]["trial"], {"n": 2, "median": 8.5, "p90": 9})
         self.assertEqual(out["hosted_share"]["share"], round(50 / 140, 4))  # the whole is unchanged
+
+    def test_a_direct_job_takes_its_own_runs_kind(self):
+        out = run(maws=[dict(job("e2e:a", ran_min=30), kind="default"),
+                        dict(job("e2e:c", runner="GitHub Actions 3", labels=HOSTED, ran_min=10), kind="default"),
+                        dict(job("e2e:c", runner="GitHub Actions 4", labels=HOSTED, ran_min=5), kind="trial")])
+        self.assertEqual(out["hosted_share_by_kind"]["default"], {"hosted_minutes": 10, "mac_minutes": 30, "share": 0.25})
+        self.assertEqual(out["hosted_share_by_kind"]["trial"], {"hosted_minutes": 5, "mac_minutes": 0, "share": 1.0})
 
     def test_a_window_whose_hosted_minutes_are_all_trials(self):
         out = run(maws=[dict(job("e2e:a", ran_min=30), kind="default")],
