@@ -96,8 +96,8 @@ request commit carries `MAWS-Source-Tree: <the tree of sha>`, and it ran on `mac
 - [x] (2026-10-26 14:2xZ) After M3: the hosted setup skips LibreOffice and Poppler for groups that do not use them
   (MAWS #170, #171), and hosted jobs share one out/ build per tree (MAWS #173); terminal, c7, browser and transcript
   ruled in after #172 (31 groups; the list's PR, MAWS #175, is with the architect).
-- [ ] M4: the collector and the before numbers; the after numbers seven days after M3's first wave lands;
-  acceptance 9; Outcomes.
+- [x] (2026-11-03 10:4xZ) M4: the collector and the before numbers (executor, 10-26); the after numbers by CI-opt,
+  with the collector taught the direct route and the EC2 Mac first (b0d5c71); acceptance 9; Outcomes.
 
 ## Design
 
@@ -869,6 +869,12 @@ M3's wave, from a worktree of MAWS master:
     counts: on 10-25 that was 8 jobs from 3 earlier runs. p90 is nearest-rank. The window should be closed (its runs
     finished) when measured.
   - The waiter cost is job minutes times the rate, as M4 says; the pool bills a box's whole life, so it is a floor.
+- 2026-11-03 (CI-opt, M4's after numbers, b0d5c71, reviewed clean): the collector counts the direct route and gives
+  the Mac queue by machine. From 2026-10-28 08:10Z (`HOSTED_MAC_ROUTE=direct`) a hosted group is MAWS's own
+  `e2e:<group>` job on a GitHub macOS image (a label `macos-<n>…`), counted as hosted with its own run's kind; read as
+  M4 first wrote it, the after window's hosted share would have left out 20,486.2 of its 23,121.0 hosted minutes. The
+  EC2 Mac (`ci-kit-mac-ec2`, from 10-27) shares the Mac prefix, so the Mac queue stays whole for the comparison and is
+  also given for the mini, its guest and the EC2 Mac. The before numbers stand: that window had neither.
 
 ## Surprises & Discoveries
 
@@ -927,19 +933,24 @@ M3's wave, from a worktree of MAWS master:
 
 **Before** (the 7 days before wave 1 landed: 2026-10-19T10:05:36Z to 2026-10-26T10:05:36Z; `measure.py --since
 2026-10-19T10:05:36Z --until 2026-10-26T10:05:36Z`, run hours after the window closed so its jobs had finished, 1,154
-API calls; the JSON is `2026-10-26-maws-hosted-mac/before.json`):
+API calls; the JSON is `2026-10-26-maws-hosted-mac/before.json`).
+
+**After** (the 7 days after: 2026-10-26T10:05:36Z to 2026-11-02T10:05:36Z; the same command with those bounds, run by
+CI-opt on 2026-11-03 at 10:2xZ with the collector of b0d5c71, which also counts the direct route; 2,803 API calls; the
+JSON is `2026-10-26-maws-hosted-mac/after.json`):
 
 | Measure | Before | After |
 |---|---|---|
-| Mac queue (`ci-kit-mac-*` jobs, started minus created) | 1,555 jobs, median 15.7 min, p90 84.1 min | (CI-opt, on the eighth day) |
-| Beside it: mini host held (`ci-kit alert: mini:` issues) | 1,047.4 min, 306.8 with a host job queued (13 alerts) | |
-| Beside it: guest off (vm-lane.log, from 10-23T07:26Z only) | 1,314.9 min with idle, 208.6 with a guest job queued (memory floor 898.5, `held: cua_repl` 325.1, paused 62.2) | |
-| Beside it: guest lane's controller stopped | 172.9 min, 90.2 with a guest job queued | |
-| Hosted share of e2e job-minutes, default runs (no `Lane:`) | 0.0% (0.0 of 3,445.3) | |
-| Hosted share, trials and baselines (`Lane:` hosted, no-hosted, vm, vm-trial) | 46.8% (716.0 hosted against 812.7 on the Macs) | |
-| Hosted share, all runs | 14.4% (716.0 hosted, 4,258.1 on the Macs) | |
-| Hosted queue (maws-app `e2e` jobs) | 101 jobs, all trials: median 8.4 min, p90 24.6 min | |
-| Waiters | 99 jobs, 1,863.0 min, $1.12 at $0.0006/min; 0 deadline reds | |
+| Mac queue (`ci-kit-mac-*` jobs, started minus created) | 1,555 jobs, median 15.7 min, p90 84.1 min | 1,367 jobs, median 1.8 min, p90 25.9 min |
+| The Mac queue by machine | all on the mini (the EC2 Mac first took a job on 10-27) | mini 622 jobs, median 0.9, p90 27.5 (3,672.6 e2e min); its guest 47, median 0.8, p90 4.6 (346.8); EC2 698, median 3.0, p90 26.0 (2,042.9) |
+| Beside it: mini host held (`ci-kit alert: mini:` issues) | 1,047.4 min, 306.8 with a host job queued (13 alerts) | 142.3 min, 4.6 with a host job queued (5 alerts, #59 to #66) |
+| Beside it: guest off (vm-lane.log, from 10-23T07:26Z only) | 1,314.9 min with idle, 208.6 with a guest job queued (memory floor 898.5, `held: cua_repl` 325.1, paused 62.2) | the whole window: 3,987.6 min with idle, 0.0 with a guest job queued (memory floor 3,346.0, memory pressure 211.7, quiet windows 339.4, paused 37.4) |
+| Beside it: guest lane's controller stopped | 172.9 min, 90.2 with a guest job queued | 244.7 min, 0.0 with a guest job queued |
+| Hosted share of e2e job-minutes, default runs (no `Lane:`) | 0.0% (0.0 of 3,445.3) | 63.1% (8,137.9 hosted, 4,751.1 on the Macs) |
+| Hosted share, trials and baselines (`Lane:` hosted, no-hosted, vm, vm-trial) | 46.8% (716.0 hosted against 812.7 on the Macs) | 92.0% (14,983.1 hosted, 1,311.2 on the Macs) |
+| Hosted share, all runs | 14.4% (716.0 hosted, 4,258.1 on the Macs) | 79.2% (23,121.0 hosted, 6,062.3 on the Macs): 2,634.9 through maws-app, 20,486.2 direct |
+| Hosted queue (maws-app `e2e` jobs; after, with the direct route's `e2e:*` jobs) | 101 jobs, all trials: median 8.4 min, p90 24.6 min | 4,673 jobs, median 12.6 min, p90 52.6 min; default runs 1,552, median 10.0, p90 32.3; by route, maws-app 537, median 4.8, p90 18.1, and direct 4,136, median 14.3, p90 55.7 |
+| Waiters | 99 jobs, 1,863.0 min, $1.12 at $0.0006/min; 0 deadline reds | 639 jobs, 8,294.7 min, $4.98; 0 deadline reds in the logs read (10 failed waiters' logs could not be read) |
 
 The before window's hosted minutes are all this work's own trials (M1's hand runs, M2's acceptance runs, M3's
 admission waves, all on 10-26): default runs hosted nothing. Admission's effect is the after window's default-run
@@ -948,4 +959,36 @@ is a loaded queue's; read the after window's default-run hosted queue against th
 waited. The Mac queue is read beside the holds: a week with more held minutes has a longer queue whatever the
 hosted share. The guest-off figure covers only the window's last 3 days (the log's start), so compare it per day.
 
-(The after numbers, the comparison and the retrospective follow on the eighth day.)
+**The comparison.** The Mac queue fell from a median of 15.7 to 1.8 minutes and from a p90 of 84.1 to 25.9, in a
+week that ran about six times the e2e job-minutes of the week before (29,183 against 4,974), most of them the P5
+wave's trials and baselines. Three things moved it, and the numbers separate them:
+
+- **Hosting.** Default runs moved 63.1% of their e2e minutes off the Macs (from 0.0%), and the whole week 79.2%.
+  From 10-28 08:10Z the route is direct (MAWS's own `e2e:<group>` job on GitHub's `macos-26`, no maws-app request
+  and no waiter): 20,486.2 of the 23,121.0 hosted minutes ran that way.
+- **The EC2 Mac.** It took 698 of the 1,367 Mac jobs and 2,042.9 of the 6,062.3 Mac e2e minutes, as the overflow
+  for the mini's queue. Its queue (median 3.0, p90 26.0) is close to the mini's (0.9, 27.5).
+- **Fewer holds.** The mini's host was held 142.3 minutes on 5 alerts (4.6 with a host job waiting) against 1,047.4
+  on 13 (306.8); from 10-29 the owner's standing word to close an unanswered consent dialog kept the later ones to 3
+  to 5 minutes. The guest was off more (memory under its floor), but never with a guest job waiting.
+
+**The hosted queue is now the bottleneck.** A job on the direct route waited a median 14.3 and a p90 55.7 minutes
+before starting, against M1's 3 to 5 s for a lone request. The jobs need nothing before them; they wait for a Mac.
+GitHub runs at most 5 macOS jobs at once per account on Free, Pro and Team, and 50 on Enterprise (docs.github.com,
+Actions limits, the job concurrency table; larger macOS runners share the same 5). A full default run sends 31
+hosted groups, so it runs them about six deep: on 10-30 run 41142276797, 5 started at once and the last at 22.5
+minutes. The levers, in order of effect: the move to GitHub Enterprise already planned (50 at once); then a support
+request to raise the limit; ordering the longest groups first was estimated at about 4 minutes on a full set.
+
+**What the measure does not see.** The hold row counts alert episodes only: the quiet windows (from 10-29: semis'
+daily window, the owner's sittings) and the measured series' exclusive runs on the mini are not in it, and both
+lengthen the mini's queue. The Mac queue starts at the job's creation, so a Mac job waiting on `e2e-build` counts that
+wait too, in both windows alike. Waiter cost is a floor (a pool box bills its whole life). The ten waiters' logs that
+could not be read (the job-logs API answered an error) are ten whose deadline red is unknown, not ruled out.
+
+**Retrospective.** The design held: hosted groups ran for a week at scale with no deadline red read. The mirror (the
+request commit, the secret scan, the waiter) was the first part to fall out of use: once the owner made MAWS public
+(MAWS's gate-offload Decision Log 127), the direct route needed none of it, and maws-app stays only as the fallback
+until the move to Enterprise. The collector, written before the direct route, would have missed nine tenths of the
+hosted minutes as written; measuring a window means checking first that the routes in it are the routes the collector
+reads.

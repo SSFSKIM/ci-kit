@@ -1,0 +1,203 @@
+{
+  "window": {
+    "since": "2026-10-26T10:05:36Z",
+    "until": "2026-11-02T10:05:36Z"
+  },
+  "mac_queue": {
+    "n": 1367,
+    "median": 1.75,
+    "p90": 25.85
+  },
+  "mac_by_machine": {
+    "ec2": {
+      "queue": {
+        "n": 698,
+        "median": 2.95,
+        "p90": 26.0
+      },
+      "e2e_minutes": 2042.88
+    },
+    "mini": {
+      "queue": {
+        "n": 622,
+        "median": 0.95,
+        "p90": 27.5
+      },
+      "e2e_minutes": 3672.6
+    },
+    "mini guest": {
+      "queue": {
+        "n": 47,
+        "median": 0.75,
+        "p90": 4.57
+      },
+      "e2e_minutes": 346.82
+    }
+  },
+  "hosted_share": {
+    "hosted_minutes": 23121.02,
+    "mac_minutes": 6062.3,
+    "share": 0.7923
+  },
+  "hosted_share_by_kind": {
+    "default": {
+      "hosted_minutes": 8137.87,
+      "mac_minutes": 4751.08,
+      "share": 0.6314
+    },
+    "trial": {
+      "hosted_minutes": 14983.15,
+      "mac_minutes": 1311.22,
+      "share": 0.9195
+    }
+  },
+  "hosted_minutes_by_route": {
+    "mirror": 2634.87,
+    "direct": 20486.15
+  },
+  "hosted_queue": {
+    "n": 4673,
+    "median": 12.58,
+    "p90": 52.57
+  },
+  "hosted_queue_by_kind": {
+    "default": {
+      "n": 1552,
+      "median": 10.03,
+      "p90": 32.27
+    },
+    "trial": {
+      "n": 3121,
+      "median": 13.97,
+      "p90": 60.32
+    }
+  },
+  "hosted_queue_by_route": {
+    "mirror": {
+      "n": 537,
+      "median": 4.8,
+      "p90": 18.05
+    },
+    "direct": {
+      "n": 4136,
+      "median": 14.33,
+      "p90": 55.73
+    }
+  },
+  "waiters": {
+    "jobs": 639,
+    "minutes": 8294.7,
+    "cost_usd": 4.9768,
+    "spot_rate_usd_per_minute": 0.0006,
+    "deadline_reds": 0,
+    "deadline_red_logs_unread": 10
+  },
+  "mini": {
+    "holds": {
+      "minutes": 142.28,
+      "minutes_with_host_job_queued": 4.6,
+      "issues": [
+        {
+          "number": 59,
+          "title": "ci-kit alert: mini: loginwindow since 2026-10-27T19:09Z",
+          "from": "2026-10-27T19:10:28Z",
+          "to": "2026-10-27T21:15:37Z"
+        },
+        {
+          "number": 62,
+          "title": "ci-kit alert: mini: loginwindow since 2026-10-28T21:25Z",
+          "from": "2026-10-28T21:26:17Z",
+          "to": "2026-10-28T21:30:53Z"
+        },
+        {
+          "number": 63,
+          "title": "ci-kit alert: mini: UserNotificationCenter since 2026-10-29T11:38Z",
+          "from": "2026-10-29T11:39:50Z",
+          "to": "2026-10-29T11:43:00Z"
+        },
+        {
+          "number": 64,
+          "title": "ci-kit alert: mini: UserNotificationCenter since 2026-10-29T18:22Z (firewall prompt for MAWS.app)",
+          "from": "2026-10-29T18:23:16Z",
+          "to": "2026-10-29T18:27:26Z"
+        },
+        {
+          "number": 66,
+          "title": "ci-kit alert: mini: UserNotificationCenter since 2026-10-31T14:01Z",
+          "from": "2026-10-31T14:03:00Z",
+          "to": "2026-10-31T14:08:12Z"
+        }
+      ]
+    },
+    "guest_off": {
+      "source": "ssh mini cat ~/Library/Logs/ci-kit/vm-lane.log",
+      "log_from": "2026-10-23T07:26:12Z",
+      "covered_from": "2026-10-26T10:05:36Z",
+      "minutes": 3987.55,
+      "minutes_with_guest_job_queued": 0.0,
+      "by_reason": {
+        "memory available N%, under the floor of N%": 3345.96,
+        "memory pressure N, not N": 211.73,
+        "swap": 2.47,
+        "the queue cannot be read": 3.53,
+        "held: ci-opt-b2": 31.57,
+        "quiet window N-N-NTN:NZ N-N-NTN:NZ CI-opt": 3.18,
+        "paused": 37.39,
+        "quiet window N-N-NTN:NZ N-N-NTN:NZ semis-research-coordinator's run launch": 31.4,
+        "quiet window N-N-NTN:NZ N-N-NTN:NZ mini-ops's rebuild of the resident MAWS app": 15.37,
+        "quiet window N-N-NTN:NZ N-N-NTN:NZ the owner's ON MN sitting on the mini's desktop": 49.08,
+        "quiet window N:NZ N:NZ semis-research-coordinator's market-open update": 200.32,
+        "a ci-kit-mac-solo job queued, but the host's exclusive instance is idle and takes it first": 0.73,
+        "quiet window N-N-NTN:NZ N-N-NTN:NZ semis-research-coordinator's SN research launch": 40.12,
+        "a claim holds the lane": 14.8
+      },
+      "controller_stopped": {
+        "minutes": 244.67,
+        "minutes_with_guest_job_queued": 0.0
+      },
+      "note": "the figures cover the window from covered_from only; minutes counts idle minutes too (no guest job queued), minutes_with_guest_job_queued does not; controller_stopped is the lane controller's own down time, which a running guest outlives, and is not in minutes"
+    }
+  },
+  "sources": [
+    {
+      "repo": "SSFSKIM/MAWS",
+      "workflow": "gate.yml",
+      "found": true,
+      "runs_listed": 3547,
+      "runs": 1948,
+      "jobs": 29564
+    },
+    {
+      "repo": "SSFSKIM/maws-app",
+      "workflow": "hosted-mac.yml",
+      "found": true,
+      "runs_listed": 750,
+      "runs": 647,
+      "jobs": 2564,
+      "runs_without_a_listed_private_run": 49
+    }
+  ],
+  "params": {
+    "app_job": "e2e",
+    "waiter_labels": [
+      "self-hosted",
+      "ci-kit-pool",
+      "cpus-2"
+    ],
+    "lookback_days": 30,
+    "mac_runner_prefix": "ci-kit-mac-",
+    "trial_lanes": [
+      "hosted",
+      "no-hosted",
+      "vm",
+      "vm-trial"
+    ],
+    "holds_repo": "SSFSKIM/ci-kit-sandbox",
+    "hold_title": "ci-kit alert: mini:",
+    "guest_labels": [
+      "ci-kit-mac-vm",
+      "ci-kit-mac-vm-trial"
+    ]
+  },
+  "api_calls": 2803
+}
