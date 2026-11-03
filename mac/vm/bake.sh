@@ -253,6 +253,19 @@ end_vm() {
   say "$run_vm: its end cannot be verified ($tart_why); stop it by hand with the verified stop (docs/mac-lane.md)" >&2
   return 1
 }
+# The guest's own shutdown, waited for up to end_wait: it writes the guest's disk out, which `tart stop` alone, a
+# power-off to the guest, does not (ci-kit #181: every golden through 20261025 lost the bake's last write). The
+# verified stop follows either way.
+shutdown_guest() { # <name>
+  local started
+  tart_call 30 exec "$1" sudo -n /sbin/shutdown -h now ||
+    say "$1: shutdown did not acknowledge; checking its end before the verified stop"
+  started=$SECONDS
+  while ((SECONDS - started < end_wait)); do
+    tart_ended "$1" && break
+    sleep "$tick"
+  done
+}
 in_guest() { # <seconds> <what> <command...>: a tart exec in the step's VM
   local seconds=$1 what=$2 output status
   shift 2
@@ -340,6 +353,7 @@ do_bake() {
     end_vm
     die "$name: cannot read the setup step's quarantined-apps record"
   }
+  shutdown_guest "$run_vm"
   end_vm || die "$name is baked, but its stop is not verified"
   say "baked: $name, stopped; the lowest free space during the bake was $lowest GB"
   cat <<EOF
@@ -367,7 +381,7 @@ EOF
 }
 
 do_first_run() {
-  local vm=${1:-} vms script status started
+  local vm=${1:-} vms script status
   [[ $# -eq 1 ]] || usage
   [[ $vm =~ ^maws-vm-candidate-[A-Za-z0-9._-]+$ ]] || refuse "--first-run needs a maws-vm-candidate-<id> (got '$vm')"
   hold_check
@@ -490,13 +504,7 @@ GUEST
   status=$?
   ((status == 0)) || die "$vm: first-run failed ($status); stays running: inspect the output and the guest's window, fix the cause, then rerun --first-run $vm"
   say "$vm: first-run passed; the scratch clone is removed; asking the guest to shut down"
-  tart_call 30 exec "$vm" sudo -n /sbin/shutdown -h now ||
-    say "$vm: shutdown did not acknowledge; checking its end before the verified stop"
-  started=$SECONDS
-  while ((SECONDS - started < end_wait)); do
-    tart_ended "$vm" && break
-    sleep "$tick"
-  done
+  shutdown_guest "$vm"
   end_vm || die "$vm: first-run passed, but its stop is not verified"
 }
 

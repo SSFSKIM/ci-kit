@@ -313,9 +313,8 @@ print(os.path.join(runner, work))' "$vm_runner" "$runner_work") || fail 'cannot 
       xcrun swiftc -O -o "$HOME/ci-kit-helpers/.$helper.tmp" "$vm_shares/kit/hooks/$helper.swift"
       mv -f "$HOME/ci-kit-helpers/.$helper.tmp" "$HOME/ci-kit-helpers/$helper"
     done
-    # The bake's last step: the guest is stopped right after it. Every golden through 20261025 has missed window-list
-    # (ci-kit #181); in 20261025's, cursor-park is there and the directory is dated at its write, as if window-list's,
-    # seconds later, never reached the disk. So the writes are flushed before the step returns.
+    # The bake's last step. The bake then shuts the guest down, which writes its disk out (bake.sh, shutdown_guest);
+    # this covers a shutdown that does not answer and ends in the power-off that lost window-list (ci-kit #181).
     sync
     say "helpers in $HOME/ci-kit-helpers; display $("$HOME/ci-kit-helpers/cursor-park" --describe 2>/dev/null || echo unreadable)"
     ;;
