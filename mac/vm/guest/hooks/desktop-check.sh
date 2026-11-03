@@ -35,6 +35,11 @@ fi
 
 read_front
 read_windows
+# The image's window-list goes missing in every clone, though the bake compiles it beside cursor-park (ci-kit #181):
+# the line says who looked and what the helpers' directory holds.
+if [[ $windows_miss == 'window-list is missing' ]]; then
+  windows_miss+=" at $window_list, as $(id -un 2>&1) with HOME=$HOME: $(ls -la "${window_list%/*}" 2>&1 | tr '\n' ';')"
+fi
 [[ -z $windows_miss ]] || log "could not read the windows on screen ($windows_miss); a dialog is seen only in front"
 if is_dialog; then
   dialog_source || true
