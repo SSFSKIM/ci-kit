@@ -2,9 +2,14 @@
 """M4's collector for MAWS on GitHub's hosted Macs (2026-10-26-maws-hosted-mac-design.md, M4).
 
 Reads MAWS's gate runs and maws-app's hosted runs in a window, with their jobs (every attempt), and prints and writes
-as JSON: the Mac queue, with the mini's holds and the guest's off time beside it; the hosted share of e2e job-minutes
-and the hosted queue, each whole and split by run kind; and the waiters' minutes, cost and deadline reds. Python 3
-standard library, the caller's `gh` login, and `ssh` to the mini for its vm-lane.log (or a copy, --vm-lane-log).
+as JSON: the Mac queue, whole and by machine, with the mini's holds and the guest's off time beside it; the hosted share
+of e2e job-minutes and the hosted queue, each whole, split by run kind and by route; and the waiters' minutes, cost and
+deadline reds. Python 3 standard library, the caller's `gh` login, and `ssh` to the mini for its vm-lane.log (or a
+copy, --vm-lane-log).
+
+Hosted jobs take two routes. Through the mirror (HOSTED_MAC_ROUTE unset), a waiter in MAWS asks maws-app, whose `e2e`
+job runs the group. Direct (HOSTED_MAC_ROUTE=direct, from 2026-10-28 08:10Z), MAWS's own `e2e:<group>` job runs on
+GitHub's macOS image, with no waiter.
 
     measure.py --since 2026-10-19T00:00:00Z --until 2026-10-26T00:00:00Z [--json out.json]
 
@@ -31,6 +36,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 MAC_RUNNER_PREFIX = "ci-kit-mac-"  # the mini host, ci-kit-mac-mini, and its guest, ci-kit-mac-mini-maws-vm-job-*
+HOSTED_IMAGE = re.compile(r"^macos-\d")  # GitHub's hosted macOS images: macos-26, macos-15-xlarge
 DEADLINE_RED = "hosted: no result by"
 RUNS_SEARCH_CAP = 1000  # the runs API answers at most this many runs for one `created` query
 PER_PAGE = 100
@@ -81,6 +87,17 @@ def run_minutes(job):
 
 def is_mac(job):
     return (job.get("runner_name") or "").startswith(MAC_RUNNER_PREFIX)
+
+
+def mac_machine(job):
+    """The Mac a `ci-kit-mac-*` job ran on: `mini` or `ec2` (any instance), `mini guest` for the guest's clones."""
+    rest = job["runner_name"][len(MAC_RUNNER_PREFIX):]
+    return rest.split("-")[0] + (" guest" if "-maws-vm-" in rest else "")
+
+
+def is_hosted_direct(job):
+    """A hosted group on the direct route: MAWS's own `e2e:<group>` job on GitHub's macOS image."""
+    return job["name"].startswith("e2e:") and any(HOSTED_IMAGE.match(label) for label in job.get("labels") or [])
 
 
 def is_waiter(job, waiter_labels):
@@ -145,6 +162,8 @@ def measure(maws_jobs, app_jobs, deadline_red_ids, *, since, until, spot_rate, w
     maws = [j for j in maws_jobs if in_window(j, since, until) and ran(j)]
     app = [j for j in app_jobs if in_window(j, since, until) and ran(j) and is_app_e2e(j, app_job)]
     mac = [j for j in maws if is_mac(j)]
+    direct = [j for j in maws if is_hosted_direct(j)]
+    hosted = app + direct
     waiters = [j for j in maws if is_waiter(j, waiter_labels)]
 
     def of(jobs, kind):
@@ -153,10 +172,18 @@ def measure(maws_jobs, app_jobs, deadline_red_ids, *, since, until, spot_rate, w
     waiter_minutes = round(sum(run_minutes(j) for j in waiters), 2)
     return {
         "mac_queue": summarize([queue_minutes(j) for j in mac]),
-        "hosted_share": hosted_share(app, mac),
-        "hosted_share_by_kind": {k: hosted_share(of(app, k), of(mac, k)) for k in KINDS},
-        "hosted_queue": summarize([queue_minutes(j) for j in app]),
-        "hosted_queue_by_kind": {k: summarize([queue_minutes(j) for j in of(app, k)]) for k in KINDS},
+        "mac_by_machine": {m: {"queue": summarize([queue_minutes(j) for j in mac if mac_machine(j) == m]),
+                               "e2e_minutes": round(sum(run_minutes(j) for j in mac
+                                                        if mac_machine(j) == m and j["name"].startswith("e2e:")), 2)}
+                           for m in sorted({mac_machine(j) for j in mac})},
+        "hosted_share": hosted_share(hosted, mac),
+        "hosted_share_by_kind": {k: hosted_share(of(hosted, k), of(mac, k)) for k in KINDS},
+        "hosted_minutes_by_route": {"mirror": round(sum(run_minutes(j) for j in app), 2),
+                                    "direct": round(sum(run_minutes(j) for j in direct), 2)},
+        "hosted_queue": summarize([queue_minutes(j) for j in hosted]),
+        "hosted_queue_by_kind": {k: summarize([queue_minutes(j) for j in of(hosted, k)]) for k in KINDS},
+        "hosted_queue_by_route": {"mirror": summarize([queue_minutes(j) for j in app]),
+                                  "direct": summarize([queue_minutes(j) for j in direct])},
         "waiters": {"jobs": len(waiters), "minutes": waiter_minutes,
                     "cost_usd": round(waiter_minutes * spot_rate, 4), "spot_rate_usd_per_minute": spot_rate,
                     "deadline_reds": sum(1 for j in waiters if j["id"] in deadline_red_ids),
@@ -289,6 +316,7 @@ def render(out):
         return f"{pct} of e2e job-minutes (hosted {s['hosted_minutes']:.1f}, {MAC_RUNNER_PREFIX}* {s['mac_minutes']:.1f})"
 
     lines = [f"mac queue: {queue(out['mac_queue'])}"]
+    lines += [f"  {m}: {queue(v['queue'])}; e2e {mins(v['e2e_minutes'])}" for m, v in out["mac_by_machine"].items()]
     if "mini" in out:
         holds, guest = out["mini"]["holds"], out["mini"]["guest_off"]
         alerts = ", ".join(f"#{i['number']}" for i in holds["issues"]) or "none"
@@ -310,8 +338,10 @@ def render(out):
                          f"(not in guest off: a running guest outlives its controller's stop)")
     lines.append(f"hosted share: {share(out['hosted_share'])}")
     lines += [f"  {KIND_LABELS[k]}: {share(out['hosted_share_by_kind'][k])}" for k in KINDS]
+    lines += [f"  {route} route: hosted {mins(m)}" for route, m in out["hosted_minutes_by_route"].items()]
     lines.append(f"hosted queue: {queue(out['hosted_queue'])}")
     lines += [f"  {KIND_LABELS[k]}: {queue(out['hosted_queue_by_kind'][k])}" for k in KINDS]
+    lines += [f"  {route} route: {queue(q)}" for route, q in out["hosted_queue_by_route"].items()]
     w = out["waiters"]
     lines.append(
         f"waiters: {w['jobs']} jobs, {w['minutes']:.1f} min, ${w['cost_usd']:.2f} at ${w['spot_rate_usd_per_minute']}/min;"
