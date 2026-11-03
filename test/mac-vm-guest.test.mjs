@@ -566,6 +566,21 @@ test('the guest hooks refuse a display read that fails', () => {
   assert.match(run.stderr, /^ci-kit: the display of the guest mini-vm \(vm=vm clone=maws-vm-job-20261021-1\) could not be read, not at least 1600 pt wide at @2x — rerun$/m);
 });
 
+test('a missing window-list is logged with who looked and what its directory holds, and the job goes on', () => {
+  const vm = guest();
+  const helpers = join(vm.home, 'ci-kit-helpers');
+  const helper = join(helpers, 'window-list');
+  mkdirSync(helpers);
+  writeFileSync(join(helpers, 'cursor-park'), '');
+  const run = vm.hook('job-started.sh', { CI_KIT_WINDOW_LIST: helper });
+  assert.equal(run.status, 0, run.stderr);
+  const line = vm.hooksLog().split('\n').find((text) => text.includes('could not read the windows on screen'));
+  assert.ok(line, vm.hooksLog());
+  assert.ok(line.includes(`(window-list is missing at ${helper}, as `), line);
+  assert.ok(line.includes(` with HOME=${vm.home}: `), line);
+  assert.match(line, / cursor-park;.*\); a dialog is seen only in front$/);
+});
+
 test('the guest hooks refuse a system dialog, in front or on screen, with no episode, no alert and no gh', () => {
   for (const [setup, held] of [
     [(vm) => vm.front(asnShape('UserNotificationCenter', 'com.apple.UserNotificationCenter')), 'holds focus'],
