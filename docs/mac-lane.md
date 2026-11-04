@@ -1366,8 +1366,12 @@ A second machine runs a second exclusive runner with the base labels, so MAWS's 
 to whichever machine is idle. Do not give it `--home`: only the mini carries `ci-kit-mac-home`, which MAWS's measured,
 live and MAC_HOME_E2E e2e groups target (MAC_HOME_E2E: those needing what only the mini runs, such as ClaudeUsage's
 relay). An EC2 M1 (`mac2.metal`), `ci-kit-mac-ec2`, ran this way from 2026-10-26 to 10-27, then was released at the
-owner's call once hosted Macs took 31 of MAWS's e2e groups. Since 10-28, a `mac-m4.metal` in us-east-2c is back as the
-second exclusive Mac: `ci-kit-mac-ec2`, runner id 6951, reached as `ssh ec2-mac`.
+owner's call once hosted Macs took 31 of MAWS's e2e groups. A `mac-m4.metal` in us-east-2c was the second exclusive
+Mac from 10-28 to 11-04 (`ci-kit-mac-ec2`, runner id 6951, reached as `ssh ec2-mac`), taking the e2e groups MAWS's gate
+plan moved off a long hosted-Mac queue. It was released on the owner's rule once a full UTC day had fewer than 20 such
+jobs (11-03: 2). Since then the mini is MAWS's only self-hosted Mac, and MAWS's repo variable `MAC_EC2=off` makes the
+plan move nothing to EC2 and refuse a LAUNCHD_E2E group that would need it. A return restores the saved image (step
+3a) and deletes the variable: `gh variable delete MAC_EC2 -R SSFSKIM/MAWS`.
 
 Below, `<host>` is the MacBook's `ssh` host for it and `<name>` its short name, a lowercase word of letters, digits and
 `-`, not ending in `-<number>` (a shared runner's name does): the runner is `ci-kit-mac-<name>`, and its refusals and
@@ -1486,9 +1490,9 @@ This changes mounting policy, not FileVault, and answers no password dialog. A f
 volumes before continuing; a sudo password requirement goes to the owner. On an AMI restored onto another physical
 host, repeat this step: `/etc/fstab` in the image has the old host's UUIDs, which do not cover the new one's SSD.
 
-Only the EC2 Mac's exclusive runner carries `ci-kit-mac-ec2`; MAWS's
-[#322](https://github.com/SSFSKIM/MAWS/pull/322) (in review) targets `[self-hosted, macOS, ARM64, ci-kit-mac-ec2]` for
-hosted-eligible groups during hosted-queue peaks. An existing registration keeps its labels, so add this through the
+Only the EC2 Mac's exclusive runner carries `ci-kit-mac-ec2`; MAWS's gate plan (`.github/scripts/gate-plan.mjs`)
+targets `[self-hosted, macOS, ARM64, ci-kit-mac-ec2]` for hosted-eligible groups during hosted-queue peaks, unless
+`MAC_EC2` is off. An existing registration keeps its labels, so add this through the
 runner API, like `ci-kit-mac-home` above, not by registering again:
 
 ```bash
