@@ -98,6 +98,8 @@ request commit carries `MAWS-Source-Tree: <the tree of sha>`, and it ran on `mac
   ruled in after #172 (31 groups; the list's PR, MAWS #175, is with the architect).
 - [x] (2026-11-03 10:4xZ) M4: the collector and the before numbers (executor, 10-26); the after numbers by CI-opt,
   with the collector taught the direct route and the EC2 Mac first (b0d5c71); acceptance 9; Outcomes.
+- [x] (2026-11-04 10:3xZ) A week of the direct route: no red belongs to the route. maws-app retires in its own MAWS PR
+  after the move to Enterprise (Decision Log, 2026-11-04).
 
 ## Design
 
@@ -875,6 +877,41 @@ M3's wave, from a worktree of MAWS master:
   M4 first wrote it, the after window's hosted share would have left out 20,486.2 of its 23,121.0 hosted minutes. The
   EC2 Mac (`ci-kit-mac-ec2`, from 10-27) shares the Mac prefix, so the Mac queue stays whole for the comparison and is
   also given for the mini, its guest and the EC2 Mac. The before numbers stand: that window had neither.
+- 2026-11-04 (CI-opt, a week of the direct route): **no red belongs to the route, and the mirror retires after the
+  move to Enterprise, not now.** From the flip (2026-10-28 08:10:33Z) to 2026-11-04 10:30Z, the 1,653 gate runs held
+  4,611 hosted `macos-26` job executions (every attempt, skipped jobs left out): 4,006 succeeded, 480 were cancelled
+  and 125 failed.
+  - Every one of the 125 failures failed in the test step. 121 are in the daily flake ledger as named spec failures,
+    and the other 4 are `packaged` test failures read from their logs. Two of those 4 are the render-host defect that
+    MAWS #426 fixed (gate-offload Decision Log 158).
+  - No failure came from checkout, setup, the cache, an artifact download or a lost runner.
+  - Of the 480 cancelled jobs:
+    - 478 carry GitHub's "The run was canceled by" annotation or a concurrency cancel;
+    - one has no annotation and was cancelled before it got a runner;
+    - one carries a 45-minute timeout annotation, though it ran 5 min 21 s and its run was cancelled by hand that minute.
+  - 59 of the cancelled jobs show GitHub's notice that macOS arm64 jobs may queue longer under capacity constraints.
+    That is the hosted queue the Outcomes name, not a red.
+
+  Gate-offload Decision Logs 130 and 132 retire maws-app and its scan in their own PR after a week of green direct
+  runs, and that condition is now met. The owner's later ruling (2026-11-01) keeps maws-app as the fallback, used
+  when `HOSTED_MAC_ROUTE` is unset, until after the move to Enterprise. So the retirement PR follows the move, as the
+  move plan's "After" says.
+
+  It removes:
+  - the waiter (`hosted-mac.sh` and its test);
+  - `.github/maws-app/`;
+  - the filter (`maws-app-tree.sh` and its test);
+  - the scan (`maws-app-scan.sh` and its test);
+  - `hosted-build.mjs` and its test, which only maws-app's workflow runs;
+  - the route switch's mirror branch.
+
+  Two fixes for the waiter, planned for after the wave, are dropped, since only the mirror runs that code:
+  - building `main` from master when it is a day old: under gate-then-land the day-old refresh almost never fires,
+    because a request's commit is rarely on master yet (10-27; the architect's lean, 37052769:335);
+  - putting `-q` first on its credentialed compare `curl`, so a `.curlrc` can never trace the header (p5-desk-track-owner,
+    10-27; the call's stderr already goes to `/dev/null`, and the pool image has no `.curlrc`).
+
+  Both had been noted only on the unmerged branch `maws-hosted-mac-spec`, which this entry replaces.
 
 ## Surprises & Discoveries
 
