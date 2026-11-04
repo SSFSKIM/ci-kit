@@ -358,7 +358,7 @@ THROTTLE remaining=<n>       once, when the GitHub token's remaining REST budget
 ```
 
 The last line is `GREEN <run-url>` (exit 0), `RED <failed>/<total> <run-url>` (exit 1) or `ERROR <message>` (exit 2:
-a config error, no run within 2 minutes of the push, the API rate limit exhausted while looking for it, gh not logged
+a config error, no run within 5 minutes of the push, the API rate limit exhausted while looking for it, gh not logged
 in, a run that failed to start). Failed gates' logs are saved to `/tmp/ci-gate/<owner>-<repo>/<run-id>/<gate>.log`,
 with their artifacts beside them. The ref is deleted afterwards unless `--keep`, and only while it still points at
 this call's commit. Progress notes go to stderr.

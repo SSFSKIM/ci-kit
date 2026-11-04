@@ -154,7 +154,7 @@ function failure(e) {
 
 async function follow(gh, repo, commit, ref, onRun) {
   const pacer = createPacer(gh, out); // one per call: discovery and the watch say THROTTLE at most once between them
-  const found = await findRun({ gh, repo, commit, caller: CALLER, ref, pacer, now: Date.now, sleep });
+  const found = await findRun({ gh, repo, commit, caller: CALLER, ref, pacer, now: Date.now, sleep, note });
   if (found.error) return { line: `ERROR ${found.error}`, code: 2 };
   const { run } = found;
   onRun(run.id);

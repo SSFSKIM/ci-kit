@@ -2103,7 +2103,7 @@ ci-gate [<worktree-or-sha>] [--gates a,b] [--repo OWNER/NAME] [--label NAME] [--
 - Exit 0, 1 or 2 respectively.
 - Logs go to `/tmp/ci-gate/<owner>-<repo>/<run-id>/<gate>.log`, with artifacts beside them.
 - `ERROR` cases:
-  - no run appeared within 2 min of the push;
+  - no run appeared within 5 min of the push (2 min until 2026-11-04);
   - `gh` is not authenticated;
   - the planner failed (its message is printed).
 
