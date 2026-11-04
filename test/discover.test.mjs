@@ -14,6 +14,7 @@ function harness(script) {
   let i = 0;
   let stats = { remaining: null, reset: null };
   const lines = [];
+  const notes = [];
   const sleeps = [];
   const gh = {
     stats: () => stats,
@@ -34,8 +35,9 @@ function harness(script) {
     pacer: createPacer(gh, (l) => lines.push(l)),
     now: () => clock,
     sleep: async (ms) => { sleeps.push(ms); clock += ms; },
+    note: (l) => notes.push(l),
   };
-  return { opts, lines, sleeps, polls: () => i };
+  return { opts, lines, notes, sleeps, polls: () => i };
 }
 
 test('the run is found at the normal 5 s pace while the budget is healthy', async () => {
@@ -43,12 +45,21 @@ test('the run is found at the normal 5 s pace while the budget is healthy', asyn
   assert.deepEqual(await findRun(h.opts), { run: RUN });
   assert.deepEqual(h.sleeps, [5000, 5000]);
   assert.deepEqual(h.lines, []);
+  assert.deepEqual(h.notes, []);
+});
+
+test('a run GitHub creates minutes late is still found, with one note after the first minute', async () => {
+  const empty = Array.from({ length: 36 }, () => ({ runs: [], remaining: 4000 })); // 3 min of 5 s polls
+  const h = harness([...empty, { runs: [RUN], remaining: 4000 }]);
+  assert.deepEqual(await findRun(h.opts), { run: RUN });
+  assert.equal(h.polls(), 37);
+  assert.deepEqual(h.notes, ['no run of .github/workflows/ci.yml yet a minute after the push to ci/x-abc-123456; waiting up to 5 min']);
 });
 
 test('a low budget stretches discovery to 60 s, says THROTTLE once, and still finds the run', async () => {
   const h = harness([{ runs: [], remaining: 450 }, { runs: [], remaining: 440 }, { runs: [RUN], remaining: 430 }]);
   assert.deepEqual(await findRun(h.opts), { run: RUN });
-  assert.deepEqual(h.sleeps, [5000, 60_000, 55_000]); // the last poll lands on the 2-minute deadline
+  assert.deepEqual(h.sleeps, [5000, 60_000, 60_000]);
   assert.deepEqual(h.lines, ['THROTTLE remaining=450']);
 });
 
@@ -57,17 +68,18 @@ test('a 403 at zero remaining paces at 60 s and ends in an ERROR naming the rate
   const h = harness([{ error: 403, remaining: 0, reset }]);
   const r = await findRun(h.opts);
   assert.deepEqual(h.lines, ['THROTTLE remaining=0']);
-  assert.deepEqual(h.sleeps, [5000, 60_000, 55_000]); // the 2-minute deadline still holds
-  assert.equal(h.polls(), 3);
+  assert.deepEqual(h.sleeps, [5000, 60_000, 60_000, 60_000, 60_000, 55_000]); // the last poll lands on the 5-minute deadline
+  assert.equal(h.polls(), 6);
   assert.equal(r.run, undefined);
   assert.equal(r.error, 'the GitHub API rate limit is exhausted (remaining 0, resets 2026-10-16T01:01:24Z); could not look for the run of ci/x-abc-123456');
 });
 
-test('with a healthy budget, no run within 2 minutes is the plain "no run appeared" error', async () => {
+test('with a healthy budget, no run within 5 minutes is the plain "no run appeared" error', async () => {
   const h = harness([{ runs: [], remaining: 4000 }]);
   const r = await findRun(h.opts);
-  assert.equal(h.sleeps.reduce((a, b) => a + b, 0), 120_000);
-  assert.match(r.error, /^no run of \.github\/workflows\/ci\.yml appeared within 2 min of the push to ci\/x-abc-123456$/);
+  assert.equal(h.sleeps.reduce((a, b) => a + b, 0), 300_000);
+  assert.equal(h.notes.length, 1);
+  assert.match(r.error, /^no run of \.github\/workflows\/ci\.yml appeared within 5 min of the push to ci\/x-abc-123456$/);
 });
 
 test('one pacer says THROTTLE once across discovery and the watch', () => {
