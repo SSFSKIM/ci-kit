@@ -153,7 +153,19 @@ export async function applySetup({ root = process.env.GITHUB_WORKSPACE || proces
   const seconds = ((performance.now() - start) / 1000).toFixed(1);
   const count = (kind) => (kind === 'apt' ? platform === 'linux' : platform === 'darwin') ? unique(setup[kind]).length : 0;
   console.log(`ci-kit setup: declared apt ${count('apt')}, brew ${count('brew')}, cask ${count('cask')}, script ${setup.script ? 'yes' : 'no'}; installed ${installed.join(' ') || 'nothing'} in ${seconds} s`);
-  if (install && setup.install) await run('bash', ['-eo', 'pipefail', '-c', setup.install], 'setup.install', true);
+  // The install fetches (a registry, a release download), and those fail for a minute at a time: GitHub's release
+  // downloads answered 504 for Electron's zip in 3 of 18 hosted Mac jobs over 15 minutes (MAWS run 41995538110). So a
+  // failed install is retried once, after a pause; its output above names the first failure, and a second fails the step.
+  if (install && setup.install) {
+    const installing = () => run('bash', ['-eo', 'pipefail', '-c', setup.install], 'setup.install', true);
+    try { await installing(); }
+    catch {
+      const pause = Number(env.CI_KIT_SETUP_INSTALL_RETRY_S || 30);
+      annotation('warning', `ci-kit setup: setup.install failed; retrying it once in ${pause} s (its output above has the failure)`);
+      await new Promise((done) => setTimeout(done, pause * 1000));
+      await installing();
+    }
+  }
   return { hash, installed: installed.join(' '), stale, quarantined };
 }
 

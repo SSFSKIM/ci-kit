@@ -65,7 +65,7 @@ if (name === 'brew') {
 if (name === 'xattr') { code = (state.quarantined ?? []).includes(args.at(-1)) ? 0 : 1; out = code ? '' : '0081;test'; }
 process.stdout.write(out); process.stderr.write(err); process.exit(code);
 `;
-  const env = { ...process.env, FIXTURE: root, CI_KIT_SETUP_HASH: '', GITHUB_OUTPUT: '', CI: '', CI_KIT_SETUP_MODE: '', INPUT_ROOT: root, INPUT_INSTALL: 'false', INPUT_SKIP: '' };
+  const env = { ...process.env, FIXTURE: root, CI_KIT_SETUP_HASH: '', GITHUB_OUTPUT: '', CI: '', CI_KIT_SETUP_MODE: '', INPUT_ROOT: root, INPUT_INSTALL: 'false', INPUT_SKIP: '', CI_KIT_SETUP_INSTALL_RETRY_S: '0' };
   for (const [name, key] of Object.entries({ 'dpkg-query': 'DPKG_QUERY', 'apt-get': 'APT_GET', sudo: 'SUDO', brew: 'BREW', xattr: 'XATTR' })) {
     const path = join(root, name);
     writeFileSync(path, shim, { mode: 0o755 });
@@ -271,15 +271,27 @@ test('missing or failed scripts fail naming the script, before install', (t) => 
   assert.equal(existsSync(join(f.root, 'installed')), false);
 });
 
-test('install is opt-in and runs after the script; a failed install fails the step', (t) => {
-  const f = fixture(t, { script: 'setup.sh', install: 'test -f ready && printf "$CI_KIT_SETUP_MODE" > installed && exit 9' });
+test('install is opt-in and runs after the script; an install that fails twice fails the step', (t) => {
+  const f = fixture(t, { script: 'setup.sh', install: 'test -f ready && printf "$CI_KIT_SETUP_MODE" >> installed && exit 9' });
   f.script('touch ready');
   successful(f.run());
   assert.equal(existsSync(join(f.root, 'installed')), false);
   const r = f.run({ install: true, mode: 'bake' });
   assert.equal(r.status, 1);
   assert.match(r.stderr, /setup.install.*9/);
-  assert.equal(readFileSync(join(f.root, 'installed'), 'utf8'), 'bake');
+  assert.equal(readFileSync(join(f.root, 'installed'), 'utf8'), 'bakebake', 'tried twice');
+});
+
+test('a failed install is retried once after the pause, with a warning, and its second success passes the step', (t) => {
+  const f = fixture(t, { install: 'echo try >> tries; [ "$(wc -l < tries)" -gt 1 ] || { echo "HTTPError: Response code 504" >&2; exit 1; }', script: 'setup.sh' });
+  f.script('true');
+  const started = Date.now();
+  const r = f.run({ install: true }, { CI_KIT_SETUP_INSTALL_RETRY_S: '1' });
+  successful(r);
+  assert.ok(Date.now() - started >= 1000, 'it paused before the retry');
+  assert.equal(readFileSync(join(f.root, 'tries'), 'utf8'), 'try\ntry\n');
+  assert.match(r.stdout, /^::warning::ci-kit setup: setup.install failed; retrying it once in 1 s \(its output above has the failure\)$/m);
+  assert.match(r.stderr, /HTTPError: Response code 504/, 'the first failure streams as it happens');
 });
 
 test('the bake CLI uses the clone root, runs install after the script, and rejects unknown modes', (t) => {

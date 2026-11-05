@@ -209,7 +209,14 @@ jobs:
           CI_KIT_BASE: ${{ needs.plan.outputs.base }}
           CI_KIT_HEAD: ${{ github.sha }}
           CI_KIT_INSTALL: ${{ matrix.gate.setup.install }}
-        run: bash -eo pipefail -c "$CI_KIT_INSTALL"
+        # Retried once after 30 s, as the setup action retries it (setup/apply.mjs): an install's downloads fail for a
+        # minute at a time.
+        run: |
+          bash -eo pipefail -c "$CI_KIT_INSTALL" || {
+            echo "::warning::ci-kit: the install failed; retrying it once in 30 s (its output above has the failure)"
+            sleep 30
+            bash -eo pipefail -c "$CI_KIT_INSTALL"
+          }
 
       - name: Run ${{ matrix.gate.name }}
         env:
