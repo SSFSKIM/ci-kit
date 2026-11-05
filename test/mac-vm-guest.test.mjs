@@ -546,6 +546,27 @@ test('the guest hooks: a wide @2x desktop passes, Terminal in front, the posture
   assert.deepEqual(vm.ghCalls(), []);
 });
 
+test('the guest start names its busiest processes, at most six at 1 % or more, and a failed read is unknown, never a refusal', () => {
+  const busiest = [' 81.2 mds_stores', ' 40.0 Google Chrome Helper', ' 12.5 softwareupdated', ' 9.0 launchd', ' 3.1 runner', ' 1.0 cfprefsd', ' 1.0 syspolicyd', ' 0.4 Terminal'];
+  for (const [table, named] of [
+    [busiest, 'mds_stores 81.2%, Google Chrome Helper 40.0%, softwareupdated 12.5%, launchd 9.0%, runner 3.1%, cfprefsd 1.0%'],
+    [[' 0.9 WindowServer', ' 0.0 launchd'], 'none at 1% or more'],
+    [null, 'unknown'],
+  ]) {
+    const vm = guest();
+    // Only the busiest read is faked; the posture's own ps reads go to the system's.
+    const fakes = join(vm.home, 'fakes');
+    mkdirSync(fakes);
+    if (table) writeFileSync(join(fakes, 'table'), `${table.join('\n')}\n`);
+    executable(join(fakes, 'ps'), `if [[ $1 == -Arco ]]; then cat '${join(fakes, 'table')}' 2>/dev/null; exit; fi\nexec /bin/ps "$@"`);
+    const run = vm.hook('job-started.sh', { PATH: `${fakes}:${vm.env.PATH}` });
+    assert.equal(run.status, 0, run.stderr);
+    const line = `ci-kit guest cpu (start): run=18750 job=e2e ${named}`;
+    assert.ok(run.stdout.split('\n').some((text) => text.endsWith(` ${line}`)), run.stdout);
+    assert.ok(vm.hooksLog().includes(line), vm.hooksLog());
+  }
+});
+
 for (const [display, why] of [['1024x768@2x', 'is 1024x768@2x'], ['2560x1440@1x', 'is 2560x1440@1x'], ['1440x900@2x', 'is 1440x900@2x'], ['2560x1440@1.5x', 'is 2560x1440@1.5x'], ['unknown', 'could not be read']]) {
   test(`the guest hooks refuse a display that ${why}, in the lane's shape, and tell the launcher`, () => {
     const vm = guest({ display });
