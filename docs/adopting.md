@@ -133,8 +133,10 @@ After checkout (and any project Node/pnpm setup), call:
 ```
 
 Inputs: `root` defaults to the workspace; `install` defaults to `false`. With `true`, the declared install command
-runs after the script. The gates workflow uses the default because it keeps its own Install step, and skips the
-action altogether for an empty declaration or a gate with `setup: false`.
+runs after the script; a failed install is retried once, 30 s later, with a warning, and a second failure fails
+the step (an install's downloads fail for a minute at a time). The gates workflow uses the default because it keeps
+its own Install step, retried the same way, and skips the action altogether for an empty declaration or a gate with
+`setup: false`.
 
 `skip` (default empty) omits declared packages this job does not need, without changing the declaration or its hash:
 
@@ -208,7 +210,7 @@ queued job (`ci-gate` prints `WAIT` after 2 minutes). Inside the job, `nproc` re
 
 Each selected gate is one job, named after the gate. It checks out the tested commit (a PR's merge commit), applies
 `setup` (Node through `actions/setup-node`, `corepack enable` when `pnpm`, packages and the setup script, then
-`install`), exports the gate's `env`,
+`install`, retried once 30 s after a failure), exports the gate's `env`,
 and runs `run`. When the gate fails, its `artifacts` are uploaded as an artifact named after the gate.
 
 The checkout holds `setup.fetch_depth` commits of history: the tested commit alone by default, everything with `0`.
