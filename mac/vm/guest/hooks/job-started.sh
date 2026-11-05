@@ -32,7 +32,7 @@ vm_posture start
 # The busiest processes by ps's %CPU (a decaying average over up to the last minute), at most six at 1 % or more: what
 # keeps a fresh clone's load high as its job starts (#183). Fenced as cursor-park is.
 {
-  if table=$(perl -e 'alarm 5; exec @ARGV' ps -Arco pcpu=,comm= 2>/dev/null); then
+  if table=$(LC_ALL=C perl -e 'alarm 5; exec @ARGV' ps -Arco pcpu=,comm= 2>/dev/null); then
     busy=$(LC_ALL=C awk '
       { pcpu=$1; name=$0; sub(/^ *[0-9.]+ +/, "", name) }
       pcpu + 0 >= 1 && n < 6 { printf "%s%s %s%%", (n++ ? ", " : ""), name, pcpu }
