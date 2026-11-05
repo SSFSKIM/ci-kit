@@ -6,6 +6,7 @@
 #   refused job is known as one.
 # - The desktop check (desktop-check.sh): the display, a system dialog, Terminal in front; a refusal is the lane's.
 # - The cursor parked on the menu bar and the posture line, with the slot and the clone, as on the host.
+# - What is busy on the guest's CPU as the job starts: a clone's job begins inside its boot's load (#183).
 #
 # What the host's start does and this does not: no admission (the clone is the job's alone), no sweep (nothing ran
 # before it, and nothing it leaves outlives the clone), no alert and no gh (the guest holds no credential beyond the
@@ -28,3 +29,18 @@ if [[ -x $CI_KIT_CURSOR_PARK ]]; then
   } || true
 fi
 vm_posture start
+# The busiest processes by ps's %CPU (a decaying average over up to the last minute), at most six at 1 % or more: what
+# keeps a fresh clone's load high as its job starts (#183). Fenced as cursor-park is.
+{
+  if table=$(perl -e 'alarm 5; exec @ARGV' ps -Arco pcpu=,comm= 2>/dev/null); then
+    busy=$(LC_ALL=C awk '
+      { pcpu=$1; name=$0; sub(/^ *[0-9.]+ +/, "", name) }
+      pcpu + 0 >= 1 && n < 6 { printf "%s%s %s%%", (n++ ? ", " : ""), name, pcpu }
+      END { if (!n) printf "none at 1%% or more" }
+    ' <<<"$table")
+  else
+    busy=unknown
+  fi
+  mkdir -p "${vm_hooks_log%/*}"
+  echo "$(vm_now) ci-kit guest cpu (start): run=${GITHUB_RUN_ID:--} job=${GITHUB_JOB:--} $busy" | tee -a "$vm_hooks_log"
+} || true
