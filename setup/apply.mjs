@@ -96,9 +96,12 @@ export async function applySetup({ root = process.env.GITHUB_WORKSPACE || proces
     const missing = apt.filter((name) => !present.has(name));
     if (missing.length) {
       const sudo = bin('SUDO', 'sudo'), aptGet = bin('APT_GET', 'apt-get');
-      await run(sudo, ['-n', aptGet, 'update'], `apt update for ${missing.join(', ')}`, true);
+      // A slow mirror otherwise holds the job until its timeout: apt's own default waits on a stalled connection for
+      // minutes per file, and retries nothing (a hosted runner's azure.archive.ubuntu.com held two jobs 30 and 45 min).
+      const acquire = ['-o', 'Acquire::Retries=3', '-o', 'Acquire::http::Timeout=30', '-o', 'Acquire::https::Timeout=30'];
+      await run(sudo, ['-n', aptGet, 'update', ...acquire], `apt update for ${missing.join(', ')}`, true);
       // Set it after sudo, whose normal environment filtering drops DEBIAN_FRONTEND.
-      await run(sudo, ['-n', 'env', 'DEBIAN_FRONTEND=noninteractive', aptGet, 'install', '-y', '--no-install-recommends', ...missing], `apt install ${missing.join(', ')}`, true);
+      await run(sudo, ['-n', 'env', 'DEBIAN_FRONTEND=noninteractive', aptGet, 'install', ...acquire, '-y', '--no-install-recommends', ...missing], `apt install ${missing.join(', ')}`, true);
       installed.push(...missing.map((name) => `apt:${name}`));
     }
   }

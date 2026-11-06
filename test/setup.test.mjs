@@ -95,7 +95,7 @@ test('Linux checks once, ignores residual config, and installs only missing name
   const calls = f.calls();
   assert.equal(calls.filter((c) => c.name === 'dpkg-query').length, 1);
   assert.equal(calls.filter((c) => c.name === 'brew').length, 0);
-  assert.deepEqual(calls.filter((c) => c.name === 'apt-get').map((c) => c.args), [['update'], ['install', '-y', '--no-install-recommends', 'cowsay']]);
+  assert.deepEqual(calls.filter((c) => c.name === 'apt-get').map((c) => c.args), [['update', '-o', 'Acquire::Retries=3', '-o', 'Acquire::http::Timeout=30', '-o', 'Acquire::https::Timeout=30'], ['install', '-o', 'Acquire::Retries=3', '-o', 'Acquire::http::Timeout=30', '-o', 'Acquire::https::Timeout=30', '-y', '--no-install-recommends', 'cowsay']]);
   assert.equal(calls.find((c) => c.name === 'apt-get' && c.args[0] === 'install').frontend, 'noninteractive');
   assert.match(r.stdout, /ci-kit setup: declared apt 2, brew 0, cask 0, script no; installed apt:cowsay in [\d.]+ s/);
 });
@@ -125,7 +125,7 @@ test('Linux skips declared apt names and accepts skips declared for the other pl
   successful(r);
   assert.equal(r.result.installed, 'apt:cowsay');
   assert.deepEqual(f.calls().filter((c) => c.name === 'apt-get').map((c) => c.args), [
-    ['update'], ['install', '-y', '--no-install-recommends', 'cowsay'],
+    ['update', '-o', 'Acquire::Retries=3', '-o', 'Acquire::http::Timeout=30', '-o', 'Acquire::https::Timeout=30'], ['install', '-o', 'Acquire::Retries=3', '-o', 'Acquire::http::Timeout=30', '-o', 'Acquire::https::Timeout=30', '-y', '--no-install-recommends', 'cowsay'],
   ]);
 });
 
