@@ -183,6 +183,8 @@ jobs:
 
       - name: Apply CI environment
         if: join(matrix.gate.setup.apt, '') != '' || join(matrix.gate.setup.brew, '') != '' || join(matrix.gate.setup.cask, '') != '' || matrix.gate.setup.script != ''
+        # A bound of its own, so a stalled package mirror fails this step instead of spending the gate's whole timeout.
+        timeout-minutes: 20
         uses: SSFSKIM/ci-kit/setup@v1
 
       # build_cache: gha (docs/adopting.md, "Build cache"). The runner hands the cache service's token and URLs to JS
