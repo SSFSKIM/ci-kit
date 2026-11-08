@@ -13,6 +13,7 @@ after(() => rmSync(root, { recursive: true, force: true }));
 const python = spawnSync('python3', ['-I', '-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).stdout.trim();
 const hookFiles = ['job-started.sh', 'job-completed.sh', 'desktop-check.sh', 'desktop-posture.sh', 'dialog.sh', 'dialog-watch.sh', 'quiet.sh', 'runner-hold.sh', 'runner-state.py', 'sweep.mjs', 'strays.mjs', 'terminate.mjs', 'instances.sh', 'shared-hold.sh', 'desktop-lock.sh', 'vm-claim.sh'];
 const watchAgent = 'com.ssfskim.ci-kit.dialog-watch';
+const publishAgent = 'com.ssfskim.ci-kit.lane-publish';
 const runnerAgent = 'com.ssfskim.ci-kit.mac-runner';
 const macOnly = { skip: process.platform !== 'darwin' };
 
@@ -40,7 +41,7 @@ if [[ $1 == bootstrap && $3 == *${runnerAgent}*.plist ]]; then log=\${3##*/}; lo
   fake('plutil', 'exit 0');
   fake('pgrep', 'exit 1');
   fake('uname', 'if [[ $1 == -m ]]; then echo arm64; else echo Darwin; fi');
-  for (const name of ['node', 'corepack', 'git']) fake(name, 'echo fixture-tool');
+  for (const name of ['node', 'corepack', 'git', 'gh']) fake(name, 'echo fixture-tool');
   // Never download/register a runner or invoke any real compiler or desktop tool.
   fake('curl', 'echo "$*" >> "$HOME/curl.calls"\nexit 90');
   // FAIL_COMPILE names the helpers whose compile fails, leaving partial output behind as a failed compiler may.
@@ -173,7 +174,7 @@ test('a successful refresh replaces the full old set, including the compiled hel
   const result = f.run();
   assert.equal(result.status, 0, result.stderr);
   assertNewHooks(f);
-  assert.deepEqual(readdirSync(join(f.runner, 'ci-kit')), ['hooks']);
+  assert.deepEqual(readdirSync(join(f.runner, 'ci-kit')).sort(), ['hooks', 'lane-publish']);
 });
 
 test('a failed Swift compile warns and publishes complete hooks without that partial binary', macOnly, () => {
@@ -550,7 +551,7 @@ test('an uninstall timeout retains the busy agent, watcher and holds for a retry
   assert.deepEqual(f.snapshot(), before);
 });
 
-test('--uninstall unloads and removes both LaunchAgents and the marker, and keeps the registration and hooks', macOnly, () => {
+test('--uninstall unloads and removes all LaunchAgents and the marker, and keeps the registration and hooks', macOnly, () => {
   const f = fixture();
   assert.equal(f.run().status, 0);
   const marker = join(f.home, 'Library/Logs/ci-kit/runner-drained');
@@ -560,9 +561,9 @@ test('--uninstall unloads and removes both LaunchAgents and the marker, and keep
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /uninstalled: .* the registration and .* stay/);
   const domain = `gui/${uidOf()}`;
-  assert.deepEqual(calls(f).filter((call) => call.startsWith('bootout')), [`bootout ${domain}/${runnerAgent}`, `bootout ${domain}/${watchAgent}`]);
+  assert.deepEqual(calls(f).filter((call) => call.startsWith('bootout')), [`bootout ${domain}/${runnerAgent}`, `bootout ${domain}/${publishAgent}`, `bootout ${domain}/${watchAgent}`]);
   assert.ok(!calls(f).some((call) => call.startsWith('bootstrap')));
-  for (const agent of [watchAgent, runnerAgent]) assert.equal(existsSync(join(f.home, `Library/LaunchAgents/${agent}.plist`)), false);
+  for (const agent of [watchAgent, runnerAgent, publishAgent]) assert.equal(existsSync(join(f.home, `Library/LaunchAgents/${agent}.plist`)), false);
   assert.equal(existsSync(marker), false);
   assert.ok(existsSync(join(f.runner, '.runner')));
   assertNewHooks(f);
@@ -710,7 +711,7 @@ test('a job on a shared instance refuses a re-run and an uninstall; --uninstall 
   const result = f.run(undefined, ['--uninstall']);
   assert.equal(result.status, 0, result.stderr);
   const domain = `gui/${uidOf()}`;
-  assert.deepEqual(calls(f).filter((call) => call.startsWith('bootout')), [`bootout ${domain}/${runnerAgent}`, `bootout ${domain}/${sharedAgent(2)}`, `bootout ${domain}/${watchAgent}`]);
+  assert.deepEqual(calls(f).filter((call) => call.startsWith('bootout')), [`bootout ${domain}/${runnerAgent}`, `bootout ${domain}/${sharedAgent(2)}`, `bootout ${domain}/${publishAgent}`, `bootout ${domain}/${watchAgent}`]);
   for (const agent of [runnerAgent, sharedAgent(2)]) assert.equal(existsSync(join(f.home, `Library/LaunchAgents/${agent}.plist`)), false);
   assert.match(result.stdout, new RegExp(`uninstalled: ${watchAgent} and ${runnerAgent}, ${sharedAgent(2)} are unloaded and removed`));
   assert.ok(existsSync(join(dir, '.runner')));
@@ -1023,4 +1024,33 @@ test('--home composes with the VM solo label without giving either to shared ins
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(labelsOf(argsOf(f.runner)), ['self-hosted', 'macOS', 'ARM64', 'ci-kit-mac', 'ci-kit-mac-solo', 'ci-kit-mac-home']);
   assert.deepEqual(labelsOf(argsOf(shared)), ['ci-kit-mac-shared']);
+});
+
+test('lane publication is an independent minute agent, refreshed and removed with the install', macOnly, () => {
+  const f = fixture();
+  const label = publishAgent;
+  const path = join(f.home, `Library/LaunchAgents/${label}.plist`);
+  const result = f.run();
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.ok(existsSync(path), 'publisher LaunchAgent installed');
+  const parse = () => JSON.parse(spawnSync(python, ['-I', '-c', 'import plistlib,json,sys; print(json.dumps(plistlib.load(open(sys.argv[1],"rb"))))', path], { encoding: 'utf8' }).stdout);
+  const config = parse();
+  assert.equal(config.Label, label);
+  assert.equal(config.StartInterval, 60);
+  assert.equal(config.RunAtLoad, true);
+  assert.equal(config.EnvironmentVariables.CI_KIT_LANE_HELD_WINDOWS, '06:43-07:00');
+  assert.equal(config.ProgramArguments[0], '/usr/bin/env');
+  const installed = join(f.runner, 'ci-kit/lane-publish');
+  assert.deepEqual(config.ProgramArguments.slice(1), ['python3', '-I', join(installed, 'lane-publish.py')]);
+  for (const file of ['lane-publish.py', 'repo.sh', 'hooks/quiet.sh', 'vm/lane-reads.sh']) {
+    assert.equal(readFileSync(join(installed, file), 'utf8'), readFileSync(join(f.kit, 'mac', file), 'utf8'));
+  }
+  assert.match(readFileSync(join(f.home, 'launchctl.calls'), 'utf8'), new RegExp(`bootstrap .*${label}.plist`));
+  assert.equal(f.run(undefined, undefined, { CI_KIT_LANE_HELD_WINDOWS: '23:00-01:00' }).status, 0);
+  assert.equal(parse().EnvironmentVariables.CI_KIT_LANE_HELD_WINDOWS, '23:00-01:00');
+  assert.equal(f.run().status, 0);
+  assert.equal(parse().EnvironmentVariables.CI_KIT_LANE_HELD_WINDOWS, '23:00-01:00', 'reinstall preserves the setting');
+  assert.equal(f.run(undefined, ['--uninstall']).status, 0);
+  assert.equal(existsSync(path), false);
+  assert.match(readFileSync(join(f.home, 'launchctl.calls'), 'utf8'), new RegExp(`bootout .*${label}`));
 });

@@ -2,7 +2,8 @@
 # Installs the mac lane (I10, docs/mac-lane.md) on this Mac: GitHub Actions runners for SSFSKIM/MAWS, each run by a
 # LaunchAgent in the logged-in GUI session, with the job hooks that kill what a job left under its work directory; and
 # the dialog watcher, the LaunchAgent com.ssfskim.ci-kit.dialog-watch, which alerts on a system dialog on screen every
-# 60 s and keeps the runners stopped while one holds the desktop.
+# 60 s and keeps the runners stopped while one holds the desktop; and an independent minute publisher of
+# MAC_MINI_LANES, so planners can read the holds without reaching the Mac.
 #
 # The runners are the machine's instances:
 # - the exclusive instance, ~/actions-runner-maws, com.ssfskim.ci-kit.mac-runner, labelled self-hosted, macOS, ARM64 and
@@ -48,7 +49,7 @@
 # own copy, under its own directory), environment and LaunchAgent; it refuses while a job is running on any instance.
 # Before stopping each instance it checks again, waiting for two equal idle reads five seconds apart (or stopped).
 # After two hours it leaves that instance alone, finishes the other work, and exits nonzero naming what needs a retry.
-# The watcher runs in every mode: --disabled turns off the runners, not the alerts. Prerequisites are checked first
+# The watcher and lane publisher run in every mode: --disabled turns off the runners, not these agents. Prerequisites are checked first
 # and a gap stops the install: they are reported, never installed.
 #
 # --vm installs the VM lane (docs/mac-lane.md, the VM lane): the launcher's LaunchAgent com.ssfskim.ci-kit.vm-lane
@@ -73,10 +74,13 @@ RUNNER_VERSION=2.338.0
 RUNNER_SHA256=df4cebda25c86a886ed204e49fee63f5c2e7cec5f447b5c98440a826bbdf9df2
 AGENT=com.ssfskim.ci-kit.mac-runner
 WATCH_AGENT=com.ssfskim.ci-kit.dialog-watch
+PUBLISH_AGENT=com.ssfskim.ci-kit.lane-publish
 RUNNER_DIR=$HOME/actions-runner-maws
 LOG_DIR=$HOME/Library/Logs/ci-kit
 LAUNCH_AGENTS=$HOME/Library/LaunchAgents
 WATCH_PLIST=$LAUNCH_AGENTS/$WATCH_AGENT.plist
+PUBLISH_PLIST=$LAUNCH_AGENTS/$PUBLISH_AGENT.plist
+PUBLISH_DIR=$RUNNER_DIR/ci-kit/lane-publish
 # The watcher's hold on the runners (dialog-watch.sh): while it exists, each runner's agent waits instead of starting it.
 DRAIN_MARKER=$LOG_DIR/runner-drained
 # The exclusive job's hold on the shared instances (hooks/shared-hold.sh).
@@ -301,6 +305,8 @@ if [[ $mode == uninstall ]]; then
     rm -f "$VM_PLIST"
     lane=", and the VM lane's $VM_AGENT ($VM_HOME stays)"
   fi
+  unload "$PUBLISH_AGENT"
+  rm -f "$PUBLISH_PLIST"
   unload "$WATCH_AGENT"
   rm -f "$WATCH_PLIST" "$DRAIN_MARKER" "$SHARED_HOLD" "$LOG_DIR"/shared-running-*
   say "uninstalled: $WATCH_AGENT and $agents are unloaded and removed$lane; the registration and $roots stay (docs/mac-lane.md)"
@@ -341,6 +347,7 @@ probe corepack corepack --version
 probe 'Xcode command line tools (clang)' xcrun clang --version
 probe python3 python3 --version
 probe git git --version
+probe gh gh --version
 # The VM lane's launcher runs Tart from the PATH its LaunchAgent gives it: Tart's own directory, first.
 tart_dir=
 if ((vm == 1)); then
@@ -496,6 +503,16 @@ for ((n = 1; n <= last; n++)); do
     [[ -x $dir/$helper ]] || die "staged $helper not executable"
   done
 done
+# The publisher owns a small independent kit: no runtime dependency on this checkout or the optional VM install.
+publish_staged=$(mktemp -d "$RUNNER_DIR/ci-kit/.lane-publish.XXXXXX")
+staged+=("$publish_staged")
+mkdir -p "$publish_staged/hooks" "$publish_staged/vm"
+cp "$here/lane-publish.py" "$here/repo.sh" "$publish_staged/"
+cp "$here/hooks/quiet.sh" "$publish_staged/hooks/"
+cp "$here/vm/lane-reads.sh" "$publish_staged/vm/"
+for file in lane-publish.py repo.sh hooks/quiet.sh vm/lane-reads.sh; do
+  [[ -f $publish_staged/$file && -r $publish_staged/$file ]] || die "staged publisher missing or unreadable: $file"
+done
 # Two renames (old -> backup, staged -> hooks) leave a gap at the fixed paths in .env. Darwin's RENAME_SWAP
 # exchanges both directories in one operation, so a job starting now still finds a complete set at hooks/.
 # The VM lane's kit is staged and checked with them, and published only once its launcher is booted out (step 6).
@@ -526,6 +543,7 @@ if ((vm == 1)) || [[ -n $vm_before ]]; then vm_fence; fi
 for ((n = 1; n <= last; n++)); do
   swap_in "${staged[n - 1]}" "$(root_of "$n")/ci-kit/hooks"
 done
+swap_in "$publish_staged" "$PUBLISH_DIR"
 # After an exchange staging holds the old set; after a first install it no longer exists.
 cleanup
 staged=() tmp=
@@ -561,6 +579,30 @@ unload "$WATCH_AGENT"
 launchctl enable "$domain/$WATCH_AGENT"
 launchctl bootstrap "$domain" "$WATCH_PLIST"
 say "the dialog watcher $WATCH_AGENT runs"
+# Preserve the fixed-window setting on refresh; an explicit installer environment overrides it (empty disables it).
+python3 -I - "$here/$PUBLISH_AGENT.plist" "$PUBLISH_PLIST" "$PUBLISH_DIR" "$LOG_DIR" "$RUNNER_PATH" <<'PYPLIST'
+import os
+import plistlib
+import sys
+from pathlib import Path
+source, target, kit, logs, path = sys.argv[1:]
+config = plistlib.loads(Path(source).read_bytes())
+env = config["EnvironmentVariables"]
+key = "CI_KIT_LANE_HELD_WINDOWS"
+if os.path.exists(target):
+    previous = plistlib.loads(Path(target).read_bytes())
+    env[key] = previous.get("EnvironmentVariables", {}).get(key, env[key])
+env[key] = os.environ.get(key, env[key])
+env["PATH"] = path
+config["ProgramArguments"][-1] = str(Path(kit) / "lane-publish.py")
+config["StandardErrorPath"] = str(Path(logs) / "lane-publish.log")
+Path(target).write_bytes(plistlib.dumps(config))
+PYPLIST
+plutil -lint -s "$PUBLISH_PLIST"
+unload "$PUBLISH_AGENT"
+launchctl enable "$domain/$PUBLISH_AGENT"
+launchctl bootstrap "$domain" "$PUBLISH_PLIST"
+say "the lane publisher $PUBLISH_AGENT runs (MAC_MINI_LANES; $LOG_DIR/lane-publish.log)"
 # The VM lane, its launcher booted out (step 5): the kit published, the slots made, and its LaunchAgent reloaded as
 # launchd had it; or, with --no-vm, its LaunchAgent removed. Finish before the host-runner waits: the lane
 # needs the published hooks and environment, not reloaded listeners, and VM-safe host jobs must not hold it off.

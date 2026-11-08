@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Independent of the dialog watcher: slow GitHub calls never delay a drain or a runner. -->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.ssfskim.ci-kit.lane-publish</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>/usr/bin/env</string>
+      <string>python3</string>
+      <string>-I</string>
+      <string>__PUBLISH_DIR__/lane-publish.py</string>
+    </array>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>PATH</key>
+      <string>__PATH__</string>
+      <key>LANG</key>
+      <string>en_US.UTF-8</string>
+      <key>CI_KIT_LANE_HELD_WINDOWS</key>
+      <string>06:43-07:00</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/dev/null</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/lane-publish.log</string>
+  </dict>
+</plist>
