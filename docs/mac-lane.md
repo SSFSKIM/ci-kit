@@ -537,16 +537,23 @@ held() {
 
 ## Publishing lane availability
 
-`mac/install.sh` also installs `com.ssfskim.ci-kit.lane-publish`, a separate LaunchAgent that samples every
-60 seconds, even with `--disabled`. It publishes the repository variable `MAC_MINI_LANES` using the Mac user's
+`mac/install.sh --publish-lanes` opts the mini into `com.ssfskim.ci-kit.lane-publish`, a separate LaunchAgent
+that samples every 60 seconds. Other Macs must not opt in: they would overwrite the same repository variable.
+The exclusive runner's `.env` remembers the opt-in across refreshes. `--disabled` unloads and disables the publisher
+without forgetting that setting. Its LaunchAgent carries the expected `CI_KIT_MACHINE`; before writing, the
+publisher verifies it matches the opted-in exclusive runner's `.env`, so a plist copied to another Mac cannot write.
+It publishes the repository variable `MAC_MINI_LANES` using the Mac user's
 own `gh` login; the repository is resolved by `mac/repo.sh` from the exclusive runner's `.env`. The Mac needs
 `gh` authenticated with repository-variable write access (the mini's SSFSKIM login has `repo` scope), plus the
-Python 3 and Bash already required by the installer. Re-run `<kit>/mac/install.sh` to install or refresh it;
-`--uninstall` removes its agent. No publisher call runs inside the watcher or runners.
+Python 3 and Bash already required by the installer. Run `<kit>/mac/install.sh --publish-lanes` on the mini once;
+ordinary refreshes then keep it, and `--uninstall` removes its agent. Publication installs only after the VM and host
+runners are restored. Its installation failures warn without failing the completed runner restoration; retry the
+same command. No publisher call runs inside the watcher or runners.
 
 The value is `{"v":1,"at":"2026-11-08T12:00:00Z","host":"free","vm":"held","why":"VM launcher not running"}`.
-`at` is UTC to the second. A verdict change publishes on the next sample; otherwise the timestamp refreshes at
-least every 120 seconds while publishing succeeds. Consumers treat an absent, invalid, or older-than-five-minute
+`at` is UTC to the second. A verdict change publishes on the next sample; an unchanged verdict publishes once
+the last successful value is at least 60 seconds old. This leaves room for minute-sampler phase drift while keeping
+successful heartbeat gaps to about 120 seconds at most. Consumers treat an absent, invalid, or older-than-five-minute
 value as held. `host` and `vm` are independent admission verdicts, not busyness: a solo placement needs both free,
 and a busy host is still free if nothing holds it. The planner counts jobs separately.
 
@@ -564,7 +571,8 @@ comma/space-separated `HH:MM-HH:MM`, start inclusive, end exclusive, wrapping mi
 disables fixed windows. Invalid settings fail closed. Quiet-file and pause-window evaluation reuse the existing
 Bash readers, not a second interpretation of their formats.
 
-Verdict reads have a 20-second overall bound; each GitHub request has 15 seconds. PATCH creates the variable with
+Verdict reads have a 20-second overall bound that kills the whole read process group, including nested readers;
+each GitHub request has 15 seconds. PATCH creates the variable with
 POST only on HTTP 404. Publishing failures are logged and retried next pass; a prolonged outage becomes a stale
 held value at the consumer. `~/Library/Logs/ci-kit/lane-publish.log` records verdict changes and publishing failures,
 not unchanged successful passes. `lane-publish-state.json` beside it keeps the last observed verdict and the last

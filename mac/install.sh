@@ -3,7 +3,7 @@
 # LaunchAgent in the logged-in GUI session, with the job hooks that kill what a job left under its work directory; and
 # the dialog watcher, the LaunchAgent com.ssfskim.ci-kit.dialog-watch, which alerts on a system dialog on screen every
 # 60 s and keeps the runners stopped while one holds the desktop; and an independent minute publisher of
-# MAC_MINI_LANES, so planners can read the holds without reaching the Mac.
+# MAC_MINI_LANES when --publish-lanes opts this Mac in, so planners can read holds without reaching it.
 #
 # The runners are the machine's instances:
 # - the exclusive instance, ~/actions-runner-maws, com.ssfskim.ci-kit.mac-runner, labelled self-hosted, macOS, ARM64 and
@@ -20,6 +20,7 @@
 #   ssh <mac> <kit>/mac/install.sh --shared 2    two shared instances (a token on stdin registers new ones)
 #   ssh <mac> <kit>/mac/install.sh --vm          the VM lane's launcher as well (installed disabled), or --no-vm to remove it
 #   ssh <mac> <kit>/mac/install.sh --display 2560x1440@2x  require this main display before jobs (kept on re-runs)
+#   ssh mini <kit>/mac/install.sh --publish-lanes  publish MAC_MINI_LANES (remembered; opt in on the mini only)
 #   ssh mini <kit>/mac/install.sh --home        the exclusive home-desktop label (mini only; kept on re-runs)
 #   ssh <mac> <kit>/mac/install.sh --check       the prerequisites only
 #   ssh <mac> <kit>/mac/install.sh --disabled    install, but leave every runner's LaunchAgent unloaded and disabled
@@ -49,7 +50,7 @@
 # own copy, under its own directory), environment and LaunchAgent; it refuses while a job is running on any instance.
 # Before stopping each instance it checks again, waiting for two equal idle reads five seconds apart (or stopped).
 # After two hours it leaves that instance alone, finishes the other work, and exits nonzero naming what needs a retry.
-# The watcher and lane publisher run in every mode: --disabled turns off the runners, not these agents. Prerequisites are checked first
+# The watcher runs in every mode; --disabled turns off the runners and the optional lane publisher. Prerequisites are checked first
 # and a gap stops the install: they are reported, never installed.
 #
 # --vm installs the VM lane (docs/mac-lane.md, the VM lane): the launcher's LaunchAgent com.ssfskim.ci-kit.vm-lane
@@ -267,6 +268,7 @@ vm=
 display=
 display_given=
 home=
+publish_lanes=
 while (($# > 0)); do
   case $1 in
     --check) mode=check ;;
@@ -276,6 +278,7 @@ while (($# > 0)); do
     --shared) (($# > 1)) || usage; shared=$2; shift ;;
     --display) (($# > 1)) || usage; display=$2; display_given=1; shift ;;
     --home) home=1 ;;
+    --publish-lanes) publish_lanes=1 ;;
     --vm) vm=1 ;;
     --no-vm) vm=0 ;;
     *) usage ;;
@@ -287,7 +290,7 @@ done
 [[ -z $shared || $shared =~ ^[0-8]$ ]] || die "--shared takes a count of shared instances, 0 to 8 (got '$shared')"
 
 if [[ $mode == uninstall ]]; then
-  [[ -z $name && -z $shared && -z $vm && -z $display_given && -z $home ]] || usage
+  [[ -z $name && -z $shared && -z $vm && -z $display_given && -z $home && -z $publish_lanes ]] || usage
   if running=$(job_running); then refuse_job "$running"; fi
   if vm_installed; then vm_refusals; fi
   agents='' roots=''
@@ -323,6 +326,7 @@ if [[ -f $RUNNER_DIR/.env ]]; then
     case $key in
       CI_KIT_DISPLAY) [[ -n $display_given ]] || display=$value ;;
       CI_KIT_HOME) [[ $value != 1 ]] || home=1 ;;
+      CI_KIT_PUBLISH_LANES) [[ $value != 1 ]] || publish_lanes=1 ;;
     esac
   done <"$RUNNER_DIR/.env"
 fi
@@ -347,7 +351,6 @@ probe corepack corepack --version
 probe 'Xcode command line tools (clang)' xcrun clang --version
 probe python3 python3 --version
 probe git git --version
-probe gh gh --version
 # The VM lane's launcher runs Tart from the PATH its LaunchAgent gives it: Tart's own directory, first.
 tart_dir=
 if ((vm == 1)); then
@@ -503,16 +506,6 @@ for ((n = 1; n <= last; n++)); do
     [[ -x $dir/$helper ]] || die "staged $helper not executable"
   done
 done
-# The publisher owns a small independent kit: no runtime dependency on this checkout or the optional VM install.
-publish_staged=$(mktemp -d "$RUNNER_DIR/ci-kit/.lane-publish.XXXXXX")
-staged+=("$publish_staged")
-mkdir -p "$publish_staged/hooks" "$publish_staged/vm"
-cp "$here/lane-publish.py" "$here/repo.sh" "$publish_staged/"
-cp "$here/hooks/quiet.sh" "$publish_staged/hooks/"
-cp "$here/vm/lane-reads.sh" "$publish_staged/vm/"
-for file in lane-publish.py repo.sh hooks/quiet.sh vm/lane-reads.sh; do
-  [[ -f $publish_staged/$file && -r $publish_staged/$file ]] || die "staged publisher missing or unreadable: $file"
-done
 # Two renames (old -> backup, staged -> hooks) leave a gap at the fixed paths in .env. Darwin's RENAME_SWAP
 # exchanges both directories in one operation, so a job starting now still finds a complete set at hooks/.
 # The VM lane's kit is staged and checked with them, and published only once its launcher is booted out (step 6).
@@ -543,7 +536,6 @@ if ((vm == 1)) || [[ -n $vm_before ]]; then vm_fence; fi
 for ((n = 1; n <= last; n++)); do
   swap_in "${staged[n - 1]}" "$(root_of "$n")/ci-kit/hooks"
 done
-swap_in "$publish_staged" "$PUBLISH_DIR"
 # After an exchange staging holds the old set; after a first install it no longer exists.
 cleanup
 staged=() tmp=
@@ -557,6 +549,7 @@ for ((n = 1; n <= last; n++)); do
     ((n != 1)) || echo "CI_KIT_VM_REPO=$repo"
     [[ -z $display ]] || echo "CI_KIT_DISPLAY=$display"
     [[ -z $home || $n != 1 ]] || echo CI_KIT_HOME=1
+    [[ -z $publish_lanes || $n != 1 ]] || echo CI_KIT_PUBLISH_LANES=1
     ((n == 1)) || echo CI_KIT_SHARED_DESKTOP=1
     ((vm == 0)) || echo "CI_KIT_VM_RESERVATION=$VM_RESERVED"
   } >"$root/.env"
@@ -579,30 +572,6 @@ unload "$WATCH_AGENT"
 launchctl enable "$domain/$WATCH_AGENT"
 launchctl bootstrap "$domain" "$WATCH_PLIST"
 say "the dialog watcher $WATCH_AGENT runs"
-# Preserve the fixed-window setting on refresh; an explicit installer environment overrides it (empty disables it).
-python3 -I - "$here/$PUBLISH_AGENT.plist" "$PUBLISH_PLIST" "$PUBLISH_DIR" "$LOG_DIR" "$RUNNER_PATH" <<'PYPLIST'
-import os
-import plistlib
-import sys
-from pathlib import Path
-source, target, kit, logs, path = sys.argv[1:]
-config = plistlib.loads(Path(source).read_bytes())
-env = config["EnvironmentVariables"]
-key = "CI_KIT_LANE_HELD_WINDOWS"
-if os.path.exists(target):
-    previous = plistlib.loads(Path(target).read_bytes())
-    env[key] = previous.get("EnvironmentVariables", {}).get(key, env[key])
-env[key] = os.environ.get(key, env[key])
-env["PATH"] = path
-config["ProgramArguments"][-1] = str(Path(kit) / "lane-publish.py")
-config["StandardErrorPath"] = str(Path(logs) / "lane-publish.log")
-Path(target).write_bytes(plistlib.dumps(config))
-PYPLIST
-plutil -lint -s "$PUBLISH_PLIST"
-unload "$PUBLISH_AGENT"
-launchctl enable "$domain/$PUBLISH_AGENT"
-launchctl bootstrap "$domain" "$PUBLISH_PLIST"
-say "the lane publisher $PUBLISH_AGENT runs (MAC_MINI_LANES; $LOG_DIR/lane-publish.log)"
 # The VM lane, its launcher booted out (step 5): the kit published, the slots made, and its LaunchAgent reloaded as
 # launchd had it; or, with --no-vm, its LaunchAgent removed. Finish before the host-runner waits: the lane
 # needs the published hooks and environment, not reloaded listeners, and VM-safe host jobs must not hold it off.
@@ -692,3 +661,64 @@ for ((n = 1; n <= last; n++)); do
   die "$(title_of "$n") did not report 'Listening for Jobs' within 30 s; see $out_log and $(root_of "$n")/_diag"
 done
 ((${#pending[@]} == 0)) || die "restart/removal pending for ${pending[*]}; files published and other agents finished; re-run when idle"
+
+# Optional publication is last: failure cannot interrupt VM/host restoration. Run
+# with errexit in a subshell, outside an `if` (which would suppress errexit inside).
+set +e
+(
+set -e
+unload "$PUBLISH_AGENT"
+if [[ -z $publish_lanes ]]; then
+  if [[ -f $PUBLISH_PLIST ]]; then
+    launchctl disable "$domain/$PUBLISH_AGENT"
+    rm -f "$PUBLISH_PLIST"
+  fi
+  exit 0
+fi
+launchctl disable "$domain/$PUBLISH_AGENT"
+PATH=$RUNNER_PATH gh --version >/dev/null
+# The publisher owns a small independent kit: no runtime dependency on this checkout or the optional VM install.
+publish_staged=$(mktemp -d "$RUNNER_DIR/ci-kit/.lane-publish.XXXXXX")
+trap 'rm -rf "$publish_staged"' EXIT
+mkdir -p "$publish_staged/hooks" "$publish_staged/vm"
+cp "$here/lane-publish.py" "$here/repo.sh" "$publish_staged/"
+cp "$here/hooks/quiet.sh" "$publish_staged/hooks/"
+cp "$here/vm/lane-reads.sh" "$publish_staged/vm/"
+for file in lane-publish.py repo.sh hooks/quiet.sh vm/lane-reads.sh; do
+  [[ -f $publish_staged/$file && -r $publish_staged/$file ]] || die "staged publisher missing or unreadable: $file"
+done
+swap_in "$publish_staged" "$PUBLISH_DIR"
+# Preserve the fixed-window setting on refresh; an explicit installer environment overrides it (empty disables it).
+python3 -I - "$here/$PUBLISH_AGENT.plist" "$PUBLISH_PLIST" "$PUBLISH_DIR" "$LOG_DIR" "$RUNNER_PATH" "$machine" <<'PYPLIST'
+import os
+import plistlib
+import sys
+from pathlib import Path
+source, target, kit, logs, path, machine = sys.argv[1:]
+config = plistlib.loads(Path(source).read_bytes())
+env = config["EnvironmentVariables"]
+key = "CI_KIT_LANE_HELD_WINDOWS"
+if os.path.exists(target):
+    previous = plistlib.loads(Path(target).read_bytes())
+    env[key] = previous.get("EnvironmentVariables", {}).get(key, env[key])
+env[key] = os.environ.get(key, env[key])
+env["PATH"] = path
+env["CI_KIT_MACHINE"] = machine
+config["ProgramArguments"][-1] = str(Path(kit) / "lane-publish.py")
+config["StandardErrorPath"] = str(Path(logs) / "lane-publish.log")
+Path(target).write_bytes(plistlib.dumps(config))
+PYPLIST
+plutil -lint -s "$PUBLISH_PLIST"
+if [[ $mode == disabled ]]; then
+  say "installed, disabled: the lane publisher $PUBLISH_AGENT is not loaded"
+else
+  launchctl enable "$domain/$PUBLISH_AGENT"
+  launchctl bootstrap "$domain" "$PUBLISH_PLIST"
+  say "the lane publisher $PUBLISH_AGENT runs (MAC_MINI_LANES; $LOG_DIR/lane-publish.log)"
+fi
+)
+publish_status=$?
+set -e
+if ((publish_status != 0)); then
+  say "warning: lane publisher installation failed (status $publish_status); runners restored; re-run --publish-lanes to retry"
+fi

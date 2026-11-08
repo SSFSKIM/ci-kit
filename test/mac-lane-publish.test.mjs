@@ -13,6 +13,9 @@ const driver = `import importlib.util,sys,json,datetime
 s=importlib.util.spec_from_file_location('publisher',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m)
 now=datetime.datetime.fromisoformat(sys.argv[3].replace('Z','+00:00'))
 if sys.argv[2]=='verdict': print(json.dumps(m.verdict(m.Path.home(),now)))
+elif sys.argv[2]=='deadline':
+ try: m.command([sys.executable,'-I',sys.argv[1],'--verdict',sys.argv[3]],timeout=1)
+ except RuntimeError as e: print(e)
 else: m.main(now)
 `;
 function fixture() {
@@ -23,7 +26,7 @@ function fixture() {
   const fake = (name, body) => { put(`bin/${name}`, `#!/bin/bash\n${body}\n`); chmodSync(join(bin, name), 0o755); };
   const plist = (env = {}) => put('Library/LaunchAgents/com.ssfskim.ci-kit.vm-lane.plist', `<?xml version="1.0"?><plist version="1.0"><dict><key>EnvironmentVariables</key><dict>${Object.entries(env).map(([k,v]) => `<key>${k}</key><string>${v}</string>`).join('')}</dict></dict></plist>`);
   plist();
-  put('actions-runner-maws/.env', 'CI_KIT_VM_REPO=example/project\n');
+  put('actions-runner-maws/.env', 'CI_KIT_VM_REPO=example/project\nCI_KIT_MACHINE=mini\nCI_KIT_PUBLISH_LANES=1\n');
   fake('launchctl', `if [[ $2 == *mac-runner ]]; then [[ "$HOST_STATE" != missing ]] || exit 113; echo 'state = waiting'; else [[ "$VM_STATE" != missing ]] || exit 113; [[ "$VM_STATE" == stopped ]] || echo 'pid = 123'; fi`);
   fake('gh', `printf '%s\\n' "$*" >> "$HOME/gh.calls"
 [[ -z \${GH_TOKEN:-} && -z \${GITHUB_TOKEN:-} ]] || exit 91
@@ -32,7 +35,7 @@ if [[ \${GH_MODE:-} == missing && " $* " == *' PATCH '* ]]; then echo 'gh: Not F
 for arg in "$@"; do [[ $arg != value=* ]] || printf '%s' "\${arg#value=}" > "$HOME/value.json"; done`);
   const run = (action = 'verdict', at = '2026-11-08T12:00:00Z', env = {}) => {
     const r = spawnSync('python3', ['-I', '-c', driver, join(kit, 'lane-publish.py'), action, at], {
-      encoding: 'utf8', timeout: 40_000, env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, ...env },
+      encoding: 'utf8', timeout: 40_000, env: { ...process.env, HOME: home, CI_KIT_MACHINE: 'mini', PATH: `${bin}:${process.env.PATH}`, ...env },
     });
     assert.equal(r.status, 0, r.stderr || r.error?.message);
     return action === 'verdict' ? JSON.parse(r.stdout) : r;
@@ -114,13 +117,13 @@ test('script errors fail closed and every concurrent reason survives', () => {
   f.put('Library/Logs/ci-kit/runner-drained', 'dialog');
   const v = f.run(); held(v, 'held', 'held', /quiet/); assert.match(v.why, /owner/); assert.match(v.why, /drain/);
 });
-test('publishes change immediately and unchanged state at 120 seconds, with own login and repo', () => {
+test('publishes changes immediately and refreshes a minute-old state, with own login and repo', () => {
   const f = fixture(); f.run('publish', undefined, { GH_TOKEN: 'wrong', GITHUB_TOKEN: 'wrong' });
   assert.equal(f.calls().length, 1); assert.match(f.calls()[0], /PATCH repos\/example\/project\/actions\/variables\/MAC_MINI_LANES/);
   assert.deepEqual(f.published(), { v: 1, at: '2026-11-08T12:00:00Z', host: 'free', vm: 'free', why: '' });
-  f.run('publish', '2026-11-08T12:01:59Z'); assert.equal(f.calls().length, 1);
-  f.run('publish', '2026-11-08T12:02:00Z'); assert.equal(f.calls().length, 2);
-  f.put('Library/Logs/ci-kit/runner-drained', 'dialog'); f.run('publish', '2026-11-08T12:02:01Z'); assert.equal(f.calls().length, 3);
+  f.run('publish', '2026-11-08T12:00:59Z'); assert.equal(f.calls().length, 1);
+  f.run('publish', '2026-11-08T12:01:00Z'); assert.equal(f.calls().length, 2);
+  f.put('Library/Logs/ci-kit/runner-drained', 'dialog'); f.run('publish', '2026-11-08T12:01:01Z'); assert.equal(f.calls().length, 3);
   assert.equal(f.published().host, 'held');
   assert.equal(readFileSync(join(f.home, 'Library/Logs/ci-kit/lane-publish.log'), 'utf8').trim().split('\n').length, 2);
 });
@@ -161,4 +164,33 @@ test('a slow shared reader fails closed and a slow gh call is bounded and retrie
   assert.match(readFileSync(join(g.home, 'Library/Logs/ci-kit/lane-publish.log'), 'utf8'), /publish failed.*timed out/);
   g.fake('gh', 'for arg in "$@"; do [[ $arg != value=* ]] || printf "%s" "${arg#value=}" > "$HOME/value.json"; done');
   g.run('publish', '2026-11-08T12:01:00Z'); assert.equal(g.published().host, 'free');
+});
+
+test('a copied publisher identity or absent opt-in cannot write the variable', () => {
+  for (const contents of ['CI_KIT_MACHINE=rental\nCI_KIT_PUBLISH_LANES=1\n', 'CI_KIT_MACHINE=mini\n']) {
+    const f = fixture(); f.put('actions-runner-maws/.env', `CI_KIT_VM_REPO=example/project\n${contents}`);
+    f.run('publish', undefined, { CI_KIT_MACHINE: 'mini' });
+    assert.equal(f.calls().length, 0, 'refuse writes from a copied identity or an unconfigured host');
+    assert.match(readFileSync(join(f.home, 'Library/Logs/ci-kit/lane-publish.log'), 'utf8'), /refus/);
+  }
+});
+test('minute sampling with clock phase drift refreshes before the heartbeat can approach 180 seconds', () => {
+  const f = fixture();
+  for (const [at, count] of [['12:00:01', 1], ['12:01:00', 1], ['12:02:00', 2], ['12:03:00', 3]]) {
+    f.run('publish', `2026-11-08T${at}Z`); assert.equal(f.calls().length, count, at);
+  }
+});
+test('the overall deadline kills a hung nested reader and its child', () => {
+  const f = fixture(); f.put('.local/state/ci-quiet', '11:00Z 13:00Z hung');
+  writeFileSync(join(f.kit, 'hooks/quiet.sh'), 'echo $$ > "$HOME/nested.pid"\nsleep 60 &\necho $! > "$HOME/leaf.pid"\nwait\n');
+  f.run('deadline');
+  const pids = ['nested.pid', 'leaf.pid'].map(file => Number(readFileSync(join(f.home, file), 'utf8').trim()));
+  try {
+    for (const pid of pids) {
+      const status = spawnSync('ps', ['-p', String(pid), '-o', 'stat='], { encoding: 'utf8' });
+      assert.ok(status.status !== 0 || /^Z/.test(status.stdout.trim()), `reader descendant ${pid} still alive: ${status.stdout}`);
+    }
+  } finally {
+    for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+  }
 });

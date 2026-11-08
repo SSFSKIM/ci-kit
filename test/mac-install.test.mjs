@@ -174,7 +174,7 @@ test('a successful refresh replaces the full old set, including the compiled hel
   const result = f.run();
   assert.equal(result.status, 0, result.stderr);
   assertNewHooks(f);
-  assert.deepEqual(readdirSync(join(f.runner, 'ci-kit')).sort(), ['hooks', 'lane-publish']);
+  assert.deepEqual(readdirSync(join(f.runner, 'ci-kit')), ['hooks']);
 });
 
 test('a failed Swift compile warns and publishes complete hooks without that partial binary', macOnly, () => {
@@ -1030,7 +1030,7 @@ test('lane publication is an independent minute agent, refreshed and removed wit
   const f = fixture();
   const label = publishAgent;
   const path = join(f.home, `Library/LaunchAgents/${label}.plist`);
-  const result = f.run();
+  const result = f.run(undefined, ['--publish-lanes']);
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.ok(existsSync(path), 'publisher LaunchAgent installed');
   const parse = () => JSON.parse(spawnSync(python, ['-I', '-c', 'import plistlib,json,sys; print(json.dumps(plistlib.load(open(sys.argv[1],"rb"))))', path], { encoding: 'utf8' }).stdout);
@@ -1046,11 +1046,54 @@ test('lane publication is an independent minute agent, refreshed and removed wit
     assert.equal(readFileSync(join(installed, file), 'utf8'), readFileSync(join(f.kit, 'mac', file), 'utf8'));
   }
   assert.match(readFileSync(join(f.home, 'launchctl.calls'), 'utf8'), new RegExp(`bootstrap .*${label}.plist`));
-  assert.equal(f.run(undefined, undefined, { CI_KIT_LANE_HELD_WINDOWS: '23:00-01:00' }).status, 0);
+  assert.equal(f.run(undefined, [], { CI_KIT_LANE_HELD_WINDOWS: '23:00-01:00' }).status, 0);
   assert.equal(parse().EnvironmentVariables.CI_KIT_LANE_HELD_WINDOWS, '23:00-01:00');
-  assert.equal(f.run().status, 0);
+  assert.equal(f.run(undefined, []).status, 0);
   assert.equal(parse().EnvironmentVariables.CI_KIT_LANE_HELD_WINDOWS, '23:00-01:00', 'reinstall preserves the setting');
   assert.equal(f.run(undefined, ['--uninstall']).status, 0);
   assert.equal(existsSync(path), false);
   assert.match(readFileSync(join(f.home, 'launchctl.calls'), 'utf8'), new RegExp(`bootout .*${label}`));
+});
+
+test('publisher failures cannot interrupt restoration of an enabled VM lane and host', macOnly, () => {
+  for (const fail of ['plist', 'bootstrap']) {
+    const f = laneFixture();
+    assert.equal(f.run(undefined, ['--vm']).status, 0);
+    writeFileSync(join(f.home, 'launchctl.db'), `"${vmAgent}" => enabled\n`);
+    // Existing installs can remember the opt-in; this also exercises a refresh, not initial registration.
+    writeFileSync(join(f.runner, '.env'), readFileSync(join(f.runner, '.env'), 'utf8') + 'CI_KIT_PUBLISH_LANES=1\n');
+    rmSync(join(f.home, 'launchctl.calls'));
+    if (fail === 'plist') {
+      f.executable(join(f.bin, 'plutil'), `[[ "$*" != *${publishAgent}.plist* ]] || exit 71`);
+    } else {
+      const script = join(f.bin, 'launchctl');
+      writeFileSync(script, readFileSync(script, 'utf8').replace('db=$HOME/launchctl.db', `[[ ! ($1 == bootstrap && $3 == *${publishAgent}.plist) ]] || exit 72\ndb=$HOME/launchctl.db`));
+    }
+    const result = f.run(undefined, []);
+    const bootstraps = calls(f).filter(c => c.startsWith('bootstrap'));
+    assert.ok(bootstraps.some(c => c.endsWith(`${vmAgent}.plist`)), 'VM launcher restored despite publisher failure');
+    assert.ok(bootstraps.some(c => c.endsWith(`${runnerAgent}.plist`)), 'host restored despite publisher failure');
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout + result.stderr, /warning:.*lane publisher.*failed/);
+    if (fail === 'bootstrap') assert.ok(bootstraps.findIndex(c => c.endsWith(`${publishAgent}.plist`)) > bootstraps.findIndex(c => c.endsWith(`${runnerAgent}.plist`)));
+  }
+});
+
+test('only an opted-in Mac publishes, and --disabled never bootstraps its publisher', macOnly, () => {
+  const ordinary = fixture({ registered: 'ci-kit-mac-rental' });
+  assert.equal(ordinary.run(undefined, []).status, 0);
+  assert.ok(!calls(ordinary).some(c => c.startsWith('bootstrap') && c.includes(publishAgent)), 'other Macs must not overwrite the mini');
+  const f = fixture();
+  assert.equal(f.run(undefined, ['--publish-lanes']).status, 0);
+  assert.match(readFileSync(join(f.runner, '.env'), 'utf8'), /^CI_KIT_PUBLISH_LANES=1$/m);
+  assert.equal(readPlist(join(f.home, `Library/LaunchAgents/${publishAgent}.plist`)).EnvironmentVariables.CI_KIT_MACHINE, 'mini');
+  rmSync(join(f.home, 'launchctl.calls'));
+  assert.equal(f.run(undefined, []).status, 0);
+  assert.ok(calls(f).some(c => c.startsWith('bootstrap') && c.includes(publishAgent)), 're-runs remember the opt-in');
+  rmSync(join(f.home, 'launchctl.calls'));
+  assert.equal(f.run(undefined, ['--disabled']).status, 0);
+  assert.ok(!calls(f).some(c => c.startsWith('bootstrap') && c.includes(publishAgent)));
+  assert.ok(calls(f).some(c => c.startsWith('bootout') && c.includes(publishAgent)));
+  assert.ok(calls(f).some(c => c.startsWith('disable ') && c.includes(publishAgent)));
+  assert.match(readFileSync(join(f.runner, '.env'), 'utf8'), /^CI_KIT_PUBLISH_LANES=1$/m);
 });

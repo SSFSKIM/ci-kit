@@ -16,6 +16,7 @@ UTC = dt.timezone.utc
 DEFAULT_WINDOWS = "06:43-07:00"
 VM_AGENT = "com.ssfskim.ci-kit.vm-lane"
 HOST_AGENT = "com.ssfskim.ci-kit.mac-runner"
+verdict_process = False
 
 
 def stamp(now):
@@ -23,13 +24,15 @@ def stamp(now):
 
 
 def command(args, timeout=5, env=None):
-    # Kill the whole read, including a shell reader's children, on timeout.
+    # The verdict child and all its readers share one group. A nested timeout kills
+    # that whole read too; compute() then publishes both held. Nested setsid would
+    # let readers escape the outer deadline.
     with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          text=True, start_new_session=True, env=env) as proc:
+                          text=True, start_new_session=not verdict_process, env=env) as proc:
         try:
             out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
+            os.killpg(os.getpgrp() if verdict_process else proc.pid, signal.SIGKILL)
             proc.communicate()
             raise RuntimeError(f"{Path(args[0]).name} timed out after {timeout}s") from None
         if proc.returncode:
@@ -221,6 +224,14 @@ def save_state(path, state):
 def main(now=None):
     now = now or dt.datetime.now(UTC)
     home = Path.home()
+    try:
+        config = fields(read(home / "actions-runner-maws/.env") or "")
+        machine = os.environ.get("CI_KIT_MACHINE")
+        if not machine or config.get("CI_KIT_MACHINE") != machine or config.get("CI_KIT_PUBLISH_LANES") != "1":
+            raise ValueError("runner is not opted in for this publisher's machine identity")
+    except (OSError, ValueError) as error:
+        log(home, now, f"publish refused: {error}")
+        return
     current = compute(now)
     value = {"v": 1, "at": stamp(now), **current}
     state_file = home / "Library/Logs/ci-kit/lane-publish-state.json"
@@ -247,7 +258,7 @@ def main(now=None):
         read(home / "actions-runner-maws/.env")
         repo = shell('source "$1"; ci_kit_repo', HERE / "repo.sh").strip()
         changed = any(previous.get(k) != current[k] for k in current)
-        if not changed and state.get("repo") == repo and 0 <= age < 120:
+        if not changed and state.get("repo") == repo and 0 <= age < 60:
             return
         env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN")}
         args = ["-f", "name=MAC_MINI_LANES", "-f", "value=" + json.dumps(value, separators=(",", ":"))]
@@ -266,6 +277,11 @@ def main(now=None):
 
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--verdict":
+        # compute() already owns this group; a direct diagnostic invocation must
+        # own one too before a reader timeout is allowed to kill the group.
+        if os.getpgrp() != os.getpid():
+            os.setpgid(0, 0)
+        verdict_process = True
         print(json.dumps(verdict(Path.home(), dt.datetime.fromisoformat(sys.argv[2].replace("Z", "+00:00")))))
     else:
         main()
