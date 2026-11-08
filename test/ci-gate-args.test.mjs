@@ -74,5 +74,11 @@ test('pushFailure names the reason, not git\'s closing line', () => {
   assert.match(pushFailure(rejected).reason, /remote rejected.*refusing/);
   assert.equal(pushFailure('remote: Permission to x denied.\nfatal: unable to access').reason, 'remote: Permission to x denied.');
   assert.match(pushFailure(hook).reason, /failed to push/); // a blank remote line is not a reason
+  const warned = [
+    'remote: warning: File a.bin is 60.00 MB; this is larger than the recommended maximum',
+    'remote: error: File b.bin is 120.00 MB; this exceeds the file size limit of 100.00 MB',
+    'error: failed to push some refs to \'x\'',
+  ].join('\n');
+  assert.match(pushFailure(warned).reason, /remote: error: File b\.bin/); // a warning never outranks the error
   assert.equal(pushFailure('').reason, 'no output from git');
 });
