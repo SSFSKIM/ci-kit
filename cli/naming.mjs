@@ -34,3 +34,12 @@ export function cleanLog(text) {
     .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
     .replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z /gm, '');
 }
+
+// A failed push's stderr ends with git's generic "failed to push some refs";
+// the reason (a hook's refusal, a remote's rejection) is on an earlier line.
+// Returns the reason for the ERROR line, plus every line for the notes.
+export function pushFailure(stderr) {
+  const lines = String(stderr).split('\n').map((l) => l.trimEnd()).filter(Boolean);
+  const telling = /^remote:\s*\S|\[rejected\]|\[remote rejected\]|hook declined|^(error|fatal):(?!.*failed to push some refs)/;
+  return { reason: lines.find((l) => telling.test(l)) ?? lines.at(-1) ?? 'no output from git', lines };
+}

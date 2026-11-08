@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseArgs, UsageError } from '../cli/args.mjs';
-import { cleanLog, formatDuration, nonceMessage, parseGitHubRemote, refName, sanitizeLabel } from '../cli/naming.mjs';
+import { cleanLog, formatDuration, nonceMessage, parseGitHubRemote, pushFailure, refName, sanitizeLabel } from '../cli/naming.mjs';
 
 test('parseArgs: defaults', () => {
   assert.deepEqual(parseArgs([]), { target: '.', gates: [], repo: null, label: null, keep: false });
@@ -56,4 +56,23 @@ test('formatDuration is <m>m<ss>s', () => {
 test('cleanLog drops the BOM, colour codes and timestamps', () => {
   const raw = '\uFEFF2026-10-13T15:09:42.4259551Z Run npm test\n2026-10-13T15:09:43.1Z \x1b[31mnot ok 1\x1b[0m\n';
   assert.equal(cleanLog(raw), 'Run npm test\nnot ok 1\n');
+});
+
+test('pushFailure names the reason, not git\'s closing line', () => {
+  const hook = 'remote: \nerror: failed to push some refs to \'x\'';
+  const refused = [
+    'pre-push hook: gitleaks found a secret in abc123',
+    'error: failed to push some refs to \'https://github.com/SSFSKIM/arachne.git\'',
+  ].join('\n');
+  assert.equal(pushFailure(refused).reason, refused.split('\n')[1]); // no telling line: the last stands
+  assert.equal(pushFailure(refused).lines.length, 2); // every line still reaches the notes
+  const rejected = [
+    'To https://github.com/SSFSKIM/arachne.git',
+    ' ! [remote rejected] abc -> ci/x (refusing to allow a GitHub App to create workflow)',
+    'error: failed to push some refs to \'https://github.com/SSFSKIM/arachne.git\'',
+  ].join('\n');
+  assert.match(pushFailure(rejected).reason, /remote rejected.*refusing/);
+  assert.equal(pushFailure('remote: Permission to x denied.\nfatal: unable to access').reason, 'remote: Permission to x denied.');
+  assert.match(pushFailure(hook).reason, /failed to push/); // a blank remote line is not a reason
+  assert.equal(pushFailure('').reason, 'no output from git');
 });

@@ -8,7 +8,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { createGitHub, ghToken } from '../lib/github.mjs';
 import { parseArgs, UsageError, USAGE } from './args.mjs';
 import { assertCaller, deleteRef, nonceCommit, pushRef, resolveRemote, resolveTarget, TargetError } from './git.mjs';
-import { cleanLog, nonceMessage, refName, sanitizeLabel } from './naming.mjs';
+import { cleanLog, nonceMessage, pushFailure, refName, sanitizeLabel } from './naming.mjs';
 import { findRun } from './discover.mjs';
 import { createPacer } from './pace.mjs';
 import { watchRun } from './watch.mjs';
@@ -114,7 +114,9 @@ async function main(argv) {
     note(`testing ${target.sha.slice(0, 8)} on ${repo} as ${ref}${opts.gates.length ? ` (CI-Gates: ${opts.gates.join(',')})` : ''}`);
     pushRef(target.dir, remote.name, commit, ref);
   } catch (e) {
-    out(`ERROR push to ${repo} failed: ${String(e.stderr ?? e.message).trim().split('\n').at(-1)}`);
+    const { reason, lines } = pushFailure(e.stderr ?? e.message);
+    for (const line of lines) note(`git push: ${line}`);
+    out(`ERROR push to ${repo} failed: ${reason}`);
     return 2;
   }
 
