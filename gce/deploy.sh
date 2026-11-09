@@ -4,7 +4,7 @@
 #   gce/deploy.sh [base] [network] [bake] [bake-check] [bake-schedule] [launcher] [launcher-schedule] [webhook] [alert] [app-hook]
 #                  (no argument: all of them but app-hook, in that order)
 #   base               the APIs, the service account ci-kit-launcher and its compute role on the project, the receiver's
-#                      service account ci-kit-webhook (no role here: webhook grants its two), and serial port logging, so
+#                      service account ci-kit-webhook (no role here: webhook grants its two), and serial port logging (its lines excluded from Cloud Logging), so
 #                      a VM deleted after a failed boot leaves its console in Cloud Logging
 #   network            the VPC ci-kit and a subnetwork for each placement of pool/config/gce.json (gce/subnets.mjs: a new
 #                      one takes the first free /20 of 10.64.0.0/16; one that exists keeps its range), each with Private
@@ -70,8 +70,16 @@ base() {
   g projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$number-compute@developer.gserviceaccount.com" \
     --role=roles/run.builder --condition=None > /dev/null
   # A job VM's console is the only record of its boot, and the VM is deleted minutes after its job (spec M3).
+  # The serial port stays on, but Cloud Logging drops its lines: they ran to about 6.5 GiB a day, about $70 a
+  # month past the free 50 GiB (owner, 2026-11-09). To read a deleted VM's boot, remove the exclusion
+  # (`gcloud logging sinks update _Default --remove-exclusions=ci-kit-serial-console`) and rerun the job.
   g compute project-info add-metadata --metadata=serial-port-logging-enable=TRUE > /dev/null
-  echo "deploy: base ok ($SA, $WEBHOOK_SA; serial port logging on)"
+  local excl=ci-kit-serial-console
+  local filter='log_id("serialconsole.googleapis.com/serial_port_1_output") OR log_id("serialconsole.googleapis.com/serial_port_debug_output")'
+  if ! g logging sinks describe _Default --format='value(exclusions[].name)' | tr ';' '\n' | grep -qx "$excl"; then
+    g logging sinks update _Default --add-exclusion="name=$excl,filter=$filter" > /dev/null
+  fi
+  echo "deploy: base ok ($SA, $WEBHOOK_SA; serial port logging on, excluded from Cloud Logging)"
 }
 
 # Every pool VM and bake VM sits here, never on the project's default network, whose stock rules open ssh and RDP to
