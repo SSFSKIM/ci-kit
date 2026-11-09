@@ -4,8 +4,8 @@
 #   gce/deploy.sh [base] [network] [bake] [bake-check] [bake-schedule] [launcher] [launcher-schedule] [webhook] [alert] [app-hook]
 #                  (no argument: all of them but app-hook, in that order)
 #   base               the APIs, the service account ci-kit-launcher and its compute role on the project, the receiver's
-#                      service account ci-kit-webhook (no role here: webhook grants its two), and serial port logging (its lines excluded from Cloud Logging), so
-#                      a VM deleted after a failed boot leaves its console in Cloud Logging
+#                      service account ci-kit-webhook (no role here: webhook grants its two), and serial port logging,
+#                      its lines excluded from Cloud Logging until a failed boot needs them (docs/pool.md)
 #   network            the VPC ci-kit and a subnetwork for each placement of pool/config/gce.json (gce/subnets.mjs: a new
 #                      one takes the first free /20 of 10.64.0.0/16; one that exists keeps its range), each with Private
 #                      Google Access, and in each placement region a Cloud Router ci-kit-router with a Cloud NAT
