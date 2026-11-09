@@ -766,8 +766,11 @@ listens about 3 s later. The rest is GitHub's: connecting and assigning the job 
 The guest agent, not cloud-init, serves the metadata and guest attributes. snapd is purged (no job uses a snap, and it
 seeded itself on the first boot of every disk made from the image) and pinned out.
 
-`gce/deploy.sh base` turns on the project's serial port logging to Cloud Logging, so a deleted VM's boot
-can be read there:
+`gce/deploy.sh base` turns on the project's serial port logging, and since 2026-11-09 it also excludes those lines
+from Cloud Logging's `_Default` sink (exclusion `ci-kit-serial-console`): they cost about $70 a month. To read a
+deleted VM's boot, remove the exclusion
+(`gcloud logging sinks update _Default --remove-exclusions=ci-kit-serial-console --project=ssfskim-ci-kit`), rerun
+the job, then read it with
 `gcloud logging read 'logName="projects/ssfskim-ci-kit/logs/serialconsole.googleapis.com%2Fserial_port_1_output" AND resource.labels.instance_id="<id>"' --project=ssfskim-ci-kit`.
 
 **The job VM.** At boot, `ci-kit-gce-job.service` runs `gce/vm/job.mjs`: it drops the job container's TCP and UDP
