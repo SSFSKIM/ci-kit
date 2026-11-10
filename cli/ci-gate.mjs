@@ -1,6 +1,6 @@
 // ci-gate (spec §2, I5): push the tested commit plus a nonce commit to a ci/ ref, follow the run it starts,
 // print one line per gate as it finishes, keep failed gates' logs on local disk, and remove the ref once the run has a
-// verdict (kept.mjs: a call that ends without one keeps it for a rerun, and a later call sweeps it).
+// verdict (a call that ends without one while its run may exist keeps the ref for a rerun, and names it on stderr).
 import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -8,11 +8,10 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createGitHub, ghToken } from '../lib/github.mjs';
 import { parseArgs, UsageError, USAGE } from './args.mjs';
-import { KEPT_FOR_MS, keepsRef, recordKept, sweepKept } from './kept.mjs';
-import { assertCaller, deleteKeptRef, deleteRef, nonceCommit, pushRef, resolveRemote, resolveTarget, TargetError } from './git.mjs';
+import { assertCaller, deleteRef, nonceCommit, pushRef, resolveRemote, resolveTarget, TargetError } from './git.mjs';
 import { cleanLog, nonceMessage, pushFailure, refName, sanitizeLabel } from './naming.mjs';
 import { findRun } from './discover.mjs';
-import { BudgetExhausted, createPacer, isLow } from './pace.mjs';
+import { BudgetExhausted, createPacer } from './pace.mjs';
 import { watchRun } from './watch.mjs';
 
 const CALLER = '.github/workflows/ci.yml';
@@ -127,27 +126,23 @@ async function main(argv) {
   let runId = null;
   let runMayExist = false;
   // verdict: the call ends GREEN or RED. The ref is this call's to remove after a verdict, or when no run came of the
-  // push; after an ERROR or an interruption while a run exists it stays for a rerun (kept.mjs).
+  // push. After an ERROR or an interruption while a run exists, or may (the budget hid it from discovery), it stays so
+  // the run can be rerun or its head read; a ci/ branch nobody pushes to starts nothing, so it is removed by hand.
   const cleanup = (verdict) => {
     if (opts.keep) return note(`kept ${ref}`);
-    if (keepsRef({ verdict, runFound: runId !== null, runMayExist })) return keepForRerun();
+    if (!verdict && (runId !== null || runMayExist)) {
+      return note(`kept ${ref}: this call ends without a verdict while its run may still go; remove it with: git push ${remote.name} --delete ${ref}`);
+    }
     if (deleteRef(target.dir, remote.name, commit, ref)) note(`removed ${ref}`);
     else note(`left ${ref} (it no longer points at this call's commit, or the delete failed)`);
   };
-  const keepForRerun = () => {
-    try {
-      recordKept(target.dir, { ref, commit, remote: remote.name, repo }, Date.now());
-      note(`kept ${ref} for a rerun, as this call ends without a verdict; a ci-gate in this clone removes it after ${KEPT_FOR_MS / 3_600_000} h (now: git push ${remote.name} --delete ${ref})`);
-    } catch (e) {
-      note(`kept ${ref}, which no later call will remove (it could not be recorded: ${e.message}); remove it with: git push ${remote.name} --delete ${ref}`);
-    }
-  };
-  process.once('SIGINT', async () => {
+  const interrupted = async () => {
     if (runId) await gh.cancelRun(repo, runId).then(() => note(`cancelled run ${runId}`), () => {});
     cleanup(false);
     out('ERROR interrupted');
     process.exit(130);
-  });
+  };
+  process.once('SIGINT', interrupted);
 
   let result;
   try {
@@ -155,43 +150,14 @@ async function main(argv) {
   } catch (e) {
     result = failure(e);
   }
+  process.removeListener('SIGINT', interrupted); // the call has its result: a late Ctrl-C must not turn it into ERROR
   cleanup(result.code !== 2);
   if (DEBUG) {
     const { requests, notModified, remaining } = gh.stats();
     note(`api requests ${requests}, of them 304 ${notModified}; remaining ${remaining}`);
   }
   out(result.line);
-  await sweepOldRefs(gh, target.dir);
   return result.code;
-}
-
-const SWEPT = {
-  removed: (ref) => `removed ${ref}, kept by an earlier call`,
-  gone: (ref) => `forgot ${ref}, kept by an earlier call: it is already gone`,
-  moved: (ref) => `forgot ${ref}, kept by an earlier call: a later push took it over`,
-  failed: (ref) => `could not remove ${ref}, kept by an earlier call; a later call tries again`,
-  busy: (ref) => `left ${ref}, kept by an earlier call: a run on it is queued or going`,
-  unknown: (ref) => `left ${ref}, kept by an earlier call: its runs could not be read (budget low or unreadable)`,
-};
-
-// The refs earlier calls in this clone kept and nobody reran within KEPT_FOR_MS (kept.mjs). Each costs one request,
-// for its newest run, which is skipped while the budget is low: the ref then waits for a later call.
-async function sweepOldRefs(gh, dir) {
-  const busy = async (e) => {
-    if (isLow(gh.stats().remaining)) return null;
-    try {
-      const run = await gh.latestRunOnBranch(e.repo, e.ref);
-      return run !== null && run.status !== 'completed';
-    } catch {
-      return null;
-    }
-  };
-  const remove = (e) => deleteKeptRef(dir, e.remote, e.commit, e.ref);
-  try {
-    for (const { ref, outcome } of await sweepKept(dir, { nowMs: Date.now(), remove, busy })) note(SWEPT[outcome](ref));
-  } catch (e) {
-    note(`the refs earlier calls kept could not be swept: ${e.message}`);
-  }
 }
 
 // An unexpected local failure (a log that cannot be written, say) still ends in I5's ERROR line and exit 2.

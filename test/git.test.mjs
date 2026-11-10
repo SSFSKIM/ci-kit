@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { assertCaller, deleteKeptRef, deleteRef, nonceCommit, pushRef, resolveRemote, resolveTarget } from '../cli/git.mjs';
+import { assertCaller, deleteRef, nonceCommit, pushRef, resolveRemote, resolveTarget } from '../cli/git.mjs';
 import { CALLER_PATH } from '../cli/init.mjs';
 
 let root;
@@ -142,18 +142,4 @@ test("a commit that does not call ci-kit's gates workflow is refused before anyt
   assert.doesNotThrow(() => assertCaller(repo, sha, CALLER_PATH));
   sha = commitWith({ '.github/workflows/ci.yml': 'jobs:\n  ci:\n    uses: ./.github/workflows/gates.yml\n' });
   assert.doesNotThrow(() => assertCaller(repo, sha, CALLER_PATH));
-});
-
-test('a kept ref\'s delete says what became of it: removed, already gone, moved by a later push, or failed', () => {
-  const sha = git(work, 'rev-parse', 'HEAD');
-  const mine = nonceCommit(work, sha, 'ci-gate cccccccccccc\n');
-  const theirs = nonceCommit(work, sha, 'ci-gate dddddddddddd\n');
-  pushRef(work, 'origin', mine, 'ci/kept');
-  assert.equal(deleteKeptRef(work, 'origin', mine, 'ci/kept'), 'removed');
-  assert.equal(deleteKeptRef(work, 'origin', mine, 'ci/kept'), 'gone');
-  pushRef(work, 'origin', theirs, 'ci/kept');
-  assert.equal(deleteKeptRef(work, 'origin', mine, 'ci/kept'), 'moved');
-  assert.equal(remoteRef('ci/kept'), theirs);
-  git(work, 'remote', 'add', 'unreachable', join(root, 'no-such-remote.git'));
-  assert.equal(deleteKeptRef(work, 'unreachable', mine, 'ci/kept'), 'failed');
 });

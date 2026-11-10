@@ -472,8 +472,8 @@ caller's repo, not the kit's).
    lane this is visible boot time.
 6. It downloads the failed jobs' logs and artifacts under `/tmp/ci-gate/<owner>-<repo>/<run-id>/`.
 7. It deletes the ref unless `--keep`, and exits 0 (green), 1 (red) or 2 (infra or config error).
-   Since 2026-11-10 an `ERROR` or an interruption while a run exists keeps the ref for a rerun, and a
-   later call in the same clone removes it after 24 h (Decision Log, "an exhausted budget is waited out").
+   Since 2026-11-10 an `ERROR` or an interruption while a run exists keeps the ref for a rerun, named
+   on stderr and removed by hand (Decision Log, "an exhausted budget is waited out").
    - The ref carries the first 6 hex characters of the nonce, so concurrent calls on the same
      commit and label never share a ref.
    - Deletion is compare-and-delete: `git push --force-with-lease=<ref>:<nonce commit>`, as MAWS's
@@ -2915,22 +2915,20 @@ euros, jobs, and the projected month at the current rate.
     failed-log fetch all read through it (`pace.mjs`, `read`); discovery's 5-minute deadline does
     not count the wait.
   - The wait is bounded at 90 min of continuous exhaustion (one window, plus a reset that moved once);
-    then `ERROR` as before. The healthy path is unchanged: no extra request, no extra line.
+    then `ERROR` as before. The bound is elapsed time on ci-gate's clock, never the published reset,
+    and each sleep is cut to what the bound has left (a reset can stay in the past while
+    `/rate_limit` says 0). The healthy path is unchanged: no extra request, no extra line.
   - Each wait prints `THROTTLE remaining=<n> until=<ISO>`; no consumer parses `THROTTLE` (MAWS's
     `scripts/ci-gate.sh` is its own watcher), so the keyword is reused rather than a new one added.
   - The ref is removed after `GREEN` or `RED`, and when no run appeared within the deadline: such
     a push has nothing to rerun, and a kept ref would let a late run start with no one watching it.
-    After an `ERROR` or an interruption while a run exists, or when the budget hid the run, the
-    ref stays and is recorded under the clone's git directory (`ci-gate/kept/`); any later ci-gate
-    in that clone deletes recorded refs older than 24 h, compare-and-delete. No janitor sweeps ci refs.
-  - The sweep reads each due ref's newest run first (one request, skipped while the budget is low) and
-    leaves the ref while that run is queued or going: a rerun keeps the nonce commit, so
-    compare-and-delete alone would delete the branch under it. A record is dropped only when the
-    delete succeeds or `ls-remote` shows the ref gone or moved; any other failure is retried later.
-  - The 90-minute bound is elapsed time on ci-gate's clock, never the published reset, and each sleep
-    is cut to what the bound has left (a reset can stay in the past while `/rate_limit` says 0).
-  - Discovery marks the run as possibly existing when the budget first hides it, before the wait, so a
-    Ctrl-C during the wait keeps the ref.
+    After an `ERROR` or an interruption while a run exists, or once the budget has hidden the run
+    from discovery (marked before the wait, so a Ctrl-C during it counts), the ref stays, and one
+    stderr note names it with its delete command. It is removed by hand: a `ci/` branch nobody
+    pushes to starts nothing, so a kept ref is harmless. An automatic 24-hour sweep from a ledger in
+    the clone's git directory was built and dropped in review: each round found another edge (an
+    active rerun of an older run, a push URL that differs from the fetch URL, a Ctrl-C after the
+    verdict) for a rare event. A server-side sweep of stale `ci/*` refs is tracked as debt.
   - **Date/Author:** 2026-11-10, ci-gate-ratelimit executor, at CI-opt's request.
 - **Decision:** the DC7 owner (smns-erb-88) approved M3's three changes to DC7's tests. It declined
   a test-only `saw_waiting` or presence counter on `GET /requests/<id>`; it does not belong in the
