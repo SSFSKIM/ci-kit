@@ -27,6 +27,8 @@ jobs:
       note: ${{ steps.plan.outputs.note }}
       base: ${{ steps.plan.outputs.base }}
       cache_write: ${{ steps.plan.outputs.cache_write }}
+      apt_cache: ${{ steps.plan.outputs.apt_cache }}
+      apt_warm: ${{ steps.plan.outputs.apt_warm }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@v7
@@ -126,6 +128,8 @@ jobs:
             echo "note=$(jq -r .note "$RUNNER_TEMP/plan.json")"
             echo "base=$gate_base"
             echo "cache_write=$(jq .cache_write "$RUNNER_TEMP/plan.json")"
+            echo "apt_cache=$(jq -r .apt_cache "$RUNNER_TEMP/plan.json")"
+            echo "apt_warm=$(jq -c .apt_warm "$RUNNER_TEMP/plan.json")"
           } >> "$GITHUB_OUTPUT"
 
       # A pool gate needs the pool box: ensure creates it if none exists, without waiting for it to boot (spec §3).
@@ -181,6 +185,41 @@ jobs:
         if: matrix.gate.setup.pnpm
         run: corepack enable
 
+      # The package cache (docs/adopting.md, "Package cache"). On GitHub's Linux runners the mirror can serve 100 kB/s, and
+      # a large TeX set then holds the setup step past its bound: apt downloads into a directory the Actions cache
+      # restores, filled by the default branch's warm job (package-cache, below) for this image and apt set. A miss
+      # downloads from the mirror as before; apt still resolves every package and fetches what the directory lacks.
+      # Self-hosted runners keep their own apt configuration: their images carry the packages.
+      - name: Point apt at the package cache
+        id: apt-cache
+        if: runner.environment == 'github-hosted' && runner.os == 'Linux' && needs.plan.outputs.apt_cache != '' && join(matrix.gate.setup.apt, '') != ''
+        env:
+          CI_KIT_APT_CACHE: ${{ needs.plan.outputs.apt_cache }}
+        # apt-get keeps what it downloads (only the apt command deletes it). Its sandbox user could not enter the runner's
+        # home, which would only cost a notice; the key names the image, whose installed packages decide what is fetched.
+        run: &apt-cache-dir |
+          dir=$RUNNER_TEMP/ci-kit-apt
+          mkdir -p "$dir"
+          printf 'Dir::Cache::Archives "%s/";\nAPT::Sandbox::User "root";\n' "$dir" | sudo tee /etc/apt/apt.conf.d/90ci-kit-package-cache >/dev/null
+          prefix=ci-kit-apt-1-$ImageOS-$RUNNER_ARCH-
+          {
+            echo "key=$prefix$CI_KIT_APT_CACHE-$ImageVersion"
+            echo "set=$prefix$CI_KIT_APT_CACHE-"
+            echo "any=$prefix"
+          } >> "$GITHUB_OUTPUT"
+
+      # The packages alone: apt's partial/ and lock belong to root. An older image's entry, or another apt set's, still
+      # serves every package whose version the mirror has not moved.
+      - name: Restore the package cache
+        if: steps.apt-cache.outcome == 'success'
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/ci-kit-apt/*.deb
+          key: ${{ steps.apt-cache.outputs.key }}
+          restore-keys: |
+            ${{ steps.apt-cache.outputs.set }}
+            ${{ steps.apt-cache.outputs.any }}
+
       - name: Apply CI environment
         if: join(matrix.gate.setup.apt, '') != '' || join(matrix.gate.setup.brew, '') != '' || join(matrix.gate.setup.cask, '') != '' || matrix.gate.setup.script != ''
         # A bound of its own, so a stalled package mirror fails this step instead of spending the gate's whole timeout.
@@ -234,6 +273,73 @@ jobs:
           name: ${{ matrix.gate.name }}
           path: ${{ join(matrix.gate.artifacts, fromJSON('"\n"')) }}
           if-no-files-found: ignore
+
+  # The package cache's warm job (docs/adopting.md, "Package cache"): on the default branch, whose entries every ref
+  # reads (a ci/** ref's would serve only that ref), it downloads the declared apt set once per image and saves it. It
+  # downloads without installing, the setup step's way (installed names are left as they are), and drops what an older
+  # entry held that the set no longer needs, so the entry stays the set's size. It is not a gate: the verdict does not
+  # wait for it, and a failure (a mirror too slow for its bound) leaves the run green; the next warm tries again.
+  package-cache:
+    name: package cache
+    needs: plan
+    if: needs.plan.outputs.apt_warm != '[]' && needs.plan.outputs.apt_warm != ''
+    runs-on: ubuntu-latest # the hosted lane's runner (plan/select.mjs), whose image the gates' key names
+    timeout-minutes: 60
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Point apt at the package cache
+        id: apt-cache
+        env:
+          CI_KIT_APT_CACHE: ${{ needs.plan.outputs.apt_cache }}
+        run: *apt-cache-dir
+
+      - name: Look up the package cache
+        id: lookup
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/ci-kit-apt/*.deb
+          key: ${{ steps.apt-cache.outputs.key }}
+          lookup-only: true
+
+      - name: Restore an older package cache
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/ci-kit-apt/*.deb
+          key: ${{ steps.apt-cache.outputs.key }}
+          restore-keys: |
+            ${{ steps.apt-cache.outputs.set }}
+            ${{ steps.apt-cache.outputs.any }}
+
+      - name: Download the declared packages
+        if: steps.lookup.outputs.cache-hit != 'true'
+        env:
+          CI_KIT_APT: ${{ needs.plan.outputs.apt_warm }}
+        run: |
+          read -r -a packages <<<"$(jq -r 'join(" ")' <<<"$CI_KIT_APT")"
+          acquire=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          install=(install -y --no-install-recommends --no-upgrade)
+          sudo apt-get update "${acquire[@]}"
+          # What the set needs at the mirror's versions: the packages apt would fetch into an empty directory.
+          empty=$(mktemp -d)
+          mkdir "$empty/partial"
+          needed=$(sudo apt-get "${install[@]}" --print-uris -qq -o "Dir::Cache::Archives=$empty/" "${packages[@]}" | awk '{print $2}')
+          shopt -s nullglob
+          for deb in "$RUNNER_TEMP"/ci-kit-apt/*.deb; do
+            grep -qxF "${deb##*/}" <<<"$needed" || rm -f "$deb"
+          done
+          sudo apt-get "${install[@]}" --download-only "${acquire[@]}" "${packages[@]}"
+          du -sh "$RUNNER_TEMP/ci-kit-apt"
+
+      - name: Save the package cache
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/ci-kit-apt/*.deb
+          key: ${{ steps.apt-cache.outputs.key }}
 
   verdict:
     name: verdict

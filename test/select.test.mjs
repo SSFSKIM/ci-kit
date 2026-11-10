@@ -88,6 +88,8 @@ test('planOutput shapes I3: runs_on per lane, setup resolved, pool flag', () => 
     pool: true,
     note: '',
     cache_write: false,
+    apt_cache: '',
+    apt_warm: [],
   });
 });
 
@@ -151,5 +153,30 @@ test('planOutput says whether the build cache is written', () => {
 });
 
 test('planOutput of an empty selection says so', () => {
-  assert.deepEqual(planOutput(config, []), { gates: [], pool: false, note: 'no gates selected', cache_write: false });
+  assert.deepEqual(planOutput(config, []), { gates: [], pool: false, note: 'no gates selected', cache_write: false, apt_cache: '', apt_warm: [] });
+});
+
+// The package cache (docs/adopting.md, "Package cache"): its key names the declared apt set, whatever the order or
+// repeats, and the warm job runs only where its entry would be served to every ref and some job reads it.
+test('planOutput names the declared apt set for the package cache key', () => {
+  const plan = (apt, gates = '[{name: a, run: x}]') => planOutput(parseConfig(`version: 1\nsetup: {apt: ${apt}}\ngates: ${gates}`, { isPrivate: true }), []);
+  const key = plan('[zsh, cowsay]').apt_cache;
+  assert.match(key, /^[a-f0-9]{16}$/);
+  assert.equal(plan('[cowsay, zsh, zsh]').apt_cache, key);
+  assert.notEqual(plan('[cowsay]').apt_cache, key);
+  assert.equal(plan('[]').apt_cache, '');
+  assert.equal(planOutput(config, []).apt_cache, '');
+});
+
+test('planOutput warms the package cache on the default branch for a hosted gate with the shared setup', () => {
+  const warm = (gates, cacheWrite = true) => {
+    const c = parseConfig(`version: 1\nsetup: {apt: [zsh, cowsay, zsh]}\ngates: ${gates}`, { isPrivate: true });
+    return planOutput(c, [], { cacheWrite }).apt_warm;
+  };
+  assert.deepEqual(warm('[{name: a, run: x}]'), ['cowsay', 'zsh']);
+  assert.deepEqual(warm('[{name: a, run: x}]', false), [], 'another ref writes what only that ref reads');
+  assert.deepEqual(warm('[{name: a, run: x, setup: false}]'), [], 'no job applies the packages');
+  assert.deepEqual(warm('[{name: a, run: x, lane: pool}, {name: b, run: x, lane: mac}, {name: c, run: x, lane: hosted-macos}]'), [],
+    'self-hosted lanes bake their packages, and macOS installs no apt');
+  assert.deepEqual(planOutput(config, [], { cacheWrite: true }).apt_warm, [], 'no apt declared');
 });

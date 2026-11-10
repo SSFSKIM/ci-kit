@@ -345,7 +345,9 @@ test('the gates workflow applies only actual declarations and respects setup fal
 
 test('a setup-only file produces a successful empty plan', () => {
   const config = parseConfig('version: 1\nsetup: {apt: [cowsay]}', { isPrivate: false });
-  assert.deepEqual(planOutput(config, config.gates), { gates: [], pool: false, note: 'no gates selected', cache_write: false });
+  const { apt_cache: key, ...plan } = planOutput(config, config.gates);
+  assert.deepEqual(plan, { gates: [], pool: false, note: 'no gates selected', cache_write: false, apt_warm: [] });
+  assert.match(key, /^[a-f0-9]{16}$/);
 });
 
 test('installed apt providers satisfy virtual names, including versioned Provides, without update or install', (t) => {

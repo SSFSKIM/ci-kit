@@ -1,6 +1,7 @@
 // Gate selection (spec §1) and the planner's output (spec I3).
 import { ConfigError, DEFAULT_FETCH_DEPTH } from './config.mjs';
 import { matchesAny } from './glob.mjs';
+import { aptCacheKey } from '../setup/hash.mjs';
 
 const RUNS_ON = {
   hosted: () => ['ubuntu-latest'],
@@ -47,8 +48,11 @@ export function selectGates(config, { event, explicit = null, explicitSource = '
   return config.gates.filter((g) => g.on.includes(event) && (event === 'dispatch' || touched(g, changedFiles)));
 }
 
-// cacheWrite: whether the build_cache gates write the cache as well as read it (plan.mjs decides).
+// cacheWrite: whether the build_cache gates write the cache as well as read it (plan.mjs decides). It is the package
+// cache's rule too: apt_warm, the declared apt set the warm job downloads, is empty off the default branch, and when no
+// hosted Linux gate applies the shared setup (self-hosted lanes bake their packages into the image).
 export function planOutput(config, selected, { cacheWrite = false } = {}) {
+  const readers = config.gates.some((g) => g.lane === 'hosted' && g.setup);
   return {
     gates: selected.map((g) => ({
       name: g.name,
@@ -63,5 +67,7 @@ export function planOutput(config, selected, { cacheWrite = false } = {}) {
     pool: selected.some((g) => g.lane === 'pool'),
     note: selected.length === 0 ? 'no gates selected' : '',
     cache_write: cacheWrite,
+    apt_cache: aptCacheKey(config.setup.apt),
+    apt_warm: cacheWrite && readers ? [...new Set(config.setup.apt)].sort() : [],
   };
 }
