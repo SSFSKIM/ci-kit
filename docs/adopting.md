@@ -357,19 +357,26 @@ FAIL <gate> <m>m<ss>s log=<path>
 SKIP <gate>
 CANCEL <gate>
 THROTTLE remaining=<n>       once, when the GitHub token's remaining REST budget falls below 500
+THROTTLE remaining=<n> until=<time>   when the budget is exhausted: it reads again at <time>
 ```
 
 The last line is `GREEN <run-url>` (exit 0), `RED <failed>/<total> <run-url>` (exit 1) or `ERROR <message>` (exit 2:
-a config error, no run within 5 minutes of the push, the API rate limit exhausted while looking for it, gh not logged
-in, a run that failed to start). Failed gates' logs are saved to `/tmp/ci-gate/<owner>-<repo>/<run-id>/<gate>.log`,
-with their artifacts beside them. The ref is deleted afterwards unless `--keep`, and only while it still points at
-this call's commit. Progress notes go to stderr.
+a config error, no run within 5 minutes of the push, the API rate limit exhausted for 90 minutes, gh not logged in, a
+run that failed to start). Failed gates' logs are saved to `/tmp/ci-gate/<owner>-<repo>/<run-id>/<gate>.log`, with
+their artifacts beside them. After `GREEN` or `RED`, or when no run appeared, the ref is deleted unless `--keep`, and
+only while it still points at this call's commit. After an `ERROR` (or Ctrl-C) while a run exists, the ref stays, so
+the run can be rerun or read. stderr names it with the command that removes it (`git push origin --delete <ref>`); nothing
+removes it automatically, and a `ci/` branch nobody pushes to starts nothing.
+Progress notes go to stderr.
 
 **It is gentle with the shared token.** Every session on the account shares the gh login's 5,000 REST requests an
 hour, so `ci-gate` polls the run and its jobs with conditional requests (a `304 Not Modified` is not counted against
 the limit), every 15 s for the first 2 minutes and every 30 s after that, and fetches logs only for failed gates. When
 the remaining budget drops below 500, while looking for the run or watching it, it prints `THROTTLE` and polls
-every 60 s until the budget recovers; lines can then arrive up to a minute late. With `CI_GATE_DEBUG=1` it prints each API request and a final count on stderr.
+every 60 s until the budget recovers; lines can then arrive up to a minute late. When the budget is spent (GitHub
+answers 403 or 429 for the rate limit), it does not give up: it prints `THROTTLE remaining=0 until=<reset>`, sleeps
+until the reset, checks `/rate_limit` (which is not counted) and reads on. After 90 minutes of continuous
+exhaustion it ends in `ERROR`. With `CI_GATE_DEBUG=1` it prints each API request and a final count on stderr.
 
 `ci-gate` uses the `gh` CLI's login and needs no other credential. The ci-kit Claude Code plugin puts it on the Bash
 tool's PATH in every session (below). Outside Claude Code, install it with `install.sh` from a ci-kit checkout that

@@ -11,7 +11,9 @@ Runs the repo's ci-kit gates for one commit on GitHub Actions and reports each g
   --label NAME       the ci ref's label; default: the branch name, else "gate"
   --keep             leave the ci/ ref on the remote
 Stdout: WAIT/PASS/FAIL/SKIP/CANCEL <gate> lines as gates progress; THROTTLE remaining=<n> once if the token's REST
-budget falls below 500 (polls then slow to 60 s); last, GREEN, RED or ERROR.
+budget falls below 500 (polls then slow to 60 s); THROTTLE remaining=<n> until=<time> while an exhausted budget is
+waited out (up to 90 min); last, GREEN, RED or ERROR. The ci/ ref is removed after GREEN or RED; after an ERROR
+while a run exists it is kept for a rerun, named on stderr with the command that removes it.
 Exit: 0 GREEN, 1 RED, 2 ERROR (infra or config). CI_GATE_DEBUG=1 logs each API request on stderr.`;
 
 export const INIT_USAGE = `usage: ci-gate init [<dir>] [--force] [--repo OWNER/NAME]

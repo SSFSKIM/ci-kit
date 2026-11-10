@@ -1,5 +1,6 @@
 // ci-gate (spec §2, I5): push the tested commit plus a nonce commit to a ci/ ref, follow the run it starts,
-// print one line per gate as it finishes, keep failed gates' logs on local disk, and remove the ref.
+// print one line per gate as it finishes, keep failed gates' logs on local disk, and remove the ref once the run has a
+// verdict (a call that ends without one while its run may exist keeps the ref for a rerun, and names it on stderr).
 import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -10,7 +11,7 @@ import { parseArgs, UsageError, USAGE } from './args.mjs';
 import { assertCaller, deleteRef, nonceCommit, pushRef, resolveRemote, resolveTarget, TargetError } from './git.mjs';
 import { cleanLog, nonceMessage, pushFailure, refName, sanitizeLabel } from './naming.mjs';
 import { findRun } from './discover.mjs';
-import { createPacer } from './pace.mjs';
+import { BudgetExhausted, createPacer } from './pace.mjs';
 import { watchRun } from './watch.mjs';
 
 const CALLER = '.github/workflows/ci.yml';
@@ -21,15 +22,17 @@ const LOG_ATTEMPTS = 6; // a job's log can lag its completion by a few seconds
 const out = (line) => process.stdout.write(line + '\n');
 const note = (line) => process.stderr.write(`ci-gate: ${line}\n`);
 
-function failureSaver(gh, repo, runId, dir) {
+// The log is read through the pacer, so an exhausted budget is waited out like the watch's polls.
+function failureSaver(gh, pacer, repo, runId, dir) {
   return async (job, gate) => {
     mkdirSync(dir, { recursive: true });
     const path = join(dir, `${gate}.log`);
     let log = null;
     for (let i = 0; i < LOG_ATTEMPTS && log === null; i += 1) {
       try {
-        log = cleanLog(await gh.jobLog(repo, job.id));
-      } catch {
+        log = cleanLog(await pacer.read(() => gh.jobLog(repo, job.id)));
+      } catch (e) {
+        if (e instanceof BudgetExhausted) break;
         await sleep(5000);
       }
     }
@@ -121,26 +124,34 @@ async function main(argv) {
   }
 
   let runId = null;
-  const cleanup = () => {
+  let runMayExist = false;
+  // verdict: the call ends GREEN or RED. The ref is this call's to remove after a verdict, or when no run came of the
+  // push. After an ERROR or an interruption while a run exists, or may (the budget hid it from discovery), it stays so
+  // the run can be rerun or its head read; a ci/ branch nobody pushes to starts nothing, so it is removed by hand.
+  const cleanup = (verdict) => {
     if (opts.keep) return note(`kept ${ref}`);
+    if (!verdict && (runId !== null || runMayExist)) {
+      return note(`kept ${ref}: this call ends without a verdict while its run may still go; remove it with: git push ${remote.name} --delete ${ref}`);
+    }
     if (deleteRef(target.dir, remote.name, commit, ref)) note(`removed ${ref}`);
     else note(`left ${ref} (it no longer points at this call's commit, or the delete failed)`);
   };
-  process.once('SIGINT', async () => {
+  const interrupted = async () => {
     if (runId) await gh.cancelRun(repo, runId).then(() => note(`cancelled run ${runId}`), () => {});
-    cleanup();
+    cleanup(false);
     out('ERROR interrupted');
     process.exit(130);
-  });
+  };
+  process.once('SIGINT', interrupted);
 
   let result;
   try {
-    result = await follow(gh, repo, commit, ref, (id) => { runId = id; });
+    result = await follow(gh, repo, commit, ref, (id) => { runId = id; }, () => { runMayExist = true; });
   } catch (e) {
     result = failure(e);
-  } finally {
-    cleanup(); // also when following the run throws: the ref is this call's to remove
   }
+  process.removeListener('SIGINT', interrupted); // the call has its result: a late Ctrl-C must not turn it into ERROR
+  cleanup(result.code !== 2);
   if (DEBUG) {
     const { requests, notModified, remaining } = gh.stats();
     note(`api requests ${requests}, of them 304 ${notModified}; remaining ${remaining}`);
@@ -154,9 +165,11 @@ function failure(e) {
   return { line: `ERROR ci-gate failed: ${e?.message ?? e}`, code: 2 };
 }
 
-async function follow(gh, repo, commit, ref, onRun) {
-  const pacer = createPacer(gh, out); // one per call: discovery and the watch say THROTTLE at most once between them
-  const found = await findRun({ gh, repo, commit, caller: CALLER, ref, pacer, now: Date.now, sleep, note });
+// onRun(id): the run was found; onUnseen(): the budget hides it from discovery, so a run may exist all the same.
+async function follow(gh, repo, commit, ref, onRun, onUnseen) {
+  // One per call: discovery and the watch say the low-budget THROTTLE at most once between them.
+  const pacer = createPacer(gh, out, { now: Date.now, sleep });
+  const found = await findRun({ gh, repo, commit, caller: CALLER, ref, pacer, now: Date.now, sleep, note, onHidden: onUnseen });
   if (found.error) return { line: `ERROR ${found.error}`, code: 2 };
   const { run } = found;
   onRun(run.id);
@@ -168,7 +181,7 @@ async function follow(gh, repo, commit, ref, onRun) {
     runId: run.id,
     runUrl: run.html_url,
     emit: out,
-    onFail: failureSaver(gh, repo, run.id, join('/tmp/ci-gate', `${owner}-${name}`, String(run.id))),
+    onFail: failureSaver(gh, pacer, repo, run.id, join('/tmp/ci-gate', `${owner}-${name}`, String(run.id))),
     planError: planErrorReader(gh, repo),
     now: Date.now,
     sleep,
