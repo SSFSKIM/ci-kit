@@ -381,11 +381,14 @@ saves a new image's set within the week even without a merge.
   image's entry exists, a gate restores the newest entry of the same set on an older image, then of any set, and
   apt downloads only what those lack. When an older entry seeds a new one, the warm job first drops what the set no
   longer needs at the mirror's versions, so an entry stays the set's size.
-- **What a hit saves, and what it does not.** The download. Unpacking and configuring the packages, the TeX triggers
-  and the setup script still run: for arachne, on a fast mirror, the download was 24 s of a 171 s setup step.
+- **What a hit saves, and what it does not.** The download, which on a slow mirror is nearly all of the step. A
+  restore of arachne's 1.1 GB takes 9–12 s (about 110 MB/s), after which apt reports `Need to get 0 B/1167 MB`.
+  Unpacking and configuring the packages, the TeX triggers and the setup script still run: arachne's setup step took
+  2m06s–2m41s on a hit, against 2m51s on a miss from a fast mirror (the download 24 s of it) and the 20-minute bound
+  on a slow one.
 - **Size.** An entry is the set's packages, which are already compressed: arachne's is about 1.1 GB. A repository's
-  caches share 10 GB, least recently used first out, and an entry not read for 7 days is dropped, so an image's
-  entry outlives the next image's by at most a week.
+  caches share 10 GB, the least recently read evicted first, and an entry not read for 7 days is dropped: an older
+  image's entry, and a partial one, a week after the gates stop reading it.
 
 ## `ci-gate`
 
