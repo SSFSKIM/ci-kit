@@ -178,3 +178,25 @@ test('the warm job downloads only what the cache lacks and keeps only what the s
   assert.match(apt[1], /^apt-get install .*--no-install-recommends --no-upgrade --print-uris .*Dir::Cache::Archives=\S+\/ cowsay zsh$/);
   assert.match(apt[2], /^apt-get install .*--no-install-recommends --no-upgrade --download-only .*Acquire::Retries=3.* cowsay zsh$/);
 });
+
+test('after a cut-short download the warm stops apt before the cache reads its unfinished file', (t) => {
+  const s = sandbox(t);
+  const open = step(warm.steps, 'Let the cache read the unfinished downloads');
+  mkdirSync(join(s.env.RUNNER_TEMP, 'ci-kit-apt', 'partial'), { recursive: true });
+  for (const name of ['pkill', 'pgrep', 'chmod']) {
+    // pgrep finds no apt-get left; the others only record.
+    writeFileSync(join(s.root, 'bin', name), `#!/usr/bin/env bash\necho "${name} $*" >> "$FIXTURE/calls"\n${name === 'pgrep' ? 'exit 1' : ''}\n`, { mode: 0o755 });
+  }
+  const run = (outcome) => {
+    writeFileSync(join(s.root, 'calls'), '');
+    s.run(open.run, { CI_KIT_DOWNLOAD: outcome });
+    return s.calls().filter((c) => !c.startsWith('sudo '));
+  };
+  assert.equal(open.env.CI_KIT_DOWNLOAD, '${{ steps.download.outcome }}');
+  // A step's timeout ends its bash, not the apt-get it started under sudo, which goes on writing (tar: "file changed
+  // as we read it", arachne run 42835893694).
+  const stopped = run('failure');
+  assert.deepEqual(stopped.slice(0, 2), ['pkill -x apt-get', 'pkill -f [/]usr/lib/apt/methods/']);
+  assert.match(stopped.at(-1), /^chmod -R a\+rX .*\/ci-kit-apt\/partial$/);
+  assert.deepEqual(run('success').map((c) => c.split(' ')[0]), ['chmod']);
+});
