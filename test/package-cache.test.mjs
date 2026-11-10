@@ -89,6 +89,9 @@ test('a hosted Linux gate with apt packages points apt at the package cache and 
   const restore = step(gate, 'Restore the package cache');
   assert.match(restore.uses, /^actions\/cache\/restore@v\d+$/);
   assert.equal(restore.if, "steps.apt-cache.outcome == 'success'");
+  // An older image's or another set's complete entry before a warm job's cut-short download.
+  assert.deepEqual(restore.with['restore-keys'].trim().split('\n'),
+    ['${{ steps.apt-cache.outputs.set }}', '${{ steps.apt-cache.outputs.any }}', '${{ steps.apt-cache.outputs.partial }}']);
 });
 
 test('the apt configuration step writes the drop-in, the directory and the keys', (t) => {
@@ -103,7 +106,11 @@ test('the apt configuration step writes the drop-in, the directory and the keys'
     key: 'ci-kit-apt-1-ubuntu24-X64-0123456789abcdef-20261102.1.0',
     set: 'ci-kit-apt-1-ubuntu24-X64-0123456789abcdef-',
     any: 'ci-kit-apt-1-ubuntu24-X64-',
+    partial: 'ci-kit-apt-1-partial-ubuntu24-X64-0123456789abcdef-',
+    resume: 'ci-kit-apt-1-partial-ubuntu24-X64-0123456789abcdef-20261102.1.0-',
   });
+  const outputs = s.outputs();
+  for (const prefix of [outputs.set, outputs.any]) assert.ok(!outputs.resume.startsWith(prefix), 'no gate mistakes a partial download for a set');
 });
 
 test('the warm job saves on the default branch, from the hosted lane runner, the same files the gates restore', () => {
@@ -125,6 +132,21 @@ test('the warm job saves on the default branch, from the hosted lane runner, the
   for (const name of ['Restore an older package cache', 'Download the declared packages', 'Save the package cache']) {
     assert.equal(step(warm.steps, name).if, "steps.lookup.outputs.cache-hit != 'true'", name);
   }
+});
+
+test('a warm cut short saves what it downloaded apart, and the next warm resumes from it', () => {
+  const download = step(warm.steps, 'Download the declared packages');
+  assert.ok(download['timeout-minutes'] < warm['timeout-minutes'] - 5, 'the partial save has time to run');
+  const partial = step(warm.steps, 'Save the partial download');
+  const restore = step(gate, 'Restore the package cache');
+  assert.equal(partial.with.path, restore.with.path);
+  assert.equal(partial.with.key, '${{ steps.apt-cache.outputs.resume }}${{ github.run_id }}-${{ github.run_attempt }}');
+  for (const [outcome, saved] of [['failure', true], ['cancelled', true], ['success', false], ['skipped', false]]) {
+    const ran = evaluate(partial.if.replace('always()', 'true'), { steps: { download: { outcome } } });
+    assert.equal(ran, saved, outcome);
+  }
+  assert.equal(step(warm.steps, 'Restore an older package cache').with['restore-keys'].trim().split('\n')[0],
+    '${{ steps.apt-cache.outputs.resume }}');
 });
 
 test('the warm job downloads only what the cache lacks and keeps only what the set needs', (t) => {

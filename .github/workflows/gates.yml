@@ -195,8 +195,8 @@ jobs:
         if: runner.environment == 'github-hosted' && runner.os == 'Linux' && needs.plan.outputs.apt_cache != '' && join(matrix.gate.setup.apt, '') != ''
         env:
           CI_KIT_APT_CACHE: ${{ needs.plan.outputs.apt_cache }}
-        # apt-get keeps what it downloads (only the apt command deletes it). Its sandbox user could not enter the runner's
-        # home, which would only cost a notice; the key names the image, whose installed packages decide what is fetched.
+        # apt-get keeps what it downloads (only the apt command deletes it). Downloads run as root: the _apt sandbox user
+        # cannot enter the runner's home. The key names the image, whose installed packages decide what apt fetches.
         run: &apt-cache-dir |
           dir=$RUNNER_TEMP/ci-kit-apt
           mkdir -p "$dir"
@@ -206,10 +206,12 @@ jobs:
             echo "key=$prefix$CI_KIT_APT_CACHE-$ImageVersion"
             echo "set=$prefix$CI_KIT_APT_CACHE-"
             echo "any=$prefix"
+            echo "partial=ci-kit-apt-1-partial-$ImageOS-$RUNNER_ARCH-$CI_KIT_APT_CACHE-"
+            echo "resume=ci-kit-apt-1-partial-$ImageOS-$RUNNER_ARCH-$CI_KIT_APT_CACHE-$ImageVersion-"
           } >> "$GITHUB_OUTPUT"
 
       # The packages alone: apt's partial/ and lock belong to root. An older image's entry, or another apt set's, still
-      # serves every package whose version the mirror has not moved.
+      # serves every package whose version the mirror has not moved; last, what a warm job cut short had downloaded.
       - name: Restore the package cache
         if: steps.apt-cache.outcome == 'success'
         uses: actions/cache/restore@v6
@@ -219,6 +221,7 @@ jobs:
           restore-keys: |
             ${{ steps.apt-cache.outputs.set }}
             ${{ steps.apt-cache.outputs.any }}
+            ${{ steps.apt-cache.outputs.partial }}
 
       - name: Apply CI environment
         if: join(matrix.gate.setup.apt, '') != '' || join(matrix.gate.setup.brew, '') != '' || join(matrix.gate.setup.cask, '') != '' || matrix.gate.setup.script != ''
@@ -304,6 +307,7 @@ jobs:
           key: ${{ steps.apt-cache.outputs.key }}
           lookup-only: true
 
+      # This image's cut-short download first, which holds what it restored and what it fetched; then as a gate restores.
       - name: Restore an older package cache
         if: steps.lookup.outputs.cache-hit != 'true'
         uses: actions/cache/restore@v6
@@ -311,11 +315,15 @@ jobs:
           path: ${{ runner.temp }}/ci-kit-apt/*.deb
           key: ${{ steps.apt-cache.outputs.key }}
           restore-keys: |
+            ${{ steps.apt-cache.outputs.resume }}
             ${{ steps.apt-cache.outputs.set }}
             ${{ steps.apt-cache.outputs.any }}
 
+      # Bounded below the job, so that a mirror too slow to finish still leaves what it served for the next warm.
       - name: Download the declared packages
+        id: download
         if: steps.lookup.outputs.cache-hit != 'true'
+        timeout-minutes: 45
         env:
           CI_KIT_APT: ${{ needs.plan.outputs.apt_warm }}
         run: |
@@ -340,6 +348,15 @@ jobs:
         with:
           path: ${{ runner.temp }}/ci-kit-apt/*.deb
           key: ${{ steps.apt-cache.outputs.key }}
+
+      # Under keys of their own, which the next warm resumes from, and a gate falls back to only when nothing else
+      # matches: a set cut short must not stand in for a complete one. Each is superseded by the next and ages out.
+      - name: Save the partial download
+        if: always() && (steps.download.outcome == 'failure' || steps.download.outcome == 'cancelled')
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/ci-kit-apt/*.deb
+          key: ${{ steps.apt-cache.outputs.resume }}${{ github.run_id }}-${{ github.run_attempt }}
 
   verdict:
     name: verdict

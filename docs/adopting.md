@@ -100,7 +100,8 @@ Package installs and scripts that fail fail the step, naming the package or scri
 hint: `CI_KIT_SETUP_HASH` matching the declaration produces `ci-kit setup: image matches setup <hash>`; a differing
 hash produces a notice naming both, and the job still installs what is missing. Hosted runners and the Mac mini's
 own runner normally have no image hash. Each run prints a summary naming the packages installed and the elapsed
-seconds. Installs on the mini persist on the owner's machine.
+seconds. Installs on the mini persist on the owner's machine. In the gates workflow, a hosted Linux gate reads its apt
+packages from the Actions cache when the default branch has saved them (see [Package cache](#package-cache)).
 
 **macOS apps have a first-run exception.** A newly installed app carrying `com.apple.quarantine` is named in a
 warning. It needs a human's first-run approval on that lane before tests can launch it; the action never removes
@@ -339,6 +340,52 @@ repository's schedule after 60 days without activity in it.
   does not name age out. Each seed that rebuilds a layer uploads it again, so a scope that several merges a week
   rebuild holds as many copies until the old ones age out. Gates that share a scope can leave the writing to one of
   them: the others read it, and their seeds upload nothing.
+
+#### Package cache
+
+On GitHub's Linux runners the Ubuntu mirror sometimes serves about 100 kB/s, and a large `apt` set then holds the setup
+step to its 20-minute bound: arachne's TeX and font set is 1167 MB of packages, `texlive-fonts-extra` alone 669 MB.
+So a `hosted` gate with `apt` packages points apt's download directory at one the Actions cache restores, before the
+setup step: apt finds the packages there and downloads only what is missing. A miss downloads from the mirror as it
+always did. The setup step itself is unchanged (it checks presence and installs the missing names, which apt still
+resolves against the mirror's package lists), and so is the setup hash. Self-hosted runners and macOS are untouched:
+their images carry the packages.
+
+The cache is written by a job of its own, `package cache`, on the default branch only, as the build cache is (and for
+the same reason: an entry written on a `ci/**` ref or a pull request is read by nothing but that ref's own later runs).
+It runs on every planned run of the default branch whose config has a `hosted` gate with the shared setup and an `apt`
+list. When its entry already exists it stops after a lookup; otherwise it downloads the declared set without
+installing it (`apt-get install --download-only --no-upgrade`, so names the image already has are left as the setup
+step leaves them) and saves it. It is not a gate: the verdict does not wait for it, and a failure leaves the run green.
+A mirror too slow for the download's 45-minute bound still leaves what it served: that is saved under a key of its
+own (`ci-kit-apt-1-partial-...`), which the next warm resumes from and a gate reads only when no complete entry of
+any set exists.
+
+The caller's `on:` therefore gains the default branch's pushes and a schedule, the same lines as the build cache's
+seeds:
+
+```yaml
+  push:
+    branches: ['ci/**', main]
+  schedule:
+    - cron: '23 0 * * 1'
+    - cron: '47 6 * * 1'
+```
+
+A push to the default branch plans only `build_cache` gates (often none), so a merge costs a plan job, the lookup
+(about 15 s) and the verdict, and a merge that changes the `apt` list saves the new set right away. The schedule
+saves a new image's set within the week even without a merge.
+
+- **The key.** `ci-kit-apt-1-<ImageOS>-<arch>-<set>-<ImageVersion>`, `<set>` a hash of the sorted `apt` names. The
+  image version moves about weekly, which refreshes the packages to the mirror's current versions; until the new
+  image's entry exists, a gate restores the newest entry of the same set on an older image, then of any set, and
+  apt downloads only what those lack. When an older entry seeds a new one, the warm job first drops what the set no
+  longer needs at the mirror's versions, so an entry stays the set's size.
+- **What a hit saves, and what it does not.** The download. Unpacking and configuring the packages, the TeX triggers
+  and the setup script still run: for arachne, on a fast mirror, the download was 24 s of a 171 s setup step.
+- **Size.** An entry is the set's packages, which are already compressed: arachne's is about 1.1 GB. A repository's
+  caches share 10 GB, least recently used first out, and an entry not read for 7 days is dropped, so an image's
+  entry outlives the next image's by at most a week.
 
 ## `ci-gate`
 
