@@ -2,6 +2,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { gateOf, jobEvents, pollInterval, watchRun } from '../cli/watch.mjs';
+import { createPacer } from '../cli/pace.mjs';
+import { GitHubError } from '../lib/github.mjs';
 
 const T0 = Date.parse('2026-10-15T12:00:00Z');
 const at = (s) => new Date(T0 + s * 1000).toISOString().replace('.000Z', 'Z');
@@ -251,4 +253,45 @@ test('a token below 500 stretches the poll to 60 s and prints THROTTLE once', as
   assert.deepEqual(h.lines, ['THROTTLE remaining=499', 'PASS unit 0m41s']);
   assert.deepEqual(h.calls.sleeps, [15_000, 60_000, 60_000, 30_000]);
   assert.equal(r.code, 0);
+});
+
+// A client whose run and jobs reads are rate-limited for `limitedReads` reads, then answer `snapshot`;
+// /rate_limit answers from `cores`, then a healthy budget.
+function limitedHarness(limitedReads, snapshot, { cores = [], reset = (T0 + 20 * 60_000) / 1000 } = {}) {
+  const h = harness([snapshot]);
+  let left = limitedReads;
+  const limitedError = () => new GitHubError(403, 'HTTP 403 GET /repos/SSFSKIM/ci-kit/actions/runs/7: API rate limit exceeded for user ID 1.', {
+    remaining: 0, reset, retryAfter: null,
+  });
+  const answer = (value) => async () => {
+    if (left > 0) {
+      left -= 1;
+      throw limitedError();
+    }
+    return value;
+  };
+  h.opts.gh = {
+    stats: () => ({ remaining: left > 0 ? 0 : 4000 }),
+    getRun: answer(snapshot.run),
+    listJobs: answer(snapshot.jobs),
+    rateLimit: async () => cores.shift() ?? { remaining: 4999, reset: reset + 3600 },
+  };
+  h.opts.pacer = createPacer(h.opts.gh, h.opts.emit, { now: h.opts.now, sleep: h.opts.sleep });
+  return h;
+}
+
+test('a rate-limited watch waits until the reset and reads on, past maxUnreadable, to the verdict', async () => {
+  const done = { run: run('completed', 'success'), jobs: [plan(), job(2, 'ci / unit')] };
+  const h = limitedHarness(5, done); // maxUnreadable is 3 here
+  const r = await watchRun(h.opts);
+  assert.deepEqual(r, { line: `GREEN ${URL}`, code: 0 });
+  assert.deepEqual(h.lines, ['THROTTLE remaining=0 until=2026-10-15T12:20:00Z', 'PASS unit 0m41s']);
+});
+
+test('a watch whose budget stays exhausted for 90 min is an ERROR naming the rate limit', async () => {
+  const busy = { run: run('in_progress'), jobs: [plan()] };
+  const h = limitedHarness(1, busy, { cores: [{ remaining: 0, reset: (T0 + 100 * 60_000) / 1000 }] });
+  const r = await watchRun(h.opts);
+  assert.equal(r.code, 2);
+  assert.equal(r.line, 'ERROR run 7 cannot be read: the GitHub API rate limit stayed exhausted for 90 min (resets 2026-10-15T13:40:00Z)');
 });

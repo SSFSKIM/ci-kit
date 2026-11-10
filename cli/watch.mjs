@@ -1,7 +1,7 @@
 // Watches one run of the reusable workflow and turns its jobs into ci-gate's lines (spec I5).
 // The gate jobs are the matrix of gates.yml, named after their gate; `plan` and `verdict` are the workflow's own.
 import { formatDuration } from './naming.mjs';
-import { createPacer } from './pace.mjs';
+import { BudgetExhausted, createPacer } from './pace.mjs';
 
 const WAIT_AFTER_MS = 2 * 60 * 1000;
 // The poll schedule (spec Decision Log, "ci-gate is a good citizen of the shared token"): every session on the human's
@@ -95,10 +95,12 @@ export function pollInterval(elapsedMs) {
 }
 
 // Polls until the run completes or its plan ends unsuccessfully. Returns the final line and the exit code.
-//   gh: { getRun(repo, id), listJobs(repo, id), stats() → { remaining } }; emit(line): one stdout line;
+// An exhausted budget is waited out by the pacer and never counts as an unreadable poll; maxUnreadable bounds the
+// other failures in a row (a run deleted, credentials revoked).
+//   gh: { getRun(repo, id), listJobs(repo, id), stats() → { remaining }, rateLimit() }; emit(line): one stdout line;
 //   onFail(job, gate) → the path of the failed gate's downloaded log; planError(job) → the plan's error message;
 //   pacer: the call's pacer, shared with discovery so THROTTLE is said once (one is made when none is given).
-export async function watchRun({ gh, repo, runId, runUrl, emit, onFail, planError, now, sleep, pacer = createPacer(gh, emit), maxUnreadable = 20 }) {
+export async function watchRun({ gh, repo, runId, runUrl, emit, onFail, planError, now, sleep, pacer = createPacer(gh, emit, { now, sleep }), maxUnreadable = 20 }) {
   const seen = new Map();
   const started = now();
   let unreadable = 0;
@@ -107,10 +109,11 @@ export async function watchRun({ gh, repo, runId, runUrl, emit, onFail, planErro
     let run;
     let jobs;
     try {
-      run = await gh.getRun(repo, runId);
-      jobs = await gh.listJobs(repo, runId);
+      run = await pacer.read(() => gh.getRun(repo, runId));
+      jobs = await pacer.read(() => gh.listJobs(repo, runId));
       unreadable = 0;
     } catch (e) {
+      if (e instanceof BudgetExhausted) return { line: `ERROR run ${runId} cannot be read: ${e.message}`, code: 2 };
       unreadable += 1;
       if (unreadable >= maxUnreadable) return { line: `ERROR run ${runId} cannot be read: ${e.message}`, code: 2 };
       await wait();

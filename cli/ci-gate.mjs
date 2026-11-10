@@ -1,5 +1,6 @@
 // ci-gate (spec §2, I5): push the tested commit plus a nonce commit to a ci/ ref, follow the run it starts,
-// print one line per gate as it finishes, keep failed gates' logs on local disk, and remove the ref.
+// print one line per gate as it finishes, keep failed gates' logs on local disk, and remove the ref once the run has a
+// verdict (kept.mjs: a call that ends without one keeps it for a rerun, and a later call sweeps it).
 import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -7,10 +8,11 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createGitHub, ghToken } from '../lib/github.mjs';
 import { parseArgs, UsageError, USAGE } from './args.mjs';
+import { KEPT_FOR_MS, keepsRef, recordKept, sweepKept } from './kept.mjs';
 import { assertCaller, deleteRef, nonceCommit, pushRef, resolveRemote, resolveTarget, TargetError } from './git.mjs';
 import { cleanLog, nonceMessage, pushFailure, refName, sanitizeLabel } from './naming.mjs';
 import { findRun } from './discover.mjs';
-import { createPacer } from './pace.mjs';
+import { BudgetExhausted, createPacer } from './pace.mjs';
 import { watchRun } from './watch.mjs';
 
 const CALLER = '.github/workflows/ci.yml';
@@ -21,15 +23,17 @@ const LOG_ATTEMPTS = 6; // a job's log can lag its completion by a few seconds
 const out = (line) => process.stdout.write(line + '\n');
 const note = (line) => process.stderr.write(`ci-gate: ${line}\n`);
 
-function failureSaver(gh, repo, runId, dir) {
+// The log is read through the pacer, so an exhausted budget is waited out like the watch's polls.
+function failureSaver(gh, pacer, repo, runId, dir) {
   return async (job, gate) => {
     mkdirSync(dir, { recursive: true });
     const path = join(dir, `${gate}.log`);
     let log = null;
     for (let i = 0; i < LOG_ATTEMPTS && log === null; i += 1) {
       try {
-        log = cleanLog(await gh.jobLog(repo, job.id));
-      } catch {
+        log = cleanLog(await pacer.read(() => gh.jobLog(repo, job.id)));
+      } catch (e) {
+        if (e instanceof BudgetExhausted) break;
         await sleep(5000);
       }
     }
@@ -121,32 +125,56 @@ async function main(argv) {
   }
 
   let runId = null;
-  const cleanup = () => {
+  let runMayExist = false;
+  // verdict: the call ends GREEN or RED. The ref is this call's to remove after a verdict, or when no run came of the
+  // push; after an ERROR or an interruption while a run exists it stays for a rerun (kept.mjs).
+  const cleanup = (verdict) => {
     if (opts.keep) return note(`kept ${ref}`);
+    if (keepsRef({ verdict, runFound: runId !== null, runMayExist })) return keepForRerun();
     if (deleteRef(target.dir, remote.name, commit, ref)) note(`removed ${ref}`);
     else note(`left ${ref} (it no longer points at this call's commit, or the delete failed)`);
   };
+  const keepForRerun = () => {
+    try {
+      recordKept(target.dir, { ref, commit, remote: remote.name }, Date.now());
+      note(`kept ${ref} for a rerun, as this call ends without a verdict; a ci-gate in this clone removes it after ${KEPT_FOR_MS / 3_600_000} h (now: git push ${remote.name} --delete ${ref})`);
+    } catch (e) {
+      note(`kept ${ref}, which no later call will remove (it could not be recorded: ${e.message}); remove it with: git push ${remote.name} --delete ${ref}`);
+    }
+  };
   process.once('SIGINT', async () => {
     if (runId) await gh.cancelRun(repo, runId).then(() => note(`cancelled run ${runId}`), () => {});
-    cleanup();
+    cleanup(false);
     out('ERROR interrupted');
     process.exit(130);
   });
 
   let result;
   try {
-    result = await follow(gh, repo, commit, ref, (id) => { runId = id; });
+    result = await follow(gh, repo, commit, ref, (id) => { runId = id; }, () => { runMayExist = true; });
   } catch (e) {
     result = failure(e);
-  } finally {
-    cleanup(); // also when following the run throws: the ref is this call's to remove
   }
+  cleanup(result.code !== 2);
   if (DEBUG) {
     const { requests, notModified, remaining } = gh.stats();
     note(`api requests ${requests}, of them 304 ${notModified}; remaining ${remaining}`);
   }
   out(result.line);
+  sweepOldRefs(target.dir);
   return result.code;
+}
+
+// The refs earlier calls in this clone kept and nobody reran within KEPT_FOR_MS (kept.mjs).
+function sweepOldRefs(dir) {
+  try {
+    const remove = (e) => deleteRef(dir, e.remote, e.commit, e.ref);
+    for (const { ref, removed } of sweepKept(dir, { nowMs: Date.now(), remove })) {
+      note(removed ? `removed ${ref}, kept by an earlier call` : `forgot ${ref}, kept by an earlier call: it is gone or no longer that call's commit`);
+    }
+  } catch (e) {
+    note(`the refs earlier calls kept could not be swept: ${e.message}`);
+  }
 }
 
 // An unexpected local failure (a log that cannot be written, say) still ends in I5's ERROR line and exit 2.
@@ -154,10 +182,15 @@ function failure(e) {
   return { line: `ERROR ci-gate failed: ${e?.message ?? e}`, code: 2 };
 }
 
-async function follow(gh, repo, commit, ref, onRun) {
-  const pacer = createPacer(gh, out); // one per call: discovery and the watch say THROTTLE at most once between them
+// onRun(id): the run was found; onUnseen(): discovery could not look for it, so a run may exist all the same.
+async function follow(gh, repo, commit, ref, onRun, onUnseen) {
+  // One per call: discovery and the watch say the low-budget THROTTLE at most once between them.
+  const pacer = createPacer(gh, out, { now: Date.now, sleep });
   const found = await findRun({ gh, repo, commit, caller: CALLER, ref, pacer, now: Date.now, sleep, note });
-  if (found.error) return { line: `ERROR ${found.error}`, code: 2 };
+  if (found.error) {
+    if (found.runMayExist) onUnseen();
+    return { line: `ERROR ${found.error}`, code: 2 };
+  }
   const { run } = found;
   onRun(run.id);
   note(`run ${run.html_url}`);
@@ -168,7 +201,7 @@ async function follow(gh, repo, commit, ref, onRun) {
     runId: run.id,
     runUrl: run.html_url,
     emit: out,
-    onFail: failureSaver(gh, repo, run.id, join('/tmp/ci-gate', `${owner}-${name}`, String(run.id))),
+    onFail: failureSaver(gh, pacer, repo, run.id, join('/tmp/ci-gate', `${owner}-${name}`, String(run.id))),
     planError: planErrorReader(gh, repo),
     now: Date.now,
     sleep,

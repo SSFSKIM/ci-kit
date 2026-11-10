@@ -1,7 +1,7 @@
 // The REST client against a fake fetch: conditional requests (ETag / If-None-Match) and the rate-limit reading.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createGitHub } from '../lib/github.mjs';
+import { createGitHub, GitHubError, isRateLimited } from '../lib/github.mjs';
 
 // A fake fetch that answers from a script of responses, recording each request's headers.
 function fakeFetch(responses) {
@@ -141,4 +141,28 @@ test('issue comments can be read from a time on, and runs from a creation time o
   assert.deepEqual(await gh.runsCreatedSince('o/r', '2026-10-16T00:00:00Z'), []);
   assert.equal(f.requests[0].url, 'https://api.github.com/repos/o/r/issues/5/comments?since=2026-10-16T00%3A00%3A00Z&per_page=100&page=1');
   assert.equal(f.requests[1].url, 'https://api.github.com/repos/o/r/actions/runs?created=%3E%3D2026-10-16T00%3A00%3A00Z&per_page=100&page=1');
+});
+
+test('a rate-limited answer carries its headers on the error: remaining, reset and retry-after', async () => {
+  const f = fakeFetch([
+    { status: 403, body: { message: 'API rate limit exceeded for user ID 1.' }, headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1794309724' } },
+    { status: 429, body: { message: 'You have exceeded a secondary rate limit.' }, headers: { 'x-ratelimit-remaining': '4100', 'retry-after': '60' } },
+    { status: 404, body: { message: 'Not Found' } },
+  ]);
+  const gh = createGitHub('t', { fetchImpl: f.impl });
+  await assert.rejects(gh.getRun('o/r', 1), (e) => isRateLimited(e) && assert.deepEqual(e.rateLimit, { remaining: 0, reset: 1794309724, retryAfter: null }) === undefined);
+  await assert.rejects(gh.getRun('o/r', 2), (e) => isRateLimited(e) && assert.deepEqual(e.rateLimit, { remaining: 4100, reset: null, retryAfter: 60 }) === undefined);
+  await assert.rejects(gh.getRun('o/r', 3), (e) => e.status === 404 && !isRateLimited(e));
+});
+
+test('a 403 that is not about the rate limit is not rate-limited', () => {
+  assert.equal(isRateLimited(new GitHubError(403, 'HTTP 403 GET /repos/o/r: Resource not accessible by integration')), false);
+  assert.equal(isRateLimited(new Error('fetch failed')), false);
+});
+
+test('rateLimit reads the core budget from /rate_limit (a read GitHub does not count)', async () => {
+  const f = fakeFetch([{ status: 200, body: { resources: { core: { limit: 5000, remaining: 0, reset: 1794309724, used: 5000 } } } }]);
+  const gh = createGitHub('t', { fetchImpl: f.impl });
+  assert.deepEqual(await gh.rateLimit(), { limit: 5000, remaining: 0, reset: 1794309724, used: 5000 });
+  assert.equal(f.requests[0].url, 'https://api.github.com/rate_limit');
 });

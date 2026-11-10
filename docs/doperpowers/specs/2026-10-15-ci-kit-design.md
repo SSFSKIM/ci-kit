@@ -472,6 +472,8 @@ caller's repo, not the kit's).
    lane this is visible boot time.
 6. It downloads the failed jobs' logs and artifacts under `/tmp/ci-gate/<owner>-<repo>/<run-id>/`.
 7. It deletes the ref unless `--keep`, and exits 0 (green), 1 (red) or 2 (infra or config error).
+   Since 2026-11-10 an `ERROR` or an interruption while a run exists keeps the ref for a rerun, and a
+   later call in the same clone removes it after 24 h (Decision Log, "an exhausted budget is waited out").
    - The ref carries the first 6 hex characters of the nonce, so concurrent calls on the same
      commit and label never share a ref.
    - Deletion is compare-and-delete: `git push --force-with-lease=<ref>:<nonce commit>`, as MAWS's
@@ -2093,9 +2095,13 @@ ci-gate [<worktree-or-sha>] [--gates a,b] [--repo OWNER/NAME] [--label NAME] [--
   FAIL <gate> <m>m<s>s log=<path>
   SKIP <gate>
   CANCEL <gate>
+  THROTTLE remaining=<n>
+  THROTTLE remaining=<n> until=<ISO time>
   ```
 
-  A `WAIT` line appears once, when a gate has been queued for 2 min.
+  A `WAIT` line appears once, when a gate has been queued for 2 min. `THROTTLE remaining=<n>` appears
+  once, when the REST budget falls below 500; `THROTTLE … until=` each time a rate-limited answer is
+  waited out, naming when ci-gate reads again.
 - The last line is one of:
   - `GREEN <run-url>`;
   - `RED <failed>/<total> <run-url>`;
@@ -2103,7 +2109,10 @@ ci-gate [<worktree-or-sha>] [--gates a,b] [--repo OWNER/NAME] [--label NAME] [--
 - Exit 0, 1 or 2 respectively.
 - Logs go to `/tmp/ci-gate/<owner>-<repo>/<run-id>/<gate>.log`, with artifacts beside them.
 - `ERROR` cases:
-  - no run appeared within 5 min of the push (2 min until 2026-11-04);
+  - no run appeared within 5 min of the push (2 min until 2026-11-04), not counting time spent
+    waiting out the rate limit;
+  - the rate limit stayed exhausted for 90 min (until 2026-11-10, a rate-limited read counted as a
+    failed one, and ci-gate gave up at once);
   - `gh` is not authenticated;
   - the planner failed (its message is printed).
 
@@ -2894,6 +2903,27 @@ euros, jobs, and the projected month at the current rate.
   - **Rationale:** adoption means many agents running `ci-gate` at once on one human's token. A
     poller that can drain it breaks the whole account.
   - **Date/Author:** 2026-10-15, CI-opt, recorded by plan-executor.
+
+- **Decision:** an exhausted budget is waited out, and a call without a verdict keeps its ref
+  (CI-opt, 2026-11-10). In two days five ci-gate calls ended without a verdict at core 0/5000
+  (friction entry `parallel-gh-watchers-exhaust-owner-api-budget`), and each deleted its ref while
+  the run still ran.
+  - A 403 or 429 naming the rate limit is not a failed read. ci-gate sleeps until the later of
+    `retry-after` and, at 0 remaining, `x-ratelimit-reset` (a minute when the answer says neither),
+    plus 5 s, then checks `GET /rate_limit` (uncounted) and sleeps again while it still says 0: the
+    published reset moves when the window refills and drains again. Discovery, the watch and the
+    failed-log fetch all read through it (`pace.mjs`, `read`); discovery's 5-minute deadline does
+    not count the wait.
+  - The wait is bounded at 90 min of continuous exhaustion (one window, plus a reset that moved once);
+    then `ERROR` as before. The healthy path is unchanged: no extra request, no extra line.
+  - Each wait prints `THROTTLE remaining=<n> until=<ISO>`; no consumer parses `THROTTLE` (MAWS's
+    `scripts/ci-gate.sh` is its own watcher), so the keyword is reused rather than a new one added.
+  - The ref is removed after `GREEN` or `RED`, and when no run appeared within the deadline: such
+    a push has nothing to rerun, and a kept ref would let a late run start with no one watching it.
+    After an `ERROR` or an interruption while a run exists, or when the budget hid the run, the
+    ref stays and is recorded under the clone's git directory (`ci-gate/kept/`); any later ci-gate
+    in that clone deletes recorded refs older than 24 h, compare-and-delete. No janitor sweeps ci refs.
+  - **Date/Author:** 2026-11-10, ci-gate-ratelimit executor, at CI-opt's request.
 - **Decision:** the DC7 owner (smns-erb-88) approved M3's three changes to DC7's tests. It declined
   a test-only `saw_waiting` or presence counter on `GET /requests/<id>`; it does not belong in the
   DX5 contract. The one 2 s wait in `test-bridge-requests.sh` stays. If it flakes in CI, the run id
