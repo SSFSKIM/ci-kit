@@ -100,7 +100,8 @@ Package installs and scripts that fail fail the step, naming the package or scri
 hint: `CI_KIT_SETUP_HASH` matching the declaration produces `ci-kit setup: image matches setup <hash>`; a differing
 hash produces a notice naming both, and the job still installs what is missing. Hosted runners and the Mac mini's
 own runner normally have no image hash. Each run prints a summary naming the packages installed and the elapsed
-seconds. Installs on the mini persist on the owner's machine.
+seconds. Installs on the mini persist on the owner's machine. In the gates workflow, a hosted Linux gate reads its apt
+packages from the Actions cache when the default branch has saved them (see [Package cache](#package-cache)).
 
 **macOS apps have a first-run exception.** A newly installed app carrying `com.apple.quarantine` is named in a
 warning. It needs a human's first-run approval on that lane before tests can launch it; the action never removes
@@ -339,6 +340,66 @@ repository's schedule after 60 days without activity in it.
   does not name age out. Each seed that rebuilds a layer uploads it again, so a scope that several merges a week
   rebuild holds as many copies until the old ones age out. Gates that share a scope can leave the writing to one of
   them: the others read it, and their seeds upload nothing.
+
+#### Package cache
+
+On GitHub's Linux runners the Ubuntu mirror sometimes serves about 100 kB/s, and a large `apt` set then holds the setup
+step to its 20-minute bound: arachne's TeX and font set is 1167 MB of packages, `texlive-fonts-extra` alone 669 MB.
+So a `hosted` gate with `apt` packages points apt's download directory at one the Actions cache restores, before the
+setup step: apt finds the packages there and downloads only what is missing. A miss downloads from the mirror as it
+always did. The setup step itself is unchanged (it checks presence and installs the missing names, which apt still
+resolves against the mirror's package lists), and so is the setup hash. Self-hosted runners and macOS are untouched:
+their images carry the packages.
+
+apt takes a file already in its download directory on its name and size alone, without checking it against the hash
+in the signed index. So between the restore and the setup step, the gate updates apt's lists and checks every restored
+package's SHA256 against the index entry for its package and version (one `apt-cache show` for them all). A package
+whose hash differs, or that the index does not know, is deleted, and apt downloads it again. When the lists cannot be
+updated, none of the restored packages are used. A file apt had only begun (in `partial/`) needs no check, since apt
+hashes a resumed download whole. The warm job runs the same check before an entry it restored seeds a new one.
+
+The cache is written by a job of its own, `package cache`, on the default branch only, as the build cache is (and for
+the same reason: an entry written on a `ci/**` ref or a pull request is read by nothing but that ref's own later runs).
+It runs on every planned run of the default branch whose config has a `hosted` gate with the shared setup and an `apt`
+list. When its entry already exists it stops after a lookup; otherwise it downloads the declared set without
+installing it (`apt-get install --download-only --no-upgrade`, so names the image already has are left as the setup
+step leaves them) and saves it. It is not a gate: the verdict does not wait for it, and a failure leaves the run green.
+A mirror too slow for the download's 45-minute bound still leaves what it served, the file it had begun included:
+that is saved under a key of its own (`ci-kit-apt-1-partial-...`), which the next warm resumes from (apt continues a
+begun file where it stopped) and a gate reads only when no complete entry of any set exists. The warm job looks first
+for this image's cut-short download, then as a gate does, an older image's last, so that a slow mirror across an image
+change still converges. The download runs in a process group of its own: when its bound ends the step, the `apt-get`
+it started under sudo keeps running, and before saving, the job stops that group and no other apt. On 2026-11-10 one warm
+fetched the whole set in 22–48 s and another, the same hour, spent 37 minutes on `texlive-fonts-extra` alone.
+
+The caller's `on:` therefore gains the default branch's pushes and a schedule, the same lines as the build cache's
+seeds:
+
+```yaml
+  push:
+    branches: ['ci/**', main]
+  schedule:
+    - cron: '23 0 * * 1'
+    - cron: '47 6 * * 1'
+```
+
+A push to the default branch plans only `build_cache` gates (often none), so a merge costs a plan job, the lookup
+(about 15 s) and the verdict, and a merge that changes the `apt` list saves the new set right away. The schedule
+saves a new image's set within the week even without a merge.
+
+- **The key.** `ci-kit-apt-1-<ImageOS>-<arch>-<set>-<ImageVersion>`, `<set>` a hash of the sorted `apt` names. The
+  image version moves about weekly, which refreshes the packages to the mirror's current versions; until the new
+  image's entry exists, a gate restores the newest entry of the same set on an older image, then of any set, and
+  apt downloads only what those lack. When an older entry seeds a new one, the warm job first drops what the set no
+  longer needs at the mirror's versions, so an entry stays the set's size.
+- **What a hit saves, and what it does not.** The download, which on a slow mirror is nearly all of the step. A
+  restore of arachne's 1.1 GB takes 9–12 s (about 110 MB/s), after which apt reports `Need to get 0 B/1167 MB`.
+  Unpacking and configuring the packages, the TeX triggers and the setup script still run: arachne's setup step took
+  2m06s–2m41s on a hit, against 2m51s on a miss from a fast mirror (the download 24 s of it) and the 20-minute bound
+  on a slow one.
+- **Size.** An entry is the set's packages, which are already compressed: arachne's is about 1.1 GB. A repository's
+  caches share 10 GB, the least recently read evicted first, and an entry not read for 7 days is dropped: an older
+  image's entry, and a partial one, a week after the gates stop reading it.
 
 ## `ci-gate`
 

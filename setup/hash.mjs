@@ -15,3 +15,7 @@ export function setupHash(setup, scriptBytes) {
     script: setup.script, script_sha256: setup.script ? sha256(scriptBytes) : '',
   })).slice(0, 16);
 }
+
+// The package cache's key for a declared apt set (docs/adopting.md, "Package cache"): only the names, so a change to
+// the script or install keeps the downloaded packages. Empty without apt packages.
+export const aptCacheKey = (apt) => (apt.length ? sha256(JSON.stringify(names(apt))).slice(0, 16) : '');

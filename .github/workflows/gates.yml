@@ -27,6 +27,8 @@ jobs:
       note: ${{ steps.plan.outputs.note }}
       base: ${{ steps.plan.outputs.base }}
       cache_write: ${{ steps.plan.outputs.cache_write }}
+      apt_cache: ${{ steps.plan.outputs.apt_cache }}
+      apt_warm: ${{ steps.plan.outputs.apt_warm }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@v7
@@ -126,6 +128,8 @@ jobs:
             echo "note=$(jq -r .note "$RUNNER_TEMP/plan.json")"
             echo "base=$gate_base"
             echo "cache_write=$(jq .cache_write "$RUNNER_TEMP/plan.json")"
+            echo "apt_cache=$(jq -r .apt_cache "$RUNNER_TEMP/plan.json")"
+            echo "apt_warm=$(jq -c .apt_warm "$RUNNER_TEMP/plan.json")"
           } >> "$GITHUB_OUTPUT"
 
       # A pool gate needs the pool box: ensure creates it if none exists, without waiting for it to boot (spec §3).
@@ -181,6 +185,86 @@ jobs:
         if: matrix.gate.setup.pnpm
         run: corepack enable
 
+      # The package cache (docs/adopting.md, "Package cache"). On GitHub's Linux runners the mirror can serve 100 kB/s, and
+      # a large TeX set then holds the setup step past its bound: apt downloads into a directory the Actions cache
+      # restores, filled by the default branch's warm job (package-cache, below) for this image and apt set. A miss
+      # downloads from the mirror as before; apt still resolves every package and fetches what the directory lacks.
+      # Self-hosted runners keep their own apt configuration: their images carry the packages.
+      - name: Point apt at the package cache
+        id: apt-cache
+        if: runner.environment == 'github-hosted' && runner.os == 'Linux' && needs.plan.outputs.apt_cache != '' && join(matrix.gate.setup.apt, '') != ''
+        env:
+          CI_KIT_APT_CACHE: ${{ needs.plan.outputs.apt_cache }}
+        # apt-get keeps what it downloads (only the apt command deletes it). Downloads run as root: the _apt sandbox user
+        # cannot enter the runner's home. The key names the image, whose installed packages decide what apt fetches.
+        run: &apt-cache-dir |
+          dir=$RUNNER_TEMP/ci-kit-apt
+          mkdir -p "$dir"
+          printf 'Dir::Cache::Archives "%s/";\nAPT::Sandbox::User "root";\n' "$dir" | sudo tee /etc/apt/apt.conf.d/90ci-kit-package-cache >/dev/null
+          prefix=ci-kit-apt-1-$ImageOS-$RUNNER_ARCH-
+          {
+            echo "key=$prefix$CI_KIT_APT_CACHE-$ImageVersion"
+            echo "set=$prefix$CI_KIT_APT_CACHE-"
+            echo "any=$prefix"
+            echo "partial=ci-kit-apt-1-partial-$ImageOS-$RUNNER_ARCH-$CI_KIT_APT_CACHE-"
+            echo "resume=ci-kit-apt-1-partial-$ImageOS-$RUNNER_ARCH-$CI_KIT_APT_CACHE-$ImageVersion-"
+          } >> "$GITHUB_OUTPUT"
+
+      # The packages, and the files apt had begun when a warm job was cut short, which apt resumes (a name is one
+      # version's file, so a partial one is a prefix of it). An older image's entry, or another apt set's, still serves
+      # every package whose version the mirror has not moved; last, what a warm job cut short had downloaded.
+      - name: Restore the package cache
+        if: steps.apt-cache.outcome == 'success'
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ runner.temp }}/ci-kit-apt/*.deb
+            ${{ runner.temp }}/ci-kit-apt/partial/*.deb
+          key: ${{ steps.apt-cache.outputs.key }}
+          restore-keys: |
+            ${{ steps.apt-cache.outputs.set }}
+            ${{ steps.apt-cache.outputs.any }}
+            ${{ steps.apt-cache.outputs.partial }}
+
+      # apt takes a file already in its archive directory on its name and size alone, never checking the hash the signed
+      # index gives it (apt 2.8.2, acquire-item.cc, pkgAcqArchive), so an entry is trusted no further than the index:
+      # against fresh lists, a restored package whose hash differs, or that the index does not know, is deleted and
+      # downloaded again. A file in partial/ needs no check: apt hashes a resumed download whole.
+      - name: Check the restored packages against the index
+        if: steps.apt-cache.outcome == 'success'
+        run: &apt-cache-check |
+          shopt -s nullglob
+          dir=$RUNNER_TEMP/ci-kit-apt
+          debs=("$dir"/*.deb)
+          (( ${#debs[@]} )) || exit 0
+          if ! sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30; then
+            echo "::warning::ci-kit: apt could not update its index, so the restored packages are not used"
+            sudo rm -f "${debs[@]}"
+            exit 0
+          fi
+          start=$SECONDS
+          specs=()
+          for deb in "${debs[@]}"; do
+            IFS=_ read -r pkg version _ <<<"${deb##*/}"
+            specs+=("$pkg=${version//%3a/:}")
+          done
+          # The index's hash of each version, by package and version: apt's file name for it, package_version_arch.deb (an
+          # epoch's colon written %3a), names the architecture as built (amd64v3 on Ubuntu 26.04) and not as indexed.
+          # apt-cache fails for a version the index lacks, and still prints the others.
+          expected=$({ apt-cache show "${specs[@]}" 2>/dev/null || true; } | awk '
+            function flush() { if (p != "") print s " " p "=" v; p = v = s = "" }
+            /^Package: / { p = $2 } /^Version: / { v = $2 } /^SHA256: / { s = $2 }
+            /^$/ { flush() } END { flush() }')
+          dropped=0
+          while read -r hash name; do
+            IFS=_ read -r pkg version _ <<<"$name"
+            grep -qxF "$hash $pkg=${version//%3a/:}" <<<"$expected" && continue
+            echo "ci-kit: $name does not match the index; apt downloads it again"
+            sudo rm -f "$dir/$name"
+            dropped=$((dropped + 1))
+          done < <(cd "$dir" && sha256sum -- *.deb)
+          echo "ci-kit: checked ${#debs[@]} restored packages against the index in $((SECONDS - start)) s, dropped $dropped"
+
       - name: Apply CI environment
         if: join(matrix.gate.setup.apt, '') != '' || join(matrix.gate.setup.brew, '') != '' || join(matrix.gate.setup.cask, '') != '' || matrix.gate.setup.script != ''
         # A bound of its own, so a stalled package mirror fails this step instead of spending the gate's whole timeout.
@@ -234,6 +318,131 @@ jobs:
           name: ${{ matrix.gate.name }}
           path: ${{ join(matrix.gate.artifacts, fromJSON('"\n"')) }}
           if-no-files-found: ignore
+
+  # The package cache's warm job (docs/adopting.md, "Package cache"): on the default branch, whose entries every ref
+  # reads (a ci/** ref's would serve only that ref), it downloads the declared apt set once per image and saves it. It
+  # downloads without installing, the setup step's way (installed names are left as they are), and drops what an older
+  # entry held that the set no longer needs, so the entry stays the set's size. It is not a gate: the verdict does not
+  # wait for it, and a failure (a mirror too slow for its bound) leaves the run green; the next warm tries again.
+  package-cache:
+    name: package cache
+    needs: plan
+    if: needs.plan.outputs.apt_warm != '[]' && needs.plan.outputs.apt_warm != ''
+    runs-on: ubuntu-latest # the hosted lane's runner (plan/select.mjs), whose image the gates' key names
+    timeout-minutes: 60
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Point apt at the package cache
+        id: apt-cache
+        env:
+          CI_KIT_APT_CACHE: ${{ needs.plan.outputs.apt_cache }}
+        run: *apt-cache-dir
+
+      - name: Look up the package cache
+        id: lookup
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ runner.temp }}/ci-kit-apt/*.deb
+            ${{ runner.temp }}/ci-kit-apt/partial/*.deb
+          key: ${{ steps.apt-cache.outputs.key }}
+          lookup-only: true
+
+      # This image's cut-short download first, which holds what it restored and what it fetched; then as a gate restores,
+      # an older image's cut-short download included, so that a slow mirror across an image change still converges.
+      - name: Restore an older package cache
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ runner.temp }}/ci-kit-apt/*.deb
+            ${{ runner.temp }}/ci-kit-apt/partial/*.deb
+          key: ${{ steps.apt-cache.outputs.key }}
+          restore-keys: |
+            ${{ steps.apt-cache.outputs.resume }}
+            ${{ steps.apt-cache.outputs.set }}
+            ${{ steps.apt-cache.outputs.any }}
+            ${{ steps.apt-cache.outputs.partial }}
+
+      # Before the entry seeds a new one: what it holds is saved again.
+      - name: Check the restored packages against the index
+        if: steps.lookup.outputs.cache-hit != 'true'
+        run: *apt-cache-check
+
+      # Bounded below the job, so that a mirror too slow to finish still leaves what it served for the next warm.
+      - name: Download the declared packages
+        id: download
+        if: steps.lookup.outputs.cache-hit != 'true'
+        timeout-minutes: 45
+        env:
+          CI_KIT_APT: ${{ needs.plan.outputs.apt_warm }}
+        run: |
+          read -r -a packages <<<"$(jq -r 'join(" ")' <<<"$CI_KIT_APT")"
+          acquire=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          install=(install -y --no-install-recommends --no-upgrade)
+          sudo apt-get update "${acquire[@]}"
+          # What the set needs at the mirror's versions: the packages apt would fetch into an empty directory.
+          empty=$(mktemp -d)
+          mkdir "$empty/partial"
+          needed=$(sudo apt-get "${install[@]}" --print-uris -qq -o "Dir::Cache::Archives=$empty/" "${packages[@]}" | awk '{print $2}')
+          shopt -s nullglob
+          for deb in "$RUNNER_TEMP"/ci-kit-apt/*.deb "$RUNNER_TEMP"/ci-kit-apt/partial/*.deb; do
+            grep -qxF "${deb##*/}" <<<"$needed" || sudo rm -f "$deb"
+          done
+          # In a process group of its own, recorded, and its return recorded: a timeout ends this bash but not the apt-get
+          # under sudo, and the next step stops that group, and only after a timeout.
+          state=$RUNNER_TEMP/ci-kit-apt-download
+          rm -f "$state.pgid" "$state.exit"
+          status=0
+          sudo setsid --wait bash -c 'echo $$ > "$0"; exec "$@"' "$state.pgid" \
+            apt-get "${install[@]}" --download-only "${acquire[@]}" "${packages[@]}" || status=$?
+          echo "$status" > "$state.exit"
+          (( status == 0 )) || exit "$status"
+          du -ch "$RUNNER_TEMP"/ci-kit-apt/*.deb | tail -n 1
+
+      # A step's timeout ends its bash, not the apt-get it started under sudo, which goes on writing the file it had begun
+      # (tar then fails: "file changed as we read it"). Only the download's own group is stopped, and only when it never
+      # returned: an apt that failed has exited, and any other apt on the machine is not the warm's. And apt keeps
+      # partial/ root's alone, unreadable to a save.
+      - name: Let the cache read the unfinished downloads
+        if: always() && steps.lookup.outputs.cache-hit != 'true'
+        env:
+          CI_KIT_DOWNLOAD: ${{ steps.download.outcome }}
+        run: |
+          state=$RUNNER_TEMP/ci-kit-apt-download
+          if [ "$CI_KIT_DOWNLOAD" != success ] && [ -s "$state.pgid" ] && [ ! -e "$state.exit" ]; then
+            pgid=$(cat "$state.pgid")
+            sudo kill -TERM -- "-$pgid" 2>/dev/null || true
+            for _ in $(seq 30); do
+              sudo kill -0 -- "-$pgid" 2>/dev/null || { pgid=; break; }
+              sleep 1
+            done
+            [ -z "$pgid" ] || sudo kill -KILL -- "-$pgid" 2>/dev/null || true
+          fi
+          if [ -d "$RUNNER_TEMP/ci-kit-apt/partial" ]; then sudo chmod -R a+rX "$RUNNER_TEMP/ci-kit-apt/partial"; fi
+
+      - name: Save the package cache
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ runner.temp }}/ci-kit-apt/*.deb
+            ${{ runner.temp }}/ci-kit-apt/partial/*.deb
+          key: ${{ steps.apt-cache.outputs.key }}
+
+      # Under keys of their own, which the next warm resumes from, and a gate falls back to only when nothing else
+      # matches: a set cut short must not stand in for a complete one. Each is superseded by the next and ages out.
+      - name: Save the partial download
+        if: always() && (steps.download.outcome == 'failure' || steps.download.outcome == 'cancelled')
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ runner.temp }}/ci-kit-apt/*.deb
+            ${{ runner.temp }}/ci-kit-apt/partial/*.deb
+          key: ${{ steps.apt-cache.outputs.resume }}${{ github.run_id }}-${{ github.run_attempt }}
 
   verdict:
     name: verdict

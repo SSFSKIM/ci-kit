@@ -98,7 +98,7 @@ test('a dispatch with no gates input runs every dispatch gate', () => {
 test('an empty selection is a success with a note', () => {
   const r = plan({ CI_KIT_EVENT: 'pr', CI_KIT_BASE: head });
   assert.equal(r.code, 0, r.err);
-  assert.deepEqual(r.json, { gates: [], pool: false, note: 'no gates selected', cache_write: false });
+  assert.deepEqual(r.json, { gates: [], pool: false, note: 'no gates selected', cache_write: false, apt_cache: '', apt_warm: [] });
 });
 
 test('an unknown trailer gate is a config error: exit 2, ci-kit: on stderr', () => {
@@ -187,7 +187,7 @@ gates:
   assert.deepEqual(all.json.gates.map((g) => g.name), ['img-lib', 'img-docs', 'img-src']);
   // A push that changes nothing a cache gate watches plans nothing: the run is the plan and the verdict.
   const none = plan({ ...env, CI_KIT_BASE: head });
-  assert.deepEqual(none.json, { gates: [], pool: false, note: 'no gates selected', cache_write: true });
+  assert.deepEqual(none.json, { gates: [], pool: false, note: 'no gates selected', cache_write: true, apt_cache: '', apt_warm: [] });
 });
 
 // A consumer with no build_cache, on the events it always sent: the plan is what it was before the build cache, with
@@ -212,16 +212,16 @@ gates:
   const lint = { name: 'lint', run: 'pnpm lint', runs_on: ['ubuntu-latest'], timeout: 30, setup, artifacts: [], env: {}, build_cache: null };
   const pr = plan({ ...env, CI_KIT_EVENT: 'pr' });
   assert.equal(pr.code, 0, pr.err);
-  assert.deepEqual(pr.json, { gates: [unit, lint], pool: true, note: '', cache_write: false });
+  assert.deepEqual(pr.json, { gates: [unit, lint], pool: true, note: '', cache_write: false, apt_cache: '', apt_warm: [] });
   const ref = plan({ ...env, CI_KIT_EVENT: 'ci-ref', CI_KIT_REF: 'refs/heads/ci/x-0123abcd-456789', CI_KIT_HEAD_MESSAGE: 'ci-gate x\n\nCI-Gates: unit, e2e\n' });
-  assert.deepEqual(ref.json, { gates: [unit, e2e], pool: true, note: '', cache_write: false });
+  assert.deepEqual(ref.json, { gates: [unit, e2e], pool: true, note: '', cache_write: false, apt_cache: '', apt_warm: [] });
   const all = plan({ ...env, CI_KIT_EVENT: 'dispatch', CI_KIT_BASE: '', CI_KIT_REF: 'refs/heads/main' });
-  assert.deepEqual(all.json, { gates: [unit, e2e, lint], pool: true, note: '', cache_write: true });
+  assert.deepEqual(all.json, { gates: [unit, e2e, lint], pool: true, note: '', cache_write: true, apt_cache: '', apt_warm: [] });
   // Such a caller never pushes to its default branch; if it did, nothing would run, and no pool box be woken.
   for (const before of [base, '']) {
     const push = plan({ ...env, CI_KIT_EVENT: 'push', CI_KIT_BASE: before, CI_KIT_REF: 'refs/heads/main' });
     assert.equal(push.code, 0, push.err);
-    assert.deepEqual(push.json, { gates: [], pool: false, note: 'no gates selected', cache_write: true });
+    assert.deepEqual(push.json, { gates: [], pool: false, note: 'no gates selected', cache_write: true, apt_cache: '', apt_warm: [] });
   }
 });
 
