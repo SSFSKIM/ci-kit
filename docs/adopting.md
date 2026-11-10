@@ -351,6 +351,13 @@ always did. The setup step itself is unchanged (it checks presence and installs 
 resolves against the mirror's package lists), and so is the setup hash. Self-hosted runners and macOS are untouched:
 their images carry the packages.
 
+apt takes a file already in its download directory on its name and size alone, without checking it against the hash
+in the signed index. So between the restore and the setup step, the gate updates apt's lists and checks every restored
+package's SHA256 against the index entry for its package and version (one `apt-cache show` for them all). A package
+whose hash differs, or that the index does not know, is deleted, and apt downloads it again. When the lists cannot be
+updated, none of the restored packages are used. A file apt had only begun (in `partial/`) needs no check, since apt
+hashes a resumed download whole. The warm job runs the same check before an entry it restored seeds a new one.
+
 The cache is written by a job of its own, `package cache`, on the default branch only, as the build cache is (and for
 the same reason: an entry written on a `ci/**` ref or a pull request is read by nothing but that ref's own later runs).
 It runs on every planned run of the default branch whose config has a `hosted` gate with the shared setup and an `apt`
@@ -359,7 +366,10 @@ installing it (`apt-get install --download-only --no-upgrade`, so names the imag
 step leaves them) and saves it. It is not a gate: the verdict does not wait for it, and a failure leaves the run green.
 A mirror too slow for the download's 45-minute bound still leaves what it served, the file it had begun included:
 that is saved under a key of its own (`ci-kit-apt-1-partial-...`), which the next warm resumes from (apt continues a
-begun file where it stopped) and a gate reads only when no complete entry of any set exists. On 2026-11-10 one warm
+begun file where it stopped) and a gate reads only when no complete entry of any set exists. The warm job looks first
+for this image's cut-short download, then as a gate does, an older image's last, so that a slow mirror across an image
+change still converges. The download runs in a process group of its own: when its bound ends the step, the `apt-get`
+it started under sudo keeps running, and before saving, the job stops that group and no other apt. On 2026-11-10 one warm
 fetched the whole set in 22–48 s and another, the same hour, spent 37 minutes on `texlive-fonts-extra` alone.
 
 The caller's `on:` therefore gains the default branch's pushes and a schedule, the same lines as the build cache's

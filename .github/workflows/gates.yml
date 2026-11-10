@@ -226,6 +226,43 @@ jobs:
             ${{ steps.apt-cache.outputs.any }}
             ${{ steps.apt-cache.outputs.partial }}
 
+      # apt takes a file already in its archive directory on its name and size alone, never checking the hash the signed
+      # index gives it (apt 2.8.2, acquire-item.cc, pkgAcqArchive), so an entry is trusted no further than the index:
+      # against fresh lists, a restored package whose hash differs, or that the index does not know, is deleted and
+      # downloaded again. A file in partial/ needs no check: apt hashes a resumed download whole.
+      - name: Check the restored packages against the index
+        if: steps.apt-cache.outcome == 'success'
+        run: &apt-cache-check |
+          shopt -s nullglob
+          dir=$RUNNER_TEMP/ci-kit-apt
+          debs=("$dir"/*.deb)
+          (( ${#debs[@]} )) || exit 0
+          if ! sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30; then
+            echo "::warning::ci-kit: apt could not update its index, so the restored packages are not used"
+            sudo rm -f "${debs[@]}"
+            exit 0
+          fi
+          start=$SECONDS
+          specs=()
+          for deb in "${debs[@]}"; do
+            IFS=_ read -r pkg version _ <<<"${deb##*/}"
+            specs+=("$pkg=${version//%3a/:}")
+          done
+          # The index's hash of each version, under apt's file name for it: package_version_arch.deb, an epoch's colon %3a.
+          # apt-cache fails for a version the index lacks, and still prints the others.
+          expected=$({ apt-cache show "${specs[@]}" 2>/dev/null || true; } | awk '
+            function flush() { if (p != "") { gsub(/:/, "%3a", v); print s "  " p "_" v "_" a ".deb" }; p = v = a = s = "" }
+            /^Package: / { p = $2 } /^Version: / { v = $2 } /^Architecture: / { a = $2 } /^SHA256: / { s = $2 }
+            /^$/ { flush() } END { flush() }')
+          dropped=0
+          while read -r hash name; do
+            grep -qxF "$hash  $name" <<<"$expected" && continue
+            echo "ci-kit: $name does not match the index; apt downloads it again"
+            sudo rm -f "$dir/$name"
+            dropped=$((dropped + 1))
+          done < <(cd "$dir" && sha256sum -- *.deb)
+          echo "ci-kit: checked ${#debs[@]} restored packages against the index in $((SECONDS - start)) s, dropped $dropped"
+
       - name: Apply CI environment
         if: join(matrix.gate.setup.apt, '') != '' || join(matrix.gate.setup.brew, '') != '' || join(matrix.gate.setup.cask, '') != '' || matrix.gate.setup.script != ''
         # A bound of its own, so a stalled package mirror fails this step instead of spending the gate's whole timeout.
@@ -312,7 +349,8 @@ jobs:
           key: ${{ steps.apt-cache.outputs.key }}
           lookup-only: true
 
-      # This image's cut-short download first, which holds what it restored and what it fetched; then as a gate restores.
+      # This image's cut-short download first, which holds what it restored and what it fetched; then as a gate restores,
+      # an older image's cut-short download included, so that a slow mirror across an image change still converges.
       - name: Restore an older package cache
         if: steps.lookup.outputs.cache-hit != 'true'
         uses: actions/cache/restore@v6
@@ -325,6 +363,12 @@ jobs:
             ${{ steps.apt-cache.outputs.resume }}
             ${{ steps.apt-cache.outputs.set }}
             ${{ steps.apt-cache.outputs.any }}
+            ${{ steps.apt-cache.outputs.partial }}
+
+      # Before the entry seeds a new one: what it holds is saved again.
+      - name: Check the restored packages against the index
+        if: steps.lookup.outputs.cache-hit != 'true'
+        run: *apt-cache-check
 
       # Bounded below the job, so that a mirror too slow to finish still leaves what it served for the next warm.
       - name: Download the declared packages
@@ -346,24 +390,35 @@ jobs:
           for deb in "$RUNNER_TEMP"/ci-kit-apt/*.deb "$RUNNER_TEMP"/ci-kit-apt/partial/*.deb; do
             grep -qxF "${deb##*/}" <<<"$needed" || sudo rm -f "$deb"
           done
-          sudo apt-get "${install[@]}" --download-only "${acquire[@]}" "${packages[@]}"
+          # In a process group of its own, recorded, and its return recorded: a timeout ends this bash but not the apt-get
+          # under sudo, and the next step stops that group, and only after a timeout.
+          state=$RUNNER_TEMP/ci-kit-apt-download
+          rm -f "$state.pgid" "$state.exit"
+          status=0
+          sudo setsid --wait bash -c 'echo $$ > "$0"; exec "$@"' "$state.pgid" \
+            apt-get "${install[@]}" --download-only "${acquire[@]}" "${packages[@]}" || status=$?
+          echo "$status" > "$state.exit"
+          (( status == 0 )) || exit "$status"
           du -ch "$RUNNER_TEMP"/ci-kit-apt/*.deb | tail -n 1
 
       # A step's timeout ends its bash, not the apt-get it started under sudo, which goes on writing the file it had begun
-      # (tar then fails: "file changed as we read it"). And apt keeps partial/ root's alone, unreadable to a save.
+      # (tar then fails: "file changed as we read it"). Only the download's own group is stopped, and only when it never
+      # returned: an apt that failed has exited, and any other apt on the machine is not the warm's. And apt keeps
+      # partial/ root's alone, unreadable to a save.
       - name: Let the cache read the unfinished downloads
         if: always() && steps.lookup.outputs.cache-hit != 'true'
         env:
           CI_KIT_DOWNLOAD: ${{ steps.download.outcome }}
         run: |
-          if [ "$CI_KIT_DOWNLOAD" != success ]; then
-            # The download methods write the files; [/] keeps the pattern from matching sudo's own command line.
-            sudo pkill -x apt-get || true
-            sudo pkill -f '[/]usr/lib/apt/methods/' || true
+          state=$RUNNER_TEMP/ci-kit-apt-download
+          if [ "$CI_KIT_DOWNLOAD" != success ] && [ -s "$state.pgid" ] && [ ! -e "$state.exit" ]; then
+            pgid=$(cat "$state.pgid")
+            sudo kill -TERM -- "-$pgid" 2>/dev/null || true
             for _ in $(seq 30); do
-              pgrep -x apt-get >/dev/null || pgrep -f '[/]usr/lib/apt/methods/' >/dev/null || break
+              sudo kill -0 -- "-$pgid" 2>/dev/null || { pgid=; break; }
               sleep 1
             done
+            [ -z "$pgid" ] || sudo kill -KILL -- "-$pgid" 2>/dev/null || true
           fi
           if [ -d "$RUNNER_TEMP/ci-kit-apt/partial" ]; then sudo chmod -R a+rX "$RUNNER_TEMP/ci-kit-apt/partial"; fi
 

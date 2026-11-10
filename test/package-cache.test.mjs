@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -50,6 +51,16 @@ case " $* " in
     done < "$FIXTURE/needed" ;;
 esac
 `, { mode: 0o755 });
+  // setsid only starts its command (the group is the runner's business); apt-cache show prints $FIXTURE/index.
+  writeFileSync(join(bin, 'setsid'), `#!/usr/bin/env bash
+[ "$1" = --wait ] || { echo "setsid without --wait returns before apt does" >&2; exit 4; }
+shift; exec "$@"
+`, { mode: 0o755 });
+  writeFileSync(join(bin, 'apt-cache'), `#!/usr/bin/env bash
+echo "apt-cache $*" >> "$FIXTURE/calls"
+cat "$FIXTURE/index" 2>/dev/null
+[ -z "$APT_CACHE_STATUS" ] || exit "$APT_CACHE_STATUS"
+`, { mode: 0o755 });
   const output = join(root, 'output');
   const env = {
     PATH: `${bin}:${process.env.PATH}`, FIXTURE: root, RUNNER_TEMP: join(root, 'temp'), GITHUB_OUTPUT: output,
@@ -74,7 +85,8 @@ test('a hosted Linux gate with apt packages points apt at the package cache and 
   const names = gate.map((s) => s.name);
   const at = names.indexOf('Apply CI environment');
   assert.ok(names.indexOf('Point apt at the package cache') < names.indexOf('Restore the package cache'));
-  assert.ok(names.indexOf('Restore the package cache') < at);
+  assert.ok(names.indexOf('Restore the package cache') < names.indexOf('Check the restored packages against the index'));
+  assert.ok(names.indexOf('Check the restored packages against the index') < at);
   const point = step(gate, 'Point apt at the package cache');
   const config = parseConfig('version: 1\nsetup: {apt: [cowsay]}\ngates: [{name: yes, run: "true"}, {name: no, run: "true", setup: false}]', { isPrivate: true });
   const plan = planOutput(config, config.gates);
@@ -145,8 +157,12 @@ test('a warm cut short saves what it downloaded apart, and the next warm resumes
     const ran = evaluate(partial.if.replace('always()', 'true'), { steps: { download: { outcome } } });
     assert.equal(ran, saved, outcome);
   }
-  assert.equal(step(warm.steps, 'Restore an older package cache').with['restore-keys'].trim().split('\n')[0],
-    '${{ steps.apt-cache.outputs.resume }}');
+  // This image's cut-short download first; an older image's last, so that a slow mirror across an image change still
+  // converges (the pruning drops what the new image does not need).
+  assert.deepEqual(step(warm.steps, 'Restore an older package cache').with['restore-keys'].trim().split('\n'), [
+    '${{ steps.apt-cache.outputs.resume }}', '${{ steps.apt-cache.outputs.set }}', '${{ steps.apt-cache.outputs.any }}',
+    '${{ steps.apt-cache.outputs.partial }}',
+  ]);
   // apt resumes a file it had begun (a 669 MB one at a slow mirror's 300 kB/s never finishes in one warm), so the
   // entries carry partial/ too, which apt keeps root's alone until it is opened to the cache before either save.
   assert.deepEqual(restore.with.path.trim().split('\n'),
@@ -177,26 +193,90 @@ test('the warm job downloads only what the cache lacks and keeps only what the s
   assert.match(apt[0], /^apt-get update .*Acquire::Retries=3/);
   assert.match(apt[1], /^apt-get install .*--no-install-recommends --no-upgrade --print-uris .*Dir::Cache::Archives=\S+\/ cowsay zsh$/);
   assert.match(apt[2], /^apt-get install .*--no-install-recommends --no-upgrade --download-only .*Acquire::Retries=3.* cowsay zsh$/);
+  // The download runs in a process group of its own, recorded; its exit is recorded once it returns.
+  assert.ok(s.calls().some((c) => /^sudo setsid --wait bash -c .* apt-get install .*--download-only/.test(c)));
+  assert.match(s.read('temp/ci-kit-apt-download.pgid'), /^\d+\n$/);
+  assert.equal(s.read('temp/ci-kit-apt-download.exit'), '0\n');
 });
 
-test('after a cut-short download the warm stops apt before the cache reads its unfinished file', (t) => {
+test('after a timed-out download the warm stops only its own apt before the cache reads the unfinished file', (t) => {
   const s = sandbox(t);
   const open = step(warm.steps, 'Let the cache read the unfinished downloads');
   mkdirSync(join(s.env.RUNNER_TEMP, 'ci-kit-apt', 'partial'), { recursive: true });
-  for (const name of ['pkill', 'pgrep', 'chmod']) {
-    // pgrep finds no apt-get left; the others only record.
-    writeFileSync(join(s.root, 'bin', name), `#!/usr/bin/env bash\necho "${name} $*" >> "$FIXTURE/calls"\n${name === 'pgrep' ? 'exit 1' : ''}\n`, { mode: 0o755 });
+  for (const name of ['kill', 'pkill', 'chmod']) {
+    // The group is gone after the first signal (kill -0 fails); the others only record.
+    writeFileSync(join(s.root, 'bin', name), `#!/usr/bin/env bash\necho "${name} $*" >> "$FIXTURE/calls"\n${name === 'kill' ? '[ "$1" != -0 ] || exit 1' : ''}\n`, { mode: 0o755 });
   }
-  const run = (outcome) => {
+  const state = join(s.env.RUNNER_TEMP, 'ci-kit-apt-download');
+  const run = (outcome, { pgid = '4242', exit = null } = {}) => {
     writeFileSync(join(s.root, 'calls'), '');
+    rmSync(`${state}.pgid`, { force: true });
+    rmSync(`${state}.exit`, { force: true });
+    if (pgid) writeFileSync(`${state}.pgid`, `${pgid}\n`);
+    if (exit !== null) writeFileSync(`${state}.exit`, `${exit}\n`);
     s.run(open.run, { CI_KIT_DOWNLOAD: outcome });
     return s.calls().filter((c) => !c.startsWith('sudo '));
   };
   assert.equal(open.env.CI_KIT_DOWNLOAD, '${{ steps.download.outcome }}');
   // A step's timeout ends its bash, not the apt-get it started under sudo, which goes on writing (tar: "file changed
-  // as we read it", arachne run 42835893694).
+  // as we read it", arachne run 42835893694). It is stopped by its process group, never by name: another apt on the
+  // machine is not the warm's.
   const stopped = run('failure');
-  assert.deepEqual(stopped.slice(0, 2), ['pkill -x apt-get', 'pkill -f [/]usr/lib/apt/methods/']);
-  assert.match(stopped.at(-1), /^chmod -R a\+rX .*\/ci-kit-apt\/partial$/);
-  assert.deepEqual(run('success').map((c) => c.split(' ')[0]), ['chmod']);
+  assert.deepEqual(stopped, ['kill -TERM -- -4242', 'kill -0 -- -4242', `chmod -R a+rX ${join(s.env.RUNNER_TEMP, 'ci-kit-apt', 'partial')}`]);
+  assert.deepEqual(run('cancelled').slice(0, 1), ['kill -TERM -- -4242']);
+  // apt returned (its failure is the step's, not a timeout's), apt never started, or the download succeeded: no signal.
+  for (const [outcome, options] of [['failure', { exit: 100 }], ['failure', { pgid: null }], ['success', { exit: 0 }]]) {
+    assert.deepEqual(run(outcome, options).map((c) => c.split(' ')[0]), ['chmod'], `${outcome} ${JSON.stringify(options)}`);
+  }
+});
+
+const sha256 = (text) => createHash('sha256').update(text).digest('hex');
+const record = (pkg, version, arch, sha) => `Package: ${pkg}\nVersion: ${version}\nArchitecture: ${arch}\nFilename: pool/${pkg}.deb\nSHA256: ${sha}\n`;
+
+test('restored packages are checked against the signed index, and a mismatch or an unknown file is dropped', (t) => {
+  const s = sandbox(t);
+  const check = step(gate, 'Check the restored packages against the index');
+  const dir = join(s.env.RUNNER_TEMP, 'ci-kit-apt');
+  mkdirSync(join(dir, 'partial'), { recursive: true });
+  const files = {
+    'zsh_5.9-6_amd64.deb': 'zsh', // matches
+    'libx_1%3a2.0_amd64.deb': 'libx', // matches, an epoch in its name
+    'cowsay_3.03-2_all.deb': 'tampered', // the index holds another hash
+    'stray_1.0_all.deb': 'stray', // the index does not know it
+  };
+  for (const [name, body] of Object.entries(files)) writeFileSync(join(dir, name), body);
+  writeFileSync(join(dir, 'partial', 'begun_1.0_all.deb'), 'begun');
+  writeFileSync(join(s.root, 'index'), [
+    record('zsh', '5.9-6', 'amd64', sha256('zsh')),
+    record('libx', '1:2.0', 'amd64', sha256('libx')),
+    record('cowsay', '3.03-2', 'all', sha256('cowsay')),
+  ].join('\n'));
+  // apt-cache show fails for the version it does not know, and still prints the others.
+  s.run(check.run, { APT_CACHE_STATUS: '100' });
+  assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith('.deb')).sort(), ['libx_1%3a2.0_amd64.deb', 'zsh_5.9-6_amd64.deb']);
+  assert.deepEqual(readdirSync(join(dir, 'partial')), ['begun_1.0_all.deb'], 'apt hashes a resumed file whole');
+  const calls = s.calls().filter((c) => !c.startsWith('sudo '));
+  assert.match(calls[0], /^apt-get update .*Acquire::Retries=3/, 'the index is current before it is trusted');
+  assert.equal(calls[1].split(' ').slice(0, 2).join(' '), 'apt-cache show');
+  assert.deepEqual(calls[1].split(' ').slice(2).sort(), ['cowsay=3.03-2', 'libx=1:2.0', 'stray=1.0', 'zsh=5.9-6']);
+});
+
+test('the check drops every restored package when the index cannot be read, and costs nothing on a miss', (t) => {
+  const s = sandbox(t);
+  const check = step(gate, 'Check the restored packages against the index');
+  assert.equal(step(warm.steps, 'Check the restored packages against the index').run, check.run, 'one check in both jobs');
+  assert.equal(check.if, "steps.apt-cache.outcome == 'success'");
+  assert.equal(step(warm.steps, 'Check the restored packages against the index').if, "steps.lookup.outputs.cache-hit != 'true'");
+  const names = warm.steps.map((x) => x.name);
+  assert.ok(names.indexOf('Restore an older package cache') < names.indexOf('Check the restored packages against the index'));
+  assert.ok(names.indexOf('Check the restored packages against the index') < names.indexOf('Download the declared packages'));
+  const dir = join(s.env.RUNNER_TEMP, 'ci-kit-apt');
+  mkdirSync(dir, { recursive: true });
+  s.run(check.run);
+  assert.deepEqual(s.calls(), [], 'nothing restored: nothing to check, no update');
+  writeFileSync(join(dir, 'zsh_5.9-6_amd64.deb'), 'zsh');
+  writeFileSync(join(s.root, 'bin', 'apt-get'), '#!/usr/bin/env bash\necho "apt-get $*" >> "$FIXTURE/calls"\nexit 100\n', { mode: 0o755 });
+  const r = s.run(check.run);
+  assert.deepEqual(readdirSync(dir), []);
+  assert.match(r.stdout, /::warning::/);
 });
