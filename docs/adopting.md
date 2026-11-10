@@ -365,7 +365,8 @@ a config error, no run within 5 minutes of the push, the API rate limit exhauste
 run that failed to start). Failed gates' logs are saved to `/tmp/ci-gate/<owner>-<repo>/<run-id>/<gate>.log`, with
 their artifacts beside them. After `GREEN` or `RED`, or when no run appeared, the ref is deleted unless `--keep`, and
 only while it still points at this call's commit. After an `ERROR` (or Ctrl-C) while a run exists, the ref stays, so
-the run can be rerun or read; stderr names it, and a later `ci-gate` in the same clone deletes it after 24 hours.
+the run can be rerun or read; stderr names it, and a later `ci-gate` in the same clone deletes it after 24 hours unless
+a run on it is queued or going (one request per kept ref, skipped while the budget is low).
 Progress notes go to stderr.
 
 **It is gentle with the shared token.** Every session on the account shares the gh login's 5,000 REST requests an

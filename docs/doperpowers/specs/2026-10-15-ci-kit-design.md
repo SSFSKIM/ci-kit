@@ -2923,6 +2923,14 @@ euros, jobs, and the projected month at the current rate.
     After an `ERROR` or an interruption while a run exists, or when the budget hid the run, the
     ref stays and is recorded under the clone's git directory (`ci-gate/kept/`); any later ci-gate
     in that clone deletes recorded refs older than 24 h, compare-and-delete. No janitor sweeps ci refs.
+  - The sweep reads each due ref's newest run first (one request, skipped while the budget is low) and
+    leaves the ref while that run is queued or going: a rerun keeps the nonce commit, so
+    compare-and-delete alone would delete the branch under it. A record is dropped only when the
+    delete succeeds or `ls-remote` shows the ref gone or moved; any other failure is retried later.
+  - The 90-minute bound is elapsed time on ci-gate's clock, never the published reset, and each sleep
+    is cut to what the bound has left (a reset can stay in the past while `/rate_limit` says 0).
+  - Discovery marks the run as possibly existing when the budget first hides it, before the wait, so a
+    Ctrl-C during the wait keeps the ref.
   - **Date/Author:** 2026-11-10, ci-gate-ratelimit executor, at CI-opt's request.
 - **Decision:** the DC7 owner (smns-erb-88) approved M3's three changes to DC7's tests. It declined
   a test-only `saw_waiting` or presence counter on `GET /requests/<id>`; it does not belong in the

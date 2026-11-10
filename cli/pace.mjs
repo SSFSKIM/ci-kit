@@ -40,20 +40,24 @@ export function createPacer(gh, emit, { now = Date.now, sleep = delay } = {}) {
   let held = 0;
   let announced = null; // the resume time last said in a THROTTLE line: each is said once
 
-  // Sleeps until the limit in `error` lifts, as /rate_limit confirms; throws BudgetExhausted past LIMIT_WAIT_MS.
+  // Sleeps until the limit in `error` lifts, as /rate_limit confirms; throws BudgetExhausted once LIMIT_WAIT_MS has
+  // elapsed on this clock since the exhaustion began. The bound is elapsed time, never the published reset: a reset
+  // can stay in the past while /rate_limit says 0, or sit past the bound on a skewed clock, so each sleep is cut to
+  // what the bound has left.
   async function waitOut(error) {
     exhaustedSince ??= now();
     let remaining = error.rateLimit?.remaining ?? 0;
     let until = resumeAt(error.rateLimit, now());
     for (;;) {
-      if (until - exhaustedSince > LIMIT_WAIT_MS) {
+      const left = exhaustedSince + LIMIT_WAIT_MS - now();
+      if (left <= 0) {
         throw new BudgetExhausted(`the GitHub API rate limit stayed exhausted for ${LIMIT_WAIT_MS / 60_000} min (resets ${iso(until)})`);
       }
       if (until !== announced) {
         announced = until;
         emit(`THROTTLE remaining=${remaining} until=${iso(until)}`);
       }
-      const ms = until > now() ? until - now() + RESET_SLACK_MS : UNSAID_WAIT_MS;
+      const ms = Math.min(until > now() ? until - now() + RESET_SLACK_MS : UNSAID_WAIT_MS, left);
       await sleep(ms);
       held += ms;
       let core;
@@ -80,7 +84,8 @@ export function createPacer(gh, emit, { now = Date.now, sleep = delay } = {}) {
       return THROTTLED_MS;
     },
     // fn's answer. A rate-limited answer is waited out and fn read again; any other error is thrown to the caller.
-    async read(fn) {
+    // onLimited(): called as each wait-out begins, before any sleep (discovery marks that a run may exist unseen).
+    async read(fn, { onLimited = () => {} } = {}) {
       for (;;) {
         try {
           const value = await fn();
@@ -88,6 +93,7 @@ export function createPacer(gh, emit, { now = Date.now, sleep = delay } = {}) {
           return value;
         } catch (e) {
           if (!isRateLimited(e)) throw e;
+          onLimited();
           await waitOut(e);
         }
       }

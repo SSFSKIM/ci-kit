@@ -13,8 +13,9 @@ const EVERY_MS = 5000;
 // limit stayed exhausted past the pacer's bound (then also runMayExist: the push most likely started a run ci-gate
 // could not see). An exhausted budget is waited out (pace.mjs), and the time waited extends the deadline: the deadline
 // is for GitHub to create the run, not for the budget to come back. The last poll lands on the deadline even when the
-// pace is stretched. After a minute without the run, `note` says once that the call is still waiting.
-export async function findRun({ gh, repo, commit, caller, ref, pacer, now, sleep, note = () => {}, deadlineMs = DEADLINE_MS, everyMs = EVERY_MS }) {
+// pace is stretched. After a minute without the run, `note` says once that the call is still waiting. onHidden() is
+// called as the budget first hides the run, before the wait: from then on a run may exist that ci-gate has not seen.
+export async function findRun({ gh, repo, commit, caller, ref, pacer, now, sleep, note = () => {}, onHidden = () => {}, deadlineMs = DEADLINE_MS, everyMs = EVERY_MS }) {
   const start = now();
   let deadline = start + deadlineMs;
   let noted = false;
@@ -22,7 +23,7 @@ export async function findRun({ gh, repo, commit, caller, ref, pacer, now, sleep
     await sleep(Math.min(pacer.wait(everyMs), deadline - now()));
     const held = pacer.heldMs();
     try {
-      const runs = await pacer.read(() => gh.runsForCommit(repo, commit));
+      const runs = await pacer.read(() => gh.runsForCommit(repo, commit), { onLimited: onHidden });
       const run = runs.find((r) => r.event === 'push' && r.path === caller);
       if (run) return { run };
     } catch (e) {

@@ -290,7 +290,7 @@ test('a rate-limited watch waits until the reset and reads on, past maxUnreadabl
 
 test('a watch whose budget stays exhausted for 90 min is an ERROR naming the rate limit', async () => {
   const busy = { run: run('in_progress'), jobs: [plan()] };
-  const h = limitedHarness(1, busy, { cores: [{ remaining: 0, reset: (T0 + 100 * 60_000) / 1000 }] });
+  const h = limitedHarness(1, busy, { cores: Array.from({ length: 2 }, () => ({ remaining: 0, reset: (T0 + 100 * 60_000) / 1000 })) });
   const r = await watchRun(h.opts);
   assert.equal(r.code, 2);
   assert.equal(r.line, 'ERROR run 7 cannot be read: the GitHub API rate limit stayed exhausted for 90 min (resets 2026-10-15T13:40:00Z)');

@@ -9,10 +9,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { createGitHub, ghToken } from '../lib/github.mjs';
 import { parseArgs, UsageError, USAGE } from './args.mjs';
 import { KEPT_FOR_MS, keepsRef, recordKept, sweepKept } from './kept.mjs';
-import { assertCaller, deleteRef, nonceCommit, pushRef, resolveRemote, resolveTarget, TargetError } from './git.mjs';
+import { assertCaller, deleteKeptRef, deleteRef, nonceCommit, pushRef, resolveRemote, resolveTarget, TargetError } from './git.mjs';
 import { cleanLog, nonceMessage, pushFailure, refName, sanitizeLabel } from './naming.mjs';
 import { findRun } from './discover.mjs';
-import { BudgetExhausted, createPacer } from './pace.mjs';
+import { BudgetExhausted, createPacer, isLow } from './pace.mjs';
 import { watchRun } from './watch.mjs';
 
 const CALLER = '.github/workflows/ci.yml';
@@ -136,7 +136,7 @@ async function main(argv) {
   };
   const keepForRerun = () => {
     try {
-      recordKept(target.dir, { ref, commit, remote: remote.name }, Date.now());
+      recordKept(target.dir, { ref, commit, remote: remote.name, repo }, Date.now());
       note(`kept ${ref} for a rerun, as this call ends without a verdict; a ci-gate in this clone removes it after ${KEPT_FOR_MS / 3_600_000} h (now: git push ${remote.name} --delete ${ref})`);
     } catch (e) {
       note(`kept ${ref}, which no later call will remove (it could not be recorded: ${e.message}); remove it with: git push ${remote.name} --delete ${ref}`);
@@ -161,17 +161,34 @@ async function main(argv) {
     note(`api requests ${requests}, of them 304 ${notModified}; remaining ${remaining}`);
   }
   out(result.line);
-  sweepOldRefs(target.dir);
+  await sweepOldRefs(gh, target.dir);
   return result.code;
 }
 
-// The refs earlier calls in this clone kept and nobody reran within KEPT_FOR_MS (kept.mjs).
-function sweepOldRefs(dir) {
-  try {
-    const remove = (e) => deleteRef(dir, e.remote, e.commit, e.ref);
-    for (const { ref, removed } of sweepKept(dir, { nowMs: Date.now(), remove })) {
-      note(removed ? `removed ${ref}, kept by an earlier call` : `forgot ${ref}, kept by an earlier call: it is gone or no longer that call's commit`);
+const SWEPT = {
+  removed: (ref) => `removed ${ref}, kept by an earlier call`,
+  gone: (ref) => `forgot ${ref}, kept by an earlier call: it is already gone`,
+  moved: (ref) => `forgot ${ref}, kept by an earlier call: a later push took it over`,
+  failed: (ref) => `could not remove ${ref}, kept by an earlier call; a later call tries again`,
+  busy: (ref) => `left ${ref}, kept by an earlier call: a run on it is queued or going`,
+  unknown: (ref) => `left ${ref}, kept by an earlier call: its runs could not be read (budget low or unreadable)`,
+};
+
+// The refs earlier calls in this clone kept and nobody reran within KEPT_FOR_MS (kept.mjs). Each costs one request,
+// for its newest run, which is skipped while the budget is low: the ref then waits for a later call.
+async function sweepOldRefs(gh, dir) {
+  const busy = async (e) => {
+    if (isLow(gh.stats().remaining)) return null;
+    try {
+      const run = await gh.latestRunOnBranch(e.repo, e.ref);
+      return run !== null && run.status !== 'completed';
+    } catch {
+      return null;
     }
+  };
+  const remove = (e) => deleteKeptRef(dir, e.remote, e.commit, e.ref);
+  try {
+    for (const { ref, outcome } of await sweepKept(dir, { nowMs: Date.now(), remove, busy })) note(SWEPT[outcome](ref));
   } catch (e) {
     note(`the refs earlier calls kept could not be swept: ${e.message}`);
   }
@@ -182,15 +199,12 @@ function failure(e) {
   return { line: `ERROR ci-gate failed: ${e?.message ?? e}`, code: 2 };
 }
 
-// onRun(id): the run was found; onUnseen(): discovery could not look for it, so a run may exist all the same.
+// onRun(id): the run was found; onUnseen(): the budget hides it from discovery, so a run may exist all the same.
 async function follow(gh, repo, commit, ref, onRun, onUnseen) {
   // One per call: discovery and the watch say the low-budget THROTTLE at most once between them.
   const pacer = createPacer(gh, out, { now: Date.now, sleep });
-  const found = await findRun({ gh, repo, commit, caller: CALLER, ref, pacer, now: Date.now, sleep, note });
-  if (found.error) {
-    if (found.runMayExist) onUnseen();
-    return { line: `ERROR ${found.error}`, code: 2 };
-  }
+  const found = await findRun({ gh, repo, commit, caller: CALLER, ref, pacer, now: Date.now, sleep, note, onHidden: onUnseen });
+  if (found.error) return { line: `ERROR ${found.error}`, code: 2 };
   const { run } = found;
   onRun(run.id);
   note(`run ${run.html_url}`);

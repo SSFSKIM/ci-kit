@@ -90,7 +90,7 @@ test('time spent waiting out the limit does not count against the 5-minute deadl
 
 test('a budget still exhausted after 90 min is an ERROR naming the rate limit, and the run may exist', async () => {
   // The window keeps refilling and draining: /rate_limit says 0 with a later reset each time.
-  const h = harness([{ error: 403, remaining: 0, reset: 60 * 60 }], { cores: [{ remaining: 0, reset: 110 * 60 }] });
+  const h = harness([{ error: 403, remaining: 0, reset: 60 * 60 }], { cores: [{ remaining: 0, reset: 110 * 60 }, { remaining: 0, reset: 110 * 60 }] });
   const r = await findRun(h.opts);
   assert.equal(r.run, undefined);
   assert.equal(r.runMayExist, true);
@@ -123,4 +123,12 @@ test('the pacer\'s threshold: 499 is low, 500 is not, an unknown budget is not',
     const pacer = createPacer({ stats: () => ({ remaining }) }, () => {});
     assert.equal(pacer.wait(15_000), ms, String(remaining));
   }
+});
+
+test('onHidden is called as soon as the budget hides the run, before the wait (a Ctrl-C then still keeps the ref)', async () => {
+  const reset = 60 * 60;
+  const h = harness([{ error: 403, remaining: 0, reset }, { runs: [RUN], remaining: 4999, reset: reset + 3600 }]);
+  const at = [];
+  assert.deepEqual(await findRun({ ...h.opts, onHidden: () => at.push(h.clock()) }), { run: RUN });
+  assert.deepEqual(at, [5000]); // at the first poll's 403, not after the hour's wait
 });

@@ -126,3 +126,13 @@ export function deleteRef(dir, remote, commit, ref) {
     return false;
   }
 }
+
+// A kept ref's delete (kept.mjs), with what became of it: 'removed'; 'gone' (no such ref any more) or 'moved' (a later
+// push took it over), both settled; or 'failed' (the remote could not be reached or refused), worth trying again.
+export function deleteKeptRef(dir, remote, commit, ref) {
+  if (deleteRef(dir, remote, commit, ref)) return 'removed';
+  const line = tryGit(dir, ['ls-remote', remote, `refs/heads/${ref}`]);
+  if (line === null) return 'failed';
+  if (line === '') return 'gone';
+  return line.split(/\s/)[0] === commit ? 'failed' : 'moved';
+}

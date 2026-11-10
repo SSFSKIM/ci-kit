@@ -98,9 +98,33 @@ test(`continuous exhaustion past ${LIMIT_WAIT_MS / 60_000} min gives up with Bud
   const h = harness();
   const r = reads(errors);
   await assert.rejects(h.pacer.read(r.fn), (e) => e instanceof BudgetExhausted
-    && e.message === 'the GitHub API rate limit stayed exhausted for 90 min (resets 2026-11-10T13:02:00Z)');
-  assert.ok(h.clock() - T0 <= LIMIT_WAIT_MS, `waited ${(h.clock() - T0) / 60_000} min`);
-  assert.equal(r.calls(), 3); // 11:02 limited; 11:22 limited (reset 12:12); 12:12 limited (reset 13:02, past the bound)
+    && e.message === 'the GitHub API rate limit stayed exhausted for 90 min (resets 2026-11-10T13:52:00Z)');
+  assert.equal(h.clock() - T0, LIMIT_WAIT_MS); // the third wait (reset 13:02) is cut to the bound, 12:32
+  // 11:02 limited; 11:22 limited (reset 12:12); 12:12 limited (reset 13:02); 12:32 limited, the bound spent
+  assert.equal(r.calls(), 4);
+});
+
+test('a /rate_limit that keeps saying 0 with a reset already past still gives up once 90 min have elapsed', async () => {
+  const stale = { remaining: 0, reset: RESET };
+  const h = harness({ cores: Array.from({ length: 500 }, () => stale) });
+  const r = reads([limited({ remaining: 0, reset: RESET })]);
+  await assert.rejects(h.pacer.read(r.fn), BudgetExhausted);
+  assert.equal(h.clock() - T0, LIMIT_WAIT_MS);
+  assert.equal(r.calls(), 1);
+});
+
+test('a reset published far past the bound (a skewed or moved window) is slept only until the bound', async () => {
+  const h = harness({ cores: [{ remaining: 0, reset: RESET + 5 * 3600 }] });
+  const r = reads([limited({ remaining: 0, reset: RESET + 5 * 3600 })]);
+  await assert.rejects(h.pacer.read(r.fn), BudgetExhausted);
+  assert.deepEqual(h.sleeps, [LIMIT_WAIT_MS]);
+});
+
+test('onLimited is called before the first wait begins, once per wait-out', async () => {
+  const h = harness();
+  const seen = [];
+  await h.pacer.read(reads([limited({ remaining: 0, reset: RESET })]).fn, { onLimited: () => seen.push(h.sleeps.length) });
+  assert.deepEqual(seen, [0]);
 });
 
 test('a read that succeeds in between starts the bound afresh', async () => {

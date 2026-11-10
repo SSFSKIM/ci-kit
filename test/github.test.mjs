@@ -160,6 +160,18 @@ test('a 403 that is not about the rate limit is not rate-limited', () => {
   assert.equal(isRateLimited(new Error('fetch failed')), false);
 });
 
+test('latestRunOnBranch reads one run, the newest, of a branch; null when it has none', async () => {
+  const run = { id: 9, status: 'queued' };
+  const f = fakeFetch([
+    { status: 200, body: { total_count: 1, workflow_runs: [run] } },
+    { status: 200, body: { total_count: 0, workflow_runs: [] } },
+  ]);
+  const gh = createGitHub('t', { fetchImpl: f.impl });
+  assert.deepEqual(await gh.latestRunOnBranch('o/r', 'ci/x-abcdef12-111111'), run);
+  assert.equal(await gh.latestRunOnBranch('o/r', 'ci/y'), null);
+  assert.equal(f.requests[0].url, 'https://api.github.com/repos/o/r/actions/runs?branch=ci%2Fx-abcdef12-111111&per_page=1');
+});
+
 test('rateLimit reads the core budget from /rate_limit (a read GitHub does not count)', async () => {
   const f = fakeFetch([{ status: 200, body: { resources: { core: { limit: 5000, remaining: 0, reset: 1794309724, used: 5000 } } } }]);
   const gh = createGitHub('t', { fetchImpl: f.impl });
