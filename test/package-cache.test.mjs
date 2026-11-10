@@ -147,6 +147,15 @@ test('a warm cut short saves what it downloaded apart, and the next warm resumes
   }
   assert.equal(step(warm.steps, 'Restore an older package cache').with['restore-keys'].trim().split('\n')[0],
     '${{ steps.apt-cache.outputs.resume }}');
+  // apt resumes a file it had begun (a 669 MB one at a slow mirror's 300 kB/s never finishes in one warm), so the
+  // entries carry partial/ too, which apt keeps root's alone until it is opened to the cache before either save.
+  assert.deepEqual(restore.with.path.trim().split('\n'),
+    ['${{ runner.temp }}/ci-kit-apt/*.deb', '${{ runner.temp }}/ci-kit-apt/partial/*.deb']);
+  const names = warm.steps.map((s) => s.name);
+  const open = step(warm.steps, 'Let the cache read the unfinished downloads');
+  assert.ok(names.indexOf('Download the declared packages') < names.indexOf(open.name));
+  assert.ok(names.indexOf(open.name) < names.indexOf('Save the package cache'));
+  assert.match(open.if, /^always\(\) && /, 'it runs after a timed-out download too');
 });
 
 test('the warm job downloads only what the cache lacks and keeps only what the set needs', (t) => {
@@ -155,11 +164,14 @@ test('the warm job downloads only what the cache lacks and keeps only what the s
   mkdirSync(join(dir, 'partial'), { recursive: true });
   // An older entry: one package still current, one superseded version, and one the set no longer declares.
   for (const deb of ['zsh_5.9-6_amd64.deb', 'cowsay_3.03-1_all.deb', 'gone_1.0_amd64.deb', 'lock']) writeFileSync(join(dir, deb), '');
+  // And files a cut-short warm had begun: one still needed, which apt resumes, and one no longer.
+  for (const deb of ['libx_1%3a2.0_amd64.deb', 'old_2.0_amd64.deb']) writeFileSync(join(dir, 'partial', deb), 'begun');
   writeFileSync(join(s.root, 'needed'), 'zsh_5.9-6_amd64.deb\ncowsay_3.03-2_all.deb\nlibx_1%3a2.0_amd64.deb\n');
   const download = step(warm.steps, 'Download the declared packages');
   s.run(download.run, { CI_KIT_APT: '["cowsay","zsh"]' });
   assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith('.deb')).sort(), ['cowsay_3.03-2_all.deb', 'libx_1%3a2.0_amd64.deb', 'zsh_5.9-6_amd64.deb']);
   assert.deepEqual(s.fetched(), ['cowsay_3.03-2_all.deb', 'libx_1%3a2.0_amd64.deb']);
+  assert.deepEqual(readdirSync(join(dir, 'partial')), ['libx_1%3a2.0_amd64.deb']);
   const apt = s.calls().filter((c) => c.startsWith('apt-get'));
   assert.equal(apt.length, 3);
   assert.match(apt[0], /^apt-get update .*Acquire::Retries=3/);

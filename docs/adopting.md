@@ -357,9 +357,10 @@ It runs on every planned run of the default branch whose config has a `hosted` g
 list. When its entry already exists it stops after a lookup; otherwise it downloads the declared set without
 installing it (`apt-get install --download-only --no-upgrade`, so names the image already has are left as the setup
 step leaves them) and saves it. It is not a gate: the verdict does not wait for it, and a failure leaves the run green.
-A mirror too slow for the download's 45-minute bound still leaves what it served: that is saved under a key of its
-own (`ci-kit-apt-1-partial-...`), which the next warm resumes from and a gate reads only when no complete entry of
-any set exists.
+A mirror too slow for the download's 45-minute bound still leaves what it served, the file it had begun included:
+that is saved under a key of its own (`ci-kit-apt-1-partial-...`), which the next warm resumes from (apt continues a
+begun file where it stopped) and a gate reads only when no complete entry of any set exists. On 2026-11-10 one warm
+fetched the whole set in 22–48 s and another, the same hour, spent 37 minutes on `texlive-fonts-extra` alone.
 
 The caller's `on:` therefore gains the default branch's pushes and a schedule, the same lines as the build cache's
 seeds:

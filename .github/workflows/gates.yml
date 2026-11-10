@@ -210,13 +210,16 @@ jobs:
             echo "resume=ci-kit-apt-1-partial-$ImageOS-$RUNNER_ARCH-$CI_KIT_APT_CACHE-$ImageVersion-"
           } >> "$GITHUB_OUTPUT"
 
-      # The packages alone: apt's partial/ and lock belong to root. An older image's entry, or another apt set's, still
-      # serves every package whose version the mirror has not moved; last, what a warm job cut short had downloaded.
+      # The packages, and the files apt had begun when a warm job was cut short, which apt resumes (a name is one
+      # version's file, so a partial one is a prefix of it). An older image's entry, or another apt set's, still serves
+      # every package whose version the mirror has not moved; last, what a warm job cut short had downloaded.
       - name: Restore the package cache
         if: steps.apt-cache.outcome == 'success'
         uses: actions/cache/restore@v6
         with:
-          path: ${{ runner.temp }}/ci-kit-apt/*.deb
+          path: |
+            ${{ runner.temp }}/ci-kit-apt/*.deb
+            ${{ runner.temp }}/ci-kit-apt/partial/*.deb
           key: ${{ steps.apt-cache.outputs.key }}
           restore-keys: |
             ${{ steps.apt-cache.outputs.set }}
@@ -303,7 +306,9 @@ jobs:
         id: lookup
         uses: actions/cache/restore@v6
         with:
-          path: ${{ runner.temp }}/ci-kit-apt/*.deb
+          path: |
+            ${{ runner.temp }}/ci-kit-apt/*.deb
+            ${{ runner.temp }}/ci-kit-apt/partial/*.deb
           key: ${{ steps.apt-cache.outputs.key }}
           lookup-only: true
 
@@ -312,7 +317,9 @@ jobs:
         if: steps.lookup.outputs.cache-hit != 'true'
         uses: actions/cache/restore@v6
         with:
-          path: ${{ runner.temp }}/ci-kit-apt/*.deb
+          path: |
+            ${{ runner.temp }}/ci-kit-apt/*.deb
+            ${{ runner.temp }}/ci-kit-apt/partial/*.deb
           key: ${{ steps.apt-cache.outputs.key }}
           restore-keys: |
             ${{ steps.apt-cache.outputs.resume }}
@@ -336,17 +343,24 @@ jobs:
           mkdir "$empty/partial"
           needed=$(sudo apt-get "${install[@]}" --print-uris -qq -o "Dir::Cache::Archives=$empty/" "${packages[@]}" | awk '{print $2}')
           shopt -s nullglob
-          for deb in "$RUNNER_TEMP"/ci-kit-apt/*.deb; do
-            grep -qxF "${deb##*/}" <<<"$needed" || rm -f "$deb"
+          for deb in "$RUNNER_TEMP"/ci-kit-apt/*.deb "$RUNNER_TEMP"/ci-kit-apt/partial/*.deb; do
+            grep -qxF "${deb##*/}" <<<"$needed" || sudo rm -f "$deb"
           done
           sudo apt-get "${install[@]}" --download-only "${acquire[@]}" "${packages[@]}"
-          du -ch "$RUNNER_TEMP"/ci-kit-apt/*.deb | tail -n 1 # partial/ is root's
+          du -ch "$RUNNER_TEMP"/ci-kit-apt/*.deb | tail -n 1
+
+      # apt keeps partial/ root's alone; a save could not read the file a slow mirror left unfinished.
+      - name: Let the cache read the unfinished downloads
+        if: always() && steps.lookup.outputs.cache-hit != 'true'
+        run: if [ -d "$RUNNER_TEMP/ci-kit-apt/partial" ]; then sudo chmod -R a+rX "$RUNNER_TEMP/ci-kit-apt/partial"; fi
 
       - name: Save the package cache
         if: steps.lookup.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
-          path: ${{ runner.temp }}/ci-kit-apt/*.deb
+          path: |
+            ${{ runner.temp }}/ci-kit-apt/*.deb
+            ${{ runner.temp }}/ci-kit-apt/partial/*.deb
           key: ${{ steps.apt-cache.outputs.key }}
 
       # Under keys of their own, which the next warm resumes from, and a gate falls back to only when nothing else
@@ -355,7 +369,9 @@ jobs:
         if: always() && (steps.download.outcome == 'failure' || steps.download.outcome == 'cancelled')
         uses: actions/cache/save@v6
         with:
-          path: ${{ runner.temp }}/ci-kit-apt/*.deb
+          path: |
+            ${{ runner.temp }}/ci-kit-apt/*.deb
+            ${{ runner.temp }}/ci-kit-apt/partial/*.deb
           key: ${{ steps.apt-cache.outputs.resume }}${{ github.run_id }}-${{ github.run_attempt }}
 
   verdict:
