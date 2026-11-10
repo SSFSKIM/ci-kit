@@ -332,7 +332,7 @@ jobs:
             grep -qxF "${deb##*/}" <<<"$needed" || rm -f "$deb"
           done
           sudo apt-get "${install[@]}" --download-only "${acquire[@]}" "${packages[@]}"
-          du -sh "$RUNNER_TEMP/ci-kit-apt"
+          du -ch "$RUNNER_TEMP"/ci-kit-apt/*.deb | tail -n 1 # partial/ is root's
 
       - name: Save the package cache
         if: steps.lookup.outputs.cache-hit != 'true'
