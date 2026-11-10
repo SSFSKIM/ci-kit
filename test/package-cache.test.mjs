@@ -239,7 +239,8 @@ test('restored packages are checked against the signed index, and a mismatch or 
   const dir = join(s.env.RUNNER_TEMP, 'ci-kit-apt');
   mkdirSync(join(dir, 'partial'), { recursive: true });
   const files = {
-    'zsh_5.9-6_amd64.deb': 'zsh', // matches
+    // matches: Ubuntu 26.04's amd64v3 build, whose index record says Architecture: amd64 (arachne run 42841293986)
+    'zsh_5.9-6_amd64v3.deb': 'zsh',
     'libx_1%3a2.0_amd64.deb': 'libx', // matches, an epoch in its name
     'cowsay_3.03-2_all.deb': 'tampered', // the index holds another hash
     'stray_1.0_all.deb': 'stray', // the index does not know it
@@ -253,7 +254,7 @@ test('restored packages are checked against the signed index, and a mismatch or 
   ].join('\n'));
   // apt-cache show fails for the version it does not know, and still prints the others.
   s.run(check.run, { APT_CACHE_STATUS: '100' });
-  assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith('.deb')).sort(), ['libx_1%3a2.0_amd64.deb', 'zsh_5.9-6_amd64.deb']);
+  assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith('.deb')).sort(), ['libx_1%3a2.0_amd64.deb', 'zsh_5.9-6_amd64v3.deb']);
   assert.deepEqual(readdirSync(join(dir, 'partial')), ['begun_1.0_all.deb'], 'apt hashes a resumed file whole');
   const calls = s.calls().filter((c) => !c.startsWith('sudo '));
   assert.match(calls[0], /^apt-get update .*Acquire::Retries=3/, 'the index is current before it is trusted');
