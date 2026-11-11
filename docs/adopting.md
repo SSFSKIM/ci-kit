@@ -89,12 +89,16 @@ project requiring an exact tool version installs and checks it in the script ins
 
 The setup step checks presence, not versions: one `dpkg-query` on Linux (including installed virtual-package
 providers), one `brew info --json=v2 --installed` per declared macOS list (including aliases and old names).
-It installs only the missing names (`sudo -n apt-get` on Linux, `brew install` on macOS), then runs the script with
-bash from the repository root, with `CI=true` and `CI_KIT_SETUP_MODE=job` (or `bake` in an image build). The script
-runs **every time**, even on a matching image. Make it idempotent and fast when satisfied: check a command or its
-version before downloading it. The action supplies no secrets. Scripts may use tools already available on the
-runner; the action itself needs no Node on PATH, but it does not provision the declaration's Node or pnpm. The gates
-workflow sets those up first; a custom workflow must do so when its script or install command needs them.
+It installs only the missing names (`sudo -n apt-get` on Linux, `brew install` on macOS). On Linux it first asks apt
+what installing them would download with the package lists already on the machine (`--print-uris`): nothing, and the
+lists are not updated; a download, and they are updated first, for at most 120 s, past which the install uses the lists
+present; a name those lists do not know (none, or lists older than the package), and they are updated with no bound.
+Then it runs the script with bash from the repository root, with `CI=true` and `CI_KIT_SETUP_MODE=job` (or `bake` in
+an image build). The script runs **every time**, even on a matching image. Make it idempotent and fast when
+satisfied: check a command or its version before downloading it. The action supplies no secrets. Scripts may use tools
+already available on the runner; the action itself needs no Node on PATH, but it does not provision the
+declaration's Node or pnpm. The gates workflow sets those up first; a custom workflow must do so when its script or
+install command needs them.
 
 Package installs and scripts that fail fail the step, naming the package or script. An image hash is only a cache
 hint: `CI_KIT_SETUP_HASH` matching the declaration produces `ci-kit setup: image matches setup <hash>`; a differing
@@ -347,16 +351,23 @@ On GitHub's Linux runners the Ubuntu mirror sometimes serves about 100 kB/s, and
 step to its 20-minute bound: arachne's TeX and font set is 1167 MB of packages, `texlive-fonts-extra` alone 669 MB.
 So a `hosted` gate with `apt` packages points apt's download directory at one the Actions cache restores, before the
 setup step: apt finds the packages there and downloads only what is missing. A miss downloads from the mirror as it
-always did. The setup step itself is unchanged (it checks presence and installs the missing names, which apt still
-resolves against the mirror's package lists), and so is the setup hash. Self-hosted runners and macOS are untouched:
-their images carry the packages.
+always did. The setup step itself is unchanged (it checks presence and installs the missing names, updating apt's
+lists only when the install would download something), and so is the setup hash. Self-hosted runners and macOS are
+untouched: their images carry the packages.
 
 apt takes a file already in its download directory on its name and size alone, without checking it against the hash
-in the signed index. So between the restore and the setup step, the gate updates apt's lists and checks every restored
-package's SHA256 against the index entry for its package and version (one `apt-cache show` for them all). A package
-whose hash differs, or that the index does not know, is deleted, and apt downloads it again. When the lists cannot be
-updated, none of the restored packages are used. A file apt had only begun (in `partial/`) needs no check, since apt
-hashes a resumed download whole. The warm job runs the same check before an entry it restored seeds a new one.
+in the signed index. So between the restore and the setup step, the gate checks every restored package's SHA256
+against the index entry for its package and version (one `apt-cache show` for them all), against the lists already on
+the machine: on a hosted runner those are the image's own signed lists, whose trust is the image's, not the cache's. A
+package whose hash differs is deleted, and apt downloads it again. Then the gate asks apt what installing its `apt` set
+would download with those lists. When nothing, apt's lists are not updated: on 2026-11-11 the Ubuntu mirror names did
+not resolve on GitHub's runners, and each update spent 6–12.5 minutes retrying them to fetch nothing, twice per job.
+Otherwise the lists are updated, for at most 120 s (a healthy update takes seconds; each try at a name the resolver
+cannot answer took 40), and the check runs again against what the update brought, a restored package of a version the
+image's lists do not know included; one that no list on the machine vouches for is deleted. A file apt had only begun
+(in `partial/`) needs no check, since apt hashes a resumed download whole. The warm job runs the same check before an
+entry it restored seeds a new one, but updates the lists first, with no bound: it downloads the mirror's current
+versions.
 
 The cache is written by a job of its own, `package cache`, on the default branch only, as the build cache is (and for
 the same reason: an entry written on a `ci/**` ref or a pull request is read by nothing but that ref's own later runs).

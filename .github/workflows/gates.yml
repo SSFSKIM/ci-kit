@@ -227,43 +227,80 @@ jobs:
             ${{ steps.apt-cache.outputs.partial }}
 
       # apt takes a file already in its archive directory on its name and size alone, never checking the hash the signed
-      # index gives it (apt 2.8.2, acquire-item.cc, pkgAcqArchive), so an entry is trusted no further than the index:
-      # against fresh lists, a restored package whose hash differs, or that the index does not know, is deleted and
-      # downloaded again. A file in partial/ needs no check: apt hashes a resumed download whole.
+      # index gives it (apt 2.8.2, acquire-item.cc, pkgAcqArchive), so an entry is trusted no further than an index: a
+      # restored package whose hash differs from the lists' is deleted and downloaded again, and one of a version no list
+      # here knows is not kept. A file in partial/ needs no check: apt hashes a resumed download whole.
+      # Offline first: the image ships signed lists (their trust is the image's, not the cache's), and an entry warmed for
+      # it usually holds every file they name. So the check runs against the lists present, then asks apt what installing
+      # the gate's set would download with them; nothing, and the index is not updated (an update retried unresolvable
+      # Ubuntu mirror names for 6-12.5 min to fetch nothing, twice per job: arachne, 2026-11-11). Otherwise it is updated,
+      # within a bound, and the check runs again against the lists it brought, which a restored package of a version the
+      # image's lists do not know waits for. The warm job gives no set: it downloads the mirror's current versions, so it
+      # updates first, unbounded, as it always did.
       - name: Check the restored packages against the index
         if: steps.apt-cache.outcome == 'success'
+        env:
+          CI_KIT_APT: ${{ toJSON(matrix.gate.setup.apt) }}
         run: &apt-cache-check |
           shopt -s nullglob
           dir=$RUNNER_TEMP/ci-kit-apt
           debs=("$dir"/*.deb)
           (( ${#debs[@]} )) || exit 0
-          if ! sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30; then
-            echo "::warning::ci-kit: apt could not update its index, so the restored packages are not used"
-            sudo rm -f "${debs[@]}"
-            exit 0
+          # Each restored package against the lists present: one whose hash differs is deleted, and so is one of a version
+          # they do not know, unless `check hold` keeps it (in $unknown) for the lists an update may bring.
+          check() {
+            local start=$SECONDS debs=("$dir"/*.deb) specs=() deb pkg version hash name spec expected known dropped=0
+            unknown=()
+            (( ${#debs[@]} )) || return 0
+            for deb in "${debs[@]}"; do
+              IFS=_ read -r pkg version _ <<<"${deb##*/}"
+              specs+=("$pkg=${version//%3a/:}")
+            done
+            # The index's hash of each version, by package and version: apt's file name for it, package_version_arch.deb
+            # (an epoch's colon written %3a), names the architecture as built (amd64v3 on Ubuntu 26.04) and not as indexed.
+            # apt-cache fails for a version the index lacks, and still prints the others.
+            expected=$({ apt-cache show "${specs[@]}" 2>/dev/null || true; } | awk '
+              function flush() { if (p != "") print s " " p "=" v; p = v = s = "" }
+              /^Package: / { p = $2 } /^Version: / { v = $2 } /^SHA256: / { s = $2 }
+              /^$/ { flush() } END { flush() }')
+            known=$(cut -d ' ' -f 2 <<<"$expected")
+            while read -r hash name; do
+              IFS=_ read -r pkg version _ <<<"$name"
+              spec=$pkg=${version//%3a/:}
+              grep -qxF "$hash $spec" <<<"$expected" && continue
+              if [[ $1 == hold ]] && ! grep -qxF -- "$spec" <<<"$known"; then unknown+=("$dir/$name"); continue; fi
+              echo "ci-kit: $name does not match the index; apt downloads it again"
+              sudo rm -f "$dir/$name"
+              dropped=$((dropped + 1))
+            done < <(cd "$dir" && sha256sum -- *.deb)
+            echo "ci-kit: checked ${#debs[@]} restored packages against the index in $((SECONDS - start)) s, dropped $dropped${unknown[0]:+, held ${#unknown[@]} of versions it does not know}"
+          }
+          acquire=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          bound=()
+          if [[ -n ${CI_KIT_APT:-} ]]; then
+            check hold
+            read -r -a packages <<<"$(jq -r 'join(" ")' <<<"$CI_KIT_APT")"
+            # What installing the set would download, as setup/apply.mjs asks it: a name the lists do not know fails.
+            if uris=$(sudo apt-get install -y -qq --no-install-recommends --no-upgrade --print-uris "${packages[@]}") \
+              && ! grep -q "^'" <<<"$uris"; then
+              if (( ${#unknown[@]} )); then
+                sudo rm -f "${unknown[@]}"
+                echo "ci-kit: removed ${#unknown[@]} restored packages of versions the lists here do not know"
+              fi
+              echo "ci-kit: with the lists on this machine apt needs nothing downloaded for the declared packages; the index is not updated"
+              exit 0
+            fi
+            # The lists present are the fallback, so the update is cut at 120 s (setup/apply.mjs's bound): a healthy one
+            # takes seconds, while each try at a name the resolver cannot answer took 40 s.
+            bound=(timeout --kill-after=10 120)
           fi
-          start=$SECONDS
-          specs=()
-          for deb in "${debs[@]}"; do
-            IFS=_ read -r pkg version _ <<<"${deb##*/}"
-            specs+=("$pkg=${version//%3a/:}")
-          done
-          # The index's hash of each version, by package and version: apt's file name for it, package_version_arch.deb (an
-          # epoch's colon written %3a), names the architecture as built (amd64v3 on Ubuntu 26.04) and not as indexed.
-          # apt-cache fails for a version the index lacks, and still prints the others.
-          expected=$({ apt-cache show "${specs[@]}" 2>/dev/null || true; } | awk '
-            function flush() { if (p != "") print s " " p "=" v; p = v = s = "" }
-            /^Package: / { p = $2 } /^Version: / { v = $2 } /^SHA256: / { s = $2 }
-            /^$/ { flush() } END { flush() }')
-          dropped=0
-          while read -r hash name; do
-            IFS=_ read -r pkg version _ <<<"$name"
-            grep -qxF "$hash $pkg=${version//%3a/:}" <<<"$expected" && continue
-            echo "ci-kit: $name does not match the index; apt downloads it again"
-            sudo rm -f "$dir/$name"
-            dropped=$((dropped + 1))
-          done < <(cd "$dir" && sha256sum -- *.deb)
-          echo "ci-kit: checked ${#debs[@]} restored packages against the index in $((SECONDS - start)) s, dropped $dropped"
+          status=0
+          sudo "${bound[@]}" apt-get update "${acquire[@]}" || status=$?
+          if (( status )); then
+            (( status == 124 )) && why="did not finish in 120 s" || why="failed ($status)"
+            echo "::warning::ci-kit: apt's index update $why; the restored packages are checked against the lists on this machine"
+          fi
+          check
 
       - name: Apply CI environment
         if: join(matrix.gate.setup.apt, '') != '' || join(matrix.gate.setup.brew, '') != '' || join(matrix.gate.setup.cask, '') != '' || matrix.gate.setup.script != ''

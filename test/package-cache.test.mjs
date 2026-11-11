@@ -35,16 +35,26 @@ echo "sudo $*" >> "$FIXTURE/calls"
 if [ "$1" = tee ]; then cat > "$FIXTURE/apt.conf"; echo "$2" > "$FIXTURE/apt.conf.path"; exit 0; fi
 exec "$@"
 `, { mode: 0o755 });
-  // apt-get knows the set's packages from $FIXTURE/needed. --print-uris lists them, downloads go to the configured
-  // archive directory: the one -o names, else the cache directory the drop-in names.
+  // apt-get answers from the lists the sandbox holds: $FIXTURE/needed, the files installing the set takes, of which
+  // --print-uris lists those the archive directory lacks (the one -o names, else the drop-in's); $FIXTURE/unknown, a
+  // name the lists do not know, which fails the request. An update brings $FIXTURE/fresh's lists, when a test has some,
+  // and exits $APT_UPDATE_STATUS.
   writeFileSync(join(bin, 'apt-get'), `#!/usr/bin/env bash
 echo "apt-get $*" >> "$FIXTURE/calls"
 archives="$RUNNER_TEMP/ci-kit-apt/"
 for arg in "$@"; do case $arg in Dir::Cache::Archives=*) archives=\${arg#*=} ;; esac; done
+if [ "$1" = update ]; then
+  if [ -d "$FIXTURE/fresh" ]; then
+    for f in index needed unknown; do rm -f "$FIXTURE/$f"; [ ! -e "$FIXTURE/fresh/$f" ] || cp "$FIXTURE/fresh/$f" "$FIXTURE/$f"; done
+  fi
+  exit "\${APT_UPDATE_STATUS:-0}"
+fi
 case " $* " in
   *" --print-uris "*)
-    [ -z "$(ls -A "$archives" | grep -v '^partial$')" ] || { echo "print-uris against a non-empty $archives" >&2; exit 3; }
-    while read -r deb; do echo "'http://mirror/$deb' $deb 100 SHA256:00"; done < "$FIXTURE/needed" ;;
+    if [ -s "$FIXTURE/unknown" ]; then echo "E: Unable to locate package $(head -n 1 "$FIXTURE/unknown")" >&2; exit 100; fi
+    while read -r deb; do
+      [ -e "$archives$deb" ] || echo "'http://mirror/$deb' $deb 100 SHA256:00"
+    done < <(cat "$FIXTURE/needed" 2>/dev/null) ;;
   *" --download-only "*)
     while read -r deb; do
       [ -e "$archives$deb" ] || { echo "$deb" >> "$FIXTURE/fetched"; touch "$archives$deb"; }
@@ -233,6 +243,8 @@ test('after a timed-out download the warm stops only its own apt before the cach
 const sha256 = (text) => createHash('sha256').update(text).digest('hex');
 const record = (pkg, version, arch, sha) => `Package: ${pkg}\nVersion: ${version}\nArchitecture: ${arch}\nFilename: pool/${pkg}.deb\nSHA256: ${sha}\n`;
 
+// The check as the warm job runs it, with no declared set: the lists are updated first, without a bound, since the warm
+// downloads the mirror's current versions.
 test('restored packages are checked against the signed index, and a mismatch or an unknown file is dropped', (t) => {
   const s = sandbox(t);
   const check = step(gate, 'Check the restored packages against the index');
@@ -257,9 +269,109 @@ test('restored packages are checked against the signed index, and a mismatch or 
   assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith('.deb')).sort(), ['libx_1%3a2.0_amd64.deb', 'zsh_5.9-6_amd64v3.deb']);
   assert.deepEqual(readdirSync(join(dir, 'partial')), ['begun_1.0_all.deb'], 'apt hashes a resumed file whole');
   const calls = s.calls().filter((c) => !c.startsWith('sudo '));
-  assert.match(calls[0], /^apt-get update .*Acquire::Retries=3/, 'the index is current before it is trusted');
+  assert.match(calls[0], /^apt-get update .*Acquire::Retries=3/, 'the warm checks against the lists it downloads by');
+  assert.ok(s.calls().includes(`sudo ${calls[0]}`), 'the warm\'s update has no bound');
   assert.equal(calls[1].split(' ').slice(0, 2).join(' '), 'apt-cache show');
   assert.deepEqual(calls[1].split(' ').slice(2).sort(), ['cowsay=3.03-2', 'libx=1:2.0', 'stray=1.0', 'zsh=5.9-6']);
+  assert.equal(calls.length, 2, 'no install question without a set');
+});
+
+test('a gate checks against the lists it has, and hands the setup step the set it declares', () => {
+  const check = step(gate, 'Check the restored packages against the index');
+  assert.equal(check.env.CI_KIT_APT, '${{ toJSON(matrix.gate.setup.apt) }}', 'the set apply.mjs installs (plan/select.mjs)');
+  assert.equal(step(warm.steps, 'Check the restored packages against the index').env?.CI_KIT_APT, undefined,
+    'the warm gives no set: it updates first');
+});
+
+// A gate's check: the image's lists, then apt's answer to what installing the set would download with them.
+function gateCheck(t, { debs, index, needed, unknown, fresh, status } = {}) {
+  const s = sandbox(t);
+  const check = step(gate, 'Check the restored packages against the index');
+  const dir = join(s.env.RUNNER_TEMP, 'ci-kit-apt');
+  mkdirSync(join(dir, 'partial'), { recursive: true });
+  for (const [name, body] of Object.entries(debs)) writeFileSync(join(dir, name), body);
+  const lists = (at, l) => {
+    mkdirSync(at, { recursive: true });
+    if (l.index) writeFileSync(join(at, 'index'), l.index.join('\n'));
+    if (l.needed) writeFileSync(join(at, 'needed'), l.needed.map((n) => `${n}\n`).join(''));
+    if (l.unknown) writeFileSync(join(at, 'unknown'), `${l.unknown}\n`);
+  };
+  lists(s.root, { index, needed, unknown });
+  if (fresh) lists(join(s.root, 'fresh'), fresh);
+  const r = s.run(check.run, { CI_KIT_APT: '["zsh","cowsay"]', APT_CACHE_STATUS: '100', ...(status ? { APT_UPDATE_STATUS: status } : {}) });
+  const calls = s.calls();
+  return {
+    r, calls,
+    kept: readdirSync(dir).filter((f) => f.endsWith('.deb')).sort(),
+    updates: calls.filter((c) => c.startsWith('apt-get update')),
+    shows: calls.filter((c) => c.startsWith('apt-cache show')),
+  };
+}
+
+test('a gate whose restored packages give apt everything the set needs does not update the index', (t) => {
+  const zsh = 'zsh_5.9-6_amd64v3.deb', cowsay = 'cowsay_3.03-2_all.deb';
+  const c = gateCheck(t, {
+    // A file of a version the lists do not know serves no install here, and an update later in the job could hand it
+    // to apt unchecked: it goes.
+    debs: { [zsh]: 'zsh', [cowsay]: 'cowsay', 'stray_1.0_all.deb': 'stray' },
+    index: [record('zsh', '5.9-6', 'amd64', sha256('zsh')), record('cowsay', '3.03-2', 'all', sha256('cowsay'))],
+    needed: [zsh, cowsay],
+  });
+  assert.deepEqual(c.updates, [], 'nothing to download: the mirror is not asked');
+  assert.deepEqual(c.kept, [cowsay, zsh]);
+  assert.equal(c.shows.length, 1);
+  const asked = c.calls.filter((x) => x.startsWith('apt-get install'));
+  assert.equal(asked.length, 1);
+  for (const flag of ['--print-uris', '-qq', '--no-install-recommends', '--no-upgrade']) assert.ok(asked[0].split(' ').includes(flag), flag);
+  assert.match(asked[0], / zsh cowsay$/);
+  assert.match(c.r.stdout, /not updated/);
+});
+
+test('a restored package the lists here cannot place brings a bounded update, then a check against the lists it brought', (t) => {
+  const zsh = 'zsh_5.9-6_amd64v3.deb';
+  const c = gateCheck(t, {
+    debs: {
+      [zsh]: 'zsh',
+      'cowsay_3.03-3_all.deb': 'cowsay 3', // the warm's newer version: the image's lists know 3.03-2 only
+      'libx_1%3a2.0_amd64.deb': 'tampered', // a version the lists know, under another hash
+    },
+    index: [record('zsh', '5.9-6', 'amd64', sha256('zsh')), record('cowsay', '3.03-2', 'all', sha256('cowsay 2')),
+      record('libx', '1:2.0', 'amd64', sha256('libx'))],
+    needed: [zsh, 'cowsay_3.03-2_all.deb', 'libx_1%3a2.0_amd64.deb'],
+    fresh: {
+      index: [record('zsh', '5.9-6', 'amd64', sha256('zsh')), record('cowsay', '3.03-3', 'all', sha256('cowsay 3')),
+        record('libx', '1:2.0', 'amd64', sha256('libx'))],
+      needed: [zsh, 'cowsay_3.03-3_all.deb', 'libx_1%3a2.0_amd64.deb'],
+    },
+  });
+  assert.equal(c.updates.length, 1);
+  assert.ok(c.calls.some((x) => /^sudo timeout --kill-after=\d+ 120 apt-get update /.test(x)), 'the update is bounded');
+  assert.equal(c.shows.length, 2, 'checked again against the lists the update brought');
+  assert.deepEqual(c.kept, ['cowsay_3.03-3_all.deb', zsh], 'the newer version waited for the lists that know it');
+});
+
+test('lists that do not know a declared name bring an update', (t) => {
+  const zsh = 'zsh_5.9-6_amd64v3.deb';
+  const c = gateCheck(t, {
+    debs: { [zsh]: 'zsh' },
+    unknown: 'cowsay', // an image without lists, or lists too old to name the package
+    fresh: { index: [record('zsh', '5.9-6', 'amd64', sha256('zsh'))], needed: [zsh, 'cowsay_3.03-3_all.deb'] },
+  });
+  assert.equal(c.updates.length, 1);
+  assert.deepEqual(c.kept, [zsh], 'kept through the update, then checked against its lists');
+});
+
+test('an update that fails or is cut short leaves the check to the lists on the machine', (t) => {
+  const zsh = 'zsh_5.9-6_amd64v3.deb';
+  const c = gateCheck(t, {
+    debs: { [zsh]: 'zsh', 'cowsay_3.03-3_all.deb': 'cowsay 3' },
+    index: [record('zsh', '5.9-6', 'amd64', sha256('zsh')), record('cowsay', '3.03-2', 'all', sha256('cowsay 2'))],
+    needed: [zsh, 'cowsay_3.03-2_all.deb'],
+    status: '124',
+  });
+  assert.equal(c.updates.length, 1);
+  assert.match(c.r.stdout, /::warning::.*did not finish in 120 s/);
+  assert.deepEqual(c.kept, [zsh], 'what the lists present do not vouch for is not used');
 });
 
 test('the check drops every restored package when the index cannot be read, and costs nothing on a miss', (t) => {
@@ -273,7 +385,7 @@ test('the check drops every restored package when the index cannot be read, and 
   assert.ok(names.indexOf('Check the restored packages against the index') < names.indexOf('Download the declared packages'));
   const dir = join(s.env.RUNNER_TEMP, 'ci-kit-apt');
   mkdirSync(dir, { recursive: true });
-  s.run(check.run);
+  s.run(check.run, { CI_KIT_APT: '["zsh"]' });
   assert.deepEqual(s.calls(), [], 'nothing restored: nothing to check, no update');
   writeFileSync(join(dir, 'zsh_5.9-6_amd64.deb'), 'zsh');
   writeFileSync(join(s.root, 'bin', 'apt-get'), '#!/usr/bin/env bash\necho "apt-get $*" >> "$FIXTURE/calls"\nexit 100\n', { mode: 0o755 });
