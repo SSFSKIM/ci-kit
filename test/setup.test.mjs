@@ -374,7 +374,7 @@ test('apt installs without updating its index when the lists on the machine need
   assert.match(r.stdout, /no index update/);
 });
 
-test('a download the lists here can name follows an update bounded at 120 s, and a cut-short one still installs', (t) => {
+test('in a job, a download the lists here can name follows an update bounded at 120 s, and a cut-short one still installs', (t) => {
   for (const updateCode of [0, 124, 100]) {
     const f = fixture(t, { apt: ['cowsay'] }, { updateCode });
     const r = f.run();
@@ -386,6 +386,10 @@ test('a download the lists here can name follows an update bounded at 120 s, and
     if (updateCode === 0) assert.doesNotMatch(r.stdout, /::warning::/);
     else assert.match(r.stdout, updateCode === 124 ? /::warning::.*did not finish in 120 s.*lists on this machine/ : /::warning::.*failed \(100\).*lists on this machine/);
   }
+  // A bake has the time, and the image it builds should carry current versions.
+  const bake = fixture(t, { apt: ['cowsay'] });
+  successful(bake.run({ mode: 'bake' }));
+  assert.equal(bake.calls().find((c) => c.name === 'sudo' && c.args.includes('update')).args[1], bake.env.CI_KIT_SETUP_APT_GET);
 });
 
 test('a name the lists here do not know (none, or too old) follows an unbounded update, whose failure fails the step', (t) => {

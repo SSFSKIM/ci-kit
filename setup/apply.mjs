@@ -110,14 +110,16 @@ export async function applySetup({ root = process.env.GITHUB_WORKSPACE || proces
       // takes, and the package cache (gates.yml) may already hold them all; an index update then only waits on the
       // mirror (unresolvable Ubuntu mirror names held each update 6-12.5 min to fetch nothing: arachne, 2026-11-11). So
       // apt is asked what the install would download with those lists. Nothing: no update. A download: an update, cut
-      // at a bound past which the lists present serve the install. A name they do not know (no lists, or lists older
-      // than the package): an update with no bound, since there is no install without it.
+      // at a bound past which the lists present serve the install (in a job: a bake has the time, and an image should
+      // carry current versions). A name they do not know (no lists, or lists older than the package): an update with no
+      // bound, since there is no install without it.
       const probe = await attempt(sudo, ['-n', aptGet, 'install', '--print-uris', '-qq', '-y', '--no-install-recommends', ...missing], `apt download query for ${names}`);
       if (probe.code !== 0) {
         console.log(`ci-kit setup: the apt lists on this machine cannot place ${names} (${lines(probe.stderr.trim() || probe.stdout.trim()).at(-1) ?? `exit ${probe.signal || probe.code}`}); updating them`);
         await run(sudo, ['-n', aptGet, 'update', ...acquire], `apt update for ${names}`, true);
       } else if (lines(probe.stdout).some((line) => line.startsWith("'"))) {
-        const update = await attempt(sudo, ['-n', 'timeout', '--kill-after=10', String(APT_UPDATE_BOUND_S), aptGet, 'update', ...acquire], `apt update for ${names}`, true);
+        const bound = mode === 'job' ? ['timeout', '--kill-after=10', String(APT_UPDATE_BOUND_S)] : [];
+        const update = await attempt(sudo, ['-n', ...bound, aptGet, 'update', ...acquire], `apt update for ${names}`, true);
         if (update.code !== 0) {
           const why = update.code === 124 ? `did not finish in ${APT_UPDATE_BOUND_S} s` : `failed (${update.signal || update.code})`;
           annotation('warning', `ci-kit setup: apt's index update for ${names} ${why}; installing against the lists on this machine`);

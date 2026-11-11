@@ -91,12 +91,12 @@ The setup step checks presence, not versions: one `dpkg-query` on Linux (includi
 providers), one `brew info --json=v2 --installed` per declared macOS list (including aliases and old names).
 It installs only the missing names (`sudo -n apt-get` on Linux, `brew install` on macOS). On Linux it first asks apt
 what installing them would download with the package lists already on the machine (`--print-uris`): nothing, and the
-lists are not updated; a download, and they are updated first, for at most 120 s, past which the install uses the lists
-present; a name those lists do not know (none, or lists older than the package), and they are updated with no bound.
-Then it runs the script with bash from the repository root, with `CI=true` and `CI_KIT_SETUP_MODE=job` (or `bake` in
-an image build). The script runs **every time**, even on a matching image. Make it idempotent and fast when
-satisfied: check a command or its version before downloading it. The action supplies no secrets. Scripts may use tools
-already available on the runner; the action itself needs no Node on PATH, but it does not provision the
+lists are not updated; a download, and they are updated first, in a job for at most 120 s, past which the install uses
+the lists present; a name those lists do not know (none, or lists older than the package), and they are updated with
+no bound. Then it runs the script with bash from the repository root, with `CI=true` and `CI_KIT_SETUP_MODE=job` (or
+`bake` in an image build). The script runs **every time**, even on a matching image. Make it idempotent and fast
+when satisfied: check a command or its version before downloading it. The action supplies no secrets. Scripts may use
+tools already available on the runner; the action itself needs no Node on PATH, but it does not provision the
 declaration's Node or pnpm. The gates workflow sets those up first; a custom workflow must do so when its script or
 install command needs them.
 
