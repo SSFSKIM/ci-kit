@@ -140,7 +140,10 @@ async function main(argv) {
   // leaves nothing to rerun, so the ref goes as after a verdict; a run that could not be cancelled, or one the budget
   // hid from discovery, keeps it, named on stderr.
   const SIGNALS = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 };
+  let stopping = false;
   const interrupted = async (signal) => {
+    if (stopping) return; // the first signal owns the cancel, the cleanup and the exit code
+    stopping = true;
     let cancelled = runId === null && !runMayExist;
     if (runId) {
       cancelled = await gh.cancelRun(repo, runId).then(() => (note(`cancelled run ${runId}`), true), (e) => (note(`could not cancel run ${runId}: ${e.message}`), false));
