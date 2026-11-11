@@ -55,7 +55,15 @@ if (name === 'sudo') {
 }
 let out = '', err = '', code = 0;
 if (name === 'dpkg-query') { out = state.dpkg ?? ''; code = state.queryCode ?? 0; }
-if (name === 'apt-get') { if (args[0] === 'install') { err = state.aptError ?? ''; code = err ? 1 : 0; } }
+// apt-get answers --print-uris from the lists the state gives: a file to download per name by default, state.uris when
+// set, and a failed request for state.unknown, a name the lists do not know. An update exits state.updateCode.
+if (name === 'apt-get') {
+  if (args.includes('--print-uris')) {
+    if (state.unknown) { err = 'E: Unable to locate package ' + state.unknown; code = 100; }
+    else out = (state.uris ?? args.slice(1).filter((a) => !a.startsWith('-')).map((n) => "'http://mirror/" + n + ".deb' " + n + '.deb 1 SHA256:00')).map((l) => l + '\\n').join('');
+  } else if (args[0] === 'update') { code = state.updateCode ?? 0; err = code ? 'E: update failed' : ''; }
+  else if (args[0] === 'install') { err = state.aptError ?? ''; code = err ? 1 : 0; }
+}
 if (name === 'brew') {
   if (args[0] === 'info') out = JSON.stringify({formulae: state.formulae ?? [], casks: state.casks ?? []});
   else if (args[0] === 'list') out = state.artifacts ?? '';
@@ -95,8 +103,8 @@ test('Linux checks once, ignores residual config, and installs only missing name
   const calls = f.calls();
   assert.equal(calls.filter((c) => c.name === 'dpkg-query').length, 1);
   assert.equal(calls.filter((c) => c.name === 'brew').length, 0);
-  assert.deepEqual(calls.filter((c) => c.name === 'apt-get').map((c) => c.args), [['update', '-o', 'Acquire::Retries=3', '-o', 'Acquire::http::Timeout=30', '-o', 'Acquire::https::Timeout=30'], ['install', '-o', 'Acquire::Retries=3', '-o', 'Acquire::http::Timeout=30', '-o', 'Acquire::https::Timeout=30', '-y', '--no-install-recommends', 'cowsay']]);
-  assert.equal(calls.find((c) => c.name === 'apt-get' && c.args[0] === 'install').frontend, 'noninteractive');
+  assert.deepEqual(calls.filter((c) => c.name === 'apt-get').map((c) => c.args), [['install', '--print-uris', '-qq', '-y', '--no-install-recommends', 'cowsay'], ['update', '-o', 'Acquire::Retries=3', '-o', 'Acquire::http::Timeout=30', '-o', 'Acquire::https::Timeout=30'], ['install', '-o', 'Acquire::Retries=3', '-o', 'Acquire::http::Timeout=30', '-o', 'Acquire::https::Timeout=30', '-y', '--no-install-recommends', 'cowsay']]);
+  assert.equal(calls.find((c) => c.name === 'apt-get' && c.args[0] === 'install' && !c.args.includes('--print-uris')).frontend, 'noninteractive');
   assert.match(r.stdout, /ci-kit setup: declared apt 2, brew 0, cask 0, script no; installed apt:cowsay in [\d.]+ s/);
 });
 
@@ -125,7 +133,7 @@ test('Linux skips declared apt names and accepts skips declared for the other pl
   successful(r);
   assert.equal(r.result.installed, 'apt:cowsay');
   assert.deepEqual(f.calls().filter((c) => c.name === 'apt-get').map((c) => c.args), [
-    ['update', '-o', 'Acquire::Retries=3', '-o', 'Acquire::http::Timeout=30', '-o', 'Acquire::https::Timeout=30'], ['install', '-o', 'Acquire::Retries=3', '-o', 'Acquire::http::Timeout=30', '-o', 'Acquire::https::Timeout=30', '-y', '--no-install-recommends', 'cowsay'],
+    ['install', '--print-uris', '-qq', '-y', '--no-install-recommends', 'cowsay'], ['update', '-o', 'Acquire::Retries=3', '-o', 'Acquire::http::Timeout=30', '-o', 'Acquire::https::Timeout=30'], ['install', '-o', 'Acquire::Retries=3', '-o', 'Acquire::http::Timeout=30', '-o', 'Acquire::https::Timeout=30', '-y', '--no-install-recommends', 'cowsay'],
   ]);
 });
 
@@ -348,6 +356,55 @@ test('a setup-only file produces a successful empty plan', () => {
   const { apt_cache: key, ...plan } = planOutput(config, config.gates);
   assert.deepEqual(plan, { gates: [], pool: false, note: 'no gates selected', cache_write: false, apt_warm: [] });
   assert.match(key, /^[a-f0-9]{16}$/);
+});
+
+// Offline first (gates.yml's check step asks the same question): the lists on the machine decide whether the install
+// needs the mirror at all.
+const aptCalls = (f) => f.calls().filter((c) => c.name === 'apt-get').map((c) => c.args);
+const ACQUIRE = ['-o', 'Acquire::Retries=3', '-o', 'Acquire::http::Timeout=30', '-o', 'Acquire::https::Timeout=30'];
+
+test('apt installs without updating its index when the lists on the machine need nothing downloaded', (t) => {
+  const f = fixture(t, { apt: ['zsh', 'cowsay'] }, { dpkg: 'zsh\tinstalled\n', uris: [] });
+  const r = f.run();
+  successful(r);
+  assert.equal(r.result.installed, 'apt:cowsay');
+  assert.deepEqual(aptCalls(f), [
+    ['install', '--print-uris', '-qq', '-y', '--no-install-recommends', 'cowsay'], ['install', ...ACQUIRE, '-y', '--no-install-recommends', 'cowsay'],
+  ]);
+  assert.match(r.stdout, /no index update/);
+});
+
+test('in a job, a download the lists here can name follows an update bounded at 120 s, and a cut-short one still installs', (t) => {
+  for (const updateCode of [0, 124, 100]) {
+    const f = fixture(t, { apt: ['cowsay'] }, { updateCode });
+    const r = f.run();
+    successful(r);
+    assert.equal(r.result.installed, 'apt:cowsay', String(updateCode));
+    const update = f.calls().find((c) => c.name === 'sudo' && c.args.includes('update'));
+    assert.deepEqual(update.args.slice(0, 4), ['-n', 'timeout', '--kill-after=10', '120']);
+    assert.deepEqual(aptCalls(f).map((a) => a[0]), ['install', 'update', 'install']);
+    if (updateCode === 0) assert.doesNotMatch(r.stdout, /::warning::/);
+    else assert.match(r.stdout, updateCode === 124 ? /::warning::.*did not finish in 120 s.*lists on this machine/ : /::warning::.*failed \(100\).*lists on this machine/);
+  }
+  // A bake has the time, and the image it builds should carry current versions.
+  const bake = fixture(t, { apt: ['cowsay'] });
+  successful(bake.run({ mode: 'bake' }));
+  assert.equal(bake.calls().find((c) => c.name === 'sudo' && c.args.includes('update')).args[1], bake.env.CI_KIT_SETUP_APT_GET);
+});
+
+test('a name the lists here do not know (none, or too old) follows an unbounded update, whose failure fails the step', (t) => {
+  const f = fixture(t, { apt: ['cowsay'] }, { unknown: 'cowsay' });
+  const r = f.run();
+  successful(r);
+  const update = f.calls().find((c) => c.name === 'sudo' && c.args.includes('update'));
+  assert.equal(update.args[1], f.env.CI_KIT_SETUP_APT_GET, 'no bound: there is no install without it');
+  assert.deepEqual(aptCalls(f).map((a) => a[0]), ['install', 'update', 'install']);
+  assert.match(r.stdout, /Unable to locate package cowsay/);
+  const failing = fixture(t, { apt: ['cowsay'] }, { unknown: 'cowsay', updateCode: 100 });
+  const failed = failing.run();
+  assert.equal(failed.status, 1);
+  assert.match(failed.stderr, /apt update for cowsay failed/);
+  assert.equal(aptCalls(failing).length, 2, 'no install after it');
 });
 
 test('installed apt providers satisfy virtual names, including versioned Provides, without update or install', (t) => {
