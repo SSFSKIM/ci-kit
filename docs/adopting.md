@@ -425,9 +425,11 @@ The last line is `GREEN <run-url>` (exit 0), `RED <failed>/<total> <run-url>` (e
 a config error, no run within 5 minutes of the push, the API rate limit exhausted for 90 minutes, gh not logged in, a
 run that failed to start). Failed gates' logs are saved to `/tmp/ci-gate/<owner>-<repo>/<run-id>/<gate>.log`, with
 their artifacts beside them. After `GREEN` or `RED`, or when no run appeared, the ref is deleted unless `--keep`, and
-only while it still points at this call's commit. After an `ERROR` (or Ctrl-C) while a run exists, the ref stays, so
-the run can be rerun or read. stderr names it with the command that removes it (`git push origin --delete <ref>`); nothing
-removes it automatically, and a `ci/` branch nobody pushes to starts nothing.
+only while it still points at this call's commit. A stopped call (Ctrl-C, or `TERM`/`HUP`, as an agent's task stop
+sends) cancels its run and then deletes the ref the same way, exiting 130, 143 or 129. After an `ERROR` while a run
+exists, or a stop whose run could not be cancelled, the ref stays, so the run can be rerun or read. stderr names it with
+the command that removes it (`git push origin --delete <ref>`); nothing removes it automatically, and a `ci/` branch
+nobody pushes to starts nothing.
 Progress notes go to stderr.
 
 **It is gentle with the shared token.** Every session on the account shares the gh login's 5,000 REST requests an

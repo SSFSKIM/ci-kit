@@ -136,13 +136,20 @@ async function main(argv) {
     if (deleteRef(target.dir, remote.name, commit, ref)) note(`removed ${ref}`);
     else note(`left ${ref} (it no longer points at this call's commit, or the delete failed)`);
   };
-  const interrupted = async () => {
-    if (runId) await gh.cancelRun(repo, runId).then(() => note(`cancelled run ${runId}`), () => {});
-    cleanup(false);
+  // A stop (Ctrl-C, or TERM/HUP from an agent's task stop) cancels this call's run. A run cancelled, or none pushed,
+  // leaves nothing to rerun, so the ref goes as after a verdict; a run that could not be cancelled, or one the budget
+  // hid from discovery, keeps it, named on stderr.
+  const SIGNALS = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 };
+  const interrupted = async (signal) => {
+    let cancelled = runId === null && !runMayExist;
+    if (runId) {
+      cancelled = await gh.cancelRun(repo, runId).then(() => (note(`cancelled run ${runId}`), true), (e) => (note(`could not cancel run ${runId}: ${e.message}`), false));
+    }
+    cleanup(cancelled);
     out('ERROR interrupted');
-    process.exit(130);
+    process.exit(SIGNALS[signal] ?? 130);
   };
-  process.once('SIGINT', interrupted);
+  for (const signal of Object.keys(SIGNALS)) process.once(signal, interrupted);
 
   let result;
   try {
@@ -150,7 +157,7 @@ async function main(argv) {
   } catch (e) {
     result = failure(e);
   }
-  process.removeListener('SIGINT', interrupted); // the call has its result: a late Ctrl-C must not turn it into ERROR
+  for (const signal of Object.keys(SIGNALS)) process.removeListener(signal, interrupted); // the call has its result: a late stop must not turn it into ERROR
   cleanup(result.code !== 2);
   if (DEBUG) {
     const { requests, notModified, remaining } = gh.stats();
