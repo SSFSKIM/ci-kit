@@ -237,6 +237,7 @@ const envFile = (f, machine, shared = false) => [
   'LANG=en_US.UTF-8',
   `ACTIONS_RUNNER_HOOK_JOB_STARTED=${f.hooks}/job-started.sh`,
   `ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${f.hooks}/job-completed.sh`,
+  `ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE=${join(f.hooks, "..", "..", "action-archive-cache")}`,
   `CI_KIT_MACHINE=${machine}`,
   ...(shared ? [] : ['CI_KIT_VM_REPO=SSFSKIM/MAWS']),
   '',
@@ -596,7 +597,8 @@ test('--shared 2 registers two shared instances, named after the machine, each w
     assert.ok(!args.some((arg) => arg.includes('registration-token-123')), 'the token is not an argument');
     assert.equal(readFileSync(join(dir, '.env'), 'utf8'), [
       'LANG=en_US.UTF-8', `ACTIONS_RUNNER_HOOK_JOB_STARTED=${dir}/ci-kit/hooks/job-started.sh`,
-      `ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${dir}/ci-kit/hooks/job-completed.sh`, 'CI_KIT_MACHINE=mini', 'CI_KIT_SHARED_DESKTOP=1', '',
+      `ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${dir}/ci-kit/hooks/job-completed.sh`,
+      `ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE=${dir}/action-archive-cache`, 'CI_KIT_MACHINE=mini', 'CI_KIT_SHARED_DESKTOP=1', '',
     ].join('\n'));
     for (const file of hookFiles) assert.equal(readFileSync(join(dir, 'ci-kit/hooks', file), 'utf8'), readFileSync(join(f.kit, 'mac/hooks', file), 'utf8'), `${n}: ${file}`);
     const plist = readPlist(join(f.home, `Library/LaunchAgents/${sharedAgent(n)}.plist`));

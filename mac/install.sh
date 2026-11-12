@@ -545,6 +545,11 @@ for ((n = 1; n <= last; n++)); do
     echo LANG=en_US.UTF-8
     echo "ACTIONS_RUNNER_HOOK_JOB_STARTED=$root/ci-kit/hooks/job-started.sh"
     echo "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=$root/ci-kit/hooks/job-completed.sh"
+    # The runner takes an action from <dir>/<owner>_<repo>/<sha>.tar.gz before it asks codeload, so a seeded archive
+    # keeps setup alive when the host's route to GitHub is slow (codeload at 10 KB/s timed out every mini job's
+    # setup on 2026-11-07 and 11-12). The line is written on every run: an .env rewrite that lost it on 11-08 left
+    # a seeded cache unread.
+    echo "ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE=$root/action-archive-cache"
     echo "CI_KIT_MACHINE=$machine"
     ((n != 1)) || echo "CI_KIT_VM_REPO=$repo"
     [[ -z $display ]] || echo "CI_KIT_DISPLAY=$display"
@@ -553,6 +558,7 @@ for ((n = 1; n <= last; n++)); do
     ((n == 1)) || echo CI_KIT_SHARED_DESKTOP=1
     ((vm == 0)) || echo "CI_KIT_VM_RESERVATION=$VM_RESERVED"
   } >"$root/.env"
+  mkdir -p "$root/action-archive-cache"
   echo "$RUNNER_PATH" >"$root/.path"
   cp "$root/bin/runsvc.sh" "$root/runsvc.sh"
 done
