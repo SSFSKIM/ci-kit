@@ -15,6 +15,7 @@ HERE = Path(__file__).resolve().parent
 UTC = dt.timezone.utc
 DEFAULT_WINDOWS = "06:43-07:00"
 VM_AGENT = "com.ssfskim.ci-kit.vm-lane"
+HORIZON = dt.timedelta(hours=6)
 HOST_AGENT = "com.ssfskim.ci-kit.mac-runner"
 verdict_process = False
 
@@ -68,14 +69,21 @@ def shell(script, *args):
     return command(["/bin/bash", "-eu", "-c", script, "lane-publish", *map(str, args)])
 
 
-def active_windows(windows, now):
-    """Use the VM launcher's format and reader, rejecting its silently ignored bad input."""
-    active = []
-    for window in windows.replace(",", " ").split():
+def parse_windows(windows):
+    """The VM launcher's format, rejecting its silently ignored bad input."""
+    parsed = windows.replace(",", " ").split()
+    for window in parsed:
         if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d", window):
             raise ValueError(f"window invalid: {window}")
         if window[:5] == window[6:]:
             raise ValueError(f"window invalid (empty): {window}")
+    return parsed
+
+
+def active_windows(windows, now):
+    """Which windows hold now, by the VM launcher's reader."""
+    active = []
+    for window in parse_windows(windows):
         result = shell('source "$1"; pause_windows=$2; clock=$3; date() { echo "$clock"; }; '
                        'if in_pause_window; then echo active; fi',
                        HERE / "vm/lane-reads.sh", window, now.strftime("%H%M"))
@@ -84,10 +92,62 @@ def active_windows(windows, now):
     return active
 
 
+def minute_stamp(moment):
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%MZ")
+
+
+def daily(start, end, now):
+    """The occurrences of a daily window (minutes after midnight UTC, wrapping when end < start) around now."""
+    midnight = now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    length = dt.timedelta(minutes=(end - start) % 1440)
+    for day in (-1, 0, 1):
+        begin = midnight + dt.timedelta(days=day, minutes=start)
+        yield begin, begin + length
+
+
+def clock_minutes(hhmm):
+    return int(hhmm[:2]) * 60 + int(hhmm[3:5])
+
+
+def lane_held_reason(window):
+    return f"lane held window {window} (UTC)"
+
+
+def vm_pause_reason(window):
+    return f"VM pause window {window} (UTC)"
+
+
 def verdict(home, now):
     reasons = []
     answer = {"host": "free", "vm": "free"}
     logs = home / "Library/Logs/ci-kit"
+    # Windows active now or starting within HORIZON, so a planner sees a hold coming. The verdict does not read
+    # them: each source's hold is decided by its own reader below, as before.
+    windows = []
+    minute = now.astimezone(UTC).replace(second=0, microsecond=0)
+
+    def announce(lanes, begin, end, reason):
+        if end > minute and begin <= minute + HORIZON:
+            windows.append({"from": minute_stamp(begin), "until": minute_stamp(end), "lanes": list(lanes),
+                            "why": " ".join(reason.split())})
+
+    def announce_clock(lanes, spec, reason):
+        for window in parse_windows(spec):
+            for begin, end in daily(clock_minutes(window[:5]), clock_minutes(window[6:]), now):
+                announce(lanes, begin, end, reason(window))
+
+    def announce_quiet():
+        # quiet.sh parses the file; its malformed lines are the verdict's to report and announce nothing.
+        if read(home / ".local/state/ci-quiet") is None:
+            return
+        for entry in shell('source "$1"; quiet_list', HERE / "hooks/quiet.sh").splitlines():
+            kind, begin, end, line = entry.split("\t", 3)
+            reason = f"quiet window {line}"
+            if kind == "daily":
+                for start, stop in daily(int(begin), int(end), now):
+                    announce(both, start, stop, reason)
+            else:
+                announce(both, *(dt.datetime.fromisoformat(t.replace("Z", "+00:00")) for t in (begin, end)), reason)
 
     def hold(lanes, reason):
         for lane in lanes:
@@ -146,8 +206,8 @@ def verdict(home, now):
 
     check(both, "claims/holds directory", claims_and_holds)
     check(both, "runner-drained", lambda: ["dialog watcher drain"] if exists(logs / "runner-drained") else [])
-    check(both, "lane held windows", lambda: [f"lane held window {w} (UTC)" for w in active_windows(
-        os.environ.get("CI_KIT_LANE_HELD_WINDOWS", DEFAULT_WINDOWS), now)])
+    lane_held = os.environ.get("CI_KIT_LANE_HELD_WINDOWS", DEFAULT_WINDOWS)
+    check(both, "lane held windows", lambda: [lane_held_reason(w) for w in active_windows(lane_held, now)])
 
     def pause():
         text = read(logs / "vm-pause")
@@ -163,13 +223,17 @@ def verdict(home, now):
 
     check(("vm",), "vm-pause", pause)
 
+    vm_pause_windows = []
+
     def vm_config():
         text = read(home / f"Library/LaunchAgents/{VM_AGENT}.plist")
         if text is None:
             return ["VM lane not installed"]
         config = plistlib.loads(text.encode())
-        windows = config.get("EnvironmentVariables", {}).get("CI_KIT_VM_PAUSE_WINDOWS", "")
-        return [f"VM pause window {w} (UTC)" for w in active_windows(windows, now)]
+        spec = config.get("EnvironmentVariables", {}).get("CI_KIT_VM_PAUSE_WINDOWS", "")
+        reasons = [vm_pause_reason(w) for w in active_windows(spec, now)]
+        vm_pause_windows.append(spec)
+        return reasons
 
     check(("vm",), "VM launcher configuration", vm_config)
     domain = f"gui/{os.getuid()}"
@@ -186,7 +250,21 @@ def verdict(home, now):
 
     check(("vm",), "VM launcher", vm_running)
     answer["why"] = "; ".join(" ".join(reason.split()) for reason in reasons)
+    # A source that cannot be read already holds its lanes above; it announces nothing.
+    for source in (announce_quiet, lambda: announce_clock(both, lane_held, lane_held_reason),
+                   *(lambda spec=spec: announce_clock(("vm",), spec, vm_pause_reason) for spec in vm_pause_windows)):
+        try:
+            source()
+        except Exception:
+            pass
+    answer["windows"] = sorted(windows, key=lambda w: (w["from"], w["until"], w["why"]))
     return answer
+
+
+def valid_window(window):
+    return (isinstance(window, dict) and set(window) == {"from", "until", "lanes", "why"}
+            and all(isinstance(window[k], str) for k in ("from", "until", "why"))
+            and window["lanes"] in (["host", "vm"], ["vm"]))
 
 
 def compute(now):
@@ -194,13 +272,14 @@ def compute(now):
     try:
         value = json.loads(command([sys.executable, "-I", str(HERE / "lane-publish.py"),
                                     "--verdict", stamp(now)], timeout=20))
-        if (not isinstance(value, dict) or set(value) != {"host", "vm", "why"}
+        if (not isinstance(value, dict) or set(value) != {"host", "vm", "why", "windows"}
                 or value["host"] not in ("held", "free") or value["vm"] not in ("held", "free")
-                or not isinstance(value["why"], str)):
+                or not isinstance(value["why"], str) or not isinstance(value["windows"], list)
+                or not all(valid_window(w) for w in value["windows"])):
             raise ValueError("invalid verdict")
         return value
     except Exception as error:
-        return {"host": "held", "vm": "held", "why": f"cannot compute lane verdict: {error}"}
+        return {"host": "held", "vm": "held", "why": f"cannot compute lane verdict: {error}", "windows": []}
 
 
 def log(home, now, text):
@@ -246,9 +325,11 @@ def main(now=None):
         age = now.timestamp() - dt.datetime.fromisoformat(previous["at"].replace("Z", "+00:00")).timestamp()
     except (KeyError, TypeError, ValueError, AttributeError):
         previous, age = {}, 120
-    if state.get("seen") != current:
+    # The log records verdict changes; a window coming into view republishes (below) without one.
+    seen = {k: current[k] for k in ("host", "vm", "why")}
+    if state.get("seen") != seen:
         log(home, now, f"host={value['host']} vm={value['vm']}: {value['why']}")
-        state["seen"] = current
+        state["seen"] = seen
         try:
             save_state(state_file, state)
         except OSError as error:
