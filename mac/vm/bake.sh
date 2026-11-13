@@ -48,7 +48,7 @@
 #   carries ci-kit-mac-vm-trial alone and can take only a trial commit's job (`Lane: vm-trial`). It follows out/ until
 #   the guest powers itself off: a clone with no job assigned within CI_KIT_VM_TRIAL_IDLE s (1800) is asked to stop
 #   through the wrapper's idle handshake (CI_KIT_VM_STOP_ANSWER s, 180, for its answer); one assigned is given
-#   CI_KIT_VM_JOB_BOUND min (50); past a bound the clone is stopped. Then the verified stop, the delete, out/ kept as
+#   CI_KIT_VM_JOB_BOUND min (100); past a bound the clone is stopped. Then the verified stop, the delete, out/ kept as
 #   ~/ci-kit-vm/trials/<clone>.out, and the record ~/ci-kit-vm/trials/<candidate> (replaced whole by a rename), which
 #   binds the candidate, the trial clone, out/job's run and attempt, the job's numeric id and its conclusion. Neither
 #   exists in the guest: both are read through gh with the machine user's own login (the jobs of that run attempt that
@@ -127,7 +127,7 @@ provision_wait=$(whole "${CI_KIT_VM_PROVISION_WAIT:-}" 3600)
 first_run_wait=$(whole "${CI_KIT_VM_FIRST_RUN_WAIT:-}" 1200)
 result_wait=$(whole "${CI_KIT_VM_TRIAL_RESULT:-}" 120)
 pointer_wait=$(whole "${CI_KIT_VM_POINTER_WAIT:-}" 120)
-job_bound_min=$(minutes "${CI_KIT_VM_JOB_BOUND:-}" 50)
+job_bound_min=$(minutes "${CI_KIT_VM_JOB_BOUND:-}" 100)
 job_bound=$(seconds "$job_bound_min")
 lane_agent=com.ssfskim.ci-kit.vm-lane
 lane_lock=$ci_kit_logs/vm-lane.lock

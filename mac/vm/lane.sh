@@ -30,7 +30,7 @@
 #               tart stop, a `raced` failure and its alert
 #   preparing   from out/assigned (the wrapper saw the listener take a job) until out/job (the guest's hook ran)
 #   running     until tart run exits, the guest having powered itself off, or out/done (the runner exited: ending); at
-#               most CI_KIT_VM_JOB_BOUND min (50) from out/assigned, then an `image` failure: GitHub ends a job at its
+#               most CI_KIT_VM_JOB_BOUND min (100) from out/assigned, then an `image` failure: GitHub ends a job at its
 #               timeout, so a clone past it did not end
 #   ending      a guest with nothing left to run: until it powers off, at most CI_KIT_VM_END_WAIT s (60)
 #   teardown    the end verified against Tart (tart.sh; where it still runs, tart stop with CI_KIT_VM_STOP_TIMEOUT s
@@ -179,7 +179,7 @@ boot_bound=$(whole "${CI_KIT_VM_BOOT:-}" 120)
 kickoff_bound=$(whole "${CI_KIT_VM_KICKOFF:-}" 60)
 session_bound=$(whole "${CI_KIT_VM_SESSION:-}" 300)
 idle_bound=$(whole "${CI_KIT_VM_IDLE:-}" 180)
-job_bound_min=$(minutes "${CI_KIT_VM_JOB_BOUND:-}" 50)
+job_bound_min=$(minutes "${CI_KIT_VM_JOB_BOUND:-}" 100)
 job_bound=$(seconds "$job_bound_min")
 answer_bound=$(whole "${CI_KIT_VM_STOP_ANSWER:-}" 180)
 end_wait=$(whole "${CI_KIT_VM_END_WAIT:-}" 60)
