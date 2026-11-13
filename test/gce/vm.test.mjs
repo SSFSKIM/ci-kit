@@ -23,6 +23,8 @@ test('a GCE job container gets every vCPU, the shared caches, hook and JIT passi
   };
   for (const [env, dir] of Object.entries(dirs)) assert.ok(args.includes(`${env}=${CACHE}/${dir}`), env);
   assert.ok(args.includes('ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/ci-kit-job-started.sh'));
+  // A stalled git transfer fails after a minute rather than at the job's limit.
+  assert.ok(args.includes('GIT_HTTP_LOW_SPEED_LIMIT=1000') && args.includes('GIT_HTTP_LOW_SPEED_TIME=60'));
   assert.equal(args.at(-1), 'ci-kit-runner:latest');
 });
 
