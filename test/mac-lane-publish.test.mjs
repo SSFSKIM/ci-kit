@@ -13,6 +13,7 @@ const driver = `import importlib.util,sys,json,datetime
 s=importlib.util.spec_from_file_location('publisher',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m)
 now=datetime.datetime.fromisoformat(sys.argv[3].replace('Z','+00:00'))
 if sys.argv[2]=='verdict': print(json.dumps(m.verdict(m.Path.home(),now)))
+elif sys.argv[2]=='compute': print(json.dumps(m.compute(now)))
 elif sys.argv[2]=='deadline':
  try: m.command([sys.executable,'-I',sys.argv[1],'--verdict',sys.argv[3]],timeout=1)
  except RuntimeError as e: print(e)
@@ -38,7 +39,7 @@ for arg in "$@"; do [[ $arg != value=* ]] || printf '%s' "\${arg#value=}" > "$HO
       encoding: 'utf8', timeout: 40_000, env: { ...process.env, HOME: home, CI_KIT_MACHINE: 'mini', PATH: `${bin}:${process.env.PATH}`, ...env },
     });
     assert.equal(r.status, 0, r.stderr || r.error?.message);
-    return action === 'verdict' ? JSON.parse(r.stdout) : r;
+    return ['verdict', 'compute'].includes(action) ? JSON.parse(r.stdout) : r;
   };
   const published = () => JSON.parse(readFileSync(join(home, 'value.json'), 'utf8'));
   const calls = () => { try { return readFileSync(join(home, 'gh.calls'), 'utf8').trim().split('\n'); } catch { return []; } };
@@ -120,7 +121,7 @@ test('script errors fail closed and every concurrent reason survives', () => {
 test('publishes changes immediately and refreshes a minute-old state, with own login and repo', () => {
   const f = fixture(); f.run('publish', undefined, { GH_TOKEN: 'wrong', GITHUB_TOKEN: 'wrong' });
   assert.equal(f.calls().length, 1); assert.match(f.calls()[0], /PATCH repos\/example\/project\/actions\/variables\/MAC_MINI_LANES/);
-  assert.deepEqual(f.published(), { v: 1, at: '2026-11-08T12:00:00Z', host: 'free', vm: 'free', why: '' });
+  assert.deepEqual(f.published(), { v: 1, at: '2026-11-08T12:00:00Z', host: 'free', vm: 'free', why: '', windows: [] });
   f.run('publish', '2026-11-08T12:00:59Z'); assert.equal(f.calls().length, 1);
   f.run('publish', '2026-11-08T12:01:00Z'); assert.equal(f.calls().length, 2);
   f.put('Library/Logs/ci-kit/runner-drained', 'dialog'); f.run('publish', '2026-11-08T12:01:01Z'); assert.equal(f.calls().length, 3);
@@ -193,4 +194,84 @@ test('the overall deadline kills a hung nested reader and its child', () => {
   } finally {
     for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} }
   }
+});
+
+const both = ['host', 'vm'];
+const win = (from, until, lanes, why) => ({ from, until, lanes, why });
+test('windows announce quiet-file declarations active now or starting within six hours', () => {
+  const f = fixture();
+  const cases = [
+    ['15:00Z 16:00Z   semis', '2026-11-08T12:00:00Z', [win('2026-11-08T15:00Z', '2026-11-08T16:00Z', both, 'quiet window 15:00Z 16:00Z semis')]],
+    ['23:00Z 01:00Z night', '2026-11-08T21:00:00Z', [win('2026-11-08T23:00Z', '2026-11-09T01:00Z', both, 'quiet window 23:00Z 01:00Z night')]],
+    ['23:00Z 01:00Z night', '2026-11-09T00:30:00Z', [win('2026-11-08T23:00Z', '2026-11-09T01:00Z', both, 'quiet window 23:00Z 01:00Z night')]],
+    ['11:00Z 13:00Z owner', '2026-11-08T12:00:00Z', [win('2026-11-08T11:00Z', '2026-11-08T13:00Z', both, 'quiet window 11:00Z 13:00Z owner')]],
+    ['2026-11-08T14:00Z 2026-11-09T02:00Z release\n2026-11-08T19:00Z 2026-11-08T20:00Z beyond\n2026-11-08T10:00Z 2026-11-08T11:00Z ended',
+      '2026-11-08T12:00:00Z', [win('2026-11-08T14:00Z', '2026-11-09T02:00Z', both, 'quiet window 2026-11-08T14:00Z 2026-11-09T02:00Z release')]],
+    ['# comment\n20:00Z 21:00Z later\n10:00Z 11:00Z ended\n2026-11-09T12:00Z 2026-11-09T13:00Z tomorrow', '2026-11-08T12:00:00Z', []],
+    ['18:00Z 19:00Z edge\n18:01Z 19:00Z past the edge', '2026-11-08T12:00:30Z', [win('2026-11-08T18:00Z', '2026-11-08T19:00Z', both, 'quiet window 18:00Z 19:00Z edge')]],
+  ];
+  for (const [file, at, windows] of cases) {
+    f.put('.local/state/ci-quiet', file); assert.deepEqual(f.run('compute', at).windows, windows, `${file} at ${at}`);
+  }
+});
+test('a malformed quiet line is reported as before and announces nothing', () => {
+  const f = fixture(); f.put('.local/state/ci-quiet', 'broken\n15:00Z 15:00Z empty\n15:00Z 16:00Z fine');
+  const v = f.run('compute'); held(v, 'held', 'held', /^quiet file invalid: broken 15:00Z 15:00Z empty$/);
+  assert.deepEqual(v.windows, [win('2026-11-08T15:00Z', '2026-11-08T16:00Z', both, 'quiet window 15:00Z 16:00Z fine')]);
+});
+test('lane held and VM pause windows are announced for their lanes, sorted by start', () => {
+  const f = fixture(); f.plist({ CI_KIT_VM_PAUSE_WINDOWS: '05:00-05:30,08:00-09:00' });
+  f.put('.local/state/ci-quiet', '04:00Z 04:10Z early');
+  const v = f.run('compute', '2026-11-08T03:00:00Z');
+  held(v, 'free', 'free', /^$/);
+  assert.deepEqual(v.windows, [
+    win('2026-11-08T04:00Z', '2026-11-08T04:10Z', both, 'quiet window 04:00Z 04:10Z early'),
+    win('2026-11-08T05:00Z', '2026-11-08T05:30Z', ['vm'], 'VM pause window 05:00-05:30 (UTC)'),
+    win('2026-11-08T06:43Z', '2026-11-08T07:00Z', both, 'lane held window 06:43-07:00 (UTC)'),
+    win('2026-11-08T08:00Z', '2026-11-08T09:00Z', ['vm'], 'VM pause window 08:00-09:00 (UTC)'),
+  ]);
+  f.plist({ CI_KIT_VM_PAUSE_WINDOWS: 'bad' });
+  const bad = f.run('compute', '2026-11-08T03:00:00Z', { CI_KIT_LANE_HELD_WINDOWS: '25:00-26:00' });
+  held(bad, 'held', 'held', /window invalid: 25:00-26:00.*window invalid: bad/);
+  assert.deepEqual(bad.windows.map(w => w.why), ['quiet window 04:00Z 04:10Z early'], 'invalid settings hold and announce nothing');
+});
+test('the verdict is the one published before windows existed', () => {
+  const f = fixture(); f.plist({ CI_KIT_VM_PAUSE_WINDOWS: '11:30-12:30' });
+  f.put('.local/state/ci-quiet', '11:00Z 13:00Z owner\n14:00Z 15:00Z later\n2026-11-08T11:59Z 2026-11-08T12:01Z dated\nbroken');
+  const v = f.run('compute', '2026-11-08T12:00:00Z', { CI_KIT_LANE_HELD_WINDOWS: '11:45-12:15' });
+  assert.deepEqual({ ...v, windows: undefined }, { host: 'held', vm: 'held', windows: undefined,
+    why: 'quiet window 11:00Z 13:00Z owner; quiet window 2026-11-08T11:59Z 2026-11-08T12:01Z dated; quiet file invalid: broken; '
+      + 'lane held window 11:45-12:15 (UTC); VM pause window 11:30-12:30 (UTC)' });
+  assert.equal(v.windows.length, 5);
+});
+test('a window coming into view republishes at once, and an unchanged list does not churn', () => {
+  const f = fixture(); f.put('.local/state/ci-quiet', '18:30Z 19:00Z semis');
+  f.run('publish', '2026-11-08T12:29:30Z'); assert.equal(f.calls().length, 1); assert.deepEqual(f.published().windows, []);
+  f.run('publish', '2026-11-08T12:29:50Z'); assert.equal(f.calls().length, 1);
+  f.run('publish', '2026-11-08T12:30:00Z'); assert.equal(f.calls().length, 2);
+  assert.deepEqual(f.published().windows, [win('2026-11-08T18:30Z', '2026-11-08T19:00Z', both, 'quiet window 18:30Z 19:00Z semis')]);
+  f.run('publish', '2026-11-08T12:30:40Z'); assert.equal(f.calls().length, 2);
+  const lines = readFileSync(join(f.home, 'Library/Logs/ci-kit/lane-publish.log'), 'utf8').trim().split('\n');
+  assert.equal(lines.length, 1, 'the log records verdict changes only');
+});
+test('a state file from before windows republishes once without logging a verdict change', () => {
+  const f = fixture();
+  f.put('Library/Logs/ci-kit/lane-publish-state.json', JSON.stringify({ repo: 'example/project', seen: { host: 'free', vm: 'free', why: '' },
+    value: { v: 1, at: '2026-11-08T11:59:50Z', host: 'free', vm: 'free', why: '' } }));
+  f.run('publish'); assert.equal(f.calls().length, 1); assert.deepEqual(f.published().windows, []);
+  assert.throws(() => readFileSync(join(f.home, 'Library/Logs/ci-kit/lane-publish.log')));
+});
+test('a stalled or broken window reader leaves the verdict as it was and omits windows', () => {
+  for (const body of ['quiet_list() { sleep 60; }', 'quiet_list() { exit 7; }', 'quiet_list() { printf "garbage\\n"; }']) {
+    const f = fixture(); f.put('.local/state/ci-quiet', '11:00Z 13:00Z owner\n15:00Z 16:00Z later');
+    const script = join(f.kit, 'hooks/quiet.sh'); writeFileSync(script, `${readFileSync(script, 'utf8')}\n${body}\n`);
+    const v = f.run('compute');
+    assert.deepEqual({ host: v.host, vm: v.vm, why: v.why }, { host: 'held', vm: 'held', why: 'quiet window 11:00Z 13:00Z owner' }, body);
+    if (body.includes('sleep')) assert.equal(v.windows, undefined, 'a timed-out windows child publishes no windows');
+    else assert.deepEqual(v.windows.map(w => w.why), [], `${body}: quiet announces nothing`);
+  }
+  const g = fixture();
+  const script = join(g.kit, 'lane-publish.py');
+  writeFileSync(script, readFileSync(script, 'utf8').replace('reader = verdict if', 'if sys.argv[1] == "--windows": print("{}"); sys.exit(0)\n        reader = verdict if'));
+  g.run('publish'); assert.deepEqual(g.published(), { v: 1, at: '2026-11-08T12:00:00Z', host: 'free', vm: 'free', why: '' });
 });

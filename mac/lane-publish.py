@@ -15,8 +15,9 @@ HERE = Path(__file__).resolve().parent
 UTC = dt.timezone.utc
 DEFAULT_WINDOWS = "06:43-07:00"
 VM_AGENT = "com.ssfskim.ci-kit.vm-lane"
+HORIZON = dt.timedelta(hours=6)
 HOST_AGENT = "com.ssfskim.ci-kit.mac-runner"
-verdict_process = False
+reader_child = False
 
 
 def stamp(now):
@@ -24,15 +25,15 @@ def stamp(now):
 
 
 def command(args, timeout=5, env=None):
-    # The verdict child and all its readers share one group. A nested timeout kills
-    # that whole read too; compute() then publishes both held. Nested setsid would
-    # let readers escape the outer deadline.
+    # Each reader child (the verdict, the windows) and all its readers share one group. A nested
+    # timeout kills that whole read too; compute() then publishes both held, or no windows.
+    # Nested setsid would let readers escape the outer deadline.
     with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          text=True, start_new_session=not verdict_process, env=env) as proc:
+                          text=True, start_new_session=not reader_child, env=env) as proc:
         try:
             out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            os.killpg(os.getpgrp() if verdict_process else proc.pid, signal.SIGKILL)
+            os.killpg(os.getpgrp() if reader_child else proc.pid, signal.SIGKILL)
             proc.communicate()
             raise RuntimeError(f"{Path(args[0]).name} timed out after {timeout}s") from None
         if proc.returncode:
@@ -68,20 +69,52 @@ def shell(script, *args):
     return command(["/bin/bash", "-eu", "-c", script, "lane-publish", *map(str, args)])
 
 
-def active_windows(windows, now):
-    """Use the VM launcher's format and reader, rejecting its silently ignored bad input."""
-    active = []
-    for window in windows.replace(",", " ").split():
+def parse_windows(windows):
+    """The VM launcher's format, rejecting its silently ignored bad input."""
+    parsed = windows.replace(",", " ").split()
+    for window in parsed:
         if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d", window):
             raise ValueError(f"window invalid: {window}")
         if window[:5] == window[6:]:
             raise ValueError(f"window invalid (empty): {window}")
+    return parsed
+
+
+def active_windows(windows, now):
+    """Which windows hold now, by the VM launcher's reader."""
+    active = []
+    for window in parse_windows(windows):
         result = shell('source "$1"; pause_windows=$2; clock=$3; date() { echo "$clock"; }; '
                        'if in_pause_window; then echo active; fi',
                        HERE / "vm/lane-reads.sh", window, now.strftime("%H%M"))
         if result.strip() == "active":
             active.append(window)
     return active
+
+
+def minute_stamp(moment):
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%MZ")
+
+
+def daily(start, end, now):
+    """The occurrences of a daily window (minutes after midnight UTC, wrapping when end < start) around now."""
+    midnight = now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    length = dt.timedelta(minutes=(end - start) % 1440)
+    for day in (-1, 0, 1):
+        begin = midnight + dt.timedelta(days=day, minutes=start)
+        yield begin, begin + length
+
+
+def clock_minutes(hhmm):
+    return int(hhmm[:2]) * 60 + int(hhmm[3:5])
+
+
+def lane_held_reason(window):
+    return f"lane held window {window} (UTC)"
+
+
+def vm_pause_reason(window):
+    return f"VM pause window {window} (UTC)"
 
 
 def verdict(home, now):
@@ -146,7 +179,7 @@ def verdict(home, now):
 
     check(both, "claims/holds directory", claims_and_holds)
     check(both, "runner-drained", lambda: ["dialog watcher drain"] if exists(logs / "runner-drained") else [])
-    check(both, "lane held windows", lambda: [f"lane held window {w} (UTC)" for w in active_windows(
+    check(both, "lane held windows", lambda: [lane_held_reason(w) for w in active_windows(
         os.environ.get("CI_KIT_LANE_HELD_WINDOWS", DEFAULT_WINDOWS), now)])
 
     def pause():
@@ -169,7 +202,7 @@ def verdict(home, now):
             return ["VM lane not installed"]
         config = plistlib.loads(text.encode())
         windows = config.get("EnvironmentVariables", {}).get("CI_KIT_VM_PAUSE_WINDOWS", "")
-        return [f"VM pause window {w} (UTC)" for w in active_windows(windows, now)]
+        return [vm_pause_reason(w) for w in active_windows(windows, now)]
 
     check(("vm",), "VM launcher configuration", vm_config)
     domain = f"gui/{os.getuid()}"
@@ -189,6 +222,58 @@ def verdict(home, now):
     return answer
 
 
+def upcoming(home, now):
+    """Windows active now or starting within HORIZON, so a planner sees a hold coming. Its own child reads them after
+    the verdict: no failure here reaches host, vm or why, each source's own reader there decides the hold. A source
+    that cannot be read, or a malformed declaration or setting, holds through the verdict and announces nothing."""
+    windows = []
+    minute = now.astimezone(UTC).replace(second=0, microsecond=0)
+    both = ("host", "vm")
+
+    def announce(lanes, begin, end, reason):
+        if end > minute and begin <= minute + HORIZON:
+            windows.append({"from": minute_stamp(begin), "until": minute_stamp(end), "lanes": list(lanes),
+                            "why": " ".join(reason.split())})
+
+    def clock(lanes, spec, reason):
+        for window in parse_windows(spec):
+            for begin, end in daily(clock_minutes(window[:5]), clock_minutes(window[6:]), now):
+                announce(lanes, begin, end, reason(window))
+
+    def quiet():
+        if read(home / ".local/state/ci-quiet") is None:
+            return
+        for entry in shell('source "$1"; quiet_list', HERE / "hooks/quiet.sh").splitlines():
+            kind, begin, end, line = entry.split("\t", 3)
+            reason = f"quiet window {line}"
+            if kind == "daily":
+                for start, stop in daily(int(begin), int(end), now):
+                    announce(both, start, stop, reason)
+            else:
+                announce(both, *(dt.datetime.fromisoformat(t.replace("Z", "+00:00")) for t in (begin, end)), reason)
+
+    def vm_pause():
+        text = read(home / f"Library/LaunchAgents/{VM_AGENT}.plist")
+        if text is None:
+            return
+        config = plistlib.loads(text.encode())
+        clock(("vm",), config.get("EnvironmentVariables", {}).get("CI_KIT_VM_PAUSE_WINDOWS", ""), vm_pause_reason)
+
+    for source in (quiet, lambda: clock(both, os.environ.get("CI_KIT_LANE_HELD_WINDOWS", DEFAULT_WINDOWS),
+                                        lane_held_reason), vm_pause):
+        try:
+            source()
+        except Exception:
+            pass
+    return sorted(windows, key=lambda w: (w["from"], w["until"], w["why"]))
+
+
+def valid_window(window):
+    return (isinstance(window, dict) and set(window) == {"from", "until", "lanes", "why"}
+            and all(isinstance(window[k], str) for k in ("from", "until", "why"))
+            and window["lanes"] in (["host", "vm"], ["vm"]))
+
+
 def compute(now):
     # A failed/hung filesystem read or reader crash still produces a held heartbeat.
     try:
@@ -198,9 +283,17 @@ def compute(now):
                 or value["host"] not in ("held", "free") or value["vm"] not in ("held", "free")
                 or not isinstance(value["why"], str)):
             raise ValueError("invalid verdict")
-        return value
     except Exception as error:
-        return {"host": "held", "vm": "held", "why": f"cannot compute lane verdict: {error}"}
+        value = {"host": "held", "vm": "held", "why": f"cannot compute lane verdict: {error}"}
+    # A failed windows read omits the field (unknown), rather than publishing [] (nothing coming).
+    try:
+        windows = json.loads(command([sys.executable, "-I", str(HERE / "lane-publish.py"),
+                                      "--windows", stamp(now)], timeout=10))
+        if isinstance(windows, list) and all(valid_window(w) for w in windows):
+            value["windows"] = windows
+    except Exception:
+        pass
+    return value
 
 
 def log(home, now, text):
@@ -246,9 +339,11 @@ def main(now=None):
         age = now.timestamp() - dt.datetime.fromisoformat(previous["at"].replace("Z", "+00:00")).timestamp()
     except (KeyError, TypeError, ValueError, AttributeError):
         previous, age = {}, 120
-    if state.get("seen") != current:
+    # The log records verdict changes; a window coming into view republishes (below) without one.
+    seen = {k: current[k] for k in ("host", "vm", "why")}
+    if state.get("seen") != seen:
         log(home, now, f"host={value['host']} vm={value['vm']}: {value['why']}")
-        state["seen"] = current
+        state["seen"] = seen
         try:
             save_state(state_file, state)
         except OSError as error:
@@ -257,7 +352,7 @@ def main(now=None):
         # repo.sh owns the setting; preflight catches an inaccessible .env rather than accepting its fallback.
         read(home / "actions-runner-maws/.env")
         repo = shell('source "$1"; ci_kit_repo', HERE / "repo.sh").strip()
-        changed = any(previous.get(k) != current[k] for k in current)
+        changed = any(previous.get(k) != current.get(k) for k in {*current, *previous} - {"v", "at"})
         if not changed and state.get("repo") == repo and 0 <= age < 60:
             return
         env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN")}
@@ -276,12 +371,13 @@ def main(now=None):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--verdict":
+    if len(sys.argv) == 3 and sys.argv[1] in ("--verdict", "--windows"):
         # compute() already owns this group; a direct diagnostic invocation must
         # own one too before a reader timeout is allowed to kill the group.
         if os.getpgrp() != os.getpid():
             os.setpgid(0, 0)
-        verdict_process = True
-        print(json.dumps(verdict(Path.home(), dt.datetime.fromisoformat(sys.argv[2].replace("Z", "+00:00")))))
+        reader_child = True
+        reader = verdict if sys.argv[1] == "--verdict" else upcoming
+        print(json.dumps(reader(Path.home(), dt.datetime.fromisoformat(sys.argv[2].replace("Z", "+00:00")))))
     else:
         main()

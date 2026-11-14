@@ -550,9 +550,27 @@ ordinary refreshes then keep it, and `--uninstall` removes its agent. Publicatio
 runners are restored. Its installation failures warn without failing the completed runner restoration; retry the
 same command. No publisher call runs inside the watcher or runners.
 
-The value is `{"v":1,"at":"2026-11-08T12:00:00Z","host":"free","vm":"held","why":"VM launcher not running"}`.
-`at` is UTC to the second. A verdict change publishes on the next sample; an unchanged verdict publishes once
-the last successful value is at least 60 seconds old. This leaves room for minute-sampler phase drift while keeping
+The value is `{"v":1,"at":"2026-11-08T12:00:00Z","host":"free","vm":"held","why":"VM launcher not running","windows":[…]}`.
+`at` is UTC to the second. `windows` says which scheduled holds are in force or coming: every quiet-file declaration
+(daily or dated), fixed lane held window and VM pause window that is active now or starts within the next six hours,
+sorted by `from`, each as
+
+```json
+{"from":"2026-11-08T23:00Z","until":"2026-11-08T23:50Z","lanes":["host","vm"],"why":"quiet window 23:00Z 23:50Z semis"}
+```
+
+`from` and `until` are UTC to the minute (start inclusive, end exclusive, a daily window crossing midnight ending the
+next day); `lanes` is `["host","vm"]`, or `["vm"]` for a VM pause window; `why` is the reason the verdict gives while
+the window is active. A planner launching a long job reads it to see a hold that has not started yet. It is
+informational: `host`, `vm` and `why` remain the verdict, decided by each source's own reader as before, and a malformed
+declaration or setting is reported there and announces nothing. The windows are read by a child of their own, after
+the verdict's and under a 10-second bound, so a window reader that fails or hangs cannot change the verdict; the field
+is then absent, which means unknown, not that nothing is coming. Readers that ignore unknown keys need no change; `v`
+stays 1. The quiet file's declarations reach the publisher through `quiet.sh`'s `quiet_list`, the same parser
+`quiet_read` uses.
+
+A verdict change, or a change in `windows` (a window coming within six hours or ending), publishes on the next
+sample; an unchanged value publishes once the last successful value is at least 60 seconds old. This leaves room for minute-sampler phase drift while keeping
 successful heartbeat gaps to about 120 seconds at most. Consumers treat an absent, invalid, or older-than-five-minute
 value as held. `host` and `vm` are independent admission verdicts, not busyness: a solo placement needs both free,
 and a busy host is still free if nothing holds it. The planner counts jobs separately.
