@@ -99,18 +99,23 @@ gh_read() { # <api path> <output file> [<seconds>, 10]: a plain read
 # with nothing of the budget left); if so the reads stop until it lifts, which q_budget_until and q_why say: the core
 # budget's reset when rate_limit reads it empty, the answer's retry-after when later, a minute when neither says.
 rate_limited() { # <stderr file> <body file> [<status> <x-ratelimit-remaining> <x-ratelimit-reset> <retry-after>]
-  local code=${3:-} remaining=${4:-} reset=${5:-} now until=0 core
+  local code=${3:-} remaining=${4:-} reset=${5:-} now until=0 core='' left
   if [[ -z $code && $(cat "$1" 2>/dev/null) =~ \(HTTP\ ([0-9]{3})\) ]]; then code=${BASH_REMATCH[1]}; fi
   [[ $code == 403 || $code == 429 ]] || return 1
   [[ $remaining == 0 ]] || grep -qi 'rate limit' "$1" "$2" 2>/dev/null || return 1
   now=$(date +%s)
   [[ ! ${6:-} =~ ^[0-9]+$ ]] || until=$((now + 10#$6))
-  core=$(bounded 5 env -u GH_TOKEN -u GITHUB_TOKEN "${CI_KIT_GH_BIN:-gh}" api rate_limit 2>/dev/null 7>&- 8>&- | perl -MJSON::PP -e '
-    my $d = eval { JSON::PP->new->decode(do { local $/; <STDIN> }) };
-    my $c = ref $d eq "HASH" && ref $d->{resources} eq "HASH" ? $d->{resources}{core} : undef;
-    exit 1 unless ref $c eq "HASH" && ($c->{remaining} // "") =~ /^\d+$/ && ($c->{reset} // "") =~ /^\d+$/;
-    print "$c->{remaining} $c->{reset}\n";
-  ')
+  # The probe, bounded by what is left of the queue read's deadline (at most 5 s), is skipped when nothing is left.
+  left=$((q_deadline - SECONDS))
+  ((left > 5)) && left=5
+  if ((left > 0)); then
+    core=$(bounded "$left" env -u GH_TOKEN -u GITHUB_TOKEN "${CI_KIT_GH_BIN:-gh}" api rate_limit 2>/dev/null 7>&- 8>&- | perl -MJSON::PP -e '
+      my $d = eval { JSON::PP->new->decode(do { local $/; <STDIN> }) };
+      my $c = ref $d eq "HASH" && ref $d->{resources} eq "HASH" ? $d->{resources}{core} : undef;
+      exit 1 unless ref $c eq "HASH" && ($c->{remaining} // "") =~ /^\d+$/ && ($c->{reset} // "") =~ /^\d+$/;
+      print "$c->{remaining} $c->{reset}\n";
+    ')
+  fi
   if [[ $core =~ ^([0-9]+)\ ([0-9]+)$ ]]; then remaining=${BASH_REMATCH[1]} reset=${BASH_REMATCH[2]}; fi
   # A few seconds past the reset, for the clocks' skew.
   if [[ $remaining == 0 && $reset =~ ^[0-9]+$ ]] && ((reset + 5 > until)); then until=$((reset + 5)); fi
@@ -250,8 +255,9 @@ queue_read() {
   # What this read did not read is no longer listed.
   for file in "$queue_cache"/*; do
     [[ -e $file && $'\n'$q_read != *$'\n'"${file##*/}"$'\n'* ]] || continue
-    rm -f "$file"
+    rm -f "$file" 2>/dev/null
   done
+  return 0
 }
 # What a host instance is doing (runner-state.py, from the kernel's paths): busy, idle, stopped, or unknown.
 instance_state() { # <instance root>
