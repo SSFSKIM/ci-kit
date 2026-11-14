@@ -563,7 +563,9 @@ sorted by `from`, each as
 next day); `lanes` is `["host","vm"]`, or `["vm"]` for a VM pause window; `why` is the reason the verdict gives while
 the window is active. A planner launching a long job reads it to see a hold that has not started yet. It is
 informational: `host`, `vm` and `why` remain the verdict, decided by each source's own reader as before, and a malformed
-declaration or setting is reported there and announces nothing. Readers that ignore unknown keys need no change; `v`
+declaration or setting is reported there and announces nothing. The windows are read by a child of their own, after
+the verdict's and under a 10-second bound, so a window reader that fails or hangs cannot change the verdict; the field
+is then absent, which means unknown, not that nothing is coming. Readers that ignore unknown keys need no change; `v`
 stays 1. The quiet file's declarations reach the publisher through `quiet.sh`'s `quiet_list`, the same parser
 `quiet_read` uses.
 
