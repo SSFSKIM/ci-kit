@@ -134,13 +134,28 @@ case $command in
 esac`;
 
 // gh: the queue from files (an empty queue when none), alerts numbered; every call recorded with the token it saw.
+// A queue read with -i is answered as gh prints one (the status line, CRLF headers, a blank line, the body), with a
+// weak ETag of the body; one whose If-None-Match is that ETag gets GitHub's 304 (headers only, gh exiting 1), and each
+// such answer is a line of answers (<path> <status>). rate-limit (a reset epoch) answers every queue read with GitHub's
+// exhausted budget, a 403, and rate_limit reports the core budget empty until then; no-etag leaves the ETag out, and
+// garble prints an -i answer with no status line.
 const fakeGh = `g=$HOME/gh
 printf '%s\\0' "$@" "GH_TOKEN=\${GH_TOKEN-unset}" >> "$g/calls"; printf '\\0' >> "$g/calls"
 if [[ $1 == api ]]; then
   [[ ! -e $g/fail ]] || { echo 'gh: HTTP 502: Bad Gateway' >&2; exit 1; }
   # slow: each API call answers after the seconds the file names (3 when it names none).
   if [[ -e $g/slow ]]; then touch "$g/slow-waiting"; read -r seconds < "$g/slow"; sleep "\${seconds:-3}"; fi
+  head='' match='' prev=''
+  for arg; do
+    [[ $arg != -i ]] || head=1
+    [[ $prev != -H || $arg != 'If-None-Match: '* ]] || match=\${arg#If-None-Match: }
+    prev=$arg
+  done
   case $2 in
+    rate_limit)
+      if [[ -e $g/rate-limit ]]; then read -r reset < "$g/rate-limit"; left=0; else reset=$(( $(date +%s) + 3600 )); left=5000; fi
+      printf '{"resources":{"core":{"limit":5000,"used":%s,"remaining":%s,"reset":%s}}}\\n' $((5000 - left)) "$left" "$reset"
+      exit 0 ;;
     */generate-jitconfig)
       [[ ! -e $g/fail-mint ]] || { echo 'gh: Resource not accessible (HTTP 403)' >&2; exit 1; }
       n=$(( $(cat "$g/mints" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$g/mints"
@@ -157,7 +172,27 @@ if [[ $1 == api ]]; then
     */jobs\\?*) id=\${2#*/runs/}; file=$g/jobs-\${id%%/*}.json ;;
     *) exit 1 ;;
   esac
-  if [[ -f $file ]]; then cat "$file"; else echo '{"total_count":0,"workflow_runs":[],"jobs":[]}'; fi
+  if [[ -e $g/rate-limit ]]; then
+    read -r reset < "$g/rate-limit"
+    [[ -z $head ]] || printf 'HTTP/2.0 403 Forbidden\\nX-Ratelimit-Remaining: 0\\r\\nX-Ratelimit-Reset: %s\\r\\n\\r\\n' "$reset"
+    echo '{"message":"API rate limit exceeded for user ID 1.","status":"403"}'
+    echo 'gh: API rate limit exceeded for user ID 1. (HTTP 403)' >&2
+    exit 1
+  fi
+  if [[ -f $file ]]; then body=$(cat "$file"); else body='{"total_count":0,"workflow_runs":[],"jobs":[]}'; fi
+  [[ -n $head ]] || { printf '%s\\n' "$body"; exit 0; }
+  [[ ! -e $g/garble ]] || { printf '%s\\n' "$body"; exit 0; }
+  etag="W/\\"$(printf '%s' "$body" | cksum | tr -d ' \\t')\\""
+  if [[ -n $match && $match == "$etag" ]]; then
+    echo "$2 304" >> "$g/answers"
+    printf 'HTTP/2.0 304 Not Modified\\nEtag: %s\\r\\nX-Ratelimit-Remaining: 4000\\r\\n\\r\\n' "\${etag#W/}"
+    echo 'gh: HTTP 304' >&2
+    exit 1
+  fi
+  echo "$2 200" >> "$g/answers"
+  printf 'HTTP/2.0 200 OK\\nContent-Type: application/json; charset=utf-8\\r\\n'
+  [[ -e $g/no-etag ]] || printf 'Etag: %s\\r\\n' "$etag"
+  printf 'X-Ratelimit-Remaining: 4000\\r\\n\\r\\n%s' "$body"
   exit 0
 fi
 if [[ $1 == issue && $2 == create ]]; then
@@ -249,6 +284,9 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/disk3s5
     hooksLog: () => text(join(logs, 'mac-runner-hooks.log')) ?? '',
     calls: () => (text(join(home, 'tart/calls')) ?? '').split('\n').filter(Boolean),
     ghCalls: () => (text(join(home, 'gh/calls')) ?? '').split('\0\0').filter(Boolean).map((call) => call.split('\0')),
+    // The -i queue reads' answers, [path, status] each; the conditional cache's entries.
+    answers: () => (text(join(home, 'gh/answers')) ?? '').split('\n').filter(Boolean).map((line) => line.split(' ')),
+    cache: () => { try { return readdirSync(join(logs, 'vm-queue-cache')).sort(); } catch { return []; } },
     alerts: () => m.ghCalls().filter((call) => call[0] === 'issue' && call[1] === 'create').map((call) => call[call.indexOf('--title') + 1]),
     closed: () => m.ghCalls().filter((call) => call[0] === 'issue' && call[1] === 'close').map((call) => call[2]),
     clones: () => readdirSync(vms).filter((name) => CLONE.test(name)),
@@ -596,6 +634,8 @@ exec /bin/mv "$@"`);
       refusal: /no boot: maws-vm-candidate-20261021 runs$/m, lift: (m, vm) => vm.stop() },
     { name: '4, an unreadable process table', before: (m) => writeFileSync(join(m.home, 'fail-ps'), ''),
       refusal: /no boot: the process table cannot be read$/m, lift: (m) => rmSync(join(m.home, 'fail-ps')) },
+    { name: '1, a queue that cannot be read', before: (m) => m.ghFlag('fail'),
+      refusal: /no boot: the queue cannot be read \(the read of repos\/SSFSKIM\/MAWS\/actions\/runs\?status=queued&per_page=100 failed: gh: HTTP 502: Bad Gateway\)$/m, lift: (m) => m.ghFlag('fail', false) },
     { name: '5, memory pressure', options: { memory: { pressure: 2 } }, refusal: /no boot: memory pressure 2, not 1 \(pressure 2, available 60%, swap 500 MB\)$/m, lift: (m) => m.memory() },
     { name: '5, available memory under the floor (57 by default)', options: { memory: { available: 56 } }, refusal: /no boot: memory available 56%, under the floor of 57%$/m, lift: (m) => m.memory({ available: 57 }) },
     { name: '5, swap growing', before: (m) => writeFileSync(join(m.home, 'swap-grow'), '500\n'), refusal: /no boot: swap grew from \d+ MB to \d+ MB in \d+ s$/m,
@@ -1846,6 +1886,131 @@ exec /bin/mv "$@"`);
     await m.waitLog(new RegExp(`${clone}: deleted, and the reservation released`));
     assert.equal(m.failures().total_image, '1');
     assert.equal(m.failures().image_run, '1', 'a clone that failed does not end the run of image failures');
+    await finish(m, a);
+  });
+
+  // THE CONDITIONAL QUEUE READ: each path's ETag and body kept in vm-queue-cache, a 304 reusing them, the rate limit
+  // waited out. A solo job with the host's exclusive instance idle keeps the lane reading the queue without a boot.
+  const queuedPath = 'repos/SSFSKIM/MAWS/actions/runs?status=queued&per_page=100';
+  const jobsPath = (id) => `repos/SSFSKIM/MAWS/actions/runs/${id}/jobs?filter=latest&per_page=100`;
+  const entryName = (path) => path.replace(/[^A-Za-z0-9._-]/g, '_');
+  const takesFirst = /no boot: a ci-kit-mac-solo job queued, but the host's exclusive instance is idle and takes it first$/m;
+  const answered = (m, path, status) => m.answers().filter(([p, s]) => p === path && s === status).length;
+
+  test('an unchanged queue is answered 304 with the ETag its 200 gave, and the kept bodies\' counts decide the boot', async () => {
+    const m = lane({ queue: [['ci-kit-mac-solo']] });
+    const host = await m.instance('idle');
+    const a = m.start();
+    await m.waitLog(takesFirst);
+    await m.until(() => answered(m, jobsPath(101), '304') >= 2 && answered(m, queuedPath, '304') >= 2, 'conditional reads answered 304');
+    assert.equal(answered(m, jobsPath(101), '200'), 1, 'one full read of the jobs, then 304s');
+    const sent = m.ghCalls().filter((call) => call[1] === jobsPath(101) && call.includes('-H'));
+    assert.ok(sent.length >= 2);
+    const etag = readFileSync(join(m.logs, 'vm-queue-cache', entryName(jobsPath(101))), 'utf8').split('\n')[0];
+    assert.match(etag, /^W\/"\d+"$/);
+    for (const call of sent) assert.equal(call[call.indexOf('-H') + 1], `If-None-Match: ${etag}`);
+    assert.deepEqual(m.cache(), [queuedPath, 'repos/SSFSKIM/MAWS/actions/runs?status=in_progress&per_page=100', jobsPath(101)].map(entryName).sort());
+    await host.kill();
+    await m.waitLog(/booting maws-vm-job-\S+ from the golden image \S+: a ci-kit-mac-solo job queued, and the host's exclusive instance is offline/);
+    assert.equal(answered(m, jobsPath(101), '200'), 1, 'the boot counted the kept body');
+    assert.doesNotMatch(m.log(), /cannot be read/);
+    await finish(m, a);
+  });
+
+  test('a 200 after a change replaces the kept body, and its counts decide', async () => {
+    const m = lane({ queue: [['ci-kit-mac-solo']] });
+    await m.instance('idle');
+    const a = m.start();
+    await m.waitLog(takesFirst);
+    await m.until(() => answered(m, jobsPath(101), '304') >= 1, 'a conditional read answered 304');
+    // The run's jobs change; its listing does not.
+    writeFileSync(join(m.home, 'gh/jobs-101.json'), JSON.stringify({ total_count: 2,
+      jobs: [9000, 9001].map((id) => ({ id, run_id: 101, status: 'queued', labels: ['ci-kit-mac-solo'] })) }));
+    await m.waitLog(/booting maws-vm-job-\S+ from the golden image \S+: 2 ci-kit-mac-solo jobs queued, more than the host's exclusive instance takes/);
+    assert.equal(answered(m, jobsPath(101), '200'), 2);
+    await finish(m, a);
+  });
+
+  test('a kept body that does not parse or cannot be read, a cache that is gone, and an answer with no ETag or no status line each read plainly: the counts never rest on the cache', asUser, async () => {
+    const m = lane({ queue: [['ci-kit-mac-solo']] });
+    await m.instance('idle');
+    const a = m.start();
+    await m.waitLog(takesFirst);
+    const dir = join(m.logs, 'vm-queue-cache');
+    const entry = join(dir, entryName(jobsPath(101)));
+    const plain = () => m.ghCalls().filter((call) => call[1] === jobsPath(101) && !call.includes('-i')).length;
+    const fresh = async (what) => {
+      const reads = answered(m, jobsPath(101), '200');
+      const kept = () => { try { return /^W\/"\d+"\n\{"total_count":1,/.test(readFileSync(entry, 'utf8')); } catch { return false; } };
+      await m.until(() => answered(m, jobsPath(101), '200') > reads && kept(), what);
+    };
+    await m.until(() => answered(m, jobsPath(101), '304') >= 1, 'a conditional read answered 304');
+    // A corrupt body under the ETag GitHub still answers 304 to: the parse refuses it, and a plain read counts.
+    const etag = readFileSync(entry, 'utf8').split('\n')[0];
+    writeFileSync(entry, `${etag}\n{"jobs": [`);
+    await m.until(() => plain() >= 1, 'the plain read past the corrupt body');
+    await fresh('the entry kept again');
+    // An entry that cannot be read: the read is unconditional, and its 200 replaces the entry.
+    chmodSync(entry, 0);
+    await fresh('the unreadable entry replaced');
+    // A first line that is no ETag: the same.
+    writeFileSync(entry, 'garbage\n{}');
+    await fresh('the garbled entry replaced');
+    rmSync(dir, { recursive: true });
+    await fresh('the cache kept again');
+    // A 200 with no ETag leaves no entry; an answer with no status line reads plainly.
+    m.ghFlag('no-etag');
+    rmSync(dir, { recursive: true });
+    const full = answered(m, jobsPath(101), '200');
+    await m.until(() => answered(m, jobsPath(101), '200') >= full + 2, 'reads with no ETag');
+    assert.deepEqual(m.cache(), []);
+    m.ghFlag('no-etag', false);
+    m.ghFlag('garble');
+    const before = plain();
+    await m.until(() => plain() >= before + 2, 'plain reads past the garbled answers');
+    m.ghFlag('garble', false);
+    await fresh('the cache kept again');
+    const log = m.log();
+    assert.doesNotMatch(log, /cannot be read/);
+    assert.doesNotMatch(log, /no queued job for the guest/);
+    assert.equal(log.split('\n').filter((line) => takesFirst.test(line)).length, 1, 'the counts never changed');
+    await finish(m, a);
+  });
+
+  test('a complete read drops the kept bodies of runs no longer listed', async () => {
+    const m = lane({ queue: [['ubuntu-latest'], ['self-hosted', 'macOS']] });
+    const a = m.start();
+    await m.waitLog(/no boot: no queued job for the guest$/m);
+    await m.until(() => m.cache().includes(entryName(jobsPath(102))), 'both runs kept');
+    assert.equal(m.cache().length, 4);
+    m.queue(['ubuntu-latest']);
+    await m.until(() => !m.cache().includes(entryName(jobsPath(102))), 'the run no longer listed dropped');
+    assert.ok(m.cache().includes(entryName(jobsPath(101))));
+    assert.equal(m.cache().length, 3);
+    await finish(m, a);
+  });
+
+  test('an exhausted budget stops the queue reads until its reset, which the log names once; the reads resume after it', async () => {
+    const m = lane();
+    const a = m.start();
+    const idle = /no boot: no queued job for the guest$/m;
+    await m.waitLog(idle);
+    const queueReads = () => m.ghCalls().filter((call) => call[0] === 'api' && /\/actions\/runs/.test(call[1] ?? '')).length;
+    const reset = Math.floor(Date.now() / 1000) + 3;
+    m.ghFlag('rate-limit', reset);
+    // Resumed a few seconds past the reset, for the clocks' skew.
+    const until = new Date((reset + 5) * 1000).toISOString().slice(11, 19);
+    await m.waitLog(new RegExp(`no boot: the queue cannot be read \\(the GitHub API budget is empty until ${until}Z\\)$`, 'm'));
+    const limited = queueReads();
+    assert.ok(m.ghCalls().some((call) => call[1] === 'rate_limit'), 'the reset read from rate_limit');
+    m.ghFlag('rate-limit', false);
+    while (Date.now() < (reset + 4) * 1000) {
+      assert.equal(queueReads(), limited, 'no queue read before the reset, though the lane polls each second');
+      await sleep(200);
+    }
+    await m.until(() => m.log().split('\n').filter((line) => idle.test(line)).length === 2, 'the queue read again');
+    assert.ok(queueReads() > limited);
+    assert.equal(m.log().split('\n').filter((line) => /budget is empty/.test(line)).length, 1);
     await finish(m, a);
   });
 });

@@ -74,19 +74,56 @@ display_admits() {
 }
 # The queue: q_solo and q_vm, the queued jobs only a guest or the exclusive instance can take (ci-kit-mac-solo) and
 # only a guest can (ci-kit-mac-vm). False with q_why when it cannot be read.
-gh_read() { # <api path> <output file> [<seconds>, 10]
+#
+# Every session and machine of the account shares one REST budget (5,000 an hour), and 2 + N plain reads a poll (N the
+# runs listed) drained it alone in a wave of runs (2026-11-14: queued guest jobs went unbooted). So each read is
+# conditional: queue_cache keeps, per API path, the ETag and body of its last 200; the next read of the path sends
+# If-None-Match, and a 304, which GitHub does not count, reuses the kept body. A complete read drops what it did not
+# read (the runs no longer listed). Anything unexpected (no ETag, an answer whose headers do not parse, a kept body
+# that cannot be read or parsed) reads plainly: the counts never rest on the cache. A read GitHub refuses for its rate
+# limit stops the reads until the limit lifts (q_budget_until, from rate_limit, which GitHub does not count either).
+gh_read() { # <api path> <output file> [<seconds>, 10]: a plain read
   local err status
   err=$(mktemp) || return 1
   bounded "${3:-10}" env -u GH_TOKEN -u GITHUB_TOKEN "${CI_KIT_GH_BIN:-gh}" api "$1" >"$2" 2>"$err" 7>&- 8>&-
   status=$?
   if ((status == 124)); then
     q_why="the read of $1 timed out"
-  elif ((status != 0)); then
+  elif ((status != 0)) && ! rate_limited "$err" "$2"; then
     q_why="the read of $1 failed: $(head -1 "$err" 2>/dev/null)"
   fi
   rm -f "$err"
   return "$status"
 }
+# Whether a failed read was GitHub's rate limit (lib/github.mjs's rule: a 403 or a 429 whose message names it, or one
+# with nothing of the budget left); if so the reads stop until it lifts, which q_budget_until and q_why say: the core
+# budget's reset when rate_limit reads it empty, the answer's retry-after when later, a minute when neither says.
+rate_limited() { # <stderr file> <body file> [<status> <x-ratelimit-remaining> <x-ratelimit-reset> <retry-after>]
+  local code=${3:-} remaining=${4:-} reset=${5:-} now until=0 core
+  if [[ -z $code && $(cat "$1" 2>/dev/null) =~ \(HTTP\ ([0-9]{3})\) ]]; then code=${BASH_REMATCH[1]}; fi
+  [[ $code == 403 || $code == 429 ]] || return 1
+  [[ $remaining == 0 ]] || grep -qi 'rate limit' "$1" "$2" 2>/dev/null || return 1
+  now=$(date +%s)
+  [[ ! ${6:-} =~ ^[0-9]+$ ]] || until=$((now + 10#$6))
+  core=$(bounded 5 env -u GH_TOKEN -u GITHUB_TOKEN "${CI_KIT_GH_BIN:-gh}" api rate_limit 2>/dev/null 7>&- 8>&- | perl -MJSON::PP -e '
+    my $d = eval { JSON::PP->new->decode(do { local $/; <STDIN> }) };
+    my $c = ref $d eq "HASH" && ref $d->{resources} eq "HASH" ? $d->{resources}{core} : undef;
+    exit 1 unless ref $c eq "HASH" && ($c->{remaining} // "") =~ /^\d+$/ && ($c->{reset} // "") =~ /^\d+$/;
+    print "$c->{remaining} $c->{reset}\n";
+  ')
+  if [[ $core =~ ^([0-9]+)\ ([0-9]+)$ ]]; then remaining=${BASH_REMATCH[1]} reset=${BASH_REMATCH[2]}; fi
+  # A few seconds past the reset, for the clocks' skew.
+  if [[ $remaining == 0 && $reset =~ ^[0-9]+$ ]] && ((reset + 5 > until)); then until=$((reset + 5)); fi
+  ((until > now)) || until=$((now + 60))
+  q_budget_until=$until
+  if [[ $remaining == 0 ]]; then
+    q_budget_why="the GitHub API budget is empty until $(date -u -r "$until" +%H:%M:%SZ)"
+  else
+    q_budget_why="GitHub's rate limit holds the API reads until $(date -u -r "$until" +%H:%M:%SZ)"
+  fi
+  q_why=$q_budget_why
+}
+q_budget_until=0 q_budget_why=''
 # The read as a whole is bounded by queue_wait s, each call by what is left of it (at most 10 s): a slow queue reads as
 # unknown, so the loop's guard samples on.
 queue_left() {
@@ -96,50 +133,125 @@ queue_left() {
   q_why="the queue read passed its $queue_wait s deadline"
   return 1
 }
+# A gh api -i answer on stdin: the body to the file, and the status, ETag, x-ratelimit-remaining, x-ratelimit-reset
+# and retry-after, a line each; false when it has no status line. gh ends its header lines in CRLF.
+# shellcheck disable=SC2016 # perl, not the shell
+q_answer='
+  my $raw = do { local $/; <STDIN> };
+  my ($head, $body) = split /\r?\n\r?\n/, $raw, 2;
+  my @lines = split /\r?\n/, $head // "";
+  my ($code) = (shift(@lines) // "") =~ m{^HTTP/\S+ (\d{3})\b} or exit 1;
+  my %h;
+  /^([^:\s]+):\s*(.*?)\s*$/ and $h{lc $1} = $2 for @lines;
+  open(my $out, ">", $ARGV[0]) or exit 1;
+  print $out $body // "";
+  close $out or exit 1;
+  print map { ($_ // "") . "\n" } $code, @h{qw(etag x-ratelimit-remaining x-ratelimit-reset retry-after)};
+'
+# One read through the cache, bounded by what is left of the queue read; g_kept names the entry when the body came
+# by a conditional read (kept or just replaced), for queue_parsed to drop if it does not parse.
+queue_get() { # <api path> <output file>
+  local entry raw err status meta='' code='' etag='' sent='' remaining='' reset='' retry='' cond=()
+  entry=$queue_cache/${1//[!A-Za-z0-9._-]/_}
+  g_kept=''
+  q_read+=${entry##*/}$'\n'
+  queue_left || return 1
+  if { IFS= read -r sent <"$entry"; } 2>/dev/null && [[ $sent =~ ^(W/)?\"[^\"]+\"$ ]]; then
+    cond=(-H "If-None-Match: $sent")
+  else
+    sent=''
+  fi
+  raw=$(mktemp) || { q_why='no scratch file'; return 1; }
+  err=$(mktemp) || { rm -f "$raw"; q_why='no scratch file'; return 1; }
+  bounded "$q_left" env -u GH_TOKEN -u GITHUB_TOKEN "${CI_KIT_GH_BIN:-gh}" api "$1" -i ${cond[@]+"${cond[@]}"} \
+    >"$raw" 2>"$err" 7>&- 8>&-
+  status=$?
+  if ((status != 124)) && meta=$(perl -e "$q_answer" "$2" <"$raw" 2>/dev/null); then
+    { read -r code; read -r etag; read -r remaining; read -r reset; read -r retry; } <<<"$meta"
+  fi
+  rm -f "$raw"
+  if ((status == 124)); then
+    q_why="the read of $1 timed out"
+  elif ((status == 0)) && [[ $code == 2[0-9][0-9] ]]; then
+    # A 200 replaces the entry; one with no ETag leaves none.
+    if [[ $etag =~ ^(W/)?\"[^\"]+\"$ ]] && mkdir -p "$queue_cache" 2>/dev/null &&
+      { printf '%s\n' "$etag" && cat "$2"; } >"$entry.tmp" 2>/dev/null && mv -f "$entry.tmp" "$entry" 2>/dev/null; then
+      g_kept=$entry
+    else
+      rm -f "$entry.tmp" "$entry"
+    fi
+  elif [[ $code == 304 && -n $sent ]] && tail -n +2 "$entry" >"$2" 2>/dev/null; then
+    g_kept=$entry status=0
+  elif ((status != 0)) && [[ -n $code && $code != 304 ]]; then
+    rate_limited "$err" "$2" "$code" "$remaining" "$reset" "$retry" || q_why="the read of $1 failed: $(head -1 "$err" 2>/dev/null)"
+  elif ((status != 0)) && [[ -z $code ]]; then
+    rate_limited "$err" "$2" || q_why="the read of $1 failed: $(head -1 "$err" 2>/dev/null)"
+  else
+    # An answer that does not parse, or a 304 whose kept body is gone: the plain read.
+    rm -f "$err" "$entry"
+    queue_left && gh_read "$1" "$2" "$q_left"
+    return
+  fi
+  rm -f "$err"
+  return "$status"
+}
+# The read and its parse (a perl program over the body) into q_parsed: 1 when the read fails (q_why says why), 2 when
+# the body does not parse. A conditional read's body that does not parse is dropped from the cache and read plainly.
+queue_parsed() { # <api path> <scratch file> <program>
+  queue_get "$1" "$2" || return 1
+  q_parsed=$(perl -MJSON::PP -e "$3" <"$2") && return 0
+  [[ -n $g_kept ]] || return 2
+  rm -f "$g_kept"
+  { queue_left && gh_read "$1" "$2" "$q_left"; } || return 1
+  q_parsed=$(perl -MJSON::PP -e "$3" <"$2") || return 2
+}
+# shellcheck disable=SC2016 # perl, not the shell
+queue_runs='
+  my $d = eval { JSON::PP->new->decode(do { local $/; <STDIN> }) };
+  exit 1 unless ref $d eq "HASH" && ref $d->{workflow_runs} eq "ARRAY";
+  print join(" ", map { $_->{id} } grep { ref $_ eq "HASH" && ($_->{id} // "") =~ /^\d+$/ } @{$d->{workflow_runs}}), "\n";
+'
+# shellcheck disable=SC2016 # perl, not the shell
+queue_jobs='
+  my $d = eval { JSON::PP->new->decode(do { local $/; <STDIN> }) };
+  exit 1 unless ref $d eq "HASH" && ref $d->{jobs} eq "ARRAY";
+  my ($solo, $vm) = (0, 0);
+  for my $job (@{$d->{jobs}}) {
+    next unless ref $job eq "HASH" && ($job->{status} // "") eq "queued" && ref $job->{labels} eq "ARRAY";
+    my @labels = map { lc } @{$job->{labels}};
+    next unless @labels && !grep { $_ ne "ci-kit-mac-solo" && $_ ne "ci-kit-mac-vm" } @labels;
+    if (grep { $_ eq "ci-kit-mac-vm" } @labels) { $vm++ } else { $solo++ }
+  }
+  print "$solo $vm\n";
+'
 queue_read() {
-  local scratch status runs='' id counts q_deadline=$((SECONDS + queue_wait)) q_left
+  local scratch status runs='' id counts q_deadline=$((SECONDS + queue_wait)) q_left q_read='' file
   q_solo=0 q_vm=0 q_why=''
+  if (($(date +%s) < q_budget_until)); then q_why=$q_budget_why; return 1; fi
   scratch=$(mktemp) || { q_why='no scratch file'; return 1; }
   for status in queued in_progress; do
-    if ! { queue_left && gh_read "repos/$repo/actions/runs?status=$status&per_page=100" "$scratch" "$q_left"; }; then
-      rm -f "$scratch"
-      return 1
-    fi
-    if ! id=$(perl -MJSON::PP -e '
-      my $d = eval { JSON::PP->new->decode(do { local $/; <STDIN> }) };
-      exit 1 unless ref $d eq "HASH" && ref $d->{workflow_runs} eq "ARRAY";
-      print join(" ", map { $_->{id} } grep { ref $_ eq "HASH" && ($_->{id} // "") =~ /^\d+$/ } @{$d->{workflow_runs}}), "\n";
-    ' <"$scratch"); then
-      q_why="the $status runs could not be read"
-      rm -f "$scratch"
-      return 1
-    fi
-    runs+=" $id"
+    queue_parsed "repos/$repo/actions/runs?status=$status&per_page=100" "$scratch" "$queue_runs"
+    case $? in
+      0) runs+=" $q_parsed" ;;
+      1) rm -f "$scratch"; return 1 ;;
+      *) q_why="the $status runs could not be read"; rm -f "$scratch"; return 1 ;;
+    esac
   done
   for id in $(tr ' ' '\n' <<<"$runs" | sort -un); do
-    if ! { queue_left && gh_read "repos/$repo/actions/runs/$id/jobs?filter=latest&per_page=100" "$scratch" "$q_left"; }; then
-      rm -f "$scratch"
-      return 1
-    fi
-    if ! counts=$(perl -MJSON::PP -e '
-      my $d = eval { JSON::PP->new->decode(do { local $/; <STDIN> }) };
-      exit 1 unless ref $d eq "HASH" && ref $d->{jobs} eq "ARRAY";
-      my ($solo, $vm) = (0, 0);
-      for my $job (@{$d->{jobs}}) {
-        next unless ref $job eq "HASH" && ($job->{status} // "") eq "queued" && ref $job->{labels} eq "ARRAY";
-        my @labels = map { lc } @{$job->{labels}};
-        next unless @labels && !grep { $_ ne "ci-kit-mac-solo" && $_ ne "ci-kit-mac-vm" } @labels;
-        if (grep { $_ eq "ci-kit-mac-vm" } @labels) { $vm++ } else { $solo++ }
-      }
-      print "$solo $vm\n";
-    ' <"$scratch"); then
-      q_why="the jobs of run $id could not be read"
-      rm -f "$scratch"
-      return 1
-    fi
+    queue_parsed "repos/$repo/actions/runs/$id/jobs?filter=latest&per_page=100" "$scratch" "$queue_jobs"
+    case $? in
+      0) counts=$q_parsed ;;
+      1) rm -f "$scratch"; return 1 ;;
+      *) q_why="the jobs of run $id could not be read"; rm -f "$scratch"; return 1 ;;
+    esac
     q_solo=$((q_solo + ${counts% *})) q_vm=$((q_vm + ${counts#* }))
   done
   rm -f "$scratch"
+  # What this read did not read is no longer listed.
+  for file in "$queue_cache"/*; do
+    [[ -e $file && $'\n'$q_read != *$'\n'"${file##*/}"$'\n'* ]] || continue
+    rm -f "$file"
+  done
 }
 # What a host instance is doing (runner-state.py, from the kernel's paths): busy, idle, stopped, or unknown.
 instance_state() { # <instance root>

@@ -704,7 +704,7 @@ into per machine (`install.sh --vm`), and a Mac without it has none of what foll
 | Job clone | `maws-vm-job-vm-<time>`, an APFS copy of the golden image (seconds; it holds only what the job writes), run with `tart run --no-graphics --no-clipboard` (its pasteboard is never the host's) and four directory shares: the kit and this clone's JIT directory read-only, its `out/` and `cache/` read-write. |
 | Slot | `~/ci-kit-vm/vm/`: `jit/<clone>/` (a 0700 directory holding the 0600 one-use config and cleanup record, removed at teardown), `out/` (what the guest writes back: its markers, `_diag`, its hooks log), `cache/` (MAWS's e2e build cache). The trial slot, `~/ci-kit-vm/vm-trial/`, is the same for a candidate's trial and serves nothing else. |
 | In the guest | `mac/vm/guest/`: `kickoff.sh` (run by `tart exec`, which is gRPC to the Tart guest agent, never the guest's address) makes the clone the slot's runner and starts `wrapper.sh`, which supplies the JIT config to `run.sh` through its masked secret input environment, writes the `out/` markers (its header is the protocol), answers the idle stop and powers the guest off; `hooks/` is the guest's start and end, cut down: the display and dialog check, Terminal in front, the posture line with `vm=` and `clone=`, at the start the busiest processes (`ci-kit guest cpu (start)`), no sweep, no alert, no `gh`. |
-| State | in `~/Library/Logs/ci-kit`, each file replaced whole, written under `desktop.lock`: `vm-reserved` (the slot's reservation), `vm-released` (the last release's epoch second), `vm-hold.<owner>` (the holds, written and removed by `mac/vm/hold.sh`), `vm-claim.<worker>` (host jobs keeping the guest out), `vm-pause` (the guard's), and the launcher's own `vm-failures` and `vm-lane.alert.<kind>`. |
+| State | in `~/Library/Logs/ci-kit`, each file replaced whole, written under `desktop.lock`: `vm-reserved` (the slot's reservation), `vm-released` (the last release's epoch second), `vm-hold.<owner>` (the holds, written and removed by `mac/vm/hold.sh`), `vm-claim.<worker>` (host jobs keeping the guest out), `vm-pause` (the guard's), and the launcher's own `vm-failures`, `vm-lane.alert.<kind>` and `vm-queue-cache/` (the queue read's last ETag and body per API path). |
 | Logs | `vm-lane.log` (every decision, every boot's reads, the guard's samples, each clone's `out/` folded in at its end), `vm-run.log` (the clones' `tart run` output), `vm-out/<clone>/` (the last 20 clones' `out/`), `vm-bake.log` (the maintenance procedure's transcript); the guest's hook lines land in `mac-runner-hooks.log`. |
 
 **One registration per clone.** Before booting, `jit.py` mints `generate-jitconfig` through the machine user's
@@ -784,6 +784,19 @@ hold, and it logs what fails, once per change, and what it read at each boot:
 7. the mode allows it: `CI_KIT_VM_LANE_MODE` `always` (the default), or `hold-only` with every host instance held or
    stopped;
 8. every host job now running is VM-safe, which is 3: a job that is not holds a claim.
+
+**The queue read and the API budget.** Condition 1 is read with `gh api`: the queued and in-progress run lists, then
+each listed run's jobs, 2 + N calls for N runs, every 15 s while idle (and again at the idle handshake). Every session
+and machine of the account shares one REST budget of 5,000 requests an hour, and in a wave of 10-20 MAWS runs these
+reads alone cost more than that (2026-11-14: the budget ran dry and queued guest jobs went unbooted). So each read is
+conditional: the launcher keeps, per path, the ETag and body of its last 200 in `vm-queue-cache/`, sends
+`If-None-Match`, and reuses the kept body on a `304 Not Modified`, which GitHub does not count. Only a path whose
+answer changed costs a request; a complete read drops the entries of runs no longer listed. Anything unexpected (no
+ETag, an answer whose headers do not parse, a kept body that cannot be read or parsed) reads plainly, so the counts
+never depend on the cache. A read refused for the rate limit (a 403 or 429 naming it, or one with nothing remaining)
+reads `gh api rate_limit` (not counted either) and stops the queue reads until the core budget's reset (for a
+secondary limit, its `retry-after`, or a minute); meanwhile the queue reads as unknown, and the log says why:
+`no boot: the queue cannot be read (the GitHub API budget is empty until 03:32:05Z)`.
 
 Conditions 3 and 4 are read again under `desktop.lock`, in the one step that writes the reservation, clones and spawns
 `tart run`; nothing can release the reservation between its write and the run. The lane never stops a running guest to
