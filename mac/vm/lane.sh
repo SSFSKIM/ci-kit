@@ -68,7 +68,9 @@
 # and a boot logs what it read. Conditions 3 and 4 are read again inside the locked step, where they are written.
 #   1. a job wants a guest: a queued job of a queued or in-progress run of CI_KIT_VM_REPO (SSFSKIM/MAWS) whose labels
 #      are a subset of {ci-kit-mac-solo, ci-kit-mac-vm}, read with the machine user's own gh login (the job's or the
-#      alert's token never reaches it), each call bounded as dialog.sh bounds its own;
+#      alert's token never reaches it), each call bounded as dialog.sh bounds its own and conditional on the ETag its
+#      path last answered (a 304 reuses the kept body and costs none of the account's API budget), and none at all
+#      while GitHub's rate limit is exhausted, until its reset (lane-reads.sh);
 #   2. the host will not take it first: a ci-kit-mac-vm job always counts; a ci-kit-mac-solo job counts only when the
 #      exclusive instance is busy, held (the dialog watcher's drain) or offline (runner-state.py), or more of them are
 #      queued than it can take (one);
@@ -118,8 +120,9 @@
 # stays reserved, a pause not written holds in this launcher). The exception is vm-released: the release's epoch
 # second, published before removing vm-reserved; a failed stamp is logged but release proceeds (a tight host budget,
 # not a hidden pass). vm-reserved and vm-released (this launcher's alone), vm-hold.<owner> (read, never written),
-# vm-claim.* (read through vm-claim.sh), vm-pause; vm-failures (the failure counts) and
-# vm-lane.alert.<kind> (an open alert's issue) are this launcher's own. The log is vm-lane.log; at each teardown out/ is
+# vm-claim.* (read through vm-claim.sh), vm-pause; vm-failures (the failure counts), vm-lane.alert.<kind> (an open
+# alert's issue) and vm-queue-cache/ (the queue read's ETag and body per path, outside the lock: only the cost of a
+# read rests on it) are this launcher's own. The log is vm-lane.log; at each teardown out/ is
 # folded in (its markers and the wrapper's log), the guest's hook lines go to the hooks log, and out/ itself is kept
 # as vm-out/<clone> (the last CI_KIT_VM_KEEP_OUT, 20). Alerts go through dialog.sh's alert_gh, one open issue per kind,
 # closed when its condition clears; each title is outside MAWS's dialog-alert pattern.
@@ -203,6 +206,7 @@ reserved_file=$ci_kit_logs/vm-reserved
 released_file=$ci_kit_logs/vm-released
 pause_file=$ci_kit_logs/vm-pause
 failures_file=$ci_kit_logs/vm-failures
+queue_cache=$ci_kit_logs/vm-queue-cache
 lane_lock=$ci_kit_logs/vm-lane.lock
 run_log=$ci_kit_logs/vm-run.log
 drain_marker=$ci_kit_logs/runner-drained
