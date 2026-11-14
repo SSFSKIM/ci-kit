@@ -46,7 +46,7 @@ test('provider stages share one resolution, including after a provider fails', a
 });
 
 // Fake only the external SDK boundary; the bake performs its own polling, promotion and cleanup.
-async function ec2Fixture({ smoke = 'ok', job = 'success', applyOk = true, lostLaunch = false, refuseFirstSmoke = false, reportMissing = false, snapshotBytes = 12 * 2**30, promote = true, otherImages = [], lostSnapshot = false, lostRegistration = false } = {}) {
+async function ec2Fixture({ smoke = 'ok', job = 'success', applyOk = true, lostLaunch = false, refuseFirstSmoke = false, reportMissing = false, snapshotBytes = 12 * 2**30, promote = true, otherImages = [], lostSnapshot = false, lostRegistration = false, unseenReads = 0 } = {}) {
   const api = await import('../../ec2/bake/bake.mjs');
   const calls = [], instances = [], images = [], snapshots = [];
   const tags = (x) => Object.fromEntries((x.Tags ?? []).map((t) => [t.Key,t.Value]));
@@ -62,6 +62,7 @@ async function ec2Fixture({ smoke = 'ok', job = 'success', applyOk = true, lostL
       if (lostLaunch) throw Error('connection lost');
       return { Instances: [i] };
     }
+    if (name === 'DescribeInstancesCommand' && input.InstanceIds && unseenReads-- > 0) throw Object.assign(Error(`The instance ID '${input.InstanceIds[0]}' does not exist`), { name: 'InvalidInstanceID.NotFound' });
     if (name === 'DescribeInstancesCommand') return { Reservations: [{ Instances: input.InstanceIds ? instances.filter((i) => input.InstanceIds.includes(i.InstanceId)) : instances }] };
     if (name === 'CreateImageCommand') { images.push({ ImageId: 'ami-new', State:'available', CreationDate:'2026-10-23T12:00:00Z', Tags: input.TagSpecifications[0].Tags, BlockDeviceMappings:[{DeviceName:'/dev/sda1',Ebs:{SnapshotId:'snap-new'}}] }); return {ImageId:'ami-new'}; }
     if (name === 'DescribeImagesCommand') return { Images: input.ImageIds?.includes('ami-canonical')
@@ -460,4 +461,16 @@ echo compact >> "$TEST_ROOT/compacted"
       assert.equal(await present('run/ci-kit-bake'),false,'failure removes its tmpfs handoff');
     }
   } finally { await rm(root,{recursive:true,force:true}); }
+});
+
+test('a just-launched builder that DescribeInstances does not know yet is read again, not failed', async () => {
+  const f = await ec2Fixture({ unseenReads: 2 });
+  const result = await f.run();
+  assert.deepEqual(result.manifest, built);
+  assert.equal(f.calls.filter(([n, v]) => n === 'DescribeInstancesCommand' && v.InstanceIds).length >= 3, true);
+});
+
+test('an instance still unknown two minutes after its launch fails the bake', async () => {
+  const f = await ec2Fixture({ unseenReads: 1000 });
+  await assert.rejects(f.run(), (error) => error.name === 'InvalidInstanceID.NotFound');
 });
