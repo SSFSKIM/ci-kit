@@ -81,7 +81,19 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
     try { return JSON.parse(text); } catch { throw new Error(`invalid ${key} report JSON`); }
   };
   const url = (key) => aws.presignPut({ bucket: cfg.report_bucket, key: `${prefix}/${key}.json` });
-  const instance = async (id) => (await list(ec2, DescribeInstancesCommand, { InstanceIds: [id] }, 'Reservations')).flatMap((r) => r.Instances ?? [])[0];
+  // EC2 is eventually consistent: an instance RunInstances just returned can be unknown to DescribeInstances for a few
+  // seconds (InvalidInstanceID.NotFound; bake 20261114-063726-689q failed 1 s after its builder's launch). One this bake
+  // launched is retried for its first two minutes; after that, or for an id it never launched, NotFound is an answer.
+  const launched = new Map();
+  const instance = async (id) => {
+    for (;;) {
+      try { return (await list(ec2, DescribeInstancesCommand, { InstanceIds: [id] }, 'Reservations')).flatMap((r) => r.Instances ?? [])[0]; }
+      catch (error) {
+        if (error.name !== 'InvalidInstanceID.NotFound' || !launched.has(id) || now() - launched.get(id) >= 2 * MINUTE) throw error;
+        await sleep(5_000);
+      }
+    }
+  };
   const launch = async (purpose, imageId, userData, builder = false) => {
     if (Buffer.byteLength(userData) > 16384) throw new Error('EC2 user-data exceeds 16 KiB');
     const labels = { ...pool, 'ci-kit-purpose': purpose, 'ci-kit-deadline': new Date(now() + (builder ? 120 : 30) * MINUTE).toISOString() };
@@ -108,6 +120,7 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
       }
       const id = res.Instances?.[0]?.InstanceId;
       if (!id) throw new Error('RunInstances returned no instance');
+      launched.set(id, now());
       log(`${cfg.account}: ${purpose} ${id} launched (${builder ? 'Canonical on-demand builder' : 'pool image spot'})`);
       return id;
     }
