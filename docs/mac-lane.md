@@ -593,6 +593,8 @@ A fixed window lives only in the publication: it steers placement (a planner sen
 neither the host drain nor the VM launcher reads it, so a job already queued for the mini's labels still starts
 inside it. A window that must keep the mini free of new jobs also needs a quiet-file line (the mini's carries
 `06:43Z 07:00Z` for this one since 2026-11-14), which is what refuses the starts; a job already running finishes.
+That is enough for this window by the owner's ruling of 2026-11-14: a job already running may finish inside
+06:45-07:00Z, so no guard keeps long jobs from starting shortly before it.
 
 Verdict reads have a 20-second overall bound that kills the whole read process group, including nested readers;
 each GitHub request has 15 seconds. PATCH creates the variable with
