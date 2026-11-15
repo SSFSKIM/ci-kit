@@ -39,6 +39,27 @@ records its `config` commit; a failed config fetch keeps the last good copy and 
 
 Inside a job container, size worker pools from `nproc` or Node's `os.availableParallelism()`.
 
+A stalled git transfer fails instead of waiting out the job's limit. Every job container gets
+`GIT_HTTP_LOW_SPEED_LIMIT=1000` and `GIT_HTTP_LOW_SPEED_TIME=60` (`pool/agent/docker.mjs`), so libcurl fails a
+transfer that moves under 1,000 B/s for a minute. libcurl misses two stalls, a trickle above that floor and a
+`git-remote-https` blocked because git is blocked writing to the disk, and a checkout fetch has still hung for a
+job's whole 30 minutes on an image carrying the bound. The VM's guest therefore also watches the job container's
+git processes from the host (`pool/vm/git-watchdog.mjs`, every 20 s). It acts on a transfer (`clone`, `fetch`, `pull`,
+`push`, `ls-remote`, `submodule`, or any git with a `git-remote-http(s)` helper) when either rule holds:
+- none of its git processes has read or written anything for 3 minutes (`/proc/<pid>/io`);
+- it is `actions/checkout`'s shallow fetch (`git -c protocol.version=2 fetch … --depth=<n> origin …`) and has run
+  for 5 minutes, however its counters move.
+
+It then kills the transfer's helper, or its git when it has none, and checkout's own retry fetches again. A git
+waiting on a hook, a credential helper or ssh is left alone, as is any git that is not a transfer and every process
+that is not git. Each kill logs one record of lines starting `git watchdog` to the VM's console. Read it while
+the VM exists, with `gcloud compute instances get-serial-port-output` or `aws ec2 get-console-output`: Cloud Logging
+drops GCE's serial lines (exclusion `ci-kit-serial-console`, under [GCE](#gce)). The record holds the process's
+command line (credentials masked), age, state, wchan and kernel stack; what moved while it was watched, with rates;
+its io counters and fds; each socket's TCP state and queues with ss's `-i` line; a timed synced write to the cache
+disk; and the VM's io pressure. A trickle shows as bytes still moving; a disk stall as a git in state `D` and a
+helper's socket with a full receive queue.
+
 ## Credentials
 
 The GitHub App `ci-kit-runners` (id 5337915) has separate private keys in GitHub repository secrets and GCP
