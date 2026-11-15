@@ -115,7 +115,7 @@ test('a still transfer is left alone inside the window, then its helper alone is
   fetchTree(w);
   const handed = [];
   const watchdog = gitWatchdog('ci-kit-gce-x', { ...w.deps, onRecord: (record) => handed.push(record) });
-  await run(w, watchdog, STILL_MS - TICK_MS);
+  await run(w, watchdog, STILL_MS);
   assert.deepEqual(w.calls.kills, []);
   assert.deepEqual(w.calls.logs, []);
   await run(w, watchdog, 2 * TICK_MS);
@@ -145,7 +145,7 @@ test('a helper that survives its kill is followed by its fetch, and neither is k
   w.procs.get(201).survives = true;
   w.procs.get(200).survives = true;
   const watchdog = gitWatchdog('c', w.deps);
-  await run(w, watchdog, STILL_MS + TICK_MS);
+  await run(w, watchdog, STILL_MS + 2 * TICK_MS);
   assert.deepEqual(w.calls.kills, [[201, 'SIGKILL']]);
   await run(w, watchdog, TICK_MS);
   assert.deepEqual(w.calls.kills, [[201, 'SIGKILL'], [200, 'SIGKILL']]);
@@ -245,7 +245,7 @@ test('a process replaced while its record is gathered is not killed', async () =
   fetchTree(w);
   w.deps.probeDisk = async () => { w.procs.get(201).start = w.now() / 1000; return 'ok'; };
   const watchdog = gitWatchdog('c', w.deps);
-  await run(w, watchdog, STILL_MS + TICK_MS);
+  await run(w, watchdog, STILL_MS + 2 * TICK_MS);
   assert.deepEqual(w.calls.kills, []);
   assert.match(w.calls.logs.at(-1), /exited before the kill/);
 });
@@ -254,7 +254,7 @@ test('the container\'s end stops the tracking: no reads and no kill after stop, 
   const w = world();
   fetchTree(w);
   const watchdog = gitWatchdog('c', w.deps);
-  await run(w, watchdog, STILL_MS - TICK_MS);
+  await run(w, watchdog, STILL_MS);
   let stopping;
   w.deps.probeDisk = async () => { stopping = watchdog.stop(); return 'ok'; };
   await run(w, watchdog, 2 * TICK_MS);
@@ -309,6 +309,55 @@ test('without a socket reading an idle transfer is left running, and that is sai
   await run(w, watchdog, 2 * STILL_MS);
   assert.deepEqual(w.calls.kills, []);
   assert.deepEqual(w.calls.logs, ['git watchdog: socket progress unavailable, so idle transfers are left running: nsenter: permission denied']);
+});
+
+test('a socket reading that only starts working later restarts the idle window: bytes may have flowed unseen', async () => {
+  const w = world();
+  fetchTree(w, { cmd: ['git', 'fetch', 'origin'] });
+  let ssWorks = false;
+  const exec = w.deps.exec;
+  w.deps.exec = async (cmd, args, options) => {
+    if (args?.at(-1) === '-tine' && !ssWorks) throw new Error('nsenter: timed out');
+    return exec(cmd, args, options);
+  };
+  const watchdog = gitWatchdog('c', w.deps);
+  const flowing = () => { w.net.set('9001', w.net.get('9001') + 64 * 1024); };
+  await run(w, watchdog, STILL_MS + 2 * TICK_MS, flowing); // ss failing for 180 s and more while bytes flow
+  ssWorks = true;
+  await run(w, watchdog, STILL_MS, flowing);
+  assert.deepEqual(w.calls.kills, [], 'not killed on its first good snapshot');
+});
+
+test('a git whose command line cannot be read makes its whole tree unjudgeable: its children are not roots', async () => {
+  const w = world();
+  fetchTree(w, { cmd: ['git', 'fetch', 'origin'] });
+  w.add(202, { cmd: ['git', 'rev-list', '--objects', '--stdin', '--not', '--all'], ppid: 200 });
+  const read = w.deps.readCmdline;
+  w.deps.readCmdline = async (pid) => { if (pid === 200) throw new Error('no answer in 2000 ms'); return read(pid); };
+  const watchdog = gitWatchdog('c', w.deps);
+  await run(w, watchdog, 3 * STILL_MS, () => { w.procs.get(202).io.rchar += 4096; });
+  assert.deepEqual(w.calls.kills, [], 'the helper is not judged alone while its sibling makes progress');
+  assert.deepEqual(w.calls.exec.filter((c) => c[0] === 'nsenter'), []);
+});
+
+test('a record\'s callback finishes before the check that made it, so a guest\'s saves never overlap', async () => {
+  const w = world();
+  fetchTree(w);
+  w.procs.get(201).survives = true;
+  w.procs.get(200).survives = true;
+  let inFlight = 0, saved = 0;
+  const watchdog = gitWatchdog('c', { ...w.deps, onRecord: async () => {
+    inFlight++;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    inFlight--;
+    saved++;
+  } });
+  for (let t = 0; t < STILL_MS + 4 * TICK_MS; t += TICK_MS) {
+    w.advance(TICK_MS);
+    await watchdog.tick();
+    assert.equal(inFlight, 0, 'no save outlives its tick');
+  }
+  assert.equal(saved, 2);
 });
 
 test('a checkout fetch waiting on ssh or a credential helper is left alone, past the wall bound too', async () => {
@@ -435,7 +484,8 @@ test('on Linux, a real git stalled on a silent server is recorded from /proc and
     probeDisk: () => probeDisk(dir),
     log: (line) => logs.push(line),
   });
-  await watchdog.tick();
+  await watchdog.tick(); // first sight
+  await watchdog.tick(); // its sockets' first reading starts the idle window
   offset += STILL_MS;
   await watchdog.tick();
   assert.deepEqual(kills, [helper], logs.join('\n'));

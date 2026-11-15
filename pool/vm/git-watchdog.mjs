@@ -124,6 +124,15 @@ export function gitWatchdog(name, deps) {
         found.set(pid, { pid, key, ...p, argv, name, helper, label, track });
       } catch { /* exited between reads */ }
     }
+    // A git under one that cannot be judged cannot be judged either: alone, a helper whose unread parent waits on a
+    // busy rev-list would look like an idle transfer of its own.
+    const underUnreadable = (pid) => {
+      for (let up = table.get(pid)?.ppid; table.has(up); up = table.get(up).ppid) {
+        if (unreadable.has(`${up}@${table.get(up).start}`)) return true;
+      }
+      return false;
+    };
+    for (const pid of [...found.keys()]) if (underUnreadable(pid)) found.delete(pid);
     const seen = new Set([...found.values()].map((m) => m.key));
     for (const key of tracks.keys()) if (!seen.has(key)) tracks.delete(key);
     for (const m of found.values()) tracks.set(m.key, m.track);
@@ -163,9 +172,10 @@ export function gitWatchdog(name, deps) {
         return false;
       }
     }
+    // Until a first reading there is no knowing what the sockets did, so the idle window starts at it.
     for (const [m, list] of inodes) {
       const net = list.reduce((sum, inode) => sum + (table.bytes.get(inode) ?? 0), 0);
-      if (m.track.net !== undefined && m.track.net !== net) m.track.changedAt = at;
+      if (m.track.net !== net) m.track.changedAt = at;
       m.track.net = net;
     }
     return true;
@@ -201,7 +211,8 @@ export function gitWatchdog(name, deps) {
     } catch { /* exited */ }
     const record = [...lines, `git watchdog ${target.pid}: ${outcome}`];
     for (const line of record) log(line);
-    deps.onRecord?.(record);
+    // Awaited, so a guest's saves of its records stay in order and finish within the check (stop waits on it).
+    await deps.onRecord?.(record);
   }
 
   async function check() {
