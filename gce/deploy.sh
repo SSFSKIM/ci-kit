@@ -5,7 +5,8 @@
 #                  (no argument: all of them but app-hook, in that order)
 #   base               the APIs, the service account ci-kit-launcher and its compute role on the project, the receiver's
 #                      service account ci-kit-webhook (no role here: webhook grants its two), and serial port logging,
-#                      its lines excluded from Cloud Logging until a failed boot needs them (docs/pool.md)
+#                      its lines excluded from Cloud Logging until a failed boot needs them, the git watchdog's
+#                      records excepted (docs/pool.md)
 #   network            the VPC ci-kit and a subnetwork for each placement of pool/config/gce.json (gce/subnets.mjs: a new
 #                      one takes the first free /20 of 10.64.0.0/16; one that exists keeps its range), each with Private
 #                      Google Access, and in each placement region a Cloud Router ci-kit-router with a Cloud NAT
@@ -73,13 +74,22 @@ base() {
   # The serial port stays on, but Cloud Logging drops its lines: they ran to about 6.5 GiB a day, about $70 a
   # month past the free 50 GiB (owner, 2026-11-09). To read a deleted VM's boot, remove the exclusion
   # (`gcloud logging sinks update _Default --remove-exclusions=ci-kit-serial-console`) and rerun the job.
+  # The job VM's git watchdog records (pool/vm/git-watchdog.mjs: lines carrying "git watchdog", a dozen per killed
+  # transfer, none while nothing stalls) pass the exclusion: they are how a stalled fetch is diagnosed after its VM is gone.
   g compute project-info add-metadata --metadata=serial-port-logging-enable=TRUE > /dev/null
   local excl=ci-kit-serial-console
-  local filter='log_id("serialconsole.googleapis.com/serial_port_1_output") OR log_id("serialconsole.googleapis.com/serial_port_debug_output")'
-  if ! g logging sinks describe _Default --format='value(exclusions[].name)' | tr ';' '\n' | grep -qx "$excl"; then
+  local filter='(log_id("serialconsole.googleapis.com/serial_port_1_output") OR log_id("serialconsole.googleapis.com/serial_port_debug_output")) AND NOT textPayload:"git watchdog"'
+  local current
+  current=$(g logging sinks describe _Default --format=json | EXCL="$excl" node -e '
+    const sink = JSON.parse(require("fs").readFileSync(0, "utf8"));
+    const exclusion = (sink.exclusions ?? []).find((e) => e.name === process.env.EXCL);
+    process.stdout.write(exclusion ? `filter ${exclusion.filter}` : "none");')
+  if [ "$current" = none ]; then
     g logging sinks update _Default --add-exclusion="name=$excl,filter=$filter" > /dev/null
+  elif [ "$current" != "filter $filter" ]; then
+    g logging sinks update _Default --update-exclusion="name=$excl,filter=$filter" > /dev/null
   fi
-  echo "deploy: base ok ($SA, $WEBHOOK_SA; serial port logging on, excluded from Cloud Logging)"
+  echo "deploy: base ok ($SA, $WEBHOOK_SA; serial port logging on, excluded from Cloud Logging but the git watchdog's records)"
 }
 
 # Every pool VM and bake VM sits here, never on the project's default network, whose stock rules open ssh and RDP to

@@ -133,7 +133,9 @@ export function gitWatchdog(name, deps) {
         outcome = 'killed (SIGKILL)';
       }
     } catch { /* exited */ }
-    for (const line of [...lines, `git watchdog ${target.pid}: ${outcome}`]) log(line);
+    const record = [...lines, `git watchdog ${target.pid}: ${outcome}`];
+    for (const line of record) log(line);
+    deps.onRecord?.(record);
   }
 
   async function check() {
@@ -191,9 +193,10 @@ const host = {
   probeDisk: () => probeDisk(CACHE),
 };
 
-// Starts watching the named job container; the returned function stops it when the container has ended.
-export function watchGitTransfers(name, { log = console.log } = {}) {
-  const watchdog = gitWatchdog(name, { ...host, log });
+// Starts watching the named job container; the returned function stops it when the container has ended. Each record
+// is logged, and handed to onRecord for a guest whose console does not outlive it (EC2's exit report).
+export function watchGitTransfers(name, { log = console.log, onRecord } = {}) {
+  const watchdog = gitWatchdog(name, { ...host, log, onRecord });
   const timer = setInterval(() => { watchdog.tick(); }, TICK_MS);
   timer.unref();
   return async () => {

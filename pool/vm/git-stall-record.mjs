@@ -128,3 +128,13 @@ export function probeDisk(dir) {
     });
   });
 }
+
+// The records an exit report carries: the first few, each cut to a few KiB, so the report stays far below the 64 KiB
+// past which the launcher ignores it (gce/launcher/providers/ec2.mjs readReports) and the job's end with it.
+export const REPORT_RECORDS = 4, REPORT_RECORD_BYTES = 4096;
+export function reportRecords(records) {
+  return records.slice(0, REPORT_RECORDS).map((lines) => {
+    const text = lines.join('\n');
+    return Buffer.byteLength(text) > REPORT_RECORD_BYTES ? `${Buffer.from(text).subarray(0, REPORT_RECORD_BYTES).toString()}…` : text;
+  });
+}

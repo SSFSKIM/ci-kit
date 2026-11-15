@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { gitWatchdog, STILL_MS, CHECKOUT_FETCH_WALL_MS, TICK_MS } from '../../pool/vm/git-watchdog.mjs';
-import { redactArgs, probeDisk } from '../../pool/vm/git-stall-record.mjs';
+import { redactArgs, probeDisk, reportRecords, REPORT_RECORDS, REPORT_RECORD_BYTES } from '../../pool/vm/git-stall-record.mjs';
 
 const ID = 'a'.repeat(64);
 const OTHER = 'b'.repeat(64);
@@ -102,7 +102,8 @@ const fetchTree = (w, { cmd = CHECKOUT, io } = {}) => {
 test('a still transfer is left alone inside the window, then its helper alone is killed with one record', async () => {
   const w = world();
   fetchTree(w);
-  const watchdog = gitWatchdog('ci-kit-gce-x', w.deps);
+  const handed = [];
+  const watchdog = gitWatchdog('ci-kit-gce-x', { ...w.deps, onRecord: (record) => handed.push(record) });
   await run(w, watchdog, STILL_MS - TICK_MS);
   assert.deepEqual(w.calls.kills, []);
   assert.deepEqual(w.calls.logs, []);
@@ -122,6 +123,7 @@ test('a still transfer is left alone inside the window, then its helper alone is
   assert.match(record, /group: 200 git fetch \(S do_poll, no io for \d+ s\), 201 git-remote-https \(S do_poll, no io for \d+ s\)/);
   assert.match(record, /killed \(SIGKILL\)/);
   assert.ok(w.calls.logs.every((line) => line.startsWith('git watchdog')), 'every line greppable');
+  assert.deepEqual(handed, [w.calls.logs], 'the whole record, once, for a report');
   assert.ok(w.calls.logs.length <= 16, 'bounded');
   assert.deepEqual(w.calls.exec.filter(([cmd]) => cmd === 'nsenter'), [['nsenter', '-t', '201', '-n', 'ss', '-tnpi']]);
 });
@@ -260,6 +262,15 @@ test('before the container exists the watchdog only asks Docker, silently', asyn
   assert.equal(w.calls.exec.length, 3);
   assert.equal(w.calls.reads, 0);
   assert.deepEqual(w.calls.logs, []);
+});
+
+test('an exit report carries the first records, each cut short, far under the launcher\'s 64 KiB', () => {
+  const records = Array.from({ length: 6 }, (_, i) => [`git watchdog: pid ${i}`, 'x'.repeat(9000)]);
+  const carried = reportRecords(records);
+  assert.equal(carried.length, REPORT_RECORDS);
+  assert.ok(carried.every((text, i) => text.startsWith(`git watchdog: pid ${i}\n`) && Buffer.byteLength(text) <= REPORT_RECORD_BYTES + 3));
+  assert.ok(Buffer.byteLength(JSON.stringify(carried)) < 32 * 1024);
+  assert.deepEqual(reportRecords([['a', 'b']]), ['a\nb']);
 });
 
 test('credentials on a command line never reach the log', () => {

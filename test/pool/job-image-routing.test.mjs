@@ -90,3 +90,12 @@ for (const [scenario, repo, present, smoke, expected, label = repo] of [
     }
   });
 }
+
+test('a job container\'s watchdog records come back with its exit, bounded for the report', async () => {
+  const result = await container.runContainer({ name: 'job', jit: 'j', cpus: 2, log: () => {}, onStarted: async () => {} }, {
+    exec: async (cmd, args) => ({ stdout: args[0] === 'wait' ? '0\n' : 'id\n' }),
+    runDocker: async () => ({ code: 0, out: '' }),
+    watch: (name, { onRecord }) => { onRecord(['git watchdog: pid 1 (git-remote-https) in job: no io for 180 s', 'git watchdog 1: killed (SIGKILL)']); return async () => {}; },
+  });
+  assert.deepEqual(result.gitWatchdog, ['git watchdog: pid 1 (git-remote-https) in job: no io for 180 s\ngit watchdog 1: killed (SIGKILL)']);
+});

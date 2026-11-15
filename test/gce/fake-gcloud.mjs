@@ -2,7 +2,7 @@
 // ($FAKE_GCLOUD_STATE) that their create and update calls change, each call appended to $FAKE_GCLOUD_LOG as a JSON array
 // of its arguments (without the global --project and --quiet). A call it does not know exits 3, so a test sees any
 // call the script starts to make.
-// state: {network: bool, subnets: [{name, region, range, pga}], routers: [region], nats: [region], firewall: [line],
+// state: {exclusions: [{name, filter}] (the _Default sink's), network: bool, subnets: [{name, region, range, pga}], routers: [region], nats: [region], firewall: [line],
 //   metrics: [{name, description, filter}], channel: name or null, policies: [the policy files' JSON],
 //   services: {<Cloud Run service>: {revisions: n, latestReady: name, traffic: [{revisionName, percent, latestRevision}],
 //   stuck?: true (update-traffic succeeds and changes nothing), trafficFails?: true (update-traffic exits 1)}}; the webhook part's secret, topic and subscription calls succeed}
@@ -24,6 +24,23 @@ const call = words.slice(0, 4).join(' ');
 const subnet = () => state.subnets.find((s) => s.name === words[4] && s.region === flag('region'));
 
 function answer() {
+  // base: everything but the _Default sink's exclusions succeeds and changes nothing the tests read.
+  if (['services enable', 'iam service-accounts describe', 'projects add-iam-policy-binding'].some((c) => call.startsWith(c))) return 0;
+  if (call.startsWith('compute project-info add-metadata')) return 0;
+  if (call.startsWith('projects describe')) { console.log('123456'); return 0; }
+  if (call === 'logging sinks describe _Default') { console.log(JSON.stringify({ name: '_Default', exclusions: state.exclusions ?? [] })); return 0; }
+  if (call === 'logging sinks update _Default') {
+    // gcloud's dict flag: name=<name>,filter=<filter> (a filter holding no comma).
+    const exclusion = (value) => Object.fromEntries(value.split(',').map((kv) => [kv.slice(0, kv.indexOf('=')), kv.slice(kv.indexOf('=') + 1)]));
+    const add = flag('add-exclusion'), update = flag('update-exclusion');
+    state.exclusions ??= [];
+    if (add) {
+      if (state.exclusions.some((e) => e.name === exclusion(add).name)) return 1;
+      return change(() => state.exclusions.push(exclusion(add)));
+    }
+    const existing = update && state.exclusions.find((e) => e.name === exclusion(update).name);
+    return existing ? change(() => Object.assign(existing, exclusion(update))) : 1;
+  }
   if (call.startsWith('compute networks describe')) return state.network ? 0 : 1;
   if (call.startsWith('compute networks create')) return change(() => { state.network = true; });
   if (call === 'compute networks subnets describe') {

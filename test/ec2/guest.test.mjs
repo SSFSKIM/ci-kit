@@ -396,3 +396,14 @@ for (const repo of ['SSFSKIM/MAWS', undefined]) {
     assert.equal(f.reports.at(-1).value, 'exit:0');
   });
 }
+
+test('the exit report carries the git watchdog\'s records, which the console would not keep', async () => {
+  const records = ['git watchdog: pid 1 (git-remote-https) in ci-kit-ec2-abc123: no io for 180 s\ngit watchdog 1: killed (SIGKILL)'];
+  const f = fixture({ runContainer: async options => { await options.onStarted(); return { code: 0, out: '', gitWatchdog: records }; } });
+  await runGuest(f.deps);
+  assert.deepEqual(f.reports.at(-1).git_watchdog, records);
+  assert.equal(f.reports.at(-1).value, 'exit:0');
+  const quiet = fixture();
+  await runGuest(quiet.deps);
+  assert.ok(!('git_watchdog' in quiet.reports.at(-1)));
+});

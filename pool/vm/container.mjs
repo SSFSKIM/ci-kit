@@ -7,6 +7,7 @@ import { workDir, IMAGE } from '../agent/docker.mjs';
 import { jobImage } from '../bake/manifest.mjs';
 import { jobRunArgs, METADATA_BLOCK } from './run.mjs';
 import { watchGitTransfers } from './git-watchdog.mjs';
+import { reportRecords } from './git-stall-record.mjs';
 
 const sh = promisify(execFile);
 // Tags are normalized, so only an explicit repository label establishes which repository owns the image.
@@ -62,7 +63,8 @@ export async function runContainer({ name, repo, jit, smoke, onStarted, log = co
   args.splice(args.indexOf('--rm'), 1, '--detach');
   const started = await exec('docker', args, { env: { ...process.env, CI_KIT_JIT: jit ?? '' }, timeout: 60_000 });
   if (!started.stdout.trim()) throw new Error('container did not start');
-  const stopWatching = smoke ? async () => {} : watch(name, { log });
+  const records = [];
+  const stopWatching = smoke ? async () => {} : watch(name, { log, onRecord: (record) => records.push(record) });
   let result, waited;
   try {
     await onStarted();
@@ -72,5 +74,5 @@ export async function runContainer({ name, repo, jit, smoke, onStarted, log = co
   } finally { await stopWatching(); }
   const code = Number(waited.stdout.trim());
   if (!Number.isInteger(code) || waited.stdout.trim() === '') throw new Error('invalid container exit');
-  return { code, out: result.out };
+  return { code, out: result.out, ...(records.length ? { gitWatchdog: reportRecords(records) } : {}) };
 }

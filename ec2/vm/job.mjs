@@ -102,7 +102,7 @@ async function upload(deps, state, event, fields = {}) {
 
 export async function runGuest(deps) {
   let stage = 'userdata', state = { timings: { guest_start: stamp(deps) } }, stopNotice;
-  let value, smoke, diagnostic;
+  let value, smoke, diagnostic, gitWatchdog;
   try {
     const raw = await deps.readUserData();
     const data = JSON.parse(raw);
@@ -133,6 +133,8 @@ export async function runGuest(deps) {
     });
     state.timings.container_exit = stamp(deps);
     value = `exit:${result.code}`;
+    // The console keeps only its last 64 KiB, and the job's own output follows a record: the report bucket keeps it.
+    gitWatchdog = result.gitWatchdog;
     if (data.smoke) smoke = smokeVerdict(result.out, result.code);
   } catch (error) {
     value = `failed:${stage}`;
@@ -142,7 +144,8 @@ export async function runGuest(deps) {
     try {
       try { await stopNotice?.(); } catch { deps.log('notice watcher stop failed'); }
       state.timings.guest_end = stamp(deps);
-      await upload(deps, state, 'exit', { value, ...(smoke ? { smoke } : {}), ...(diagnostic ? { diagnostic } : {}) });
+      await upload(deps, state, 'exit', { value, ...(smoke ? { smoke } : {}), ...(diagnostic ? { diagnostic } : {}),
+        ...(gitWatchdog ? { git_watchdog: gitWatchdog } : {}) });
     } finally { await deps.poweroff(); }
   }
 }
