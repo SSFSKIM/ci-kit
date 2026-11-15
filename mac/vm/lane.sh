@@ -75,7 +75,8 @@
 #      exclusive instance is busy, held (the dialog watcher's drain) or offline (runner-state.py), or more of them are
 #      queued than it can take (one);
 #   3. nothing holds the lane: no vm-hold.<owner>, no vm-pause in force, and no claim (vm-claim.sh claims, read under
-#      the desktop lock: clear only when it exits 0 and prints nothing), and no daily quiet window in ~/.local/state/ci-quiet;
+#      the desktop lock: clear only when it exits 0 and prints nothing), and no quiet window in ~/.local/state/ci-quiet
+#      that holds the VM lane (one without lanes= holds both);
 #   4. no guest exists: vm-reserved absent, and no `tart run` process names a maws-vm-* VM (options may precede or
 #      follow the VM operand; a maintenance VM keeps the lane shut,
 #      logged once per change and alerted after CI_KIT_VM_MAINTENANCE_ALERT s, 600);
@@ -575,7 +576,7 @@ The lane boots nothing while any vm-hold.<owner> exists; only its owner removes 
 # says what was read; false with the reason logged.
 admit() { # <running maws-vm-* names, from the process table>
   quiet_read
-  if [[ -n $quiet_windows ]]; then note boot "no boot: $quiet_windows"; return 1; fi
+  if [[ -n $quiet_vm ]]; then note boot "no boot: $quiet_vm"; return 1; fi
   if in_pause_window; then note boot "no boot: inside the pause window $window_seen (UTC)"; return 1; fi
   if ! holds_read; then note boot "no boot: ${h_owners//$'\n'/; }"; return 1; fi
   if [[ -n $p_reason ]]; then note boot "no boot: $(pause_line)"; return 1; fi
@@ -629,7 +630,7 @@ boot() {
     return
   fi
   quiet_read
-  [[ -z $quiet_windows ]] || why=$quiet_windows
+  [[ -z $quiet_vm ]] || why=$quiet_vm
   holds_read || why="${h_owners//$'\n'/; }"
   pause_read
   [[ -z $p_reason ]] || why=$(pause_line)
@@ -687,8 +688,8 @@ boot() {
     return
   fi
   quiet_read
-  if [[ -n $quiet_windows ]]; then
-    boot_undo "$quiet_windows" no-image-failure
+  if [[ -n $quiet_vm ]]; then
+    boot_undo "$quiet_vm" no-image-failure
     return
   fi
   printf '%s %s: tart run\n' "$now" "$clone" >>"$run_log" 2>/dev/null

@@ -883,6 +883,23 @@ exec /bin/mv "$@"`);
     await finish(m, a);
   });
 
+  test('a host-only quiet window leaves the guest booting, and a VM-only one holds it', async () => {
+    const m = lane({ queue: [['ci-kit-mac-vm']] });
+    mkdirSync(join(m.home, '.local/state'), { recursive: true });
+    writeFileSync(join(m.home, '.local/state/ci-quiet'), '23:00Z 23:50Z lanes=vm bench\n');
+    writeFileSync(join(m.home, 'quiet-clock'), '23:00\n');
+    executable(join(m.home, 'bin/date'), `if [[ $* == '-u +%H:%M' ]]; then cat "$HOME/quiet-clock"; else exec /bin/date "$@"; fi`);
+    const a = m.start();
+    await m.until(() => /no boot: quiet window/.test(m.log()) || m.clones().length > 0, 'a quiet hold or an incorrect boot');
+    assert.equal(m.clones().length, 0, m.log());
+    assert.match(m.log(), /no boot: quiet window 23:00Z 23:50Z lanes=vm bench/);
+    writeFileSync(join(m.home, '.local/state/ci-quiet'), '23:00Z 23:50Z lanes=host gui sitting\n');
+    await m.booted();
+    assert.doesNotMatch(m.log(), /no boot: quiet window 23:00Z 23:50Z lanes=host/);
+    assert.deepEqual(m.alerts(), []);
+    await finish(m, a);
+  });
+
   test('a quiet window starting during cloning prevents the spawn and releases the unused clone', async () => {
     const m = lane({ queue: [['ci-kit-mac-vm']] });
     mkdirSync(join(m.home, '.local/state'), { recursive: true });

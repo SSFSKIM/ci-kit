@@ -135,17 +135,23 @@ def verdict(home, now):
             hold(lanes, f"cannot read {label}: {error}")
 
     both = ("host", "vm")
+    quiet_host = ""
 
     def quiet():
+        nonlocal quiet_host
         if read(home / ".local/state/ci-quiet") is None:
             return []
         text = shell('source "$1"; _publish_clock=$2; _publish_instant=$3; '
                      'date() { case "$*" in "-u +%H:%M") echo "$_publish_clock";; '
                      '"-u +%Y-%m-%dT%H:%MZ") echo "$_publish_instant";; *) return 1;; esac; }; '
-                     'quiet_read; printf "%s\\n%s" "$quiet_windows" "$quiet_invalid"',
+                     'quiet_read; printf "%s\\n%s\\n%s\\n%s" "$quiet_windows" "$quiet_host" "$quiet_vm" "$quiet_invalid"',
                      HERE / "hooks/quiet.sh", now.strftime("%H:%M"), now.strftime("%Y-%m-%dT%H:%MZ"))
-        windows, invalid = text.split("\n", 1)
-        return ([windows] if windows else []) + ([f"quiet file invalid: {invalid}"] if invalid else [])
+        windows, quiet_host, vm, invalid = text.split("\n", 3)
+        # A lane is held while an active window names it (both, without lanes=); the reason lists every active one.
+        lanes = [lane for lane, active in (("host", quiet_host), ("vm", vm)) if active]
+        if lanes:
+            hold(lanes, windows)
+        return [f"quiet file invalid: {invalid}"] if invalid else []
 
     check(both, "ci-quiet", quiet)
 
@@ -178,7 +184,18 @@ def verdict(home, now):
         return []
 
     check(both, "claims/holds directory", claims_and_holds)
-    check(both, "runner-drained", lambda: ["dialog watcher drain"] if exists(logs / "runner-drained") else [])
+
+    def drain():
+        if not exists(logs / "runner-drained"):
+            return []
+        # The watcher's drain holds both lanes, unless what it holds for, after "held at <time>: ", is exactly the
+        # host-scoped quiet windows read above: each of those already holds the lanes it names.
+        if quiet_host and (read(logs / "runner-drained") or "").partition("\n")[0].partition(": ")[2] == quiet_host:
+            hold(("host",), "dialog watcher drain")
+            return []
+        return ["dialog watcher drain"]
+
+    check(both, "runner-drained", drain)
     check(both, "lane held windows", lambda: [lane_held_reason(w) for w in active_windows(
         os.environ.get("CI_KIT_LANE_HELD_WINDOWS", DEFAULT_WINDOWS), now)])
 
@@ -244,13 +261,13 @@ def upcoming(home, now):
         if read(home / ".local/state/ci-quiet") is None:
             return
         for entry in shell('source "$1"; quiet_list', HERE / "hooks/quiet.sh").splitlines():
-            kind, begin, end, line = entry.split("\t", 3)
-            reason = f"quiet window {line}"
+            kind, begin, end, lanes, line = entry.split("\t", 4)
+            lanes, reason = lanes.split(","), f"quiet window {line}"
             if kind == "daily":
                 for start, stop in daily(int(begin), int(end), now):
-                    announce(both, start, stop, reason)
+                    announce(lanes, start, stop, reason)
             else:
-                announce(both, *(dt.datetime.fromisoformat(t.replace("Z", "+00:00")) for t in (begin, end)), reason)
+                announce(lanes, *(dt.datetime.fromisoformat(t.replace("Z", "+00:00")) for t in (begin, end)), reason)
 
     def vm_pause():
         text = read(home / f"Library/LaunchAgents/{VM_AGENT}.plist")
@@ -271,7 +288,7 @@ def upcoming(home, now):
 def valid_window(window):
     return (isinstance(window, dict) and set(window) == {"from", "until", "lanes", "why"}
             and all(isinstance(window[k], str) for k in ("from", "until", "why"))
-            and window["lanes"] in (["host", "vm"], ["vm"]))
+            and window["lanes"] in (["host", "vm"], ["host"], ["vm"]))
 
 
 def compute(now):

@@ -150,7 +150,7 @@ hold() { # under the episode lock: any active reason holds; an alert close owed 
       printf '%s\n' "$line" >>"$noted"
     fi
   done <<<"$quiet_invalid"
-  reason=$quiet_windows
+  reason=$quiet_host
   if [[ -n $desktop_in_use ]]; then
     reason="${reason:+$reason; }$desktop_in_use"
   fi
@@ -164,7 +164,7 @@ hold() { # under the episode lock: any active reason holds; an alert close owed 
         log "drain: could not write $drain_marker; the runner is not held"
         return 0
       fi
-      if [[ -n $quiet_windows || -n $desktop_in_use ]]; then
+      if [[ -n $quiet_host || -n $desktop_in_use ]]; then
         log "drain: holding the runners: $reason"
       else
         log "drain: holding the runner while ${st_name:-a system dialog} is up (since $st_since)"

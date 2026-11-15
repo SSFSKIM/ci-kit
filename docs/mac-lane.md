@@ -518,7 +518,8 @@ way, while two eval scripts ran there. The claims and holds tell such work to wa
   back to back, so the gaps between jobs are covered too. It holds `until=<UTC, ISO 8601>` and `by=<who, what for>`,
   and its writer removes it when the set ends. An `until` in the past counts as no hold. For a daily window or an on-demand operator drain, the
   operator writes `~/.local/state/ci-quiet` instead: `<HH:MM>Z <HH:MM>Z <who, what for>`, one UTC window per line
-  (the [drain](#the-drain) below). Unlike `ci-hold`, a quiet window also drains CI runners and prevents VM boots.
+  (the [drain](#the-drain) below). Unlike `ci-hold`, a quiet window also drains CI runners and prevents VM boots, or
+  only one of the two when its line says `lanes=host` or `lanes=vm`.
 
 A launcher that runs heavy work on the Mac waits while any is in force, and does well to wait while the 1-minute load
 is 5 or more as well (the guard's own bound):
@@ -534,6 +535,9 @@ held() {
   grep -lqs '^measured claim since' ~/Library/Logs/ci-kit/vm-claim.* 2>/dev/null
 }
 ```
+
+`quiet_windows` is every window in force, whatever lanes its line names; `quiet_host` and `quiet_vm` are the ones
+holding each lane.
 
 ## Publishing lane availability
 
@@ -560,7 +564,8 @@ sorted by `from`, each as
 ```
 
 `from` and `until` are UTC to the minute (start inclusive, end exclusive, a daily window crossing midnight ending the
-next day); `lanes` is `["host","vm"]`, or `["vm"]` for a VM pause window; `why` is the reason the verdict gives while
+next day); `lanes` is the lanes a quiet line names (`["host","vm"]` without `lanes=`, else `["host"]` or `["vm"]`),
+`["host","vm"]` for a fixed window and `["vm"]` for a VM pause window; `why` is the reason the verdict gives while
 the window is active. A planner launching a long job reads it to see a hold that has not started yet. It is
 informational: `host`, `vm` and `why` remain the verdict, decided by each source's own reader as before, and a malformed
 declaration or setting is reported there and announces nothing. The windows are read by a child of their own, after
@@ -575,12 +580,16 @@ successful heartbeat gaps to about 120 seconds at most. Consumers treat an absen
 value as held. `host` and `vm` are independent admission verdicts, not busyness: a solo placement needs both free,
 and a busy host is still free if nothing holds it. The planner counts jobs separately.
 
-Quiet windows (including invalid declarations), a future `ci-hold`, measured claims, the dialog watcher's drain,
-and fixed windows hold both lanes. VM owner holds, `vm-pause`, its LaunchAgent's `CI_KIT_VM_PAUSE_WINDOWS`, and a
-missing/stopped VM launcher also hold the VM lane; an unloaded exclusive runner holds the host lane. Every applicable
-reason joins `why` with `; `. Failed reads hold the affected lanes; a failed overall verdict read publishes both
-held. One limit: a VM pause the launcher could not write exists only in its memory and is not observable here. The
-launcher still refuses boots, so a group sent to it waits until that pause ends rather than running into it.
+A quiet window holds the lanes its line names. Invalid quiet declarations, a future `ci-hold`, measured claims, the
+dialog watcher's drain, and fixed windows hold both lanes. The drain holds only the host while what its marker holds
+for is exactly the host-scoped quiet windows in force: those already hold the lanes they name, so a `lanes=host`
+window leaves the VM lane free. A dialog or desktop use in the marker, or a marker that does not match (unreadable, or
+the watcher's tick not yet caught up with a window's end), holds both as before. VM owner holds, `vm-pause`, its
+LaunchAgent's `CI_KIT_VM_PAUSE_WINDOWS`, and a missing/stopped VM launcher also hold the VM lane; an unloaded
+exclusive runner holds the host lane. Every applicable reason joins `why` with `; `. Failed reads hold the affected
+lanes; a failed overall verdict read publishes both held. One limit: a VM pause the launcher could not write exists
+only in its memory and is not observable here. The launcher still refuses boots, so a group sent to it waits until
+that pause ends rather than running into it.
 
 The publisher's LaunchAgent stores `CI_KIT_LANE_HELD_WINDOWS`, default `06:43-07:00` UTC: MAWS's 06:45–07:00 quiet
 window (O7, Decision Log 2026-11-02), with a two-minute lead margin. It uses the VM pause-window format:
@@ -1353,6 +1362,17 @@ That form is `<YYYY-MM-DDTHH:MMZ> <YYYY-MM-DDTHH:MMZ> <who, what for>`, with val
 start. It holds only during that span, not every day. Expired lines remain in the operator-owned file and silently
 hold nothing; remove them when convenient. Both forms can coexist and overlap.
 
+A line holds both lanes unless a `lanes=host` or `lanes=vm` token comes right after its endpoints (`lanes=host,vm`
+is the default spelled out):
+
+```text
+2026-11-14T20:00Z 2026-11-14T22:35Z lanes=host ux-wave GUI sitting
+```
+
+`lanes=host` drains the host runners and leaves the VM launcher booting guests, for a sitting on the host's screen
+that headless guests do not touch; `lanes=vm` keeps guests from booting and leaves the runners alone. Any other
+`lanes=` value, or a token with no who-and-what after it, makes the line malformed.
+
 Each malformed line holds nothing and is logged once in `mac-runner-hooks.log` (`quiet window: ignored
 malformed line`); `quiet-invalid.lines` beside it remembers which were reported. Other valid lines still apply.
 
@@ -1363,13 +1383,13 @@ purpose, appears on the marker's first line and in `dialog-watch … drain: hold
 Overlapping windows all appear there. Closing a dialog during a window keeps the hold; ending a window during an
 open dialog keeps it too. Removing the declaration releases its reason at the next read.
 
-Put the lead into the window itself: `23:00Z` leaves half an hour for jobs already running to finish before a
-`23:30Z` measurement. The drain is polled, not a timer interrupt at the start minute, and a busy job is always left to
-finish. Include the watcher's tick and the idle confirmation in that lead. The VM launcher reads the same schedule at
-admission and again before spawning, so it boots no guest in a window, independently of the watcher's tick. A guest
-already booted is left to finish; a dialog alone still permits the VM fallback as before. The existing VM-only pause
-windows and owner holds are unchanged. Local heavy-work launchers use `quiet_read` in the check above, so they do not
-have to wait for the drain marker either.
+Put the lead into the window itself: `23:00Z` leaves half an hour for jobs already running to finish before a `23:30Z`
+measurement. The drain is polled, not a timer interrupt at the start minute, and a busy job is always left to finish.
+Include the watcher's tick and the idle confirmation in that lead. The VM launcher reads the same schedule at
+admission and again before spawning, so it boots no guest in a window holding the VM lane, independently of the
+watcher's tick. A guest already booted is left to finish; a dialog alone still permits the VM fallback as before. The
+existing VM-only pause windows and owner holds are unchanged. Local heavy-work launchers use `quiet_read` in the check
+above, so they do not have to wait for the drain marker either.
 
 To see it holding, read `~/Library/Logs/ci-kit/runner-drained` and the `drain:` lines in `mac-runner-hooks.log`.
 `vm-lane.log` says `no boot: quiet window …`; each runner's `mac-runner[-<n>].out.log` says `runner-hold: …; waiting`
