@@ -8,7 +8,7 @@ const ID = 'a'.repeat(64);
 const OTHER = 'b'.repeat(64);
 const CHECKOUT = ['git', '-c', 'protocol.version=2', 'fetch', '--no-tags', '--prune', '--no-recurse-submodules', '--depth=1',
   'origin', '+0123abc:refs/remotes/origin/ci/x'];
-const HELPER = ['git-remote-https', 'origin', 'https://github.com/SSFSKIM/MAWS'];
+const HELPER = ['/usr/lib/git-core/git-remote-https', 'origin', 'https://github.com/SSFSKIM/MAWS']; // as git execs it
 
 // A process table the tests mutate between ticks. `start` is seconds since boot; io counters default to zero.
 function world() {
@@ -80,7 +80,7 @@ function world() {
       const p = procs.get(pid);
       if (p.survives) return;
       procs.delete(pid);
-      if (p.cmd[0].startsWith('git-remote-')) procs.delete(p.ppid);
+      if (p.cmd[0].includes('git-remote-')) procs.delete(p.ppid);
     },
     probeDisk: async () => 'a 4 KiB synced write to /var/lib/ci-kit/cache took 3 ms',
     log: (line) => calls.logs.push(line),
@@ -110,7 +110,7 @@ test('a still transfer is left alone inside the window, then its helper alone is
   assert.deepEqual(w.calls.kills, [[201, 'SIGKILL']], 'the helper, not the fetch that waits on it');
   const record = w.calls.logs.join('\n');
   assert.match(record, /git watchdog: pid 201 \(git-remote-https\) in ci-kit-gce-x: no io for \d+ s/);
-  assert.match(record, /cmd: git-remote-https origin https:\/\/github\.com\/SSFSKIM\/MAWS/);
+  assert.match(record, /cmd: \/usr\/lib\/git-core\/git-remote-https origin https:\/\/github\.com\/SSFSKIM\/MAWS/);
   assert.match(record, /state S, wchan do_poll/);
   assert.match(record, /rchar 0 .*read_bytes 0/);
   assert.match(record, /stack: wait_woken.*tcp_recvmsg/);
@@ -331,7 +331,7 @@ test('on Linux, a real git stalled on a silent server is recorded from /proc and
   assert.deepEqual(kills, [helper], logs.join('\n'));
   const record = logs.join('\n');
   assert.match(record, new RegExp(`git watchdog: pid ${helper} \\(git-remote-http\\) in c: no io for 180 s`));
-  assert.match(record, /cmd: git-remote-http \S+ http:\/\/127\.0\.0\.1:\d+\/r\.git/);
+  assert.match(record, /cmd: \S*git-remote-http \S+ http:\/\/127\.0\.0\.1:\d+\/r\.git/);
   assert.match(record, /age \d+ s, state S, wchan \S+, parent \d+/);
   assert.match(record, /io: rchar \d+ wchar \d+ syscr \d+ syscw \d+/);
   assert.match(record, new RegExp(`tcp: socket:\\[\\d+\\] ESTABLISHED 127\\.0\\.0\\.1:\\d+ -> 127\\.0\\.0\\.1:${server.address().port} `));
