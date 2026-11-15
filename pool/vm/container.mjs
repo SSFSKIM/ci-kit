@@ -6,6 +6,7 @@ import { availableParallelism } from 'node:os';
 import { workDir, IMAGE } from '../agent/docker.mjs';
 import { jobImage } from '../bake/manifest.mjs';
 import { jobRunArgs, METADATA_BLOCK } from './run.mjs';
+import { watchGitTransfers } from './git-watchdog.mjs';
 
 const sh = promisify(execFile);
 // Tags are normalized, so only an explicit repository label establishes which repository owns the image.
@@ -53,18 +54,23 @@ export function docker(args, { env = {}, capture = false, spawnProcess = spawn }
 
 // Detached creation lets the EC2 guest distinguish a real container start from a Docker CLI spawn failure.
 // Attach preserves the job's serial-console output; wait supplies its actual exit status even on attach errors.
-export async function runContainer({ name, repo, jit, smoke, onStarted, log = console.log, cpus = availableParallelism() },
-  { exec = sh, runDocker = docker } = {}) {
+// onGitRecord receives each git watchdog record as it is made (pool/vm/git-watchdog.mjs).
+export async function runContainer({ name, repo, jit, smoke, onStarted, onGitRecord, log = console.log, cpus = availableParallelism() },
+  { exec = sh, runDocker = docker, watch = watchGitTransfers } = {}) {
   const image = smoke ? IMAGE : await selectJobImage(repo, { exec, log });
   if (smoke) log(`job image ${image}`);
   const args = jobRunArgs({ name, cpus, smoke, image });
   args.splice(args.indexOf('--rm'), 1, '--detach');
   const started = await exec('docker', args, { env: { ...process.env, CI_KIT_JIT: jit ?? '' }, timeout: 60_000 });
   if (!started.stdout.trim()) throw new Error('container did not start');
-  await onStarted();
-  // The container can exit between run and attach. Logs still retains its complete output in that case.
-  const result = await runDocker(['logs', '--follow', name], { capture: Boolean(smoke) });
-  const waited = await exec('docker', ['wait', name], { timeout: 10_000 });
+  const stopWatching = smoke ? async () => {} : watch(name, { log, onRecord: onGitRecord });
+  let result, waited;
+  try {
+    await onStarted();
+    // The container can exit between run and attach. Logs still retains its complete output in that case.
+    result = await runDocker(['logs', '--follow', name], { capture: Boolean(smoke) });
+    waited = await exec('docker', ['wait', name], { timeout: 10_000 });
+  } finally { await stopWatching(); }
   const code = Number(waited.stdout.trim());
   if (!Number.isInteger(code) || waited.stdout.trim() === '') throw new Error('invalid container exit');
   return { code, out: result.out };

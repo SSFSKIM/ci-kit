@@ -70,6 +70,7 @@ for (const [scenario, repo, present, smoke, expected, label = repo] of [
         return { stdout: '7\n' };
       },
       runDocker: async args => { calls.push(['attach', args]); return { code: 0, out: 'output' }; },
+      watch: (name, options) => { calls.push(['watch', name, options.log]); return async () => calls.push(['unwatch', name]); },
     });
     assert.deepEqual(result, { code: 7, out: 'output' });
     const runIndex = calls.findIndex(c => c[0] === 'docker' && c[1][0] === 'run');
@@ -79,5 +80,25 @@ for (const [scenario, repo, present, smoke, expected, label = repo] of [
     assert.ok(calls.findIndex(c => c[0] === 'started') > runIndex);
     assert.ok(calls.findIndex(c => c[0] === 'attach') > runIndex);
     if (smoke || !repo) assert.ok(!calls.some(c => c[0] === 'docker' && c[1][0] === 'image'));
+    // A job container's git transfers are watched from its start until Docker reports its exit; a smoke one's never.
+    const watched = calls.filter(c => ['watch', 'unwatch'].includes(c[0]));
+    if (smoke) assert.deepEqual(watched, []);
+    else {
+      assert.deepEqual(watched, [['watch', 'job', calls.find(c => c[0] === 'watch')[2]], ['unwatch', 'job']]);
+      assert.ok(calls.findIndex(c => c[0] === 'watch') > runIndex);
+      assert.ok(calls.findIndex(c => c[0] === 'unwatch') > calls.findIndex(c => c[0] === 'docker' && c[1][0] === 'wait'));
+    }
   });
 }
+
+test('a job container\'s watchdog records reach the guest as they are made', async () => {
+  const handed = [];
+  const record = ['git watchdog: pid 1 (git-remote-https) in job: no io for 180 s', 'git watchdog 1: killed (SIGKILL)'];
+  await container.runContainer({ name: 'job', jit: 'j', cpus: 2, log: () => {}, onStarted: async () => {},
+    onGitRecord: (r) => handed.push(r) }, {
+    exec: async (cmd, args) => ({ stdout: args[0] === 'wait' ? '0\n' : 'id\n' }),
+    runDocker: async () => ({ code: 0, out: '' }),
+    watch: (name, { onRecord }) => { onRecord(record); return async () => {}; },
+  });
+  assert.deepEqual(handed, [record]);
+});

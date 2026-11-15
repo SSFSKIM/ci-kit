@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // A GCE job VM's one task (spec §3a VM lifecycle step 3), run at boot by ci-kit-gce-job.service: block the job
 // container from the metadata server (DNS stays open), then run the job container with the JIT config from this VM's
-// metadata, or, on the bake's smoke VM, the smoke check. The result goes to a guest attribute (ci-kit/job=exit:<code>,
+// metadata, or, on the bake's smoke VM, the smoke check. A job's stalled git transfers are ended (pool/vm/git-watchdog.mjs). The result goes to a guest attribute (ci-kit/job=exit:<code>,
 // or ci-kit/smoke=ok|failed:<check>); the unit powers the VM off when this exits, however it exits.
 // The JIT config reaches the container only through the docker CLI's environment, never a command line or a log.
 import { pathToFileURL } from 'node:url';
@@ -10,6 +10,7 @@ import { availableParallelism } from 'node:os';
 import { prepareContainer, docker, selectJobImage } from '../../pool/vm/container.mjs';
 import { jobRunArgs, vmMode, smokeVerdict } from './run.mjs';
 import { smokeJobImages } from '../../pool/bake/job-images.mjs';
+import { watchGitTransfers } from '../../pool/vm/git-watchdog.mjs';
 
 const MD = 'http://169.254.169.254/computeMetadata/v1/instance';
 const log = (...a) => console.log(`ci-kit gce job (up ${readFileSync('/proc/uptime', 'utf8').split(' ')[0]} s):`, ...a);
@@ -35,7 +36,7 @@ async function report(key, value) {
   }
 }
 
-export async function runGuest({ meta, log, report, prepareContainer, docker, smokeJobImages, selectJobImage, cpus }) {
+export async function runGuest({ meta, log, report, prepareContainer, docker, smokeJobImages, selectJobImage, watchGitTransfers, cpus }) {
   const name = await meta('name');
   const mode = vmMode({ jit: await meta('attributes/ci-kit-jit'), smoke: await meta('attributes/ci-kit-smoke') });
   log(`${name}: ${mode.kind}`);
@@ -61,13 +62,15 @@ export async function runGuest({ meta, log, report, prepareContainer, docker, sm
   }
   const jit = await meta('attributes/ci-kit-jit');
   const image = await selectJobImage(await meta('attributes/ci-kit-repo'), { log });
-  const { code } = await docker(jobRunArgs({ name, cpus, image }), { env: { CI_KIT_JIT: jit } });
+  const stopWatching = watchGitTransfers(name, { log });
+  const { code } = await docker(jobRunArgs({ name, cpus, image }), { env: { CI_KIT_JIT: jit } }).finally(stopWatching);
   log(`job container exited ${code}`);
   await report('job', `exit:${code}`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  runGuest({ meta, log, report, prepareContainer, docker, smokeJobImages, selectJobImage, cpus: availableParallelism() })
+  runGuest({ meta, log, report, prepareContainer, docker, smokeJobImages, selectJobImage, watchGitTransfers,
+    cpus: availableParallelism() })
     .catch(async (err) => {
       log(`failed: ${err.message}`);
       await report('job', 'failed:unit');

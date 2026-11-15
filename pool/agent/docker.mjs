@@ -21,6 +21,8 @@ export const CACHE_ENV = {
 // A git transfer that moves under 1000 bytes a second for 60 seconds fails instead of waiting out the job's limit:
 // a pool job's checkout fetch once sat silent for 30 minutes on one VM while its neighbours fetched in a second (MAWS
 // run 43412123856, 2026-11-13). actions/checkout retries a failed fetch, so the stall costs about a minute.
+// The stalls this bound cannot see (a trickle above it, git blocked on the disk) are the VM's git watchdog's
+// (pool/vm/git-watchdog.mjs).
 export const GIT_ENV = { GIT_HTTP_LOW_SPEED_LIMIT: '1000', GIT_HTTP_LOW_SPEED_TIME: '60' };
 
 export const workDir = (name) => `${CACHE}/work/${name}`;

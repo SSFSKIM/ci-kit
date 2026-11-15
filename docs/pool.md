@@ -39,6 +39,42 @@ records its `config` commit; a failed config fetch keeps the last good copy and 
 
 Inside a job container, size worker pools from `nproc` or Node's `os.availableParallelism()`.
 
+A stalled git transfer fails instead of waiting out the job's limit. Every job container gets
+`GIT_HTTP_LOW_SPEED_LIMIT=1000` and `GIT_HTTP_LOW_SPEED_TIME=60` (`pool/agent/docker.mjs`), so libcurl fails a
+transfer that moves under 1,000 B/s for a minute. libcurl misses two stalls, a trickle above that floor and a
+`git-remote-https` blocked because git is blocked writing to the disk, and a checkout fetch has still hung for a
+job's whole 30 minutes on an image carrying the bound. The VM's guest therefore also watches the job container's
+git processes from the host (`pool/vm/git-watchdog.mjs`, every 20 s). It acts on a transfer (`clone`, `fetch`, `pull`,
+`push`, `ls-remote`, `submodule`, or any git with a `git-remote-http(s)` helper) when either rule holds:
+- for 3 minutes, none of its git processes has read or written anything (`/proc/<pid>/io`) and none of their sockets
+  has received or had acknowledged a byte (tcp_info, from `ss` in the container's network namespace: curl's `recv`
+  is in no io counter);
+- it is `actions/checkout`'s shallow fetch (`git -c protocol.version=2 fetch … --depth=<n> origin …`) and has run
+  for 5 minutes, however its counters move.
+
+It then kills the transfer's helper, or its git when it has none, and checkout's own retry fetches again. A
+transfer waiting on a hook, a credential helper or ssh is left alone under both rules, as is any git that is not a
+transfer and every process that is not git. Each kill logs one record, a dozen lines starting `git watchdog`, to
+the VM's console, and the record outlives the VM:
+- **GCE:** the `ci-kit-serial-console` exclusion drops the job VMs' serial lines from Cloud Logging, all but these
+  (see [GCE](#gce)). Each line arrives twice, once prefixed with the uptime in brackets and once with rsyslog's
+  timestamp; the filter below keeps the bracketed copy:
+  ```
+  gcloud logging read 'logName="projects/ssfskim-ci-kit/logs/serialconsole.googleapis.com%2Fserial_port_1_output" AND textPayload:"git watchdog" AND textPayload=~"^\["' \
+    --project=ssfskim-ci-kit --freshness=7d --order=asc --format='value(timestamp,labels."compute.googleapis.com/resource_name",textPayload)'
+  ```
+- **EC2:** the console keeps only its recent tail, and the job's own output follows a record into it. So the guest
+  saves the first four records, up to 4 KiB each, in its state as they are made, and every exit report carries them
+  as `git_watchdog`: `exit:<code>`, `failed:container`, and the deadline finalizer's `failed:deadline`. The report goes
+  to the account's report bucket, where it is kept 7 days:
+  `aws s3 cp s3://ci-kit-ec2-reports-290475840169/reports/<alloc>/exit.json - --profile ci-kit-ops | jq -r '.git_watchdog[]'`.
+  `<alloc>` is the runner name's suffix (`ci-kit-ec2-<alloc>`).
+
+The record holds the process's command line (credentials masked), age, state, wchan and kernel stack; what moved
+while it was watched, with rates; its io counters and fds; each socket's TCP state and queues with ss's `-i` line;
+a timed synced write to the cache disk; and the VM's io pressure. A trickle shows as bytes still moving; a disk stall as a git in state `D` and a
+helper's socket with a full receive queue.
+
 ## Credentials
 
 The GitHub App `ci-kit-runners` (id 5337915) has separate private keys in GitHub repository secrets and GCP
@@ -767,7 +803,10 @@ The guest agent, not cloud-init, serves the metadata and guest attributes. snapd
 seeded itself on the first boot of every disk made from the image) and pinned out.
 
 `gce/deploy.sh base` turns on the project's serial port logging, and since 2026-11-09 it also excludes those lines
-from Cloud Logging's `_Default` sink (exclusion `ci-kit-serial-console`): they cost about $70 a month. To read a
+from Cloud Logging's `_Default` sink (exclusion `ci-kit-serial-console`): they cost about $70 a month. The exclusion
+keeps the job VMs' git watchdog records (lines carrying `git watchdog`: a dozen per killed transfer, none otherwise;
+reading them is under [Using the pool from a repo](#using-the-pool-from-a-repo)), and base converges an older
+filter to it. To read a
 deleted VM's boot, remove the exclusion
 (`gcloud logging sinks update _Default --remove-exclusions=ci-kit-serial-console --project=ssfskim-ci-kit`), rerun
 the job, then read it with

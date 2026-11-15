@@ -10,6 +10,7 @@ import { smokeVerdict } from '../../pool/vm/run.mjs';
 import { formatDiagnostic } from './diagnostics.mjs';
 import { verifyRepoResults } from '../../pool/bake/manifest.mjs';
 import { smokeJobImages } from '../../pool/bake/job-images.mjs';
+import { reportRecords, REPORT_RECORDS } from '../../pool/vm/git-stall-record.mjs';
 
 const sh = promisify(execFile);
 const STATE = '/run/ci-kit-ec2/state.json';
@@ -85,6 +86,9 @@ function validate(data) {
 async function upload(deps, state, event, fields = {}) {
   const report = { kind: event === 'exit' ? 'terminal' : 'telemetry', alloc: state.alloc,
     event, at: stamp(deps), timings: { ...state.timings }, ...fields };
+  // The console keeps only its recent tail and the job's output follows a record into it: the exit report keeps the
+  // git watchdog's records, however the guest ends (saved as they arrive, so the deadline finalizer has them too).
+  if (event === 'exit' && state.gitWatchdog?.length) report.git_watchdog = state.gitWatchdog;
   if (event === 'exit') {
     state.terminal = report;
     try { await deps.saveState(state); } catch { deps.log('terminal state write failed'); }
@@ -103,6 +107,7 @@ async function upload(deps, state, event, fields = {}) {
 export async function runGuest(deps) {
   let stage = 'userdata', state = { timings: { guest_start: stamp(deps) } }, stopNotice;
   let value, smoke, diagnostic;
+  const gitRecords = [];
   try {
     const raw = await deps.readUserData();
     const data = JSON.parse(raw);
@@ -125,6 +130,12 @@ export async function runGuest(deps) {
     stage = 'container';
     const result = await deps.runContainer({ name: `ci-kit-ec2-${data.alloc}`, repo: data.repo, jit: data.jit, log: deps.log,
       ...(data.smoke ? { smoke: { expectCpus: data.smoke } } : {}),
+      onGitRecord: async record => {
+        if (gitRecords.length >= REPORT_RECORDS) return;
+        gitRecords.push(record);
+        state.gitWatchdog = reportRecords(gitRecords);
+        try { await deps.saveState(state); } catch { deps.log('git watchdog state write failed'); }
+      },
       onStarted: async () => {
         state.timings.container_start = stamp(deps);
         await deps.saveState(state);

@@ -221,3 +221,20 @@ test('alert: run again, it creates nothing', () => {
   assert.equal(again.status, 0, again.stderr);
   assert.deepEqual(again.calls.filter((c) => c.includes('create')), []);
 });
+
+// base: the job VMs' serial lines are excluded from Cloud Logging, but for the git watchdog's records.
+const SERIAL = '(log_id("serialconsole.googleapis.com/serial_port_1_output") OR log_id("serialconsole.googleapis.com/serial_port_debug_output"))';
+const KEPT = `${SERIAL} AND NOT textPayload:"git watchdog"`;
+test('base: the serial console exclusion is added, or its filter converged, to keep the git watchdog\'s records', () => {
+  const sinkUpdates = (calls) => calls.filter((c) => c.slice(0, 4).join(' ') === 'logging sinks update _Default');
+  const fresh = deploy('base', {});
+  assert.equal(fresh.status, 0, fresh.stderr);
+  assert.deepEqual(fresh.state.exclusions, [{ name: 'ci-kit-serial-console', filter: KEPT }]);
+  const old = deploy('base', { exclusions: [{ name: 'other', filter: 'x' }, { name: 'ci-kit-serial-console', filter: SERIAL }] });
+  assert.equal(old.status, 0, old.stderr);
+  assert.deepEqual(old.state.exclusions, [{ name: 'other', filter: 'x' }, { name: 'ci-kit-serial-console', filter: KEPT }]);
+  assert.ok(sinkUpdates(old.calls)[0].includes(`--update-exclusion=name=ci-kit-serial-console,filter=${KEPT}`));
+  const again = deploy('base', old.state);
+  assert.equal(again.status, 0, again.stderr);
+  assert.deepEqual(sinkUpdates(again.calls), [], 'a converged exclusion is left alone');
+});

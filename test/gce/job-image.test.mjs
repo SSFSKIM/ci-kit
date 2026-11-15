@@ -19,6 +19,10 @@ function fixture({ repo, present = true, smoke = null, jit = 'secret-jit', label
       if (!present) throw new Error('No such image');
       return { stdout: `${label}\n` };
     } }),
+    watchGitTransfers: (name, options) => {
+      calls.push(['watch', name, options.log]);
+      return async () => calls.push(['unwatch', name]);
+    },
     docker: async (args, options) => {
       calls.push(['run', args, options]);
       return { code: 0, out: 'ci-kit smoke: ok\n' };
@@ -45,8 +49,19 @@ for (const [scenario, repo, present, expected, label = repo] of [
     assert.deepEqual(options.env, { CI_KIT_JIT: 'secret-jit' });
     assert.ok(!args.includes('secret-jit'));
     assert.deepEqual(f.calls.at(-1), ['report', 'job', 'exit:0']);
+    // The job container's git transfers are watched while it runs, and only then.
+    const ops = f.calls.map(c => c[0]).filter(op => ['watch', 'run', 'unwatch'].includes(op));
+    assert.deepEqual(ops, ['watch', 'run', 'unwatch']);
+    assert.deepEqual(f.calls.find(c => c[0] === 'watch'), ['watch', 'ci-kit-gce-test', f.deps.log]);
   });
 }
+
+test('GCE stops watching the job container even when Docker fails', async () => {
+  const f = fixture({ repo: 'SSFSKIM/MAWS' });
+  f.deps.docker = async () => { throw new Error('docker gone'); };
+  await assert.rejects(runGuest(f.deps), /docker gone/);
+  assert.deepEqual(f.calls.filter(c => c[0] === 'unwatch'), [['unwatch', 'ci-kit-gce-test']]);
+});
 
 test('GCE smoke stays on the base and checks every baked repository image separately', async () => {
   const f = fixture({ repo: 'SSFSKIM/MAWS', smoke: '4', jit: null });
@@ -55,4 +70,5 @@ test('GCE smoke stays on the base and checks every baked repository image separa
   assert.equal(f.calls.find(c => c[0] === 'run')[1].at(-1), 'ci-kit-runner:latest');
   assert.ok(!f.calls.some(c => c[0] === 'docker'));
   assert.deepEqual(f.calls.at(-1), ['report', 'smoke', 'ok']);
+  assert.ok(!f.calls.some(c => c[0] === 'watch'));
 });
