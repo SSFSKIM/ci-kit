@@ -1,8 +1,8 @@
 // The pool's git watchdog (pool/vm/git-watchdog.mjs): a fake /proc and clock drive the stall decisions.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { gitWatchdog, STILL_MS, CHECKOUT_FETCH_WALL_MS, TICK_MS } from '../../pool/vm/git-watchdog.mjs';
-import { redactArgs, probeDisk, reportRecords, REPORT_RECORDS, REPORT_RECORD_BYTES } from '../../pool/vm/git-stall-record.mjs';
+import { gitWatchdog, STILL_MS, CHECKOUT_FETCH_WALL_MS, TICK_MS, readCmdline, parseSocketBytes } from '../../pool/vm/git-watchdog.mjs';
+import { redactArgs, probeDisk, boundedChild, reportRecords, REPORT_RECORDS, REPORT_RECORD_BYTES } from '../../pool/vm/git-stall-record.mjs';
 
 const ID = 'a'.repeat(64);
 const OTHER = 'b'.repeat(64);
@@ -15,6 +15,7 @@ function world() {
   let nowMs = 1_000_000;
   const procs = new Map();
   const calls = { logs: [], kills: [], exec: [], reads: 0 };
+  const net = new Map(); // socket inode → bytes received and acknowledged (tcp_info), as ss -tine reports them
   const add = (pid, p) => {
     procs.set(pid, { ppid: 1, state: 'S', start: nowMs / 1000 - 1, cgroup: ID, fds: {}, wchan: 'do_poll', ...p,
       io: { rchar: 0, wchar: 0, syscr: 0, syscw: 0, read_bytes: 0, write_bytes: 0, ...p.io } });
@@ -63,9 +64,18 @@ function world() {
       if (!target) throw missing(path);
       return target;
     },
+    readCmdline: async (pid) => {
+      const p = procs.get(pid);
+      if (!p) throw missing(`/proc/${pid}/cmdline`);
+      return p.cmd.join('\0') + '\0';
+    },
     exec: async (cmd, args) => {
       calls.exec.push([cmd, ...args]);
       if (cmd === 'docker') return { stdout: `${ID}\n` };
+      if (cmd === 'nsenter' && args.at(-1) === '-tine') {
+        return { stdout: 'State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n' + [...net].map(([inode, bytes]) =>
+          `ESTAB 0 0 10.0.0.2:41394 140.92.112.3:443 uid:1001 ino:${inode} sk:1 <->\n\t cubic bytes_acked:1 bytes_received:${bytes - 1} lastrcv:1`).join('\n') };
+      }
       if (cmd === 'nsenter') {
         return { stdout: 'State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n'
           + `ESTAB 0 0 10.0.0.2:41394 140.92.112.3:443 users:(("git-remote-http",pid=${args[1]},fd=5))\n`
@@ -86,7 +96,7 @@ function world() {
     log: (line) => calls.logs.push(line),
   };
   const advance = (ms) => { nowMs += ms; };
-  return { procs, calls, deps, add, advance, now: () => nowMs };
+  return { procs, calls, deps, add, advance, net, now: () => nowMs };
 }
 
 async function run(w, watchdog, ms, between = () => {}) {
@@ -97,6 +107,7 @@ const fetchTree = (w, { cmd = CHECKOUT, io } = {}) => {
   w.add(100, { cmd: ['/runner/externals/node20/bin/node', 'checkout'], ppid: 1 });
   w.add(200, { cmd, ppid: 100 });
   w.add(201, { cmd: HELPER, ppid: 200, io, fds: { 0: 'pipe:[11]', 1: 'pipe:[12]', 5: 'socket:[9001]' } });
+  w.net.set('9001', 5120);
 };
 
 test('a still transfer is left alone inside the window, then its helper alone is killed with one record', async () => {
@@ -110,7 +121,7 @@ test('a still transfer is left alone inside the window, then its helper alone is
   await run(w, watchdog, 2 * TICK_MS);
   assert.deepEqual(w.calls.kills, [[201, 'SIGKILL']], 'the helper, not the fetch that waits on it');
   const record = w.calls.logs.join('\n');
-  assert.match(record, /git watchdog: pid 201 \(git-remote-https\) in ci-kit-gce-x: no io for \d+ s/);
+  assert.match(record, /git watchdog: pid 201 \(git-remote-https\) in ci-kit-gce-x: no io or socket bytes for \d+ s/);
   assert.match(record, /cmd: \/usr\/lib\/git-core\/git-remote-https origin https:\/\/github\.com\/SSFSKIM\/MAWS/);
   assert.match(record, /state S, wchan do_poll/);
   assert.match(record, /rchar 0 .*read_bytes 0/);
@@ -120,12 +131,12 @@ test('a still transfer is left alone inside the window, then its helper alone is
   assert.match(record, /ss: ESTAB 0 0 10\.0\.0\.2:41394 140\.92\.112\.3:443 .*lastrcv:181000/);
   assert.doesNotMatch(record, /sshd/, 'only the process\'s own sockets');
   assert.match(record, /disk: a 4 KiB synced write .* took 3 ms; io pressure some avg10=0\.00/);
-  assert.match(record, /group: 200 git fetch \(S do_poll, no io for \d+ s\), 201 git-remote-https \(S do_poll, no io for \d+ s\)/);
+  assert.match(record, /group: 200 git fetch \(S do_poll, idle \d+ s\), 201 git-remote-https \(S do_poll, idle \d+ s\)/);
   assert.match(record, /killed \(SIGKILL\)/);
   assert.ok(w.calls.logs.every((line) => line.startsWith('git watchdog')), 'every line greppable');
   assert.deepEqual(handed, [w.calls.logs], 'the whole record, once, for a report');
   assert.ok(w.calls.logs.length <= 16, 'bounded');
-  assert.deepEqual(w.calls.exec.filter(([cmd]) => cmd === 'nsenter'), [['nsenter', '-t', '201', '-n', 'ss', '-tnpi']]);
+  assert.deepEqual(w.calls.exec.filter((c) => c.at(-1) === '-tnpi'), [['nsenter', '-t', '201', '-n', 'ss', '-tnpi']]);
 });
 
 test('a helper that survives its kill is followed by its fetch, and neither is killed or recorded twice', async () => {
@@ -152,7 +163,7 @@ test('a transfer whose counters move is never killed, however long it runs, and 
   await run(w, watchdog, 30 * 60_000, () => { w.procs.get(201).io.rchar += 50_000; });
   assert.deepEqual(w.calls.kills, []);
   assert.deepEqual(w.calls.logs, []);
-  assert.deepEqual(w.calls.exec, [['docker', 'inspect', '--format', '{{.Id}}', 'c']], 'the container is looked up once');
+  assert.deepEqual(w.calls.exec, [['docker', 'inspect', '--format', '{{.Id}}', 'c']], 'the container is looked up once, its sockets never');
 });
 
 test('a group is still only when every member is: a helper idle while its fetch checks connectivity is not killed', async () => {
@@ -199,7 +210,7 @@ test('a fetch still after its transfer (no helper left) is killed itself', async
   const watchdog = gitWatchdog('c', w.deps);
   await run(w, watchdog, STILL_MS + TICK_MS);
   assert.deepEqual(w.calls.kills, [[200, 'SIGKILL']]);
-  assert.match(w.calls.logs.join('\n'), /210 git index-pack \(D balance_dirty_pages, no io for \d+ s\)/);
+  assert.match(w.calls.logs.join('\n'), /210 git index-pack \(D balance_dirty_pages, idle \d+ s\)/);
 });
 
 test('never outside the job container, never a non-git process, never an idle non-transfer git or one waiting on a hook', async () => {
@@ -273,16 +284,98 @@ test('an exit report carries the first records, each cut short, far under the la
   assert.deepEqual(reportRecords([['a', 'b']]), ['a\nb']);
 });
 
+test('a helper whose socket keeps receiving is not idle, though no io counter moves (recv(2) is not in rchar)', async () => {
+  const w = world();
+  fetchTree(w, { cmd: ['git', 'fetch', 'origin'] });
+  const watchdog = gitWatchdog('c', w.deps);
+  await run(w, watchdog, 3 * STILL_MS, () => { w.net.set('9001', w.net.get('9001') + 64 * 1024); });
+  assert.deepEqual(w.calls.kills, []);
+  w.calls.exec.length = 0;
+  await run(w, watchdog, STILL_MS + 2 * TICK_MS); // then the bytes stop: idle from here
+  assert.deepEqual(w.calls.kills, [[201, 'SIGKILL']]);
+  const reads = w.calls.exec.filter((c) => c.at(-1) === '-tine').length;
+  assert.ok(reads > 0 && reads <= (STILL_MS + 2 * TICK_MS) / TICK_MS, 'at most one socket read a tick');
+});
+
+test('without a socket reading an idle transfer is left running, and that is said once', async () => {
+  const w = world();
+  fetchTree(w, { cmd: ['git', 'fetch', 'origin'] });
+  const exec = w.deps.exec;
+  w.deps.exec = async (cmd, args, options) => {
+    if (args?.at(-1) === '-tine') throw new Error('nsenter: permission denied');
+    return exec(cmd, args, options);
+  };
+  const watchdog = gitWatchdog('c', w.deps);
+  await run(w, watchdog, 2 * STILL_MS);
+  assert.deepEqual(w.calls.kills, []);
+  assert.deepEqual(w.calls.logs, ['git watchdog: socket progress unavailable, so idle transfers are left running: nsenter: permission denied']);
+});
+
+test('a checkout fetch waiting on ssh or a credential helper is left alone, past the wall bound too', async () => {
+  const w = world();
+  fetchTree(w);
+  w.add(250, { cmd: ['ssh', 'git@github.com'], ppid: 200 });
+  const watchdog = gitWatchdog('c', w.deps);
+  await run(w, watchdog, 2 * CHECKOUT_FETCH_WALL_MS);
+  assert.deepEqual(w.calls.kills, []);
+});
+
+test('a git whose command line cannot be read is not judged, and a hung check does not hold stop', async () => {
+  const w = world();
+  fetchTree(w);
+  w.deps.readCmdline = async (pid) => { throw new Error(`no answer for ${pid}`); };
+  const watchdog = gitWatchdog('c', w.deps);
+  await run(w, watchdog, 2 * STILL_MS);
+  assert.deepEqual(w.calls.kills, []);
+  const hung = gitWatchdog('c', { ...world().deps, readdir: () => new Promise(() => {}), stopWaitMs: 50 });
+  hung.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  const started = Date.now();
+  await hung.stop();
+  assert.ok(Date.now() - started < 1000);
+});
+
+test('ss -tine\'s sockets: inode to bytes received plus acknowledged', () => {
+  assert.deepEqual(parseSocketBytes('State Recv-Q Send-Q Local Peer\n' +
+    'ESTAB 0 0 10.0.0.2:1 1.2.3.4:443 uid:1001 ino:9001 sk:1 <->\n\t cubic bytes_sent:90 bytes_acked:91 bytes_received:5120 lastrcv:3\n' +
+    'TIME-WAIT 0 0 10.0.0.2:2 1.2.3.4:443 timer:(timewait,1min) ino:0 sk:2\n'), new Map([['9001', 5211]]));
+});
+
+test('the disk probe never writes through a link a job planted in the cache, and leaves no file', async (t) => {
+  const { mkdtemp, writeFile, readFile, readdir, symlink, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const dir = await mkdtemp(`${tmpdir()}/ci-kit-probe-`);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(`${dir}/target`, 'host file');
+  await symlink(`${dir}/target`, `${dir}/planted`);
+  assert.match(await probeDisk(dir, { file: 'planted' }), /failed \(EEXIST\)/);
+  assert.equal(await readFile(`${dir}/target`, 'utf8'), 'host file');
+  assert.match(await probeDisk(dir), /a 4 KiB synced write to .* took \d+ ms/);
+  assert.deepEqual((await readdir(dir)).sort(), ['planted', 'target']);
+});
+
+test('a bounded child is given up on when it does not answer', async () => {
+  const started = Date.now();
+  assert.equal(await boundedChild(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], 100), null);
+  assert.ok(Date.now() - started < 2000);
+  assert.deepEqual(await boundedChild(process.execPath, ['-e', 'process.stdout.write("a\\0b")'], 5000), { code: 0, stdout: 'a\0b' });
+});
+
 test('credentials on a command line never reach the log', () => {
   assert.deepEqual(redactArgs(['git', 'clone', 'https://x-access-token:ghs_secret@github.com/o/r', '-c',
     'http.https://github.com/.extraheader=AUTHORIZATION: basic c2VjcmV0', '-chttp.extraheader=Bearer t']), ['git', 'clone',
     'https://***@github.com/o/r', '-c', 'http.https://github.com/.extraheader=***', '-chttp.extraheader=***']);
+  assert.deepEqual(redactArgs(['git', 'clone', '--config', 'http.extraHeader=AUTHORIZATION: bearer t',
+    '--config=http.https://github.com/.extraheader=AUTHORIZATION: basic c2VjcmV0', '--config', 'core.autocrlf=false', '--cached']),
+  ['git', 'clone', '--config', 'http.extraHeader=***', '--config=http.https://github.com/.extraheader=***', '--config',
+    'core.autocrlf=false', '--cached']);
 });
 
 // The real /proc: a git whose server accepted the connection and never answered, found, recorded and killed.
 test('on Linux, a real git stalled on a silent server is recorded from /proc and its helper killed', { skip: process.platform !== 'linux', timeout: 30_000 }, async (t) => {
   const { createServer } = await import('node:net');
-  const { spawn } = await import('node:child_process');
+  const { spawn, execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
   const { readFile, readdir, readlink, mkdtemp, rm } = await import('node:fs/promises');
   const { readFileSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
@@ -317,7 +410,7 @@ test('on Linux, a real git stalled on a silent server is recorded from /proc and
   assert.ok(helper && sockets.length, 'git connected to the silent server');
   await new Promise((resolve) => setTimeout(resolve, 300)); // the request written, curl waiting in poll
 
-  let offset = 0;
+  let offset = 0, tine = '';
   const logs = [], kills = [];
   const watchdog = gitWatchdog('c', {
     now: () => Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0]) * 1000 + offset,
@@ -327,10 +420,16 @@ test('on Linux, a real git stalled on a silent server is recorded from /proc and
       const m = path.match(/^\/proc\/(\d+)\/cgroup$/);
       return m && tree.has(Number(m[1])) ? `${text}0::/system.slice/docker-${ID}.scope\n` : text;
     },
-    readdir, readlink,
+    readdir, readlink, readCmdline,
+    // Not root, so no nsenter: the test's processes share its network namespace, and ss reads it directly.
     exec: async (cmd, args) => {
       if (cmd === 'docker') return { stdout: ID };
-      throw new Error('no nsenter without root');
+      if (cmd === 'nsenter') {
+        const result = await promisify(execFile)('ss', args.slice(4));
+        if (args.at(-1) === '-tine') tine = result.stdout;
+        return result;
+      }
+      throw new Error(`unexpected ${cmd}`);
     },
     kill: (pid, signal) => { kills.push(pid); process.kill(pid, signal); },
     probeDisk: () => probeDisk(dir),
@@ -341,15 +440,18 @@ test('on Linux, a real git stalled on a silent server is recorded from /proc and
   await watchdog.tick();
   assert.deepEqual(kills, [helper], logs.join('\n'));
   const record = logs.join('\n');
-  assert.match(record, new RegExp(`git watchdog: pid ${helper} \\(git-remote-http\\) in c: no io for 180 s`));
+  assert.match(record, new RegExp(`git watchdog: pid ${helper} \\(git-remote-http\\) in c: no io or socket bytes for 180 s`));
   assert.match(record, /cmd: \S*git-remote-http \S+ http:\/\/127\.0\.0\.1:\d+\/r\.git/);
   assert.match(record, /age \d+ s, state S, wchan \S+, parent \d+/);
   assert.match(record, /io: rchar \d+ wchar \d+ syscr \d+ syscw \d+/);
   assert.match(record, new RegExp(`tcp: socket:\\[\\d+\\] ESTABLISHED 127\\.0\\.0\\.1:\\d+ -> 127\\.0\\.0\\.1:${server.address().port} `));
   assert.match(record, /disk: a 4 KiB synced write to .* took \d+ ms/);
-  assert.match(record, new RegExp(`group: .*${git.pid} git ls-remote \\(S \\S+, no io for 180 s\\)`));
-  assert.match(record, new RegExp(`group: .*${helper} git-remote-http \\(S \\S+, no io for 180 s\\)`));
+  assert.match(record, new RegExp(`group: .*${git.pid} git ls-remote \\(S \\S+, idle 180 s\\)`));
+  assert.match(record, new RegExp(`group: .*${helper} git-remote-http \\(S \\S+, idle 180 s\\)`));
   assert.match(record, /killed \(SIGKILL\)/);
+  // The socket reading the idle decision rested on was real ss output, and it named the helper's socket.
+  const inode = record.match(/tcp: socket:\[(\d+)\]/)[1];
+  assert.ok(parseSocketBytes(tine).has(inode), `ss -tine named the helper's socket ${inode}:\n${tine}`);
   const { code } = await exited;
   assert.notEqual(code, 0, 'the git fails at once, as a dropped connection would fail it');
   await watchdog.stop();

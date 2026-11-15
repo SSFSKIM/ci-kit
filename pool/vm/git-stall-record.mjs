@@ -2,7 +2,7 @@
 // trickled (bytes still arriving, slowly), was blocked on the disk (git in D state, the socket's receive queue full),
 // or stalled some other way. A dozen lines at most, each prefixed so the serial console can be grepped for them.
 import { spawn } from 'node:child_process';
-import { performance } from 'node:perf_hooks';
+import { randomBytes } from 'node:crypto';
 
 const MAX_FDS = 24, MAX_FRAMES = 10, MAX_SOCKETS = 3, MAX_SS = 2, MAX_GROUP = 8, MAX_LINE = 500;
 const TCP_STATES = ['', 'ESTABLISHED', 'SYN_SENT', 'SYN_RECV', 'FIN_WAIT1', 'FIN_WAIT2', 'TIME_WAIT', 'CLOSE',
@@ -12,14 +12,35 @@ const DISK_PROBE_MS = 10_000;
 const seconds = (ms) => Math.round(ms / 1000);
 const clip = (text) => (text.length > MAX_LINE ? `${text.slice(0, MAX_LINE)}…` : text);
 
+// URL credentials, and the value of any credential-like config given as -c k=v, -ck=v, --config k=v or --config=k=v.
 export function redactArgs(argv) {
   return argv.map((arg, i) => {
     let out = arg.replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi, '$1***@');
-    const config = argv[i - 1] === '-c' ? out : /^-c./.test(out) ? out.slice(2) : null;
+    const config = ['-c', '--config'].includes(argv[i - 1]) ? out
+      : out.startsWith('--config=') ? out.slice('--config='.length)
+        : /^-c[^-]/.test(out) ? out.slice(2) : null;
     if (config !== null && /^[^=]*(extraheader|auth|token|pass|secret|cred)[^=]*=/i.test(config)) {
-      out = out.slice(0, out.indexOf('=') + 1) + '***';
+      out = out.slice(0, out.length - config.length) + config.slice(0, config.indexOf('=') + 1) + '***';
     }
     return out;
+  });
+}
+
+// Runs a child and stops waiting for it after `ms`: a child stuck in an uninterruptible wait (a hung disk, another
+// process's held mmap lock) is left behind instead of holding the watchdog. { code, stdout }, or null on timeout.
+export function boundedChild(cmd, args, ms) {
+  return new Promise((resolve) => {
+    let stdout = '';
+    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      child.stdout.destroy();
+      child.unref();
+      resolve(null);
+    }, ms);
+    child.stdout.on('data', (data) => { stdout += data; });
+    child.on('error', () => { clearTimeout(timer); resolve({ code: -1, stdout: '' }); });
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout }); });
   });
 }
 
@@ -91,7 +112,7 @@ export async function stallRecord({ container, target, group, reason, at }, { re
     .map((l) => l.replace(/^\[<[^>]*>\]\s*/, '')).slice(0, MAX_FRAMES).join(' < '));
   const pressure = await attempt(async () => (await readFile('/proc/pressure/io')).trim().split('\n').join(', '));
   const members = await Promise.all(group.slice(0, MAX_GROUP).map(async (m) =>
-    `${m.pid} ${m.label} (${m.state} ${await wchan(m.pid)}, no io for ${seconds(at - m.track.changedAt)} s)`));
+    `${m.pid} ${m.label} (${m.state} ${await wchan(m.pid)}, idle ${seconds(at - m.track.changedAt)} s)`));
   const prefix = `git watchdog ${pid}:`;
   return [
     `git watchdog: pid ${pid} (${target.name}) in ${container}: ${reason}`,
@@ -108,25 +129,28 @@ export async function stallRecord({ container, target, group, reason, at }, { re
   ].map(clip);
 }
 
-// Whether the cache disk (the job's work directory is on it) takes a 4 KiB synchronous write. A hung disk would hang
-// the probe too, so it runs as a child the watchdog stops waiting for, never in this process's thread pool.
-export function probeDisk(dir) {
-  const file = `${dir}/.ci-kit-git-watchdog-probe`;
-  const started = performance.now();
-  return new Promise((resolve) => {
-    const child = spawn('sh', ['-c', 'dd if=/dev/zero of="$1" bs=4096 count=1 oflag=dsync 2>/dev/null && rm -f "$1"', 'sh', file],
-      { stdio: 'ignore' });
-    const timer = setTimeout(() => {
-      child.unref();
-      resolve(`a 4 KiB synced write to ${dir} had not finished after ${DISK_PROBE_MS / 1000} s`);
-    }, DISK_PROBE_MS);
-    child.on('error', (error) => { clearTimeout(timer); resolve(`probe failed: ${error.message}`); });
-    child.on('exit', (code) => {
-      clearTimeout(timer);
-      resolve(code === 0 ? `a 4 KiB synced write to ${dir} took ${Math.round(performance.now() - started)} ms`
-        : `a 4 KiB synced write to ${dir} failed (exit ${code})`);
-    });
-  });
+// Whether the cache disk (the job's work directory is on it) takes a 4 KiB synchronous write. The directory is the
+// job's to write too, so the probe is created exclusively under a random name and never through a link the job could
+// plant there (O_CREAT|O_EXCL|O_NOFOLLOW): host root must not write where a job points it. A hung disk would hang the
+// probe too, so it runs as a child the watchdog stops waiting for, never in this process's thread pool.
+const PROBE = `
+const fs = require('fs');
+const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
+const file = process.argv[1];
+try {
+  const started = process.hrtime.bigint();
+  const fd = fs.openSync(file, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600);
+  try { fs.writeSync(fd, Buffer.alloc(4096)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); fs.unlinkSync(file); }
+  process.stdout.write(String(Math.round(Number(process.hrtime.bigint() - started) / 1e6)));
+} catch (error) {
+  process.stdout.write(error.code ?? 'error');
+  process.exitCode = 1;
+}`;
+export async function probeDisk(dir, { file = `.ci-kit-git-watchdog-probe-${randomBytes(8).toString('hex')}` } = {}) {
+  const result = await boundedChild(process.execPath, ['-e', PROBE, `${dir}/${file}`], DISK_PROBE_MS);
+  const write = `a 4 KiB synced write to ${dir}`;
+  if (!result) return `${write} had not finished after ${DISK_PROBE_MS / 1000} s`;
+  return result.code === 0 ? `${write} took ${result.stdout} ms` : `${write} failed (${result.stdout || `exit ${result.code}`})`;
 }
 
 // The records an exit report carries: the first few, each cut to a few KiB, so the report stays far below the 64 KiB

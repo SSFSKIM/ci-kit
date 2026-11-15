@@ -397,13 +397,44 @@ for (const repo of ['SSFSKIM/MAWS', undefined]) {
   });
 }
 
-test('the exit report carries the git watchdog\'s records, which the console would not keep', async () => {
-  const records = ['git watchdog: pid 1 (git-remote-https) in ci-kit-ec2-abc123: no io for 180 s\ngit watchdog 1: killed (SIGKILL)'];
-  const f = fixture({ runContainer: async options => { await options.onStarted(); return { code: 0, out: '', gitWatchdog: records }; } });
+const RECORD = ['git watchdog: pid 1 (git-remote-https) in ci-kit-ec2-abc123: no io for 180 s', 'git watchdog 1: killed (SIGKILL)'];
+test('the git watchdog\'s records are saved as they arrive and reach the exit report, however the container ends', async () => {
+  const saved = [];
+  const f = fixture({ runContainer: async options => { await options.onStarted(); await options.onGitRecord(RECORD); return { code: 0, out: '' }; },
+    saveState: async state => saved.push(JSON.parse(JSON.stringify(state))) });
   await runGuest(f.deps);
-  assert.deepEqual(f.reports.at(-1).git_watchdog, records);
+  assert.deepEqual(f.reports.at(-1).git_watchdog, [RECORD.join('\n')]);
   assert.equal(f.reports.at(-1).value, 'exit:0');
+  assert.ok(saved.some(state => state.gitWatchdog?.length === 1 && !state.terminal), 'saved as it arrived, before the end');
+  // docker wait rejected: the failed:container report keeps the record.
+  const failed = fixture({ runContainer: async options => { await options.onStarted(); await options.onGitRecord(RECORD); throw new Error('wait'); } });
+  await runGuest(failed.deps);
+  assert.equal(failed.reports.at(-1).value, 'failed:container');
+  assert.deepEqual(failed.reports.at(-1).git_watchdog, [RECORD.join('\n')]);
+  // No record: no field.
   const quiet = fixture();
   await runGuest(quiet.deps);
   assert.ok(!('git_watchdog' in quiet.reports.at(-1)));
+});
+
+test('the exit report keeps the first four records, each at most 4 KiB', async () => {
+  const f = fixture({ runContainer: async options => {
+    for (let i = 0; i < 6; i++) await options.onGitRecord([`git watchdog: pid ${i}`, 'x'.repeat(9000)]);
+    return { code: 0, out: '' };
+  } });
+  await runGuest(f.deps);
+  const carried = f.reports.at(-1).git_watchdog;
+  assert.equal(carried.length, 4);
+  assert.ok(carried.every((text, i) => text.startsWith(`git watchdog: pid ${i}\n`) && Buffer.byteLength(text) <= 4096 + 3));
+});
+
+test('the deadline finalizer reports the records the guest saved', async () => {
+  const reports = [];
+  await finalizeGuest('deadline', {
+    loadState: async () => ({ alloc: 'abc123', report: data().report, timings: {}, gitWatchdog: [RECORD.join('\n')] }),
+    readUserData: async () => JSON.stringify(data()), now: () => new Date('2026-10-24T02:00:00Z'),
+    saveState: async () => {}, putReport: async (url, report) => reports.push(report), poweroff: async () => {}, log: () => {},
+  });
+  assert.equal(reports.at(-1).value, 'failed:deadline');
+  assert.deepEqual(reports.at(-1).git_watchdog, [RECORD.join('\n')]);
 });

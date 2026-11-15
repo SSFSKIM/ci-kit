@@ -7,7 +7,6 @@ import { workDir, IMAGE } from '../agent/docker.mjs';
 import { jobImage } from '../bake/manifest.mjs';
 import { jobRunArgs, METADATA_BLOCK } from './run.mjs';
 import { watchGitTransfers } from './git-watchdog.mjs';
-import { reportRecords } from './git-stall-record.mjs';
 
 const sh = promisify(execFile);
 // Tags are normalized, so only an explicit repository label establishes which repository owns the image.
@@ -55,7 +54,8 @@ export function docker(args, { env = {}, capture = false, spawnProcess = spawn }
 
 // Detached creation lets the EC2 guest distinguish a real container start from a Docker CLI spawn failure.
 // Attach preserves the job's serial-console output; wait supplies its actual exit status even on attach errors.
-export async function runContainer({ name, repo, jit, smoke, onStarted, log = console.log, cpus = availableParallelism() },
+// onGitRecord receives each git watchdog record as it is made (pool/vm/git-watchdog.mjs).
+export async function runContainer({ name, repo, jit, smoke, onStarted, onGitRecord, log = console.log, cpus = availableParallelism() },
   { exec = sh, runDocker = docker, watch = watchGitTransfers } = {}) {
   const image = smoke ? IMAGE : await selectJobImage(repo, { exec, log });
   if (smoke) log(`job image ${image}`);
@@ -63,8 +63,7 @@ export async function runContainer({ name, repo, jit, smoke, onStarted, log = co
   args.splice(args.indexOf('--rm'), 1, '--detach');
   const started = await exec('docker', args, { env: { ...process.env, CI_KIT_JIT: jit ?? '' }, timeout: 60_000 });
   if (!started.stdout.trim()) throw new Error('container did not start');
-  const records = [];
-  const stopWatching = smoke ? async () => {} : watch(name, { log, onRecord: (record) => records.push(record) });
+  const stopWatching = smoke ? async () => {} : watch(name, { log, onRecord: onGitRecord });
   let result, waited;
   try {
     await onStarted();
@@ -74,5 +73,5 @@ export async function runContainer({ name, repo, jit, smoke, onStarted, log = co
   } finally { await stopWatching(); }
   const code = Number(waited.stdout.trim());
   if (!Number.isInteger(code) || waited.stdout.trim() === '') throw new Error('invalid container exit');
-  return { code, out: result.out, ...(records.length ? { gitWatchdog: reportRecords(records) } : {}) };
+  return { code, out: result.out };
 }

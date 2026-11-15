@@ -46,14 +46,16 @@ transfer that moves under 1,000 B/s for a minute. libcurl misses two stalls, a t
 job's whole 30 minutes on an image carrying the bound. The VM's guest therefore also watches the job container's
 git processes from the host (`pool/vm/git-watchdog.mjs`, every 20 s). It acts on a transfer (`clone`, `fetch`, `pull`,
 `push`, `ls-remote`, `submodule`, or any git with a `git-remote-http(s)` helper) when either rule holds:
-- none of its git processes has read or written anything for 3 minutes (`/proc/<pid>/io`);
+- for 3 minutes, none of its git processes has read or written anything (`/proc/<pid>/io`) and none of their sockets
+  has received or had acknowledged a byte (tcp_info, from `ss` in the container's network namespace: curl's `recv`
+  is in no io counter);
 - it is `actions/checkout`'s shallow fetch (`git -c protocol.version=2 fetch … --depth=<n> origin …`) and has run
   for 5 minutes, however its counters move.
 
-It then kills the transfer's helper, or its git when it has none, and checkout's own retry fetches again. A git
-waiting on a hook, a credential helper or ssh is left alone, as is any git that is not a transfer and every process
-that is not git. Each kill logs one record, a dozen lines starting `git watchdog`, to the VM's console, and the
-record outlives the VM:
+It then kills the transfer's helper, or its git when it has none, and checkout's own retry fetches again. A
+transfer waiting on a hook, a credential helper or ssh is left alone under both rules, as is any git that is not a
+transfer and every process that is not git. Each kill logs one record, a dozen lines starting `git watchdog`, to
+the VM's console, and the record outlives the VM:
 - **GCE:** the `ci-kit-serial-console` exclusion drops the job VMs' serial lines from Cloud Logging, all but these
   (see [GCE](#gce)). Each line arrives twice, once prefixed with the uptime in brackets and once with rsyslog's
   timestamp; the filter below keeps the bracketed copy:
@@ -62,8 +64,9 @@ record outlives the VM:
     --project=ssfskim-ci-kit --freshness=7d --order=asc --format='value(timestamp,labels."compute.googleapis.com/resource_name",textPayload)'
   ```
 - **EC2:** the console keeps only its recent tail, and the job's own output follows a record into it. So the guest
-  also puts the first four records, up to 4 KiB each, in its exit report, as `git_watchdog`. The report goes to the
-  account's report bucket, where it is kept 7 days:
+  saves the first four records, up to 4 KiB each, in its state as they are made, and every exit report carries them
+  as `git_watchdog`: `exit:<code>`, `failed:container`, and the deadline finalizer's `failed:deadline`. The report goes
+  to the account's report bucket, where it is kept 7 days:
   `aws s3 cp s3://ci-kit-ec2-reports-290475840169/reports/<alloc>/exit.json - --profile ci-kit-ops | jq -r '.git_watchdog[]'`.
   `<alloc>` is the runner name's suffix (`ci-kit-ec2-<alloc>`).
 
