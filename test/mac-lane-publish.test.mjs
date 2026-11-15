@@ -275,3 +275,46 @@ test('a stalled or broken window reader leaves the verdict as it was and omits w
   writeFileSync(script, readFileSync(script, 'utf8').replace('reader = verdict if', 'if sys.argv[1] == "--windows": print("{}"); sys.exit(0)\n        reader = verdict if'));
   g.run('publish'); assert.deepEqual(g.published(), { v: 1, at: '2026-11-08T12:00:00Z', host: 'free', vm: 'free', why: '' });
 });
+
+test('a quiet line holds the lanes its lanes= token names, both without one, and a bad token is an invalid line', () => {
+  const f = fixture();
+  for (const [token, host, vm] of [['lanes=host ', 'held', 'free'], ['lanes=vm ', 'free', 'held'], ['lanes=host,vm ', 'held', 'held'], ['', 'held', 'held']]) {
+    const line = `11:00Z 13:00Z ${token}gui sitting`;
+    f.put('.local/state/ci-quiet', line); held(f.run(), host, vm, new RegExp(`^quiet window ${line}$`));
+  }
+  for (const line of ['11:00Z 13:00Z lanes=guest gui sitting', '11:00Z 13:00Z lanes=vm,host gui sitting', '11:00Z 13:00Z lanes=host', '11:00Z 13:00Z lanes= gui sitting']) {
+    f.put('.local/state/ci-quiet', line); held(f.run(), 'held', 'held', new RegExp(`^quiet file invalid: ${line}$`));
+  }
+  f.put('.local/state/ci-quiet', '2026-11-08T11:00Z 2026-11-08T13:00Z lanes=host gui sitting\n11:30Z 12:30Z lanes=vm bench');
+  held(f.run(), 'held', 'held', /^quiet window 2026-11-08T11:00Z 2026-11-08T13:00Z lanes=host gui sitting; quiet window 11:30Z 12:30Z lanes=vm bench$/);
+});
+test('the watcher\'s drain for host-scoped quiet windows alone holds only the host; any other drain holds both', () => {
+  const f = fixture();
+  const drained = (reason) => f.put('Library/Logs/ci-kit/runner-drained', `held at 2026-11-08T12:00:00Z: ${reason}\n`);
+  f.put('.local/state/ci-quiet', '11:00Z 13:00Z lanes=host gui sitting\n11:30Z 12:30Z lanes=vm bench');
+  drained('quiet window 11:00Z 13:00Z lanes=host gui sitting');
+  held(f.run(), 'held', 'held', /lanes=vm bench/);
+  f.put('.local/state/ci-quiet', '11:00Z 13:00Z lanes=host gui sitting');
+  held(f.run(), 'held', 'free', /^quiet window 11:00Z 13:00Z lanes=host gui sitting; dialog watcher drain$/);
+  drained('quiet window 11:00Z 13:00Z lanes=host gui sitting; desktop in use (remote=screensharing, input within 120 s)');
+  held(f.run(), 'held', 'held', /drain/);
+  drained('quiet window 11:00Z 13:00Z lanes=host gui sitting; SecurityAgent since 2026-11-08T11:59:00Z');
+  held(f.run(), 'held', 'held', /drain/);
+  drained('quiet window 11:00Z 13:00Z lanes=host gui sitting');
+  held(f.run('verdict', '2026-11-08T13:00:00Z'), 'held', 'held', /^dialog watcher drain$/);
+  rmSync(join(f.home, 'Library/Logs/ci-kit/runner-drained'));
+  symlinkSync('missing-target', join(f.home, 'Library/Logs/ci-kit/runner-drained'));
+  held(f.run(), 'held', 'held', /cannot read runner-drained/);
+});
+test('windows announce the lanes a quiet line names, and a bad token announces nothing', () => {
+  const f = fixture();
+  f.put('.local/state/ci-quiet', '15:00Z 16:00Z lanes=host gui sitting\n2026-11-08T14:00Z 2026-11-08T15:00Z lanes=vm bench\n'
+    + '17:00Z 18:00Z lanes=host,vm both\n13:00Z 14:00Z lanes=bogus typo');
+  const v = f.run('compute');
+  held(v, 'held', 'held', /^quiet file invalid: 13:00Z 14:00Z lanes=bogus typo$/);
+  assert.deepEqual(v.windows, [
+    win('2026-11-08T14:00Z', '2026-11-08T15:00Z', ['vm'], 'quiet window 2026-11-08T14:00Z 2026-11-08T15:00Z lanes=vm bench'),
+    win('2026-11-08T15:00Z', '2026-11-08T16:00Z', ['host'], 'quiet window 15:00Z 16:00Z lanes=host gui sitting'),
+    win('2026-11-08T17:00Z', '2026-11-08T18:00Z', both, 'quiet window 17:00Z 18:00Z lanes=host,vm both'),
+  ]);
+});

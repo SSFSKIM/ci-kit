@@ -490,6 +490,24 @@ test('malformed quiet declarations hold nothing and each is logged once across w
   assert.equal(run.log.match(/quiet window: ignored malformed line/g)?.length, bad.length);
 });
 
+test('a quiet line drains the host only when its lanes take the host; a bad lanes token is malformed', () => {
+  for (const token of ['lanes=host ', 'lanes=host,vm ', '']) {
+    const d = desktop();
+    quietSchedule(d, `05:00Z 06:00Z ${token}gui sitting\n`);
+    const run = d.watch(terminal);
+    assert.match(run.marker, new RegExp(`^held at \\S+: quiet window 05:00Z 06:00Z ${token}gui sitting$`, 'm'), token);
+    assert.deepEqual(run.launchctl, [kill], token);
+  }
+  const d = desktop();
+  const bad = ['05:00Z 06:00Z lanes=guest gui sitting', '05:00Z 06:00Z lanes=host'];
+  quietSchedule(d, `05:00Z 06:00Z lanes=vm bench\n${bad.join('\n')}\n`);
+  const run = d.watch(terminal);
+  assert.equal(run.marker, null, 'a VM-only window and malformed lines leave the host running');
+  assert.deepEqual(run.launchctl, []);
+  assert.equal(run.log.match(/quiet window: ignored malformed line/g)?.length, bad.length);
+  for (const line of bad) assert.ok(run.log.includes(line), line);
+});
+
 test('a quiet window drains even without a desktop read, and removing its declaration releases', () => {
   const d = desktop({ status: 3 });
   quietSchedule(d, '05:00Z 06:00Z coordinator update\n');
