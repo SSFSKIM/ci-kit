@@ -1091,3 +1091,27 @@ test('more items than the batch that write no line leave room for the sweep, whi
   assert.equal(lineOf(root, '2026-10-21', '883/1/unit').report, 'missing');
   assert.deepEqual(await pass({ limit: 1 }), { counts: NOTHING, errors: [], more: false });
 });
+
+test('a missing rerun that already records its copied shard artifact is not taken again while another shard stays missing', async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  const suites = shardSuites();
+  const one = { name: 'unit 1/2', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z', suites: suites[0] };
+  // shard 2 uploads in both attempts but its artifacts are never listed; the rerun copies shard 1, whose artifact is known
+  run({ id: 891, ref: 'ci/waiting-aaaaaaa', tested: c('a'), tree: 'TA', created: '2026-10-21T07:50:00Z', attempts: [
+    [one, { name: 'unit 2/2', conclusion: 'failure', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:07:00Z', suites: suites[1] }],
+    [copied(one), { name: 'unit 2/2', started: '2026-10-21T08:31:00Z', completed: '2026-10-21T08:37:00Z', suites: suites[1] }],
+  ] });
+  repo.artifacts = repo.artifacts.filter((a) => !a.name.startsWith('test-results-unit-2of2'));
+  const { fake, pass } = passes(repo, root);
+
+  const first = await pass();
+  assert.deepEqual([first.errors, first.counts.missing], [[], 2]);
+  assert.equal(lineOf(root, '2026-10-21', '891/2/unit').report, 'missing');
+  assert.equal(lineOf(root, '2026-10-21', '891/2/unit').shards[0].artifact.name, 'test-results-unit-1of2-1');
+
+  const asked = fake.requests.length;
+  assert.deepEqual(await pass(), { counts: NOTHING, errors: [], more: false });
+  const later = fake.requests.slice(asked); // the sweep of recent runs still lists the attempts' jobs
+  assert.ok(!later.some((p) => /^\/actions\/runs\/891(\/artifacts)?(\?|$)/.test(p)), later.join('\n'));
+});

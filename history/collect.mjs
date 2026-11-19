@@ -158,10 +158,11 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
     for (const a of artifacts) {
       const part = artifactPart(a.name, bySlug);
       if (!part || a.expired) continue;
-      // A known artifact still takes again a waiting rerun: the pass that recorded its own attempt may have left
-      // the rerun past its batch.
+      // A known artifact still takes again a waiting rerun that lacks it: the pass that recorded its own attempt may
+      // have left the rerun past its batch.
       for (const l of waiting) {
         if (l.run !== a.workflow_run.id || l.job !== part.job || l.attempt <= part.attempt || l.shards[part.k - 1]?.attempt !== part.attempt) continue;
+        if (l.shards[part.k - 1].artifact?.id === a.id) continue; // the line already holds this artifact
         if (!items.has(lineKey(l))) items.set(lineKey(l), { run: l.run, attempt: l.attempt, job: l.job, artifact: null, at: a.created_at });
       }
       if (known.has(a.id)) continue;
