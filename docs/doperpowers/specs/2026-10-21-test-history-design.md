@@ -174,8 +174,12 @@ It also lists the last 3 days' runs and gives a `missing` line to each job in th
 
 A pass builds at most `--limit` lines, oldest first (by upload, or by completion for a line without an artifact), and
 writes them when it ends; it prints `history: more` when it left work. Oldest first, because a line's previous run is
-looked up among the lines already stored, and the day's base is its first report. The 3-day sweep costs a request per
-run and attempt, so it waits for the pass whose batch holds every listed item. Whatever outlives a report (a line, a
+looked up among the lines already stored, and the day's base is its first report. An item that writes no line (a shard
+still running, or one that never ran its tests) takes no room in the batch. The 3-day sweep costs a request per run
+and attempt, so it runs only once every listed item was taken and the batch still has room, and its items, oldest
+first, fill the rest; `more` means items were left or the sweep did not run. A waiting rerun is taken again by
+every listed artifact of the shard it copied, recorded or not, since a batch can record the shard's own attempt and
+leave the rerun for the next. Whatever outlives a report (a line, a
 base, durations) is copied from it, never sliced from its text (Surprises, 11-19). A rate-limit error ends the
 batching: no `more` is claimed.
 

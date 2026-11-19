@@ -1023,15 +1023,71 @@ test('a pass whose batch is full leaves the sweep of recent runs to a later pass
     [{ name: 'unit', started: '2026-10-21T10:05:00Z', completed: '2026-10-21T10:15:00Z', suites: suitesA() }],
   ] });
   const { pass } = passes(repo, root);
-  // two artifacts, one line a pass: the sweep waits until the listing's items fit the batch
+  // two artifacts, one line a pass: the sweep waits for a pass the listing's items leave room in
   const first = await pass({ limit: 1 });
   assert.deepEqual([first.counts.lines, first.counts.missing, first.more], [1, 0, true]);
   assert.equal(lineOf(root, '2026-10-21', '801/1/unit').report, 'present');
   const second = await pass({ limit: 1 });
-  assert.deepEqual([second.counts.lines, second.counts.missing, second.more], [1, 1, true]);
-  assert.equal(lineOf(root, '2026-10-21', '802/1/unit').report, 'missing');
+  assert.deepEqual([second.counts.lines, second.counts.present, second.more], [1, 1, true]);
+  assert.equal(lineOf(root, '2026-10-21', '802/1/unit'), undefined);
   const third = await pass({ limit: 1 });
-  assert.deepEqual([third.counts.lines, third.counts.present, third.more], [1, 1, false]);
+  assert.deepEqual([third.counts.lines, third.counts.missing, third.more], [1, 1, false]);
+  assert.equal(lineOf(root, '2026-10-21', '802/1/unit').report, 'missing');
   const fourth = await pass({ limit: 1 });
   assert.deepEqual([fourth.counts, fourth.more], [NOTHING, false]);
+});
+
+test('a late artifact recorded in one batch still takes again, in a later batch, the missing rerun that copied it', async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  const red = shardSuites({ fails: true });
+  const suites = shardSuites();
+  // a red shard re-run alone; the first attempt's shard 1, which the rerun copies, uploads late
+  const one = { name: 'unit 1/2', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z', suites: red[0] };
+  run({ id: 871, ref: 'ci/late-aaaaaaaa', tested: c('a'), tree: 'TA', created: '2026-10-21T07:50:00Z', attempts: [
+    [one, { name: 'unit 2/2', conclusion: 'failure', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:07:00Z', suites: red[1] }],
+    [copied(one), { name: 'unit 2/2', started: '2026-10-21T08:31:00Z', completed: '2026-10-21T08:37:00Z', suites: suites[1] }],
+  ] });
+  const late = repo.artifacts.find((a) => a.name === 'test-results-unit-1of2-1');
+  repo.artifacts = repo.artifacts.filter((a) => a !== late);
+  const { pass } = passes(repo, root);
+
+  const first = await pass();
+  assert.deepEqual([first.errors, first.counts.missing], [[], 2]);
+
+  // one line a pass: the first attempt's line makes the late artifact known before the rerun is taken
+  repo.artifacts.push(late);
+  let r = await pass({ limit: 1 });
+  assert.deepEqual([r.errors, r.counts.present, r.more], [[], 1, true]);
+  assert.equal(lineOf(root, '2026-10-21', '871/1/unit').report, 'present');
+  while (r.more) r = await pass({ limit: 1 });
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(lineOf(root, '2026-10-21', '871/2/unit').shards.map((s) => [s.attempt, s.artifact?.name ?? null]),
+    [[1, 'test-results-unit-1of2-1'], [2, 'test-results-unit-2of2-2']]);
+  assert.equal(lineOf(root, '2026-10-21', '871/2/unit').report, 'present');
+});
+
+test('more items than the batch that write no line leave room for the sweep, which runs and ends the work', async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  const suites = shardSuites();
+  // two attempts whose shard 2 was preempted before its upload, never rerun: listed every pass, never a line
+  for (const id of [881, 882]) {
+    run({ id, ref: `ci/stuck-${id}aaaaa`, tested: c('a'), tree: 'TA', created: '2026-10-21T07:50:00Z', attempts: [[
+      { name: 'unit 1/2', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z', suites: suites[0] },
+      { name: 'unit 2/2', conclusion: 'failure', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:03:00Z', steps: [
+        { name: 'Run actions/upload-artifact@v7', conclusion: 'skipped' },
+      ] },
+    ]] });
+  }
+  // a job that ran its tests and uploaded nothing: only the sweep finds it
+  run({ id: 883, ref: 'master', event: 'workflow_dispatch', tested: c('d'), tree: 'TD', created: '2026-10-21T09:00:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-21T09:05:00Z', completed: '2026-10-21T09:15:00Z' }],
+  ] });
+  const { pass } = passes(repo, root);
+
+  const first = await pass({ limit: 1 });
+  assert.deepEqual([first.errors, first.counts.lines, first.counts.missing, first.more], [[], 1, 1, false]);
+  assert.equal(lineOf(root, '2026-10-21', '883/1/unit').report, 'missing');
+  assert.deepEqual(await pass({ limit: 1 }), { counts: NOTHING, errors: [], more: false });
 });

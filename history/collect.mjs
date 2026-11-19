@@ -157,7 +157,14 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
     const { artifacts } = await gh.artifactsPage(repo, page);
     for (const a of artifacts) {
       const part = artifactPart(a.name, bySlug);
-      if (!part || a.expired || known.has(a.id)) continue;
+      if (!part || a.expired) continue;
+      // A known artifact still takes again a waiting rerun: the pass that recorded its own attempt may have left
+      // the rerun past its batch.
+      for (const l of waiting) {
+        if (l.run !== a.workflow_run.id || l.job !== part.job || l.attempt <= part.attempt || l.shards[part.k - 1]?.attempt !== part.attempt) continue;
+        if (!items.has(lineKey(l))) items.set(lineKey(l), { run: l.run, attempt: l.attempt, job: l.job, artifact: null, at: a.created_at });
+      }
+      if (known.has(a.id)) continue;
       const key = `${a.workflow_run.id}/${part.attempt}/${part.job}`;
       const held = store.line(key);
       if (held && held.report !== 'missing') { // a re-upload of a job already recorded
@@ -169,46 +176,46 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
       if (part.n === null) item.artifact = a;
       if (a.created_at > item.at) item.at = a.created_at; // a shard set's latest upload
       items.set(key, item);
-      for (const l of waiting) {
-        if (l.run !== a.workflow_run.id || l.job !== part.job || l.attempt <= part.attempt || l.shards[part.k - 1]?.attempt !== part.attempt) continue;
-        if (!items.has(lineKey(l))) items.set(lineKey(l), { run: l.run, attempt: l.attempt, job: l.job, artifact: null, at: a.created_at });
-      }
     }
     if (artifacts.length < 100 || artifacts.some((a) => Date.parse(a.created_at) < cutoff)) break;
   }
 
   // 2. The last 3 days' jobs in the reporting set that ran their tests and have no line: their artifact if the
   //    listing missed it, else a `missing` line. A shard that ran its tests brings in its job, whose set 3. gathers.
-  //    It costs a request per run and attempt, so it waits for the pass whose batch can hold every listed item.
-  const sweep = items.size <= limit;
-  for (const run of sweep ? await gh.runsCreatedSince(repo, new Date(now - 3 * DAY).toISOString()) : []) {
-    for (let attempt = 1; attempt <= run.run_attempt; attempt += 1) {
-      let attemptJobs;
-      try {
-        attemptJobs = await jobsOf(run.id, attempt);
-      } catch (err) {
-        failed(`run ${run.id} attempt ${attempt}`, err);
-        continue;
-      }
-      for (const job of attemptJobs) {
-        const part = jobPart(job.name, reporting);
-        if (!part || job.status !== 'completed' || carriedOver(job) || !uploadRan(job)) continue;
-        const key = `${run.id}/${attempt}/${part.job}`;
-        if (items.has(key) || store.line(key)) continue;
-        if (part.n !== null) {
-          items.set(key, { run: run.id, attempt, job: part.job, artifact: null, at: job.completed_at });
+  //    It costs a request per run and attempt, so it runs after 3. has taken every listed item, in a pass whose
+  //    batch is not yet full, and its items fill what is left of the batch.
+  const sweepRecent = async () => {
+    const swept = new Map();
+    for (const run of await gh.runsCreatedSince(repo, new Date(now - 3 * DAY).toISOString())) {
+      for (let attempt = 1; attempt <= run.run_attempt; attempt += 1) {
+        let attemptJobs;
+        try {
+          attemptJobs = await jobsOf(run.id, attempt);
+        } catch (err) {
+          failed(`run ${run.id} attempt ${attempt}`, err);
           continue;
         }
-        try {
-          const name = artifactName(job.name, attempt);
-          const artifact = (await artifactsOf(run.id)).find((a) => a.name === name && !a.expired && !known.has(a.id)) ?? null;
-          items.set(key, { run: run.id, attempt, job: job.name, artifact, at: job.completed_at });
-        } catch (err) {
-          failed(`run ${run.id} attempt ${attempt} ${job.name}`, err);
+        for (const job of attemptJobs) {
+          const part = jobPart(job.name, reporting);
+          if (!part || job.status !== 'completed' || carriedOver(job) || !uploadRan(job)) continue;
+          const key = `${run.id}/${attempt}/${part.job}`;
+          if (items.has(key) || swept.has(key) || store.line(key)) continue;
+          if (part.n !== null) {
+            swept.set(key, { run: run.id, attempt, job: part.job, artifact: null, at: job.completed_at });
+            continue;
+          }
+          try {
+            const name = artifactName(job.name, attempt);
+            const artifact = (await artifactsOf(run.id)).find((a) => a.name === name && !a.expired && !known.has(a.id)) ?? null;
+            swept.set(key, { run: run.id, attempt, job: job.name, artifact, at: job.completed_at });
+          } catch (err) {
+            failed(`run ${run.id} attempt ${attempt} ${job.name}`, err);
+          }
         }
       }
     }
-  }
+    return [...swept.values()];
+  };
 
   // 3. Each item's run and job, in the order the jobs completed, so a day's base is its first unselected report.
   //    A sharded job is taken once all n shards of the attempt completed. A shard a re-run copied into the attempt
@@ -219,13 +226,21 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
   //    listing name more than one shard count (unsharded included) is refused.
   //    Items are taken oldest first (by upload, or completion when there is no artifact), up to `limit` lines: a
   //    line's previous run is found among the lines stored before it, and the day's base is its first report.
+  //    An item that writes no line (a shard still running or that never ran its tests) does not count against it.
   const order = (x, y) => (x < y ? -1 : x > y ? 1 : 0);
-  const queue = [...items.values()].sort((a, b) => order(a.at, b.at) || a.run - b.run || a.attempt - b.attempt || order(a.job, b.job));
+  const oldestFirst = (list) => list.sort((a, b) => order(a.at, b.at) || a.run - b.run || a.attempt - b.attempt || order(a.job, b.job));
   const work = [];
-  let taken = 0;
-  for (const item of queue) {
-    if (work.length >= limit) break;
-    taken += 1;
+  let left = false; // items the batch had no room for
+  const takeAll = async (queue) => {
+    for (const item of queue) {
+      if (work.length >= limit) {
+        left = true;
+        return;
+      }
+      await take(item);
+    }
+  };
+  async function take(item) {
     try {
       const run = await runOf(item.run);
       const mine = (await jobsOf(item.run, item.attempt)).filter((j) => jobPart(j.name, reporting)?.job === item.job);
@@ -237,9 +252,9 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
       if (n === null) {
         const job = mine.find((j) => j.name === item.job);
         if (!job) throw new Error('history: the attempt has no job of that name');
-        if (job.status !== 'completed') continue; // the next pass takes it
+        if (job.status !== 'completed') return; // the next pass takes it
         work.push({ ...item, runInfo: run, jobInfo: job, shards: null });
-        continue;
+        return;
       }
       const shards = [];
       for (let k = 1; k <= n; k += 1) {
@@ -247,7 +262,7 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
         if (!job) throw new Error(`history: the attempt has no shard ${k} of ${n}`);
         shards.push(job);
       }
-      if (shards.some((j) => j.status !== 'completed')) continue; // the next pass takes it
+      if (shards.some((j) => j.status !== 'completed')) return; // the next pass takes it
       const ran = [];
       for (const shard of shards) {
         let [job, attempt] = [shard, item.attempt];
@@ -257,18 +272,21 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
         }
         ran.push({ job, attempt });
       }
-      if (ran.some(({ job }) => !job || carriedOver(job) || !uploadRan(job))) continue;
+      if (ran.some(({ job }) => !job || carriedOver(job) || !uploadRan(job))) return;
       const set = ran.map(({ job, attempt }, i) => ({
         job,
         attempt,
         artifact: artifacts.find((a) => a.name === artifactName(item.job, attempt, i + 1, n) && !a.expired) ?? null,
       }));
-      if (set.some((s) => !s.artifact) && store.line(lineKey(item))) continue; // still short, and already `missing`
+      if (set.some((s) => !s.artifact) && store.line(lineKey(item))) return; // still short, and already `missing`
       work.push({ ...item, runInfo: run, jobInfo: logicalJob(set.map((s) => s.job)), shards: set });
     } catch (err) {
       failed(`run ${item.run} attempt ${item.attempt} ${item.job}`, err);
     }
   }
+  await takeAll(oldestFirst([...items.values()]));
+  const sweep = work.length < limit;
+  if (sweep) await takeAll(oldestFirst(await sweepRecent()));
   work.sort((a, b) => order(a.jobInfo.completed_at, b.jobInfo.completed_at) || a.run - b.run || a.attempt - b.attempt || order(a.job, b.job));
 
   // 4. One line per item.
@@ -403,7 +421,7 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
   for (const line of replacing) store.replace(line);
   counts.relinked = replacing.length;
   counts.written = store.flush();
-  return { counts, errors, more: (taken < queue.length || !sweep) && !limited };
+  return { counts, errors, more: (left || !sweep) && !limited };
 }
 
 export const formatCounts = (repo, c, errors) =>
