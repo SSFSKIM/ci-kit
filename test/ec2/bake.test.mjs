@@ -46,7 +46,7 @@ test('provider stages share one resolution, including after a provider fails', a
 });
 
 // Fake only the external SDK boundary; the bake performs its own polling, promotion and cleanup.
-async function ec2Fixture({ smoke = 'ok', job = 'success', applyOk = true, lostLaunch = false, refuseFirstSmoke = false, reportMissing = false, snapshotBytes = 12 * 2**30, promote = true, otherImages = [], lostSnapshot = false, lostRegistration = false, unseenReads = 0, refuse = () => undefined } = {}) {
+async function ec2Fixture({ smoke = 'ok', job = 'success', applyOk = true, lostLaunch = false, refuseFirstSmoke = false, reportMissing = false, snapshotBytes = 12 * 2**30, promote = true, otherImages = [], lostSnapshot = false, lostRegistration = false, unseenReads = 0, refuse = () => undefined, builderReport = {} } = {}) {
   const api = await import('../../ec2/bake/bake.mjs');
   const calls = [], instances = [], images = [], snapshots = [], logs = [], sentAt = new Map();
   const tags = (x) => Object.fromEntries((x.Tags ?? []).map((t) => [t.Key,t.Value]));
@@ -85,7 +85,7 @@ async function ec2Fixture({ smoke = 'ok', job = 'success', applyOk = true, lostL
     if (name === 'GetObjectCommand') {
       if (reportMissing && input.Key.includes('smoke/exit')) throw Object.assign(Error('missing'),{name:'NoSuchKey'});
       let data;
-      if (input.Key.endsWith('/builder.json')) data = { value:'ok', manifest:{...built,repos:{'owner/project':{...built.repos['owner/project'],apply:{ok:applyOk,image_bytes:100}}}} };
+      if (input.Key.endsWith('/builder.json')) data = { value:'ok', manifest:{...built,repos:{'owner/project':{...built.repos['owner/project'],apply:{ok:applyOk,image_bytes:100}}}}, ...builderReport };
       else data = {kind:'terminal',value:'exit:0',smoke};
       return { Body: { transformToString: async () => JSON.stringify(data) } };
     }
@@ -504,6 +504,22 @@ echo compact >> "$TEST_ROOT/compacted"
       assert.equal(await present('poweroff'),true);
       assert.equal(await present('run/ci-kit-bake'),false,'failure removes its tmpfs handoff');
     }
+
+    // A root copied on its second attempt carries that attempt's evidence in the ok report, bounded like a failure tail.
+    for (const p of ['report.jsonl','poweroff','curl-calls']) await rm(join(root,p),{force:true});
+    await mkdir(join(root,'run/ci-kit-bake'),{recursive:true});
+    await writeFile(join(root,'run/ci-kit-bake/report-url'),'https://reports.invalid/builder');
+    await writeFile(compact, `#!/bin/bash
+printf '%s\\n' 'root-copy 3 1' 'root-copy-retry 202 0' 'compact 431 0' > "$CI_KIT_COMPACT_TRACE"
+for i in $(seq 1 50); do echo "compact: evidence line $i"; done > "$CI_KIT_COMPACT_RETRY"
+`);
+    run(finalizer);
+    const retried = JSON.parse(await readFile(join(root,'report.jsonl'),'utf8'));
+    assert.equal(retried.value,'ok');
+    assert.deepEqual(retried.compact.phases,{'root-copy':{elapsed_seconds:3,exit_status:1,bound_seconds:480},
+      'root-copy-retry':{elapsed_seconds:202,exit_status:0,bound_seconds:480}});
+    assert.equal(retried.root_copy_retry.log_tail,Array.from({length:40},(_,i)=>`compact: evidence line ${i+11}\n`).join(''));
+    assert.equal(await present('run/ci-kit-bake'),false);
   } finally { await rm(root,{recursive:true,force:true}); }
 });
 
@@ -572,6 +588,20 @@ test('a just-launched builder that DescribeInstances does not know yet is read a
   const result = await f.run();
   assert.deepEqual(result.manifest, built);
   assert.equal(f.calls.filter(([n, v]) => n === 'DescribeInstancesCommand' && v.InstanceIds).length >= 3, true);
+});
+
+test('a builder whose root copy passed on its second attempt is named in the controller log, its evidence left in S3', async () => {
+  const evidence = 'compact: before flush: loop /dev/loop0 dio=1; superblock free blocks: loop 11915999';
+  const compact = { elapsed_seconds: 431, exit_status: 0, phases: { 'root-copy': { elapsed_seconds: 3, exit_status: 1, bound_seconds: 480 },
+    'root-copy-retry': { elapsed_seconds: 202, exit_status: 0, bound_seconds: 480 } } };
+  const f = await ec2Fixture({ builderReport: { compact, root_copy_retry: { log_tail: evidence } } });
+  await f.run();
+  const lines = f.logs.filter((line) => /second partclone attempt/.test(line));
+  assert.deepEqual(lines, ['123456789012: builder copied the root on a second partclone attempt (first exit 1); evidence in s3://reports/reports/bake-20261023-120000-abcd-123456789012/builder.json']);
+  assert.ok(!f.logs.some((line) => line.includes('11915999')), 'evidence text stays in the report');
+  const plain = await ec2Fixture({ builderReport: { compact: { ...compact, phases: { 'root-copy': { elapsed_seconds: 202, exit_status: 0 } } } } });
+  await plain.run();
+  assert.ok(!plain.logs.some((line) => /second partclone attempt/.test(line)));
 });
 
 test('an instance still unknown two minutes after its launch fails the bake', async () => {

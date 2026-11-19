@@ -7,7 +7,7 @@ import { GetParameterCommand } from '@aws-sdk/client-ssm';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { manifestTags, verifyManifest, logRepoResults } from '../../pool/bake/manifest.mjs';
 import { CHECK, checkJitRequest, checkOutcome } from '../../gce/bake/plan.mjs';
-import { formatDiagnostic } from '../vm/diagnostics.mjs';
+import { formatDiagnostic, formatCompactTrace } from '../vm/diagnostics.mjs';
 
 const MINUTE = 60_000;
 const CAPACITY_PAUSE = MINUTE, CAPACITY_WAIT = 15 * MINUTE;
@@ -174,6 +174,9 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
       if (i.State.Name === 'terminated') throw new Error('builder terminated before snapshot');
       return i.State.Name === 'stopped' && r ? {report:r,instance:i} : null;
     });
+    // A second partclone attempt is the only trace of an otherwise invisible refusal; its evidence stays in S3.
+    const copied = JSON.parse(formatCompactTrace(built.report.compact)).phases ?? {};
+    if (copied['root-copy-retry']) log(`${cfg.account}: builder copied the root on a second partclone attempt (first exit ${copied['root-copy']?.exit_status ?? 'unknown'}); evidence in s3://${cfg.report_bucket}/${prefix}/builder.json`);
     const actual = verifyManifest(built.report.manifest,manifest);
     logRepoResults(actual, log);
     const labels = { ...pool,...manifestTags(actual),'ci-kit-ready':'false' };

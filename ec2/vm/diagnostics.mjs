@@ -35,8 +35,9 @@ const codesByReason = new Map([
 ]);
 
 const compactPhases = new Set(['compact', 'disk-validation', 'boot-copy', 'copy-root-setup', 'source-inventory',
-  'root-copy', 'root-recovery', 'target-inventory', 'root-comparison', 'root-fsck', 'copy-root-cleanup', 'disk-verification']);
-const compactBounds = new Map([['source-inventory', 300], ['root-copy', 480], ['target-inventory', 300]]);
+  'root-copy', 'root-copy-retry', 'root-recovery', 'target-inventory', 'root-comparison', 'root-fsck', 'copy-root-cleanup', 'disk-verification']);
+// copy-root.sh's second partclone attempt, after a bitmap free-count refusal, has the first one's bound.
+const compactBounds = new Map([['source-inventory', 300], ['root-copy', 480], ['root-copy-retry', 480], ['target-inventory', 300]]);
 const record = value => value && typeof value === 'object' && !Array.isArray(value);
 const timing = value => record(value) && Number.isInteger(value.elapsed_seconds) && value.elapsed_seconds >= 0 && value.elapsed_seconds <= 86400
   && Number.isInteger(value.exit_status) && value.exit_status >= 0 && value.exit_status <= 255;
