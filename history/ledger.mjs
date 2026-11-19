@@ -229,8 +229,20 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, mirro
 
   const closed = new Map();
   const done = new Set();
-  for (const item of batch) {
-    if (!pacer.allows(kind, 2)) break;
+  // Four attempts at a time, as many as the token's limits leave room for at two calls an attempt (its listing and,
+  // now and then, its annotations or its earlier attempt's conclusion): their listings are fetched together.
+  const take = async function* () {
+    for (let i = 0; i < batch.length; ) {
+      let k = 0;
+      while (k < 4 && i + k < batch.length && pacer.allows(kind, 2 * (k + 1))) k += 1;
+      if (k === 0) return;
+      const chunk = batch.slice(i, i + k);
+      await Promise.all(chunk.map((item) => listingOf(item.run.id, item.attempt).catch(() => {}))); // a failure is met again below
+      yield* chunk;
+      i += k;
+    }
+  };
+  for await (const item of take()) {
     const { run, attempt } = item;
     try {
       const jobs = await listingOf(run.id, attempt);
