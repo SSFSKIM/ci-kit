@@ -47,7 +47,7 @@ const steps = (last) => [{ name: 'Set up job', status: 'completed', conclusion: 
 // the job it held, and GitHub fails the job and frees the runner. `ending`: how the job ended. `lost`: its runner
 // went outright (GitHub's lost-runner failure, its running step never concluded); `shutdown`: the guest's shutdown
 // failed the running step as the VM went; `before`: it failed on its own and reported, and the VM was preempted
-// afterwards, as it wound down.
+// afterwards, as it wound down; `upload`: its gate step failed, and the VM went during the upload after it.
 async function lose(w, launcher, { name = 'ci / unit', run, ending = 'lost' } = {}) {
   const job = w.sim.queue(SBX, L(4), { name, run });
   const before = new Set(w.g.instances.map((i) => i.name));
@@ -58,12 +58,18 @@ async function lose(w, launcher, { name = 'ci / unit', run, ending = 'lost' } = 
   w.advance(MIN);
   await launcher.tick();
   if (ending === 'before') {
-    Object.assign(job, { status: 'completed', conclusion: 'failure', completed_at: iso(w.now()), steps: steps({ status: 'completed', conclusion: 'failure' }) });
+    Object.assign(job, { status: 'completed', conclusion: 'failure', completed_at: iso(w.now()), steps: steps({ status: 'completed', conclusion: 'failure', completed_at: iso(w.now()) }) });
     w.advance(30_000);
   }
   w.sim.preempt(vm);
   w.sim.runner(SBX, vm).status = 'offline';
-  if (ending === 'shutdown') Object.assign(job, { completed_at: iso(w.now() + 5_000), steps: steps({ status: 'completed', conclusion: 'failure' }) });
+  if (ending === 'shutdown') Object.assign(job, { completed_at: iso(w.now() + 5_000), steps: steps({ status: 'completed', conclusion: 'failure', completed_at: iso(w.now() + 5_000) }) });
+  if (ending === 'upload') { // the gate step failed, then the VM went during the artifact upload after it
+    Object.assign(job, { completed_at: iso(w.now() + 10 * MIN), steps: [
+      ...steps({ status: 'completed', conclusion: 'failure', completed_at: iso(w.now() - 20_000) }),
+      { name: 'Upload artifacts', status: 'in_progress', conclusion: null },
+    ] });
+  }
   await launcher.tick();
   if (ending === 'lost') Object.assign(job, { completed_at: iso(w.now()), steps: steps({ status: 'in_progress', conclusion: null }) });
   Object.assign(job, { status: 'completed', conclusion: 'failure' });
@@ -294,4 +300,31 @@ test('no rerun for a repo the pool no longer serves, or a public repo\'s run for
   await ticks(pub.w, proc, 6);
   assert.deepEqual(reruns(pub.w), []);
   assert.deepEqual([rowOf(pub.w, b.vm).rerun.state, rowOf(pub.w, b.vm).rerun.reason], ['dropped', 'not served']);
+});
+
+test('a job whose gate step failed before the preemption is not rerun, though the preemption cut a later step short', async () => {
+  const { w, launcher } = setup();
+  const { vm, run } = await lose(w, launcher, { ending: 'upload' });
+  complete(run);
+  await ticks(w, launcher, 6);
+  assert.deepEqual(reruns(w), []);
+  assert.deepEqual([rowOf(w, vm).rerun.state, rowOf(w, vm).rerun.reason], ['dropped', 'not a lost runner']);
+});
+
+test('the sweep stops starting calls once its time budget is spent; what it left stays owed and goes first next tick', async () => {
+  const { w, launcher } = setup();
+  const lost = [];
+  for (let k = 0; k < 5; k += 1) lost.push(await lose(w, launcher, { name: `ci / ${k}` }));
+  for (const l of lost) complete(l.run);
+  w.advance(5 * MIN);
+  w.hooks.getRun = async () => w.advance(12_000); // each run read takes 12 s
+  const before = runReads(w);
+  await launcher.tick();
+  assert.equal(runReads(w) - before, 3, 'reads start at 0, 12 and 24 s; none at 36 s');
+  assert.equal(reruns(w).length, 2, 'the third read ends past the budget: its job read and POST wait');
+  assert.deepEqual(lost.map((l) => rowOf(w, l.vm).rerun.state).sort(), ['fired', 'fired', 'owed', 'owed', 'owed']);
+  delete w.hooks.getRun;
+  w.advance(MIN);
+  await launcher.tick();
+  assert.equal(reruns(w).length, 5, 'the three left are read on the next tick');
 });

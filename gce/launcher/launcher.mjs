@@ -44,6 +44,10 @@ const LIMITS_WAIT_MS = 3_000;
 const RERUN_EVERY_MS = 5 * 60_000;
 const RERUN_RUNS_PER_TICK = 5;
 const RERUN_ATTEMPT_CAP = 3;
+// The sweep's share of a tick: no GitHub or ledger call starts past it, so one big run's many job reads cannot hold the
+// tick; what it leaves stays owed, its run read first next tick. The writes that record a rerun just sent still run.
+const RERUN_BUDGET_MS = 30_000;
+const CUT = Symbol('rerun budget spent');
 // The events a public repo's runs are served for (docs/pool.md).
 const PUBLIC_EVENTS = ['push', 'workflow_dispatch', 'schedule'];
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -914,14 +918,18 @@ export class Launcher {
     for (const key of this.rerunChecks.keys()) if (!runs.has(key)) this.rerunChecks.delete(key);
     const last = (key) => this.rerunChecks.get(key) ?? -Infinity;
     const due = [...runs].filter(([key]) => this.now() - last(key) >= RERUN_EVERY_MS).sort(([a], [b]) => last(a) - last(b));
+    const deadline = this.now() + RERUN_BUDGET_MS;
     for (const [key, rows] of due.slice(0, RERUN_RUNS_PER_TICK)) {
+      if (this.now() >= deadline) break;
       this.rerunChecks.set(key, this.now());
-      await this.settleRun(seen, rows);
+      if ((await this.settleRun(seen, rows, deadline)) === CUT) this.rerunChecks.delete(key);
     }
   }
 
-  async settleRun(seen, rows) {
+  // Returns CUT when the sweep's budget ran out before the run was settled.
+  async settleRun(seen, rows, deadline) {
     const { repo, job: { run: id } } = rows[0];
+    const go = () => { if (this.now() >= deadline) throw CUT; };
     const settle = async (row, rerun) => {
       try {
         const next = await this.ledger.settleRerun(row, { ...rerun, at: iso(this.now()) });
@@ -932,6 +940,7 @@ export class Launcher {
     };
     const drop = async (reason, list = rows) => {
       for (const row of list) {
+        go();
         this.log(`rerun: none for ${row.job.name} (${row.job.id}) in ${repo}, lost with ${row.instance}: ${reason}`);
         await settle(row, { state: 'dropped', reason });
       }
@@ -940,6 +949,7 @@ export class Launcher {
       if (!this.cfg.repos.some((r) => r.repo === repo)) return await drop('not served');
       let run;
       try {
+        go();
         run = await this.gh.getRun(repo, id);
       } catch (err) {
         if (err.status === 404) return await drop(`run ${id} not found`);
@@ -951,6 +961,7 @@ export class Launcher {
       if (!seen.served.includes(repo)) return; // not served this tick (its visibility unread, say): a later read decides
       const lost = [];
       for (const row of rows) {
+        go();
         const job = await this.gh.getJob(repo, row.job.id);
         const reason = job.run_attempt !== run.run_attempt ? `run ${id} is at attempt ${run.run_attempt}, the job ran in ${job.run_attempt}`
           : run.conclusion !== 'failure' ? `run ${id} ${run.conclusion}`
@@ -961,6 +972,7 @@ export class Launcher {
       }
       if (!lost.length) return;
       const how = lost.length === 1 ? 'job' : 'failed-jobs';
+      go();
       try {
         if (how === 'job') await this.gh.rerunJob(repo, lost[0].job.id);
         else await this.gh.rerunFailedJobs(repo, id);
@@ -977,6 +989,7 @@ export class Launcher {
       this.log(`rerun: run ${id} attempt ${run.run_attempt} in ${repo}, ${how === 'job' ? 'its job' : 'its failed jobs'} for ${jobs}`);
       for (const row of lost) await settle(row, { state: 'fired', attempt: run.run_attempt, how });
     } catch (err) {
+      if (err === CUT) return CUT;
       this.log(`rerun of run ${id} in ${repo}: ${err.message}; owed still`);
     }
   }

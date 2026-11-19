@@ -485,12 +485,13 @@ for "pool ledger".
 **Preemption** is recorded and re-run once. GCE deletes a preempted spot VM (its termination action), GitHub fails the
 job, and the launcher finalizes the row `preempted` with the job the runner held, which it wrote on the row while the
 job ran. Such a row owes the job's run a rerun (`rerun owed` in its `end` column). GitHub reruns a run's jobs only
-once the run has completed, so the launcher reads each run owed one at most every 5 minutes (5 runs a tick at most,
-the least recently read first), and once it has completed it settles the rerun on the row. It reruns when the run
+once the run has completed, so the launcher reads each run owed one at most every 5 minutes (5 runs and 30 s a tick
+at most, the least recently read first; what is left waits for the next tick), and once it has completed it settles the rerun on the row. It reruns when the run
 failed in the attempt the lost job ran in, below its third attempt, in a repo still served and (for a public repo)
 for an event served, and the job failed because its runner was lost: GitHub never heard one of its steps end (a VM
 gone outright, as MAWS run 44468141412's), or the job ended at or after the VM's preemption (the guest's shutdown
-failing the running step). A job that failed and reported before its VM was preempted is a red, not a loss. It
+failing the running step). A job with a step that failed before its VM was preempted is a red, not a loss, even when
+the preemption cut a later step (an upload) short. It
 reruns the job (POST `actions/jobs/<id>/rerun`, which also reruns the jobs that need it), or the run's failed jobs
 when several of its jobs were lost (`rerun fired`); otherwise it reruns nothing (`rerun dropped`, with the reason in
 the row's JSON). Since a fired rerun moves the run to its next attempt, no attempt is rerun twice, and an attempt

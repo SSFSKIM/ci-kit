@@ -433,15 +433,19 @@ export function newestReadyImage(images, family) {
     .sort((a, b) => Date.parse(b.creationTimestamp) - Date.parse(a.creationTimestamp))[0] ?? null;
 }
 
-// Whether a failed job's end was its runner's loss rather than its own failure: a step GitHub never heard end (a runner
-// lost outright: MAWS run 44468141412's job, its running step left without a conclusion), or the job's end at or after
-// its VM's preemption (`preemptedAt`, ms; a guest's shutdown fails the running step and ends the job as the VM goes:
-// sandbox run 38927837115). A job that failed and reported before its VM was preempted (a red test, the VM reclaimed
-// as it wound down) is neither. GitHub's times are whole seconds, rounded down, so a job ending in the second its VM
-// was preempted reads as before it: the doubt goes to no rerun.
+// Whether a failed job's end was its runner's loss rather than its own failure. A step that failed before its VM was
+// preempted (`preemptedAt`, ms) is a real red, whatever came after: the preemption only cut short what followed (an
+// artifact upload, say). Otherwise the loss shows as a step GitHub never heard end (a runner lost outright: MAWS run
+// 44468141412's job, its running step left without a conclusion), or as the job's end at or after the preemption (a
+// guest's shutdown fails the running step at that moment and ends the job: sandbox run 38927837115, whose failed
+// step therefore ends after the preemption, not before). GitHub's times are whole seconds, rounded down, so an end in
+// the second its VM was preempted reads as before it: the doubt goes to no rerun.
 export function lostRunner(job, preemptedAt) {
-  if ((job.steps ?? []).some((step) => step.conclusion == null)) return true;
-  return job.completed_at != null && Date.parse(job.completed_at) >= preemptedAt;
+  const before = (t) => t == null || Date.parse(t) < preemptedAt;
+  const steps = job.steps ?? [];
+  if (steps.some((step) => step.conclusion === 'failure' && before(step.completed_at))) return false;
+  if (steps.some((step) => step.conclusion == null)) return true;
+  return !before(job.completed_at);
 }
 
 // What to do with each ci-kit=gce instance (spec §3a Cleanup). runnersOf(view) → Map runner name → runner for the

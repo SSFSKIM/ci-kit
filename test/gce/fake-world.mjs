@@ -160,7 +160,9 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
     runsCreatedSince: async (repo, iso) => gh.runs.filter((r) => r.repo === repo && r.created_at >= iso).map((r) => ({ ...r })),
     // A run and a job as GitHub reports them (`run_attempt` 1 unless set). A rerun, of one job or of a run's failed
     // jobs, is refused while the run has not completed (as GitHub does), and starts the run's next attempt.
+    // hooks.getRun(id): a promise a run read waits on first (a slow read).
     getRun: async (repo, id) => {
+      await hooks.getRun?.(id);
       log.push(`get run ${id}`);
       const run = gh.runs.find((r) => r.repo === repo && r.id === id);
       if (!run) throw httpError(404, 'Not Found');
