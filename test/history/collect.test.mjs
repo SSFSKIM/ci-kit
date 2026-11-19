@@ -283,7 +283,7 @@ test('a day starting with selection has no base or durations until a full run, a
   assert.deepEqual(gz(root, 'base/2026-10-21/unit.json.gz'), base);
   assert.deepEqual(gz(root, 'durations/2026-10-21/unit.json.gz'), durations);
   assert.deepEqual(lineOf(root, '2026-10-21', '701/1/unit'), beforeBase);
-  assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
+  assert.deepEqual(await pass(), { counts: NOTHING, errors: [], more: false });
 });
 
 test('an artifact a pass could not download is listed again by the next, however many newer ones were stored', async (t) => {
@@ -572,7 +572,7 @@ test("a sharded job's full set is one line of the job: the union of the shards' 
   assert.deepEqual(lineOf(root, '2026-10-21', '802/1/unit').previous, { run: 801, attempt: 1, relation: 'descendant', paths: ['src/a.ts'], truncated: false });
 
   const asked = fake.requests.length;
-  assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
+  assert.deepEqual(await pass(), { counts: NOTHING, errors: [], more: false });
   assert.ok(!fake.requests.slice(asked).some((p) => p.endsWith('/zip') || p.startsWith('/compare')));
 });
 
@@ -604,11 +604,11 @@ test('a shard still running writes nothing yet; one that ran its tests and uploa
   const missing = lineOf(root, '2026-10-21', '812/1/unit');
   assert.deepEqual([missing.report, missing.membership, missing.completed], ['missing', null, '2026-10-21T08:07:00Z']);
   assert.deepEqual(missing.shards.map((s) => s.artifact?.name ?? null), ['test-results-unit-1of3-1', null, null]);
-  assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
+  assert.deepEqual(await pass(), { counts: NOTHING, errors: [], more: false });
 
   // one of the two turns up: the set is still short, and the missing line stands
   repo.artifacts.push(late2);
-  assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
+  assert.deepEqual(await pass(), { counts: NOTHING, errors: [], more: false });
 
   Object.assign(running, { status: 'completed', conclusion: 'success', completed_at: '2026-10-21T08:09:00Z' });
   repo.artifacts.push(late3);
@@ -616,7 +616,7 @@ test('a shard still running writes nothing yet; one that ran its tests and uploa
   assert.deepEqual(second.errors, []);
   assert.deepEqual([second.counts.lines, second.counts.present, second.counts.artifacts], [2, 2, 5]);
   for (const key of ['811/1/unit', '812/1/unit']) assert.equal(lineOf(root, '2026-10-21', key).report, 'present');
-  assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
+  assert.deepEqual(await pass(), { counts: NOTHING, errors: [], more: false });
 });
 
 // A re-run of some shards: GitHub copies the others into the new attempt, completed before it was created there.
@@ -668,7 +668,7 @@ test('a shard a re-run copied takes its report from the attempt it ran in: a sha
   assert.deepEqual(lineOf(root, '2026-10-21', '821/2/unit').shards.map((s) => [s.attempt, s.artifact.name]), [[1, 'test-results-unit-1of2-1'], [2, 'test-results-unit-2of2-2']]);
 
   const asked = fake.requests.length;
-  assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
+  assert.deepEqual(await pass(), { counts: NOTHING, errors: [], more: false });
   assert.ok(!fake.requests.slice(asked).some((p) => p.endsWith('/zip')));
 });
 
@@ -696,7 +696,7 @@ test("a copied shard whose own attempt's artifact is gone, expired or never uplo
     assert.deepEqual(line.shards.map((s) => [s.attempt, s.artifact?.name ?? null]), [[1, null], [2, 'test-results-unit-2of2-2']]);
     assert.equal(lineOf(root, '2026-10-21', `${run}/1/unit`), undefined);
   }
-  assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
+  assert.deepEqual(await pass(), { counts: NOTHING, errors: [], more: false });
 });
 
 test("an artifact of another attempt never stands in for a shard that ran in this one", async (t) => {
@@ -720,7 +720,7 @@ test("an artifact of another attempt never stands in for a shard that ran in thi
   assert.deepEqual(first.errors, []);
   assert.deepEqual(linesOf(root, '2026-10-21').map((l) => `${l.run}/${l.attempt}:${l.report}`), ['825/1:present', '825/2:missing']);
   assert.deepEqual(lineOf(root, '2026-10-21', '825/2/unit').shards.map((s) => [s.attempt, s.artifact?.name ?? null]), [[2, null], [2, 'test-results-unit-2of2-2']]);
-  assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
+  assert.deepEqual(await pass(), { counts: NOTHING, errors: [], more: false });
 });
 
 test('the job unsharded and sharded across runs in one store: one base, every line rebuilds, the change links across the switch', async (t) => {
@@ -833,7 +833,7 @@ test("each shard's report is checked against its own job: one stamped outside it
   assert.deepEqual(first.errors, []);
   assert.deepEqual(first.counts, { ...NOTHING, artifacts: 4, lines: 2, unparseable: 1, rejected: 1, written: 1 });
   assert.deepEqual(linesOf(root, '2026-10-21').map((l) => `${l.run}:${l.report}:${l.shards.length}`), ['851:rejected:2', '852:unparseable:2']);
-  assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
+  assert.deepEqual(await pass(), { counts: NOTHING, errors: [], more: false });
 });
 
 test("a copied shard's artifact listed late takes again the missing rerun that copied it", async (t) => {
@@ -861,7 +861,7 @@ test("a copied shard's artifact listed late takes again the missing rerun that c
   assert.deepEqual([second.counts.lines, second.counts.present], [1, 1]);
   assert.deepEqual(lineOf(root, '2026-10-21', '861/2/unit').shards.map((s) => [s.attempt, s.artifact.name]),
     [[1, 'test-results-unit-1of2-1'], [2, 'test-results-unit-2of2-2']]);
-  assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
+  assert.deepEqual(await pass(), { counts: NOTHING, errors: [], more: false });
 });
 
 test("an attempt that failed to collect is retried past the sweep, though a later attempt's line copied its artifact", async (t) => {
@@ -891,7 +891,7 @@ test("an attempt that failed to collect is retried past the sweep, though a late
   const second = await pass();
   assert.deepEqual(second.errors, []);
   assert.deepEqual(linesOf(root, '2026-10-17').map((l) => `${l.attempt}:${l.report}`), ['2:present', '3:present']);
-  assert.deepEqual(await pass(), { counts: NOTHING, errors: [] });
+  assert.deepEqual(await pass(), { counts: NOTHING, errors: [], more: false });
 });
 
 test('an artifact naming another shard count beside a recorded attempt is refused on every pass', async (t) => {
@@ -947,4 +947,91 @@ test('--repo selects the stable alias, defaulting to the current full name when 
   assert.deepEqual(collector.selectRepos(moved,'SSFSKIM/MAWS'),moved);
   assert.deepEqual(collector.selectRepos(moved),moved);
   assert.throws(()=>collector.selectRepos(moved,'neworg/MAWS'),/not in history/);
+});
+
+// Batches (the collector's repair after the backlog of 2026-10-22 → 11-19 never fit one pass): `limit` bounds the
+// lines one pass builds, taken oldest first, so each pass is durable on its own and a crash loses at most its batch.
+test('passes of a few lines each, oldest first, end with the store one whole pass writes, byte for byte', async (t) => {
+  const whole = tempRoot(t);
+  const once = await passes(scenario().repo, whole).pass();
+  assert.equal(once.more, false);
+
+  const root = tempRoot(t);
+  const { repo } = scenario();
+  const { fake, pass } = passes(repo, root);
+  const first = await pass({ limit: 3 });
+  assert.deepEqual([first.errors, first.counts.lines, first.more], [[], 3, true]);
+  // the three oldest lines, and nothing asked about a newer run or the sweep of recent runs
+  assert.deepEqual(linesOf(root, '2026-10-20').map((l) => l.run), [104]);
+  assert.deepEqual(linesOf(root, '2026-10-21').map((l) => `${l.run}/${l.attempt}`), ['101/1', '101/2']);
+  assert.ok(!fake.requests.some((p) => /^\/actions\/runs\/(10[235-9]|110)(\/|$)/.test(p) || p.startsWith('/actions/runs?')), fake.requests.join('\n'));
+
+  let passesRun = 1;
+  for (let r = first; r.more; passesRun += 1) {
+    r = await pass({ limit: 3 });
+    assert.deepEqual(r.errors, []);
+    assert.ok(r.counts.lines <= 3);
+  }
+  assert.ok(passesRun >= 4, `${passesRun} passes`);
+  const files = readDir(join(whole, REPO));
+  assert.deepEqual(readDir(join(root, REPO)), files);
+  for (const p of files) assert.ok(readFileSync(join(root, REPO, p)).equals(readFileSync(join(whole, REPO, p))), p);
+});
+
+test('after weeks without a pass, the batches take every artifact still kept, oldest first, and link back across the gap', async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  run({ id: 701, ref: 'ci/long-77777777', tested: c('7'), tree: 'T7', created: '2026-10-21T10:00:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-21T10:05:00Z', completed: '2026-10-21T10:15:00Z', suites: suitesA() }],
+  ] });
+  const { pass } = passes(repo, root);
+  assert.deepEqual((await pass()).counts.present, 1);
+
+  // four weeks on: the old artifact expired, and a run of the same change each of the last three days
+  repo.artifacts[0].expired = true;
+  const later = Date.parse('2026-11-19T12:00:00Z');
+  for (const [i, day] of ['2026-11-16', '2026-11-17', '2026-11-18'].entries()) {
+    const tested = c(String(i + 1));
+    repo.ancestors[tested] = [c('7'), ...[1, 2, 3].slice(0, i).map((k) => c(String(k)))];
+    repo.changed[`${i === 0 ? c('7') : c(String(i))}...${tested}`] = [{ filename: `src/f${i}.ts` }];
+    run({ id: 710 + i, ref: `ci/long-${tested.slice(0, 8)}`, tested, tree: `TL${i}`, created: `${day}T09:00:00Z`, attempts: [
+      [{ name: 'unit', started: `${day}T09:05:00Z`, completed: `${day}T09:15:00Z`, suites: suitesA() }],
+    ] });
+  }
+  const r1 = await pass({ now: later, limit: 1 });
+  assert.deepEqual([r1.errors, r1.counts.present, r1.more], [[], 1, true]);
+  assert.deepEqual(lineOf(root, '2026-11-16', '710/1/unit').previous, { run: 701, attempt: 1, relation: 'descendant', paths: ['src/f0.ts'], truncated: false });
+  // a newer line stored never hides an older artifact not yet taken: the listing runs its whole window every pass
+  let r = r1;
+  while (r.more) r = await pass({ now: later, limit: 1 });
+  assert.deepEqual(lineOf(root, '2026-11-17', '711/1/unit').previous, { run: 710, attempt: 1, relation: 'descendant', paths: ['src/f1.ts'], truncated: false });
+  assert.deepEqual(lineOf(root, '2026-11-18', '712/1/unit').previous, { run: 711, attempt: 1, relation: 'descendant', paths: ['src/f2.ts'], truncated: false });
+  assert.deepEqual(linesOf(root, '2026-10-21').map((l) => l.run), [701]);
+});
+
+test('a pass whose batch is full leaves the sweep of recent runs to a later pass, and says more is left', async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  run({ id: 801, ref: 'master', event: 'workflow_dispatch', tested: c('d'), tree: 'TD', created: '2026-10-21T08:00:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-21T08:05:00Z', completed: '2026-10-21T08:15:00Z', suites: suitesA() }],
+  ] });
+  // a job that ran its tests and uploaded nothing: only the sweep finds it
+  run({ id: 802, ref: 'master', event: 'workflow_dispatch', tested: c('d'), tree: 'TD', created: '2026-10-21T09:00:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-21T09:05:00Z', completed: '2026-10-21T09:15:00Z' }],
+  ] });
+  run({ id: 803, ref: 'master', event: 'workflow_dispatch', tested: c('d'), tree: 'TD', created: '2026-10-21T10:00:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-21T10:05:00Z', completed: '2026-10-21T10:15:00Z', suites: suitesA() }],
+  ] });
+  const { pass } = passes(repo, root);
+  // two artifacts, one line a pass: the sweep waits until the listing's items fit the batch
+  const first = await pass({ limit: 1 });
+  assert.deepEqual([first.counts.lines, first.counts.missing, first.more], [1, 0, true]);
+  assert.equal(lineOf(root, '2026-10-21', '801/1/unit').report, 'present');
+  const second = await pass({ limit: 1 });
+  assert.deepEqual([second.counts.lines, second.counts.missing, second.more], [1, 1, true]);
+  assert.equal(lineOf(root, '2026-10-21', '802/1/unit').report, 'missing');
+  const third = await pass({ limit: 1 });
+  assert.deepEqual([third.counts.lines, third.counts.present, third.more], [1, 1, false]);
+  const fourth = await pass({ limit: 1 });
+  assert.deepEqual([fourth.counts, fourth.more], [NOTHING, false]);
 });

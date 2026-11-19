@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // The test-history collector (test history spec, Design "Collector"):
-//   node history/collect.mjs [--repo <alias>] --store <dir>
+//   node history/collect.mjs [--repo <alias>] --store <dir> [--limit <lines>]
 // For each repo in history/repos.json (or the one named), it records every gate job's JUnit report into the store
 // directory: one run line per (run, attempt, job), the day's base and durations. A job a matrix shards, `<job> <k>/<n>`
 // uploading `test-results-<slug>-<k>of<n>-<attempt>`, makes one line of `<job>` from all n shards of the attempt.
@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
-import { createGitHub, ghToken, GitHubError } from '../lib/github.mjs';
+import { createGitHub, ghToken, GitHubError, isRateLimited } from '../lib/github.mjs';
 import { createAppTokens } from '../lib/github-app.mjs';
 import { parseJUnit } from './junit.mjs';
 import { previousRun, resolveTested, startedBefore } from './provenance.mjs';
@@ -110,11 +110,23 @@ const describe = (err) => {
   return /^E[A-Z0-9]+$/.test(err?.code ?? '') ? `${kind} ${err.code}` : kind;
 };
 
-// One repo's pass. `jobs`: its reporting set, the job names that upload a report. → counts, and `errors`, one
-// line each, naming runs and jobs only. A failed item writes nothing and is tried again by the next pass.
-export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Date.now(), readZip = readArtifact }) {
+// A copy that shares no string with its source. A string sliced from a report (an id, a message) keeps the whole
+// report's text alive, so whatever outlives the report it came from is copied: a held line pinned its artifact's XML,
+// and a backlog of such lines ran the heap out (2026-10-22 → 11-10).
+const own = (value) => JSON.parse(JSON.stringify(value));
+
+// One repo's pass. `jobs`: its reporting set, the job names that upload a report. `limit`: the most lines the pass
+// builds, oldest first, so a backlog is taken in passes each durable on its own. → counts, `errors`, one line each,
+// naming runs and jobs only, and `more`: whether work was left for another pass (none is claimed after a rate-limit
+// error, which another pass would only repeat). A failed item writes nothing and is tried again by the next pass.
+export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Date.now(), readZip = readArtifact, limit = Infinity }) {
   const counts = { artifacts: 0, lines: 0, present: 0, missing: 0, unparseable: 0, rejected: 0, relinked: 0, failures: 0, written: 0 };
   const errors = [];
+  let limited = false;
+  const failed = (what, err) => {
+    limited ||= isRateLimited(err);
+    errors.push(`${what}: ${describe(err)}`);
+  };
   const store = openStore(root, alias);
   const bySlug = new Map(jobs.map((j) => [jobSlug(j), j]));
   const reporting = new Set(jobs);
@@ -153,12 +165,13 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
         if (recorded !== part.n) errors.push(`run ${a.workflow_run.id} attempt ${part.attempt} ${part.job}: ${mixedCounts([recorded, part.n]).message}`);
         continue;
       }
-      const item = items.get(key) ?? { run: a.workflow_run.id, attempt: part.attempt, job: part.job, artifact: null };
+      const item = items.get(key) ?? { run: a.workflow_run.id, attempt: part.attempt, job: part.job, artifact: null, at: a.created_at };
       if (part.n === null) item.artifact = a;
+      if (a.created_at > item.at) item.at = a.created_at; // a shard set's latest upload
       items.set(key, item);
       for (const l of waiting) {
         if (l.run !== a.workflow_run.id || l.job !== part.job || l.attempt <= part.attempt || l.shards[part.k - 1]?.attempt !== part.attempt) continue;
-        if (!items.has(lineKey(l))) items.set(lineKey(l), { run: l.run, attempt: l.attempt, job: l.job, artifact: null });
+        if (!items.has(lineKey(l))) items.set(lineKey(l), { run: l.run, attempt: l.attempt, job: l.job, artifact: null, at: a.created_at });
       }
     }
     if (artifacts.length < 100 || artifacts.some((a) => Date.parse(a.created_at) < cutoff)) break;
@@ -166,13 +179,15 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
 
   // 2. The last 3 days' jobs in the reporting set that ran their tests and have no line: their artifact if the
   //    listing missed it, else a `missing` line. A shard that ran its tests brings in its job, whose set 3. gathers.
-  for (const run of await gh.runsCreatedSince(repo, new Date(now - 3 * DAY).toISOString())) {
+  //    It costs a request per run and attempt, so it waits for the pass whose batch can hold every listed item.
+  const sweep = items.size <= limit;
+  for (const run of sweep ? await gh.runsCreatedSince(repo, new Date(now - 3 * DAY).toISOString()) : []) {
     for (let attempt = 1; attempt <= run.run_attempt; attempt += 1) {
       let attemptJobs;
       try {
         attemptJobs = await jobsOf(run.id, attempt);
       } catch (err) {
-        errors.push(`run ${run.id} attempt ${attempt}: ${describe(err)}`);
+        failed(`run ${run.id} attempt ${attempt}`, err);
         continue;
       }
       for (const job of attemptJobs) {
@@ -181,15 +196,15 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
         const key = `${run.id}/${attempt}/${part.job}`;
         if (items.has(key) || store.line(key)) continue;
         if (part.n !== null) {
-          items.set(key, { run: run.id, attempt, job: part.job, artifact: null });
+          items.set(key, { run: run.id, attempt, job: part.job, artifact: null, at: job.completed_at });
           continue;
         }
         try {
           const name = artifactName(job.name, attempt);
           const artifact = (await artifactsOf(run.id)).find((a) => a.name === name && !a.expired && !known.has(a.id)) ?? null;
-          items.set(key, { run: run.id, attempt, job: job.name, artifact });
+          items.set(key, { run: run.id, attempt, job: job.name, artifact, at: job.completed_at });
         } catch (err) {
-          errors.push(`run ${run.id} attempt ${attempt} ${job.name}: ${describe(err)}`);
+          failed(`run ${run.id} attempt ${attempt} ${job.name}`, err);
         }
       }
     }
@@ -202,8 +217,15 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
   //    leaves the attempt without a line, as an unsharded job that did not run its tests has none; any other
   //    attempt's artifact never stands in for a shard. An attempt whose jobs and unexpired artifacts in the run's own
   //    listing name more than one shard count (unsharded included) is refused.
+  //    Items are taken oldest first (by upload, or completion when there is no artifact), up to `limit` lines: a
+  //    line's previous run is found among the lines stored before it, and the day's base is its first report.
+  const order = (x, y) => (x < y ? -1 : x > y ? 1 : 0);
+  const queue = [...items.values()].sort((a, b) => order(a.at, b.at) || a.run - b.run || a.attempt - b.attempt || order(a.job, b.job));
   const work = [];
-  for (const item of items.values()) {
+  let taken = 0;
+  for (const item of queue) {
+    if (work.length >= limit) break;
+    taken += 1;
     try {
       const run = await runOf(item.run);
       const mine = (await jobsOf(item.run, item.attempt)).filter((j) => jobPart(j.name, reporting)?.job === item.job);
@@ -244,19 +266,18 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
       if (set.some((s) => !s.artifact) && store.line(lineKey(item))) continue; // still short, and already `missing`
       work.push({ ...item, runInfo: run, jobInfo: logicalJob(set.map((s) => s.job)), shards: set });
     } catch (err) {
-      errors.push(`run ${item.run} attempt ${item.attempt} ${item.job}: ${describe(err)}`);
+      failed(`run ${item.run} attempt ${item.attempt} ${item.job}`, err);
     }
   }
-  const order = (x, y) => (x < y ? -1 : x > y ? 1 : 0);
   work.sort((a, b) => order(a.jobInfo.completed_at, b.jobInfo.completed_at) || a.run - b.run || a.attempt - b.attempt || order(a.job, b.job));
 
   // 4. One line per item.
   const fresh = [];
   for (const w of work) {
     try {
-      fresh.push(await lineFor(w));
+      fresh.push(own(await lineFor(w)));
     } catch (err) {
-      errors.push(`run ${w.run} attempt ${w.attempt} ${w.job}: ${describe(err)}`);
+      failed(`run ${w.run} attempt ${w.attempt} ${w.job}`, err);
     }
   }
 
@@ -308,14 +329,14 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
     const day = dayOf(job.completed_at);
     let base = store.base(day, name);
     if (!base && prov.selection === null) {
-      base = buildBase(prov, summary);
+      base = own(buildBase(prov, summary));
       store.setBase(day, name, base);
     }
     // Selected reports are not whole-suite snapshots, even when a fallback happened to run every test.
     if (job.conclusion === 'success' && prov.selection === null) {
       const held = store.durations(day, name);
       const later = !held || held.completed < prov.completed || (held.completed === prov.completed && (held.run < prov.run || (held.run === prov.run && held.attempt < prov.attempt)));
-      if (later) store.setDurations(day, name, buildDurations(prov, summary));
+      if (later) store.setDurations(day, name, own(buildDurations(prov, summary)));
     }
     return buildRunLine(prov, artifact, 'present', summary, base);
   }
@@ -329,7 +350,7 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
     try {
       line.previous = await previousRun(gh, repo, line, everyLine);
     } catch (err) {
-      errors.push(`run ${line.run} attempt ${line.attempt} ${line.job}: previous run: ${describe(err)}`);
+      failed(`run ${line.run} attempt ${line.attempt} ${line.job}: previous run`, err);
       unlinked.add(line);
     }
   }
@@ -349,7 +370,7 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
       const previous = await previousRun(gh, repo, line, everyLine);
       if (!isDeepStrictEqual(previous, line.previous)) relinked.push({ ...line, previous });
     } catch (err) {
-      errors.push(`run ${line.run} attempt ${line.attempt} ${line.job}: previous run: ${describe(err)}`);
+      failed(`run ${line.run} attempt ${line.attempt} ${line.job}: previous run`, err);
       for (const f of earlier) unlinked.add(f);
     }
   }
@@ -382,7 +403,7 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
   for (const line of replacing) store.replace(line);
   counts.relinked = replacing.length;
   counts.written = store.flush();
-  return { counts, errors };
+  return { counts, errors, more: (taken < queue.length || !sweep) && !limited };
 }
 
 export const formatCounts = (repo, c, errors) =>
@@ -400,14 +421,17 @@ function tokenFor(repo) {
   return token;
 }
 
-function parseArgs(argv) {
-  const opts = { repo: null, store: null };
+export function parseArgs(argv) {
+  const opts = { repo: null, store: null, limit: Infinity };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--repo') opts.repo = argv[++i];
     else if (argv[i] === '--store') opts.store = argv[++i];
-    else throw new Error(`history: unknown argument ${argv[i]}`);
+    else if (argv[i] === '--limit') {
+      opts.limit = Number(argv[++i]);
+      if (!Number.isInteger(opts.limit) || opts.limit < 1) throw new Error('history: --limit takes a whole number of lines, 1 or more');
+    } else throw new Error(`history: unknown argument ${argv[i]}`);
   }
-  if (!opts.store) throw new Error('history: usage: collect.mjs [--repo <alias>] --store <dir>');
+  if (!opts.store) throw new Error('history: usage: collect.mjs [--repo <alias>] --store <dir> [--limit <lines>]');
   return opts;
 }
 
@@ -424,12 +448,17 @@ async function main(argv) {
   const repos = JSON.parse(readFileSync(new URL('./repos.json', import.meta.url), 'utf8'));
   const chosen = selectRepos(repos, opts.repo);
   let failed = false;
+  let more = false;
   for (const { repo, alias, jobs } of chosen) {
-    const { counts, errors } = await collectRepo({ gh: createGitHub(tokenFor(repo)), repo, alias, jobs, root: opts.store });
-    for (const e of errors) console.error(`${repo}: ${e}`);
-    console.log(formatCounts(repo, counts, errors.length));
-    if (errors.length > 0) failed = true;
+    const result = await collectRepo({ gh: createGitHub(tokenFor(repo)), repo, alias, jobs, root: opts.store, limit: opts.limit });
+    for (const e of result.errors) console.error(`${repo}: ${e}`);
+    console.log(formatCounts(repo, result.counts, result.errors.length));
+    if (result.errors.length > 0) failed = true;
+    if (result.more) more = true;
   }
+  // The workflow reads these: `more` to run another pass, the peak resident memory (maxRSS is in KiB) to watch it.
+  console.log(`history: peak rss ${Math.round(process.resourceUsage().maxRSS / 1024)} MB`);
+  if (more) console.log('history: more');
   return failed ? 1 : 0;
 }
 
