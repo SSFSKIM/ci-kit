@@ -1,7 +1,7 @@
 # The gate ledger: what each gate costs, what it catches, and what landed without it — living spec
 
-**Date.** 2026-11-19. **Status.** Design approved by the owner (2026-11-19, "설계안 전체"); revised the same day
-after its adversarial review (Decision Log). Author: CI-opt.
+**Date.** 2026-11-19. **Status.** Design approved by the owner (2026-11-19, "설계안 전체"); revised twice the same
+day, after each of its adversarial review's two passes (Decision Log). Author: CI-opt.
 Parents: `2026-10-15-ci-kit-design.md` (the kit) and `2026-10-21-test-history-design.md` (the per-test record this
 builds on; its M3 is superseded by M3 and M6 here).
 
@@ -17,12 +17,14 @@ After this work:
 
 - **Every gate job leaves one line**: which gate, where it ran, how long, how it ended, on which tree and with
   what scope. For all five repositories ci-kit serves, and for the hand-run Mac gate.
-- **Every red gate attempt carries what the record can prove about its cause**, and says so when it can prove
-  nothing: infrastructure, flaky, fixed by changing a test, fixed by changing the product ("caught"), or
-  unattributed with the reason it could not be attributed.
+- **Every red gate attempt carries what the record shows about it**, and says so when it shows nothing: lost to
+  infrastructure, green on a rerun of the same tree, followed by a green that changed only tests, followed by a
+  green that changed the product, or unattributed with the reason.
 - **A weekly report per repository** shows, per gate, runner minutes and reds by cause. It nominates a gate for
-  removal or demotion only when every one of its reds is explained and none was a catch; reds it could not
-  attribute are listed for a person to read. A person decides; CI never removes a check.
+  removal or demotion only when its record is long enough and it had no red but infrastructure's. A gate whose
+  other reds all passed on a rerun or went green on a test-only change is listed as a candidate with each of those
+  reds to read, because neither observation proves the product was not at fault; reds the record could not
+  attribute are listed too. A person decides; CI never removes a check.
 - **Every update of a default branch is checked against its gates**: did the tree that landed run, in full, and
   green? The count of landings that did not is visible each day.
 - **`ci-gate` gives context at a failure**: when the same gate last ran on the default branch and how it ended, and
@@ -37,9 +39,11 @@ store, print a weekly report, and show `ci-gate` printing the context lines.
   protection (`ci / verdict` is a required check on cua, doperpowers, ci-kit and manim-master since 2026-11-19) and,
   in MAWS, the architect's rule. The ledger observes both.
 - **Not a disposition.** A cause is a statement of what the record shows, and a context line says what it does not
-  know. Neither tells a session that a failure may be ignored. The review of this spec showed three ways a
-  rule-made label could call a real failure harmless (one passing shard, a narrower rerun, a different test
-  failing on the base); wherever the record cannot exclude those, the answer is `unattributed`.
+  know. Neither tells a session that a failure may be ignored. The review of this spec showed ways a rule-made
+  label could call a real failure harmless (one passing shard, a narrower rerun, a different test failing on the
+  base, a product deadlock reaching the time limit, an intermittent product fault passing on a rerun, a weakened
+  assertion); a cause is therefore named for the observation, never for a conclusion, and where the record shows
+  nothing the answer is `unattributed`.
 - **No check removed or quarantined by CI.** The report nominates. A check that guards a rare but costly failure is
   marked `keep` with its reason and is not nominated.
 - **No test name, file or message in a public place.** MAWS's record is treated as private whatever the
@@ -47,7 +51,7 @@ store, print a weekly report, and show `ci-gate` printing the context lines.
   Actions carries counts only (the parent spec's rule).
 - **No new credentials or permissions.** The collector uses the ci-kit GitHub App with the permissions it has
   (Actions read, Contents read); local commands use `gh`'s token. A design step that needs more is redesigned, not
-  granted (M1's preflight decides which of two listed routes each repository uses).
+  granted (M1's preflight proves each read with the token the daily run has).
 - **Not a report of time saved.** Four shards of eight minutes are 32 runner minutes and eight minutes of
   anyone's wait. The unit is runner minutes by lane, with the Mac's minutes shown apart because the one Mac is the
   scarce machine; the report never calls a sum of them elapsed time.
@@ -68,15 +72,19 @@ store, print a weekly report, and show `ci-gate` printing the context lines.
 - **Scope.** What a gate attempt actually exercised: `full`; `selected` (a `Selection: affected` trailer, whether or
   not selection fell back to the whole suite, as the parent spec's landing rule has it); `narrowed` (the hand-run
   gate with a test filter, or a gate on an event `history/repos.json` lists as vacuous for it, such as doperpowers'
-  `version-bump` on a dispatch); `unknown`. The **scope key** adds what else distinguishes one execution from
-  another: the nonce message's trailers other than `Gates`, and for the hand-run gate its filter, environment and
-  peers. Two attempts are **comparable** when gate and scope key are equal.
+  `version-bump` on a dispatch); `unknown`. The **scope key** adds what else decides what an execution exercised
+  or where, and nothing that merely varies between two executions of the same work: the values of the trailers
+  `history/repos.json` lists as semantic for the repository (in MAWS, the runner, the selection, the lane, the
+  live flag, the peers and the mini copies; never the nonce, the backlog and demand snapshots or the coverage
+  notes), and for the hand-run gate its filter, environment, peers and whether the job is a mini copy. Two
+  attempts are **comparable** when gate and scope key are equal and neither scope is `unknown`.
 - **Tree basis.** `exact`: the run tested exactly the tree recorded (a ci-gate ref, whose nonce commit is empty; a
   push to a branch). `pr-merge`: a `pull_request` run, which checks out GitHub's merge of the head into the base
   of that moment; the head's tree is recorded and the tested tree is not known.
 - **Change.** For a ci-gate ref, its producer and label, unless the label is one a repository uses as a fallback
   for unrelated targets (`gate` in ci-kit's own `ci-gate`; the list is in `history/repos.json`), in which case the
-  attempt has no change. For a `pull_request` run, the head branch's name.
+  attempt has no change. For a `pull_request` run, the pull request's number when the run names one, else the
+  head branch's name (a name alone can be reused by a later pull request).
 - **Lane.** Where a job ran: `pool-gce`, `pool-ec2`, `mini-host`, `mini-guest`, `hosted-linux`, `hosted-macos`, or
   `manual-host` / `manual-guest` for the hand-run Mac gate.
 - **Landing.** One update of a default branch: a push event with its `before` and `after` commits, from the
@@ -103,6 +111,8 @@ store, print a weekly report, and show `ci-gate` printing the context lines.
   (merge 8304e4c); proof run 44486730875 (349 lines in 9 batches, 0 errors). The store holds 10-21 and 11-12 to
   11-19.
 - [x] (2026-11-19 09:4xZ) Adversarial review: 12 blocking findings and 3 lesser, all taken (Decision Log).
+- [x] (2026-11-19 10:1xZ) Its second pass: 8 blocking findings and 2 lesser on the revision, folded (Decision
+  Log). The review ends here; the counterexamples it gave are test pins and acceptance cases.
 - [ ] M1 — Job lines.
 - [ ] M2 — The store kept small, watched, and fed by the hand-run gate.
 - [ ] M3 — Landings and causes.
@@ -121,8 +131,8 @@ token; a run made with `gh`'s token proves nothing about the daily run.
    `pool-gce`, conclusion `success`, basis `exact`, and `e2e:desk-web` at 7.6 minutes (08:18:10Z to 08:25:45Z).
    All five repositories have job files for every day from 2026-10-22 on which they ran a gate.
 2. **A gate attempt is not greener than its worst shard.** MAWS run 39962530337, attempt 1: `unit 2/4` failed and
-   the other three shards passed after it. The gate attempt `unit` is `failed`, and nothing derived from it
-   (cause, landing evidence, standing) reads it as green or as flaky.
+   the other three shards passed after it. The gate attempt `unit` is `failed`; nothing derived from it (cause,
+   landing evidence, standing) reads it as green, and its sibling shards' success is not a later pass of its tree.
 3. **Causes say what the record shows, on cases whose cause is known.**
    - `infra`: MAWS run 44468141412's first `static-local` (runner lost in the setup step; the rerun got past it)
      and run 44472434480's `e2e:desk-web` (cancelled inside `playwright install`; its rerun got past it).
@@ -131,33 +141,40 @@ token; a run made with `gh`'s token proves nothing about the daily run.
    - `unattributed`: doperpowers pull request 481's `mods-types` failure of 2026-11-10 12:40Z (merged red: no later
      attempt in its change), and a setup failure that no later attempt on the same tree got past (the executor
      names one, or records that the store has none).
-   - For `flaky`, `test-changed` and `caught` the executor of M3 takes two labelled attempts of each from the
-     store, reads the runs behind them on GitHub, and records all six with their evidence in Surprises &
-     Discoveries. A label the reading contradicts is a defect.
-4. **The landing record reproduces the hand measurement, where their definitions agree**, for 2026-10-22 to
-   2026-11-19. By the pull request check (the semantic GitHub's required check enforces): doperpowers 184 merged
-   pull requests, 165 green, 2 red (410, 481), 17 unrun of which 15 in flight at the merge; ci-kit 116: 113, 0, 3;
-   cua 69, all green; manim-master 207: 188 green and 19 with no gate required. The three doperpowers commits
-   pushed with no pull request (f2c78808, 74ff0ff4, 06d4ea08) are landings and are `unrun`. For MAWS, and for
-   "did the exact landed tree run" in every repository, the ledger's own definitions differ from the hand
-   measurement's (push diffs, the path policy, full scope only); the executor records both sets of counts and what
-   each difference comes from in Surprises & Discoveries.
+   - For `rerun-green`, `test-only-diff` and `product-diff` the executor of M3 takes two labelled attempts of each
+     from the store, reads the runs behind them on GitHub, and records all six with their evidence in Surprises &
+     Discoveries. A label whose stated observation the reading contradicts is a defect.
+4. **The landing record agrees with the hand measurement, or says why not**, for 2026-10-22 to 2026-11-19. Fixed
+   points by `pr_check`: doperpowers' pull request 481 is `red`; 410 is `green` (its check, run 40596123672,
+   passed; the red the hand measurement counted was a `ci-gate` push six minutes later, run 40596797028, which is
+   a cause line). The three doperpowers commits pushed with no pull request (f2c78808, 74ff0ff4, 06d4ea08) are
+   landings and are `unrun`. The hand measurement's totals, which mixed the two kinds of run: doperpowers 184
+   merged pull requests, 165 green, 2 red, 17 unrun of which 15 in flight; ci-kit 116: 113, 0, 3; cua 69, all
+   green; manim-master 207: 188 green and 19 with no check (`none`). The executor sets the ledger's `pr_check`
+   counts beside these and explains every difference by pull request number in Surprises & Discoveries; a
+   difference left unexplained is a defect. For MAWS, and for "did the exact landed tree run" in every repository,
+   the definitions differ by design (push diffs, the path policy, full scope only), and both sets of counts are
+   recorded with what each difference comes from.
 5. **The report reads, and does not nominate what caught something.** `node history/report.mjs --store <dir> --repo
    SSFSKIM/doperpowers --week 2026-W47` prints a Markdown report with a row per gate and the sections of "The
-   report" below. No gate with a `caught` or an `unattributed` red in its window is in the nominations; no gate
-   that `~/.local/share/ci-analysis/verification-retro-1119/reds.md` credits with a product catch is nominated in
-   MAWS's report.
+   report" below. No gate with any red but `infra` in its window is in the nominations; no gate with a
+   `product-diff` or an `unattributed` red is among the candidates; no gate that
+   `~/.local/share/ci-analysis/verification-retro-1119/reds.md` credits with a product catch is nominated in MAWS's
+   report.
 6. **`ci-gate` gives context and changes nothing else.** With a status file in which gate `test` last failed on
    the default branch, `ci-gate` on a commit whose `test` fails prints the FAIL line followed by a `base:` line
    naming the commit, the time and the run. Verdict and exit code are as today. With no readable status file, or
    one older than 48 hours, the output is byte for byte today's.
 7. **The hand-run gate is in the ledger and a MAWS session can read it.** After `history/manual-gate.mjs` imports
-   run `24952ff2f8a4-20261119T054617Z` (RED 3/5), the store has its five job lines with their scope keys, and
-   `ci-gate status --repo SSFSKIM/MAWS` prints MAWS's standing per gate and its known entries.
+   run `24952ff2f8a4-20261119T054617Z` (RED 3/5: a build and five test jobs, the last a mini copy bundling two
+   groups), the store has seven lines: the build as `control`; `e2e:panel` failed, `e2e:code` and `e2e:remote`
+   succeeded; and the mini copies of `e2e:remote` (succeeded), `e2e:panel` (failed) and `e2e:code` (succeeded),
+   each copy an attempt apart from its direct job. `ci-gate status --repo SSFSKIM/MAWS` prints MAWS's standing per
+   gate and its known entries.
 8. **Nothing public names a test.** The Actions log of the collection run that produced 1 to 5 contains no MAWS
    test name, file or message (`gh run view --log | grep` for three names taken from the store returns nothing).
-9. **A dead collector is noticed.** With the store's newest commit made older than 36 hours (the check pointed at a
-   test branch that is), ci-kit's guard workflow opens or updates the kit's alert issue.
+9. **A dead collector is noticed.** With the guard pointed at a test branch whose marker is older than 36 hours
+   and whose newest commit is fresh, the sandbox's guard workflow opens or comments on the alert issue.
 
 ## Design
 
@@ -168,7 +185,8 @@ App token, a branch as the store. The ledger adds files beside `runs/` under eac
 
 | File | Holds | Written by |
 |---|---|---|
-| `attempts.json` | which (run, attempt) pairs are collected, and which are still open | M1 |
+| `attempts.json` | which (run, attempt) pairs are collected, which are still open, and when each day was listed | M1 |
+| `collected.json` (the store's root) | the collector's marker: when a pass last ended complete | M2 |
 | `jobs/<YYYY-MM-DD>.jsonl` | one line per job of a gate run, by completion day (UTC) | M1 |
 | `jobs-manual/<YYYY-MM-DD>.jsonl` | the same, for the hand-run Mac gate | M2 |
 | `landings/<YYYY-MM-DD>.jsonl` | one line per update of the default branch | M3 |
@@ -195,19 +213,38 @@ only, a rerun keeps its run's creation date, and a filtered listing stops at 1,0
   (reruns are possible for 30); a day whose `total_count` exceeds 1,000 is split by hour. A (run, attempt) not in
   `attempts.json`, or in it as open, is work. An attempt is closed when its run is completed and its jobs are
   written; an attempt still running stays open and is read again next pass. About 35 requests a repository a pass.
-- **Jobs.** Read through GraphQL: the check runs of each run's head commit, with their steps and up to five
-  annotations, batched many commits to a query. The measurement read every job of every attempt of 28 days of five
-  repositories in about 190 queries (`gate-observe-1119/scripts/common.py` is the reference). *Rejected:* the REST
-  jobs endpoint, one call per attempt: 8,367 attempts in the backfill.
+- **Jobs.** One REST call per (run, attempt): the attempt's jobs, 100 a page (`lib/github.mjs` `attemptJobs`,
+  which the per-test pass calls today for the same attempts). It is the only source that names a job's runner, its
+  labels and the attempt a job ran in: in the listing of a failed-jobs rerun, a shard carried over from the
+  earlier attempt keeps that attempt's number, which is how `copied_from` is read. The pass fetches each attempt's
+  jobs once, for the job lines and the per-test pass both, and records the attempt in `attempts.json`.
+  Annotations are read for unsuccessful jobs only, one call each (`annotations`). *Rejected:* GraphQL check runs,
+  which this spec's first revision chose for their batching: a check run has steps and annotations but no runner,
+  no labels and no attempt of its own, so neither the lane nor a copied shard can be read from it.
+- **Discovery once a pass.** The sandbox workflow calls the collector in a loop of batches. The first call of a
+  pass makes the run listing and keeps its result (the open attempts, oldest first, and the time of the listing)
+  in `attempts.json`; later batches of that pass take work from it without listing again.
+- **Coverage.** `attempts.json` records, per repository and day, when the day was last listed in full. A day is
+  **covered** when it was listed after it ended and every attempt found for it is closed. A backfill that has not
+  reached a day leaves it uncovered, and the report counts covered days only.
+- **Budget.** From the measurement, not a guess: 35 listing calls a repository a pass (175), one jobs call per new
+  attempt (8,367 attempts in the 28 days measured, about 300 a day), one annotations call per unsuccessful job,
+  and the per-test pass's artifact downloads. A daily pass is held under 1,500 REST calls on the App's token (the
+  installation's own allowance, at least 5,000 an hour, which the launcher shares and no session does). The
+  collector counts its calls, takes no new work at the limit, and prints the count. The backfill is the same pass
+  over a longer window, paced under 2,000 calls an hour: about five hours.
 - **Trees, ancestry, paths.** From the mirror, not the API. A run's nonce commit is fetched by id, which brings the
   tested commit with it; a pull request's head is fetched from `refs/pull/<n>/head`. The compare endpoint is not
   used: it lists at most 300 files and, for two commits where neither descends from the other, lists the later
   one's changes since their common ancestor, which hides a product edit that an amendment dropped.
 - **Preflight.** M1 opens by proving, with the App token on the pool, for each of the five repositories: the run
-  listing, the GraphQL check runs with steps and annotations, the activity listing of the default branch, the
-  mirror clone, and a fetch by commit id of a nonce commit whose ref is gone. Its results go into Surprises &
-  Discoveries. Where the activity listing is refused, that repository's landings are read from the mirror's
-  first-parent history with the committer date as the time, and its lines say `time_basis: "commit"`.
+  listing; the jobs of both attempts of one run that was rerun for its failed jobs, with each job's runner and
+  labels and a carried-over shard read from the answer; the annotations of one failed job; the activity listing
+  of the default branch; the mirror clone; and a fetch by commit id of a nonce commit whose ref is gone. Its
+  results go into Surprises & Discoveries. Where the activity listing is refused, that repository has no landing
+  lines and the report says so. *Rejected:* reading landings from first-parent history instead. It cannot tell one
+  push of three commits from three pushes, nor a gate that finished between a commit's creation and its push, so
+  its counts would be invented.
 
 ### A job line (M1)
 
@@ -225,27 +262,43 @@ only, a rerun keeps its run's creation date, and a filtered listing stops at 1,0
 - **`failed_step` and `phase`** say where a job stopped, not why: the first step that concluded `failure` or
   `cancelled`, and `setup` when its name matches the repository's `setup_steps` patterns in `history/repos.json`,
   `post` for `Post …` steps, else `test`. A job that ended unsuccessfully with no such step has `phase: "lost"`.
-- **`annotations`** are kept only when they match the kit's list of platform messages (the job was not started for
-  billing; the runner lost communication; the operation was cancelled at the job's time limit), as the matched
-  kind, never the text.
+- **`annotations`** are kept only when they match the kit's list of platform messages (`not-started`: the job was
+  not started for billing; `runner-lost`: the runner lost communication; `time-limit`: the operation was cancelled
+  at the job's time limit), as the matched kind, never the text.
 - **`copied_from`** names the earlier attempt whose shard a failed-jobs rerun carried over; such a line has no
   minutes.
 - Skipped jobs are not written. Lines are idempotent by (run, attempt, job id).
 
-### What a red gate attempt's cause is (M3)
+### What a red gate attempt's record shows (M3)
 
 A cause line is `{ run, attempt, gate, cause, why, evidence, context }`. Cancelled jobs of a run that was itself
 cancelled while a later run existed for the same ref or head branch are `superseded`: they are not reds, and their
-minutes are reported as superseded cost. For every other gate attempt that failed, the first rule that holds
-decides:
+minutes are reported as superseded cost. For every other gate attempt that failed, each of its unsuccessful jobs
+is first read on its own:
+
+- **lost:** the pool's record says the job's runner was preempted; or the job has a `runner-lost` or `not-started`
+  annotation; or the job stopped in `setup` or `lost` and a comparable attempt on the same exact tree later got
+  that shard past that phase.
+- **failed:** anything else, a job that reached its time limit included. A time limit is an outcome, not a cause:
+  a deadlock in the product reaches it too.
+
+Then the first rule that holds decides the attempt:
 
 | # | Cause | Holds when |
 |---|---|---|
-| 1 | `infra` | the pool's record says the job's runner was preempted; or an annotation of the platform kinds is present; or the attempt stopped in `setup` or `lost` and a comparable attempt on the same exact tree later got past that phase |
-| 2 | `flaky` | the attempt failed in `test`, and a later comparable attempt on the same exact tree succeeded (every shard) |
-| 3 | `test-changed` | the change's next comparable attempt that succeeded has a tree whose difference from this one, read from the mirror, lies wholly in paths matching the repository's `test_globs` |
-| 4 | `caught` | the same, with any other path in the difference |
-| 5 | `unattributed` | none of the above; `why` is one of `no-later-green` (the change ended red, or was abandoned), `setup-uncorroborated`, `timeout-uncorroborated`, `incomparable` (only attempts of another scope followed), `no-change` (no label to follow), `basis` (a `pr-merge` attempt, whose tree is not known, with no later attempt in its change) |
+| 1 | `infra` | every unsuccessful job of the attempt is lost |
+| 2 | `rerun-green` | a later comparable attempt on the same exact tree succeeded (every shard) |
+| 3 | `test-only-diff` | the change's next comparable attempt that succeeded has a tree whose difference from this one, read from the mirror, lies wholly in paths matching the repository's `test_globs` |
+| 4 | `product-diff` | the same, with any other path in the difference |
+| 5 | `unattributed` | none of the above; `why` is one of `no-later-green` (the change ended red, or was abandoned), `setup-uncorroborated`, `incomparable` (only attempts of another scope followed), `no-change` (no change to follow), `basis` (a `pr-merge` attempt, whose tree is not known, with no later attempt in its change) |
+
+- **A cause is named for what the record shows, and none is an exoneration.** `rerun-green` is what a flaky test
+  looks like, and what an intermittent fault in the product looks like (the retrospective has one, fixed in MAWS
+  pull request 763). `test-only-diff` is what a wrong test looks like, and what a weakened assertion looks like.
+  `product-diff` is what a catch looks like, and what a scene that an intended change made wrong looks like. The
+  retrospective told each pair apart by reading; the report keeps the three apart and proposes removal on none of
+  them (Nominations).
+- An attempt with one shard lost and another failed is not `infra`: rule 1 needs every unsuccessful job lost.
 
 - Rules 2 to 4 need `basis: "exact"` on both attempts, except that two `pr-merge` attempts of one head commit
   count as the same tree for rule 2 only when the base branch did not move between them.
@@ -260,28 +313,34 @@ decides:
   failure on the base does not explain a failure on the change, because the two may be different tests; the
   context is there so a reader can compare them in one look.
 - A cause is recomputed while its attempt is younger than 14 days, then final.
-- *Not decided by rule:* whether a `caught` was a product bug or a scene an intended change had made wrong. The
-  retrospective told those apart by reading. The report says so beside the count.
+- *Known limit:* a gate that compares the tree with the default branch of the moment (doperpowers'
+  `version-bump`) can differ between two runs of one tree. Its `rerun-green` says the base moved as often as it
+  says anything about the test; the report's last section names such gates.
 
 ### A landing (M3)
 
-A landing line holds the push event (`before`, `after`, time, `time_basis`), the tree and tree key of `after`,
-the paths between `before` and `after`, the pull request number when the tip's message names one, the gates
-required of it, and two verdicts.
+A landing line holds the push event (`before`, `after`, time), the tree and tree key of `after`, the paths
+between `before` and `after`, the pull request, the gates required of it, and two verdicts. The pull request is
+the number the tip's message names, with `pr_link: "parent"` when the mirror's `refs/pull/<n>/head` is the tip's
+second parent and `pr_link: "message"` when the tip has one parent (a squash) and the message is all there is.
 
 - **Required gates.** In the ci-kit repositories: what ci-kit's own planner selects from `before`'s
   `.github/ci-kit.yml` for event `pr` and the landing's paths (`plan/config.mjs` `parseConfig` and
   `plan/select.mjs` `selectGates`, called as libraries, with the file read from the mirror). In MAWS: the
   `required` list in `history/repos.json` (`static`, `unit`, `probes`). A landing all of whose paths the path
-  policy excludes is `exempt`.
+  policy excludes is `exempt`: exempt from the gates named here, which says nothing of a separate docs check.
 - **`exact`: did the landed tree run.** For each required gate, the latest comparable-to-`full` gate attempt, with
   `basis: "exact"` and scope `full`, on the landing's tree key, completed before the landing. `green` when each
   succeeded; `red` when one failed; `unrun` otherwise, with `head_green: true` when the tip has a second parent
   whose tree key has them all green (a branch was gated and the merged tree was not).
-- **`pr_check`: what a required check would have seen**, in the repositories that merge pull requests: the same,
-  over the `pr-merge` attempts of the pull request's head commit (the tip's second parent, or
-  `refs/pull/<n>/head` for a squash). `green`, `red`, or `unrun` with `inflight: true` and the job's eventual
-  conclusion when it was running at the landing.
+- **`pr_check`: what the required check saw**, in the repositories that merge pull requests: the conclusion, as
+  it stood at the landing, of the repository's verdict job (`ci / verdict`; `verdict_job` in `history/repos.json`)
+  in the latest `pull_request` run of the pull request's head commit (the tip's second parent, or
+  `refs/pull/<n>/head` for a squash). `green`; `red`; `unrun` with `inflight: true` and the job's eventual
+  conclusion when it was running at the landing; or `none` when that head has no `pull_request` run (a change no
+  gate applies to). It is the check's own result, not the plan recomputed, so a workflow or plan failure reads as
+  the check read it. A `ci-gate` push made for the same head is a gate attempt with its own cause line and takes
+  no part in this verdict.
 - **Override.** A landing whose tip message has a line `Ship-with: <reason>` carries the reason. This is how
   "ship with it" is said where a check is required: `gh pr merge --admin --body "Ship-with: <reason>"`, which
   writes it into the merge commit. *Rejected for now:* a `known_red` attribute on a gate in `.github/ci-kit.yml`
@@ -289,8 +348,9 @@ required of it, and two verdicts.
   shows 4 times in 576 merges; the report counts overrides, and that count is the argument if it grows.
 - **Standing.** Each gate's observations on the default branch are the full, exact gate attempts on landings'
   tree keys and on default-branch push runs, each with the time it completed. An observation is used only by
-  readers later than that time, and a landing with no observation leaves the previous one standing with its own
-  commit and time, so a reader always sees which tree a standing is about and how old it is.
+  readers later than both that time and its landing's push, and a landing with no observation leaves the previous
+  one standing with its own commit and time, so a reader always sees which tree a standing is about and how old
+  it is.
 
 ### Known entries (read from M3 on, written in M5)
 
@@ -322,15 +382,19 @@ required of it, and two verdicts.
 1. **Per gate:** attempts, runner minutes by lane (the Mac's apart), superseded minutes, reds by cause.
 2. **Reds to read:** each gate's `unattributed` attempts, newest first, with their `why` and run links. This is the
    list a person reads to learn what a gate is really catching.
-3. **Nominations:** a gate is nominated only when its window is covered (lines on at least 21 of the 28 days it
-   could run and at least 20 attempts), it has no `caught` and no `unattributed` red in the window, and no `keep`
-   entry. The line gives its runner minutes a week and its reds by cause, and says which lane they free. A gate
-   that fails the coverage test is listed as "too little record", never nominated.
+3. **Nominations:** a gate is nominated only when its window is covered (at least 21 covered days of the 28 with
+   lines, and at least 20 attempts), its only reds in the window are `infra`, and it has no `keep` entry. The line
+   gives its runner minutes a week and says which lane they free. A gate that fails the coverage test is listed as
+   "too little record", never nominated.
+   **Candidates to read:** a covered gate with no `product-diff` and no `unattributed` red and no `keep` entry,
+   whose other reds are `rerun-green` or `test-only-diff`. It is listed with each of those reds linked, under the
+   sentence that a rerun's pass does not rule out an intermittent product fault and a test-only change may have
+   weakened the test. The report proposes nothing for it; a person who has read the reds may.
 4. **Landings:** counts by both verdicts; each landing that was `red`, `unrun` and not in flight, or `head_green`,
    by commit; each override with its reason.
 5. **Known entries:** in force, expiring within a week, expired.
-6. **What the record cannot say:** the `caught` caveat; lanes with no lines that week; repositories whose landing
-   times are commit times.
+6. **What the record cannot say:** what each cause's name leaves open; lanes with no lines that week; days not
+   covered; repositories with no landing record; gates that compare with the default branch of the moment.
 
 `status.json`, written in the same daily pass: `{ as_of, gates: { <gate>: { result, commit, at, run } }, known:
 […entries in force…] }`.
@@ -365,13 +429,17 @@ because a line stores its membership as a difference from the day's one base and
 thousands of cases. The store grew 64 MB in eight days, every pass loads every line, and the pass's peak memory
 (616 MB at 64 MB of lines) would reach the heap's limit in about a month.
 
-- A run line that is not its day's base keeps its counts, the hash of its ids, its failed cases and its skipped
-  count; it no longer stores membership. A reader that asks whether a case ran and passed in such a run answers
-  yes when the run's report is present, the case is in the day's base, and the case is not among the run's failed.
-  *What this gives up:* a case deleted on a branch reads as passed there, which the parent spec rejected a daily
-  snapshot for. Measured, the exactness costs 50 times its estimate, and the error it admits can only add a
-  passing observation for a test that no longer exists, which no report acts on.
-- Existing lines are rewritten once to the new shape. A pass loads the lines of the last 35 days only.
+- A run line that is not its day's base keeps its counts, the hash of its ids, the hash of its skipped ids (a line
+  holds both today) and its failed cases; it no longer stores membership. A reader that asks whether a case ran
+  and passed in such a run answers `passed` only when the run's two hashes equal the base's (the same cases ran
+  and the same were skipped) and the case is not among the run's failed; otherwise `unknown`. A run selected by
+  `--affected`, or one that skipped other cases, therefore says nothing about the cases it did not fail.
+  *What this gives up:* passing observations from runs whose membership differs from the day's base. Measured, the
+  exactness costs 50 times its estimate. *Rejected:* answering `passed` for every case of the base that did not
+  fail (this spec's first revision). It reports thousands of unselected and skipped cases as passed, and M6 reads
+  exactly that signal.
+- Existing lines are rewritten once to the new shape, from the exact membership they hold. The exact lines stay in
+  the branch's history, which is never rewritten. A pass loads the lines of the last 35 days only.
 
 ## Plan of Work
 
@@ -380,15 +448,15 @@ Constraints on every milestone:
 - Node's built-ins, `git`, and the kit's vendored `yaml` only; tests are `node --test`, beside the existing ones in
   `test/history/`.
 - A collection's Actions log prints counts only (acceptance 8).
-- A daily pass stays under 600 REST calls and 100 GraphQL queries for all repositories together; the backfill is
-  paced under 2,000 calls an hour. A repository in `history/repos.json` with no `jobs` list of reporting jobs takes
-  no part in the per-test pass.
+- A daily pass stays under 1,500 REST calls for all repositories together, counted and printed by the collector;
+  the backfill is paced under 2,000 calls an hour ("Reading GitHub cheaply and completely"). A repository in
+  `history/repos.json` with no `jobs` list of reporting jobs takes no part in the per-test pass.
 - The collector keeps what M0 gave it: bounded batches, oldest first, each durable on its own, memory bounded by a
   batch.
 - The MacBook runs focused test files only (`node --test test/history/`), never the kit's whole suite, and never
   collects MAWS (the REST budget is shared with every session).
-- Nothing is deployed and `v1` does not move: this work changes `history/`, `cli/`, `hooks/`, one guard workflow
-  and docs.
+- Nothing is deployed and `v1` does not move: this work changes `history/`, `cli/`, `hooks/` and docs in ci-kit,
+  and the sandbox's workflows by their own pull requests.
 
 ### M1 — Job lines
 
@@ -396,21 +464,27 @@ At its end the store holds `attempts.json` and job lines for the five repositori
 daily run adds each day's.
 
 - Touches: `history/repos.json` (every served repository: its gate workflows, default branch, `setup_steps`,
-  `test_globs`, path policy, `required`, summary parts, fallback labels, vacuous events), `history/jobs.mjs` (a run
-  and its check runs to job lines and gate attempts, pure), `history/mirror.mjs` (the clone, fetch by id, trees,
-  tree keys, path differences), `history/collect.mjs` and `history/store.mjs` (the pass, `attempts.json`, the
-  `jobs/` files), `lib/github.mjs` (the listings and the GraphQL query), the sandbox workflow (the mirror's
-  credentials; by its own pull request), `test/history/`.
+  `test_globs`, path policy, `required`, `verdict_job`, summary parts, fallback labels, vacuous events, semantic
+  trailers), `history/jobs.mjs` (a run and its attempt's jobs to job lines and gate attempts, pure),
+  `history/mirror.mjs` (the clone, fetch by id, trees, tree keys, path differences), `history/collect.mjs` and
+  `history/store.mjs` (the pass, `attempts.json`, the `jobs/` files, the call count), `lib/github.mjs` (the
+  listings), the sandbox workflow (the mirror's credentials; by its own pull request), `test/history/`.
 - Exposes: the job line; `gateAttempts(lines)` → attempts with result, scope, scope key, basis, tree key;
-  `mirror.treeKey`, `mirror.paths(a, b)`, `mirror.isAncestor(a, b)`; `store.jobLines(fromDay, toDay)`.
+  `mirror.treeKey`, `mirror.paths(a, b)`, `mirror.isAncestor(a, b)`; `store.jobLines(fromDay, toDay)`;
+  `store.covered(repo, day)`.
 - Decisions: "Reading GitHub cheaply and completely" above is the contract, preflight first. Lines are written by
-  completion day. The backfill is the same pass over a longer window, in batches, under the paced budget.
-- Does not touch: the per-test pass and its files; causes; anything outside the paths above.
-- Proves: acceptance 1, 2 and 8. Its tests pin: shard folding, a missing shard (incomplete), a copied shard; a
-  failed shard beside three passing ones; control jobs and summary parts; lane for each lane; `phase` for a setup
-  failure, a test failure and a lost job; scope and scope key for a selected run and a vacuous event; a rerun of
-  a run created 20 days ago being found; a day of more than 1,000 runs; a pass interrupted between batches
-  resuming without a missing or doubled line.
+  completion day. The backfill is the same pass over a longer window, in batches, under the paced budget. Each
+  repository's semantic trailers are listed by reading its own `ci-gate` script: a trailer is semantic when it
+  changes which tests run or where, and not when it reports state.
+- Does not touch: the per-test pass's lines and reports (it only takes its jobs from the shared fetch); causes;
+  anything outside the paths above.
+- Proves: acceptance 1, 2 and 8. Its tests pin: shard folding, a missing shard (incomplete), a copied shard read
+  from a rerun's listing; a failed shard beside three passing ones; control jobs and summary parts; lane for each
+  lane; `phase` for a setup failure, a test failure and a lost job; scope and scope key for a selected run and a
+  vacuous event; two runs of one tree that differ in nonce and backlog trailers being comparable, two that differ
+  in runner not, and two of unknown scope not; a rerun of a run created 20 days ago being found; a day of more
+  than 1,000 runs; a pass's second batch making no listing call; work stopping at the call limit; a day with an
+  open attempt not being covered; a pass interrupted between batches resuming without a missing or doubled line.
 
 ### M2 — The store kept small, watched, and fed by the hand-run gate
 
@@ -418,20 +492,30 @@ At its end the per-test lines are small, a stale store raises the kit's alert, a
 the ledger.
 
 - Touches: `history/record.mjs`, `history/store.mjs`, `history/collect.mjs` (the slim line, the one-time rewrite,
-  the 35-day load); `.github/workflows/pool-guard.yml` and its script (the store's newest commit older than 36
-  hours is an alert, through the guard's existing alert issue); `history/manual-gate.mjs` (run directories to
-  `jobs-manual/` lines: `workflow: "manual-gate"`, `run` the directory's name, scope and scope key from the run's
-  filter, environment and peers, a job that bundles several groups written as one line per group with the job's
-  minutes on the first, a refused or partial run as `incomplete`); `test/history/`.
+  the 35-day load; the marker `collected.json` at the store's root, written when a pass ends with every
+  repository's work taken: the time, and per repository its last covered day); the sandbox's workflows, by their
+  own pull request (`store-guard.yml`: daily on the pool, it reads the marker and, when it is older than 36
+  hours, opens or comments on the sandbox's `ci-kit-alert` issue by the route `test-history.yml`'s alert step
+  uses; and `test-history.yml`'s push: a rejected push fetches, rebases and pushes again, three times at most);
+  `history/manual-gate.mjs` (run directories to `jobs-manual/` lines: `workflow: "manual-gate"`, `run` the
+  directory's name, `job_id` the summary row's id, scope and scope key from the run's filter, environment and
+  peers; the run's build as kind `control`; a job that bundles several groups written as one line per group,
+  `job_id` `<row id>:<group>`, each with its own exit and its segment's minutes where the run's log has them,
+  else the job's minutes on the first; a mini copy marked in its scope key, so it is an attempt of its own and
+  never joins the direct job's; a refused or partial run as `incomplete`); `test/history/`.
 - Consumes: M1's job line and store. Exposes: `jobs-manual/` lines readable through `store.jobLines`.
 - Decisions: "The per-test record, kept small" above. The hand-run import is run on the MacBook by CI-opt
   (`node history/manual-gate.mjs --runs <dir> --store <dir>`, then a push that fetches and replays on a
   non-fast-forward). The retrospective's parser
   (`~/.local/share/ci-analysis/verification-retro-1119/scripts/`) is the reference for the directories' layout.
+  The guard reads the collector's own marker and lives in the sandbox. *Rejected:* the store's newest commit as
+  the sign of life (a hand-run import or a `known add` keeps it fresh over a dead collector), and ci-kit's pool
+  guard as the place (its token reads issues and writes none, and this work grants nothing).
 - Does not touch: causes; the report; `cli/`.
-- Proves: acceptance 7's first half and 9. Its tests pin: a slim line answering "ran and passed" from the base; a
-  store with old-shape lines read and rewritten; the import of a green run, a red run, a narrowed run and a
-  refused run.
+- Proves: acceptance 7's first half and 9. Its tests pin: a slim line answering `passed` when its hashes equal the
+  base's, and `unknown` for a case a selected run left out and for a case it skipped; a store with old-shape lines
+  read and rewritten; the import of a green run, a red run, a narrowed run and a refused run; a bundled job whose
+  two groups ended differently; a mini copy and its direct job staying two attempts.
 
 ### M3 — Landings and causes
 
@@ -447,7 +531,10 @@ are kept current by the daily run.
 - Does not touch: the report; `ci-gate`; `known.json`'s writing.
 - Proves: acceptance 3 and 4. Its tests pin: each rule with the one above it not holding; a full red followed by
   a narrower green staying `unattributed` (`incomparable`); a setup failure by a broken lockfile staying
-  `unattributed`; a superseded run; an amendment that drops a product edit and keeps a test edit being `caught`;
+  `unattributed`; a job at its time limit not being lost; an attempt with one shard preempted and another failing
+  an assertion not being `infra`; a superseded run; an amendment that drops a product edit and keeps a test edit
+  being `product-diff`; a pull request whose check passed and whose later `ci-gate` push failed reading `green`
+  by `pr_check`, with the push's own cause line; a head with no `pull_request` run reading `none`;
   `known` and `base_also_failed` appearing only as context; `case_match` in its three values; a landing whose tip
   is docs-only and whose push is not; a landing that changes only the excluded-path exception being not exempt;
   `head_green`; an in-flight `pr_check`; an override; an observation not used before its completion time.
@@ -460,8 +547,9 @@ At its end the store holds a report for each of the last four ISO weeks per repo
   `test/history/`.
 - Consumes: M3's lines and `observations`. Exposes: `status.json`'s shape.
 - Does not touch: `cli/`.
-- Proves: acceptance 5. Its tests pin: a gate with one `unattributed` red is not nominated and its red is in
-  "reds to read"; a gate with a `keep` entry is not nominated; a gate with too little record is listed as such;
+- Proves: acceptance 5. Its tests pin: a gate with one `unattributed` red is in neither list and its red is in
+  "reds to read"; a gate with one `rerun-green` or `test-only-diff` red is a candidate with that red linked, and
+  not a nomination; a gate with a `keep` entry is in neither; a gate with too little record is listed as such;
   an expired entry is listed and is not in `status.json`; summary parts' minutes roll up to their gate.
 
 ### M5 — `ci-gate`'s context lines and known entries
@@ -528,6 +616,13 @@ inputs M0 added.
   either. That recount still credits any succeeded run whatever its scope, which the ledger does not; acceptance 4
   records the ledger's counts beside these. Evidence: `gate-observe-1119/maws-93-split.tsv` (the first count) and
   the recount's output in this spec's commit message.
+- Observation: a pull request's check and a `ci-gate` push for the same head are different records, and the hand
+  measurement mixed them. doperpowers' pull request 410 was counted red; its check passed (run 40596123672) and
+  the red was a `ci-gate` push six minutes later (run 40596797028).
+  Evidence: `gh api repos/SSFSKIM/doperpowers/actions/runs/<id>` for both.
+- Observation: a GraphQL check run names no runner, no labels and no attempt, so the lane and a copied shard can
+  only be read from the REST listing of an attempt's jobs. Evidence: GitHub's GraphQL reference for `CheckRun`;
+  the measurement's query (`gate-observe-1119/scripts/common.py`) read names, outcomes and times only.
 
 ## Decision Log
 
@@ -552,6 +647,20 @@ inputs M0 added.
   Date/Author: 2026-11-19, CI-opt.
 - Decision: per-test run lines drop per-run membership (the parent spec's "exact per run"). Rationale and what it
   gives up: "The per-test record, kept small". Date/Author: 2026-11-19, CI-opt.
+- Decision: the review's second pass is folded and is the last. What changed: jobs are read by the attempt's REST
+  listing, once, shared with the per-test pass (a GraphQL check run has no runner and no attempt), with discovery
+  once a pass, covered days, and a budget from the measured counts; each unsuccessful job is read as lost or
+  failed before an attempt is `infra`, and a time limit is not lost; the causes are named for observations
+  (`rerun-green`, `test-only-diff`, `product-diff`) and only an infra-only gate is nominated, the others being
+  candidates to read; the scope key takes semantic trailers only; `pr_check` is the verdict job's own result; a
+  repository without the activity listing has no landing record; a slim per-test line answers `passed` only on
+  equal hashes; the stale-store guard reads the collector's marker from the sandbox; the hand-run import's rows
+  follow the real run. Not taken: proof that a newer run caused a cancellation (a cancelled run with a newer run
+  for its ref is counted as superseded cost either way, and is never a red), and a base identity for gates that
+  compare with the default branch (a known limit, named in the report). Rationale for stopping: the second pass
+  found faults in what the first revision added, each with a concrete counterexample; those are now pins, and a
+  third pass would review their wording, which the milestone reviews do against code.
+  Date/Author: 2026-11-19, CI-opt.
 
 ## Outcomes & Retrospective
 
