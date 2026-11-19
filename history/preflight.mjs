@@ -156,7 +156,17 @@ async function preflightRepo(entry) {
 async function main(argv) {
   const i = argv.indexOf('--plan');
   if (i < 0) throw new Error("history: usage: preflight.mjs --plan '<json>'");
-  for (const entry of JSON.parse(argv[i + 1])) await preflightRepo(entry);
+  let failed = false;
+  for (const entry of JSON.parse(argv[i + 1])) {
+    // One repository's failure (an App not installed there) is its result, and the next is still read.
+    try {
+      await preflightRepo(entry);
+    } catch (err) {
+      failed = true;
+      say(`  ${entry.repo}: stopped: ${err.status ?? ''} ${(err.message ?? String(err)).slice(0, 200)}`);
+    }
+  }
+  if (failed) process.exitCode = 1;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
