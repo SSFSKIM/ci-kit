@@ -163,14 +163,14 @@ deploy_bake_job() {
   # Source deploy includes ec2/, pool/bake/, lib/aws.mjs and package-lock.json's SDK dependencies.
   # Roles come only from pool/config/ec2.json; there are no AWS keys or duplicate role env maps.
   # GCE keeps its 180-minute envelope, followed by each account's builder (30), image (30), smoke/check
-  # (20 each) and cleanup, with API margin. Disabled accounts still receive images, like their guard legs.
+  # (20 each, after up to 15 each of spot capacity rounds) and cleanup, with API margin. Disabled accounts still receive images, like their guard legs.
   local accounts timeout
   accounts=$(node -e '
     const fs = require("node:fs");
     try { console.log(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).accounts.length); }
     catch (e) { if (e.code === "ENOENT") console.log(0); else throw e; }
   ' "$KIT/pool/config/ec2.json")
-  timeout=$((180 + 120 * accounts))
+  timeout=$((180 + 150 * accounts))
   g run jobs deploy "$job" --source="$KIT" --region="$REGION" --service-account="$SA" \
     --command=launcher --args=node,gce/bake/bake.mjs --labels=ci-kit=bake \
     --tasks=1 --max-retries=0 --task-timeout="${timeout}m" --cpu=1 --memory=512Mi "$@"

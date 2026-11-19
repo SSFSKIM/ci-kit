@@ -23,7 +23,7 @@ blockdev() {
     if [ "$CASE" = size ] && [[ "$*" == *nvme1n1* ]]; then echo 10; else echo 50; fi
   else
     echo "CALL blockdev $* frozen=\${FROZEN:-0}"
-    if [[ "$*" == *--flushbufs* ]]; then : > "$STATE/flushed"; fi
+    if [[ "$*" == *--flushbufs* ]]; then [ "$CASE" != bitmap-flush-timeout ] || return 124; : > "$STATE/flushed"; fi
   fi
 }
 wipefs() { [ "$CASE" != occupied ] || echo ext4; return 0; }
@@ -44,9 +44,11 @@ sgdisk() { echo "CALL sgdisk $*"; if [[ "$*" == *'-v'* ]]; then [ "$CASE" != dis
 dd() {
   # A superblock read: through the loop alias it is stale until its cached blocks are flushed.
   if [[ "$*" == *'bs=4096 count=1'* ]]; then
-    local free=9851892
+    local free=9851892 arg out=
+    for arg in "$@"; do case "$arg" in of=*) out=\${arg#of=};; esac; done
+    if [ "$CASE" = bitmap-probe-timeout ] && [[ "$*" == *if=/dev/nvme0n1p1* ]]; then return 124; fi
     if [[ "$*" == *if=/dev/loop7* && "$*" != *iflag=direct* ]] && [ ! -e "$STATE/flushed" ]; then free=11915999; fi
-    node -e 'const b = Buffer.alloc(4096); b.writeUInt32LE(Number(process.argv[1]), 1036); process.stdout.write(b)' "$free"
+    node -e 'const b = Buffer.alloc(4096); b.writeUInt32LE(Number(process.argv[1]), 1036); require("node:fs").writeFileSync(process.argv[2], b)' "$free" "$out"
     return
   fi
   echo "CALL dd $*"; [ "$CASE" != boot-copy-failure ] || return 23;
@@ -131,10 +133,11 @@ partclone.ext4() {
   [ "\${FROZEN:-0}" = 1 ] || return 2
   if [ "$CASE" = timed-copy ]; then node -e 'setTimeout(() => {}, 1100)'; fi
   case "$CASE" in
-    bitmap-retry|bitmap-retry-fails)
-      if [ "$CASE" = bitmap-retry ] && [ -e "$STATE/attempted" ]; then return 0; fi
+    bitmap-retry|bitmap-retry-fails|bitmap-probe-timeout|bitmap-flush-timeout)
+      if [ "$CASE" != bitmap-retry-fails ] && [ -e "$STATE/attempted" ]; then return 0; fi
       : > "$STATE/attempted"; write_log "$@"; return 1;;
     bitmap-timeout) write_log "$@"; return 124;;
+    bitmap-killed) write_log "$@"; return 137;;
     diagnostic-later) write_log "$@"; return 0;;
     diagnostic-timeout-cleanup) write_log "$@"; return 124;;
     diagnostic-*) write_log "$@"; return 1;;
@@ -148,7 +151,7 @@ timeout() {
       if [ "$CASE" = source-timeout ] && [ "\${FROZEN:-0}" = 1 ]; then return 124; fi
       if [ "$CASE" = target-timeout ] && [ "\${FROZEN:-0}" = 0 ]; then return 124; fi
     fi
-  else echo "CALL timeout $*"; fi
+  else echo "CALL timeout $*" >&3; fi
   shift 2
   "$@"
 }
@@ -481,10 +484,29 @@ test('a bitmap refusal that repeats fails with both errors and the evidence in t
   assert.ok(r.stdout.indexOf('CALL fsfreeze -u /') < r.stdout.indexOf('CALL tail'));
 });
 
-for (const scenario of ['copy-failure', 'copy-timeout', 'bitmap-timeout']) test(`${scenario} is not copied again`, () => {
+for (const scenario of ['copy-failure', 'copy-timeout', 'bitmap-timeout', 'bitmap-killed']) test(`${scenario} is not copied again`, () => {
   const r = run(scenario);
   assert.notEqual(r.status, 0);
   assert.equal(rootCopies(r).length, 1);
   assert.doesNotMatch(r.stdout, /--flushbufs/);
   assert.equal(r.diagnostic.phase, 'root-copy');
+});
+
+test('every frozen probe is bounded; a probe past its deadline is recorded and the copy goes on', () => {
+  const r = run('bitmap-probe-timeout');
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(rootCopies(r).length, 2);
+  assert.match(r.retryLog, /source direct timed out, source buffered timed out; holders: /);
+  for (const command of ['dd', 'blockdev --flushbufs', 'losetup --noheadings', 'uname', 'bash -c'])
+    assert.match(r.stdout, new RegExp(`CALL timeout --kill-after=2s 5s ${command}`), command);
+});
+
+test('a flush that does not complete leaves the first failure standing, with the evidence gathered so far', () => {
+  const r = run('bitmap-flush-timeout');
+  assert.equal(r.status, 1);
+  assert.equal(rootCopies(r).length, 1);
+  assert.match(r.logTail, evidence(r.logTail, 'before flush', 11915999));
+  assert.match(r.logTail, /\ncompact: flush of \/dev\/loop7 exit 124; no second attempt\n$/);
+  assert.doesNotMatch(r.logTail, /after flush/);
+  assert.ok(r.stdout.indexOf('CALL fsfreeze -u /') < r.stdout.indexOf('CALL tail'));
 });

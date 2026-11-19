@@ -9,13 +9,14 @@ export DEBIAN_FRONTEND=noninteractive HOME=/root
 step=start
 # The failure report carries a bounded tail of this script's output (cloud-init's output log, still on disk here) for
 # the S3 report only; the controller prints a pointer to it. python3 is the one interpreter Canonical's image has before
-# step apt. The GitHub token, also its basic-auth form, and the report URL are redacted, even after WARM_TOKEN is unset.
+# step apt. The GitHub token, also its basic-auth form, and the report URL are redacted, even after WARM_TOKEN is unset,
+# and so are both as user-data carries them (base64), which a traced line of this script would print.
 # shellcheck disable=SC2016
 FAILURE_REPORT='
 import base64, json, sys
 step, status, path = sys.argv[1:]
 token, url = sys.stdin.buffer.read().split(b"\0", 1)
-values, secrets = [token], {url}
+values, secrets = [token], {url, base64.b64encode(token), base64.b64encode(url)}
 try:
     owners = json.loads(token)
     if isinstance(owners, dict): values += [v.encode() for v in owners.values() if isinstance(v, str)]

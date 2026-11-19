@@ -721,7 +721,7 @@ smoke, not a job's hash comparison: retain both the console and Actions evidence
 
 **Hourly declaration check (GCE and EC2).** `ci-kit-bake-check` runs the same source as the bake, with
 `CI_KIT_BAKE_IF_STALE=1`, as `ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com`. Its timeout is the bake's
-(180 minutes plus 120 per configured EC2 account). `ci-kit-bake-check-hourly` invokes it at minute 23 of every hour,
+(180 minutes plus 150 per configured EC2 account). `ci-kit-bake-check-hourly` invokes it at minute 23 of every hour,
 UTC. The weekly bake and manual `ci-kit-bake` executions remain unconditional; their job and weekly cadence are unchanged.
 
 Before comparing anything, the check lists **both** jobs' executions, excluding itself. A pending/running execution

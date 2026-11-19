@@ -544,6 +544,7 @@ curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat > "$TEST_ROOT/report.js
     `remote: https://x-access-token:${tokens.ssfskim}@github.com/SSFSKIM/MAWS`,
     `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${tokens.other}`).toString('base64')}`,
     `PUT ${report}`, `token map ${JSON.stringify(tokens)}`,
+    `+ printf %s ${Buffer.from(JSON.stringify(tokens)).toString('base64')}`, `+ printf %s ${Buffer.from(report).toString('base64')}`,
     'E: Could not get lock /var/lib/apt/lists/lock. It is held by process 1234 (apt-get)', ''].join('\n');
   const run = async (path = process.env.PATH, log = output) => {
     for (const p of ['report.json','curl-calls']) await rm(join(root,p),{force:true});
@@ -567,7 +568,8 @@ curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat > "$TEST_ROOT/report.js
     assert.equal(log_tail.split('\n').length, 41, 'forty whole lines and the final newline');
     assert.ok(Buffer.byteLength(log_tail) <= 8192);
     assert.match(log_tail, /E: Could not get lock .*\n$/, 'the tail ends with what the failing step printed');
-    for (const secret of [...Object.values(tokens), Buffer.from(`x-access-token:${tokens.other}`).toString('base64'), 'private-signature'])
+    for (const secret of [...Object.values(tokens), Buffer.from(`x-access-token:${tokens.other}`).toString('base64'), 'private-signature',
+      Buffer.from(JSON.stringify(tokens)).toString('base64'), Buffer.from(report).toString('base64')])
       assert.ok(!log_tail.includes(secret), `the report must not carry ${secret.slice(0, 8)}`);
     assert.match(log_tail, /x-access-token:\[redacted\]@github.com/);
 
