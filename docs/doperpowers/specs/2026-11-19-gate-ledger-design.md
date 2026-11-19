@@ -110,8 +110,8 @@ store, print a weekly report, and show `ci-gate` printing the context lines.
 - [x] (2026-11-19 09:2xZ) M0 — the per-test collector runs again: ci-kit #219 (merge 7cc2381), sandbox #86
   (merge 8304e4c); proof run 44486730875 (349 lines in 9 batches, 0 errors). The store holds 10-21 and 11-12 to
   11-19.
-- [x] (2026-11-19 09:4xZ) Adversarial review: 12 blocking findings and 3 lesser, all taken (Decision Log).
-- [x] (2026-11-19 10:1xZ) Its second pass: 8 blocking findings and 2 lesser on the revision, folded (Decision
+- [x] (2026-11-19 09:1xZ) Adversarial review: 12 blocking findings and 3 lesser, all taken (Decision Log).
+- [x] (2026-11-19 09:2xZ) Its second pass: 8 blocking findings and 2 lesser on the revision, folded (Decision
   Log). The review ends here; the counterexamples it gave are test pins and acceptance cases.
 - [ ] M1 — Job lines.
 - [ ] M2 — The store kept small, watched, and fed by the hand-run gate.
