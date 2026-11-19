@@ -434,8 +434,8 @@ echo compact >> "$TEST_ROOT/compacted"
     await writeFile(join(root,'opt/ci-kit/pool/bake/prepare.sh'),'step=job-images; false\n');
     assert.throws(()=>run(builder));
     assert.equal(await present('poweroff'),true);
-    assert.equal(await present('report.jsonl'),false);
-    assert.match(await readFile(join(root,'curl-calls'),'utf8'),/failed:job-images/);
+    assert.deepEqual(JSON.parse(await readFile(join(root,'report.jsonl'),'utf8')),
+      {value:'failed:job-images',diagnostic:{reason:'builder-failed',exit_status:1}});
     assert.doesNotMatch(await readFile(join(root,'systemctl'),'utf8'),/start ci-kit-bake-finalize/);
 
     // The finalizer's self-check is authoritative: a bad manifest cannot produce ok, even with clean state.
@@ -504,6 +504,66 @@ echo compact >> "$TEST_ROOT/compacted"
       assert.equal(await present('poweroff'),true);
       assert.equal(await present('run/ci-kit-bake'),false,'failure removes its tmpfs handoff');
     }
+  } finally { await rm(root,{recursive:true,force:true}); }
+});
+
+// 2026-11-19: three bakes reported only failed:apt, and their builders were gone before anyone could ask why.
+test('a builder step failure reports a bounded, token-free tail of what it printed, and still reports without one', async () => {
+  const {readFile,writeFile,mkdtemp,mkdir,rm} = await import('node:fs/promises');
+  const {tmpdir} = await import('node:os');
+  const {join} = await import('node:path');
+  const {execFileSync} = await import('node:child_process');
+  const {fillEc2Builder} = await import('../../ec2/bake/bake.mjs');
+  const root = await mkdtemp(join(tmpdir(),'ci-kit-builder-failure-'));
+  const relocate = (s) => s.replace(/\/(etc|opt|var|root|run|tmp|snap)(?=\/|\s|$)/g,`${root}/$1`);
+  const report = 'https://reports.invalid/builder.json?X-Amz-Signature=private-signature';
+  const tokens = {ssfskim:'ghs_'+'A'.repeat(36), other:'ghs_'+'B'.repeat(36)};
+  const driver = `set -euo pipefail
+apt-get() { echo "apt-get $*"; [ "$1" != update ] || return 100; }
+systemctl() { :; }; sync() { :; }; poweroff() { :; }
+curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat > "$TEST_ROOT/report.json"; else printf '%s\\n' "$*" > "$TEST_ROOT/curl-calls"; fi; }
+. "$1"
+`;
+  const output = [...Array.from({length:60}, (_, i) => `Get:${i} http://archive.ubuntu.com/ubuntu noble InRelease`),
+    `remote: https://x-access-token:${tokens.ssfskim}@github.com/SSFSKIM/MAWS`,
+    `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${tokens.other}`).toString('base64')}`,
+    `PUT ${report}`, `token map ${JSON.stringify(tokens)}`,
+    'E: Could not get lock /var/lib/apt/lists/lock. It is held by process 1234 (apt-get)', ''].join('\n');
+  const run = async (path = process.env.PATH, log = output) => {
+    for (const p of ['report.json','curl-calls']) await rm(join(root,p),{force:true});
+    await mkdir(join(root,'var/log'),{recursive:true});
+    await mkdir(join(root,'etc/apt/preferences.d'),{recursive:true});
+    await rm(join(root,'var/log/cloud-init-output.log'),{force:true});
+    if (log !== null) await writeFile(join(root,'var/log/cloud-init-output.log'),log);
+    const template = await readFile(new URL('../../ec2/bake/builder.sh',import.meta.url),'utf8');
+    await writeFile(join(root,'builder.sh'),relocate(fillEc2Builder(template,{manifest:built,token:JSON.stringify(tokens),report})));
+    assert.throws(() => execFileSync('bash',['-c',driver,'fixture',join(root,'builder.sh')],{env:{...process.env,PATH:path,TEST_ROOT:root},stdio:'pipe'}),
+      (error) => error.status === 100);
+    const present = async (p) => readFile(join(root,p),'utf8').catch(() => undefined);
+    return {report: await present('report.json'), plain: await present('curl-calls')};
+  };
+  try {
+    const failed = JSON.parse((await run()).report);
+    assert.deepEqual(Object.keys(failed), ['value','diagnostic']);
+    assert.equal(failed.value, 'failed:apt');
+    const {log_tail, ...fields} = failed.diagnostic;
+    assert.deepEqual(fields, {reason:'builder-failed', exit_status:100});
+    assert.equal(log_tail.split('\n').length, 41, 'forty whole lines and the final newline');
+    assert.ok(Buffer.byteLength(log_tail) <= 8192);
+    assert.match(log_tail, /E: Could not get lock .*\n$/, 'the tail ends with what the failing step printed');
+    for (const secret of [...Object.values(tokens), Buffer.from(`x-access-token:${tokens.other}`).toString('base64'), 'private-signature'])
+      assert.ok(!log_tail.includes(secret), `the report must not carry ${secret.slice(0, 8)}`);
+    assert.match(log_tail, /x-access-token:\[redacted\]@github.com/);
+
+    const noLog = JSON.parse((await run(undefined, null)).report);
+    assert.deepEqual(noLog, {value:'failed:apt', diagnostic:{reason:'builder-failed', exit_status:100}});
+
+    // timeout runs python3 from PATH, so the failing interpreter is a file, not a shell function.
+    await mkdir(join(root,'bin'),{recursive:true});
+    await writeFile(join(root,'bin/python3'),'#!/bin/sh\nexit 1\n',{mode:0o755});
+    const broken = await run(`${join(root,'bin')}:${process.env.PATH}`);
+    assert.equal(broken.report, undefined);
+    assert.match(broken.plain, /\{"value":"failed:apt"\}/, 'a failure to build the tail still reports the step');
   } finally { await rm(root,{recursive:true,force:true}); }
 });
 

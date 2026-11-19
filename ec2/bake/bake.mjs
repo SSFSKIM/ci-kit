@@ -17,7 +17,7 @@ const tags = (obj) => Object.entries(obj).map(([Key, Value]) => ({ Key, Value: S
 const filters = (obj) => Object.entries(obj).map(([key, value]) => ({ Name: `tag:${key}`, Values: [String(value)] }));
 const owned = (x, run) => tagsOf(x)['ci-kit-pool'] === 'ec2' && tagsOf(x)['ci-kit-run'] === run;
 const failureStages = new Set(['userdata', 'deadline', 'prepare', 'image', 'container', 'unit',
-  'start', 'apt', 'kit', 'node', 'deps', 'warm', 'warm-check', 'boot', 'clean', 'compact', 'finalizer', 'report-input', 'report']);
+  'start', 'apt', 'kit', 'node', 'deps', 'caches', 'job-images', 'warm', 'warm-check', 'boot', 'clean', 'compact', 'finalizer', 'report-input', 'report']);
 const safeOutcome = value => typeof value === 'string' && (/^exit:-?\d{1,3}$/.test(value)
   || (value.startsWith('failed:') && failureStages.has(value.slice(7)))) ? value : 'invalid report';
 

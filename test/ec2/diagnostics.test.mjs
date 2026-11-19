@@ -104,3 +104,14 @@ test('structured diagnostic formatting never admits tool text without a trusted 
   }
   assert.equal(formatDiagnostic({...base,phase:'forged',log_tail:'private'}, {logLocation:'s3://trusted/report'}), '{"reason":"unexpected"}');
 });
+
+test('a builder step failure keeps only its numeric status, and its tail only as a pointer to a trusted location', () => {
+  const tail = 'E: Could not get lock /var/lib/dpkg/lock-frontend\nghs_' + 'A'.repeat(36) + '\n';
+  assert.equal(formatDiagnostic({ reason: 'builder-failed', exit_status: 100, log_tail: tail, step: 'secret', stderr: 'secret' }),
+    '{"reason":"builder-failed","exit_status":100}');
+  assert.equal(formatDiagnostic({ reason: 'builder-failed', exit_status: 100, log_tail: tail }, { logLocation: 's3://trusted/builder.json' }),
+    '{"reason":"builder-failed","exit_status":100,"log_tail":"s3://trusted/builder.json (2 lines)"}');
+  for (const exit_status of [0, -1, 256, 1.5, '100', null, undefined, 'secret'])
+    assert.equal(formatDiagnostic({ reason: 'builder-failed', exit_status, log_tail: tail }, { logLocation: 's3://trusted/builder.json' }),
+      '{"reason":"unexpected"}');
+});

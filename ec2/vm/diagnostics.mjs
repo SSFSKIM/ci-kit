@@ -56,16 +56,27 @@ export function formatCompactTrace(value) {
   return JSON.stringify({ elapsed_seconds: value.elapsed_seconds, exit_status: value.exit_status, phases });
 }
 
+const failureStatus = value => Number.isInteger(value) && value >= 1 && value <= 255;
+// The tail itself stays in the report: a trusted location and its bounded line count are all that is printed.
+function tailPointer(value, logLocation) {
+  const tail = logLocation ? boundCompactLogTail(value) : '';
+  const lines = tail ? tail.split('\n').length - Number(tail.endsWith('\n')) : 0;
+  return lines ? { log_tail: `${logLocation} (${lines} ${lines === 1 ? 'line' : 'lines'})` } : {};
+}
+
 // Only structured fields enter logs. logLocation comes from the controller, never from report data.
 export function formatDiagnostic(value, { logLocation } = {}) {
   const unexpected = '{"reason":"unexpected"}';
   if (!value || typeof value !== 'object' || Array.isArray(value)) return unexpected;
   if (value.reason === 'compact-failed') {
-    if (!compactPhases.has(value.phase) || !Number.isInteger(value.exit_status) || value.exit_status < 1 || value.exit_status > 255) return unexpected;
-    const tail = logLocation ? boundCompactLogTail(value.log_tail) : '';
-    const lines = tail ? tail.split('\n').length - Number(tail.endsWith('\n')) : 0;
+    if (!compactPhases.has(value.phase) || !failureStatus(value.exit_status)) return unexpected;
     return JSON.stringify({ reason: 'compact-failed', phase: value.phase, exit_status: value.exit_status,
-      ...(lines ? { log_tail: `${logLocation} (${lines} ${lines === 1 ? 'line' : 'lines'})` } : {}) });
+      ...tailPointer(value.log_tail, logLocation) });
+  }
+  // builder.sh's step failure; the step itself is the report's failed:<step> outcome.
+  if (value.reason === 'builder-failed') {
+    if (!failureStatus(value.exit_status)) return unexpected;
+    return JSON.stringify({ reason: 'builder-failed', exit_status: value.exit_status, ...tailPointer(value.log_tail, logLocation) });
   }
   if (!pathsByReason.get(value.reason)?.includes(value.path)) return unexpected;
   if (value.code !== undefined && !codesByReason.get(value.reason)?.has(value.code)) return unexpected;
