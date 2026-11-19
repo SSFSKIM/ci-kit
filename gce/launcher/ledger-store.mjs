@@ -6,7 +6,8 @@
 // one after another before every tick's first launch). An incremental read shows no deletion, so at most every
 // FULL_READ_MS the store reads an issue again and forgets a comment GitHub no longer lists (another
 // writer's dedupe removed it), unless that comment is too recent for the listing to show yet. A row never moves back: before an update the comment is read
-// again and the write is dropped if the comment is already as far along (a final row is never rewritten). Issue
+// again and the write is dropped if the comment is already as far along (a final row is rewritten only to settle the
+// rerun it owed, settleRerun). Issue
 // comments have no compare-and-swap, so during an overlap of two ticks a row is eventually final rather than
 // finalized once: a stale writer whose update lands in the milliseconds after another finalized the row rolls it back
 // to running, and the next tick finalizes it again, possibly with a later deletion time and charge. As with every overlap (spec Decision Log, 2026-10-16), correctness does not rest
@@ -160,6 +161,22 @@ export function createGceLedger(gh, { repo, issue_title: title }, { now = Date.n
           drop(extra.id);
         }
       }
+    },
+    // Settles the rerun a final row owes (ledger.mjs finalRow): the stored row, read again, takes `rerun` and nothing
+    // else, and only while it is final and still owes one for `row`'s job, so a caller's stale copy changes nothing
+    // else on it. Returns the row written, or null when there was nothing to settle.
+    async settleRerun(row, rerun) {
+      const [counted] = rowComments(comments(), row.alloc).map((x) => x.c);
+      if (!counted) return null;
+      const fresh = await gh.getComment(repo, counted.id);
+      counted.body = fresh.body;
+      const stored = parseRow(fresh.body);
+      if (stored?.state !== 'final' || stored.rerun?.state !== 'owed' || stored.job?.id !== row.job?.id) return null;
+      const next = { ...stored, rerun };
+      const body = renderRow(next);
+      await gh.updateComment(repo, counted.id, body);
+      counted.body = body;
+      return next;
     },
     // Whether the day's line is already on an open ledger issue, as the store last read them.
     hasDaily: (day) => dailyDays(comments()).has(day),

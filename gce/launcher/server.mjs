@@ -50,8 +50,9 @@ async function deps(preparation) {
     fetchText, readBundled: bundled, bundledCommit: process.env.CI_KIT_COMMIT || 'bundled', log });
   github = gh;
   // stockouts: capacity refusals remembered across ticks (logic.mjs stockoutMemory), for this process's life; limits:
-  // the placements' quota limits (room.mjs), read live and kept for minutes.
-  return { gce, gh, source, ledgers: new Map(), credits: new Map(), providerState: new Map(), stockouts: stockoutMemory(), limits: createLimits(gce, log) };
+  // the placements' quota limits (room.mjs), read live and kept for minutes; rerunChecks: when each run owed a rerun
+  // was last read (launcher.mjs settleReruns), since every tick builds a new Launcher.
+  return { gce, gh, source, ledgers: new Map(), credits: new Map(), providerState: new Map(), stockouts: stockoutMemory(), rerunChecks: new Map(), limits: createLimits(gce, log) };
 }
 
 async function reconcile(preparation) {
@@ -66,7 +67,7 @@ async function reconcile(preparation) {
   const providers = createProviders({ gce: d.gce, cfg, config, ec2, log, limits: d.limits });
   if (!d.credits.has(cfg.ledger.repo)) d.credits.set(cfg.ledger.repo, createCreditManager({ gh: d.gh, repo: cfg.ledger.repo, log }));
   const creditPreference = await preparation.time('credit', () => d.credits.get(cfg.ledger.repo).update(ec2));
-  const launcher = new Launcher({ provider: providers[0], providers, gh: d.gh, ledger: d.ledgers.get(key), cfg, config, ec2, repoProviders, creditPreference, log, error, stockouts: d.stockouts, providerState: d.providerState });
+  const launcher = new Launcher({ provider: providers[0], providers, gh: d.gh, ledger: d.ledgers.get(key), cfg, config, ec2, repoProviders, creditPreference, log, error, stockouts: d.stockouts, providerState: d.providerState, rerunChecks: d.rerunChecks });
   return { config: config.slice(0, 8), repos: cfg.repos.map((r) => r.repo), ...(await launcher.tick(preparation)), github: d.gh.stats() };
 }
 
