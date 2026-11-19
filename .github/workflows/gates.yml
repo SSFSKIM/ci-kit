@@ -6,6 +6,15 @@ name: gates
 
 on:
   workflow_call:
+    inputs:
+      # Where plan and verdict run, as JSON for runs-on. GitHub-hosted by default: they take seconds and need no setup.
+      # A private repository whose account cannot start hosted jobs (no minutes left, a failed payment) has both
+      # refused before any gate is planned, so every run is red whatever lane its gates are on; it names its
+      # self-hosted runners here, e.g. '["self-hosted","ci-kit-pool","cpus-2"]' (docs/adopting.md, "The workflow").
+      control-runs-on:
+        type: string
+        required: false
+        default: '"ubuntu-latest"'
 
 permissions:
   contents: read
@@ -18,7 +27,7 @@ concurrency:
 jobs:
   plan:
     name: plan
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.control-runs-on) }}
     timeout-minutes: 10
     outputs:
       gates: ${{ steps.plan.outputs.gates }}
@@ -485,7 +494,7 @@ jobs:
     name: verdict
     needs: [plan, gate]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.control-runs-on) }}
     timeout-minutes: 5
     steps:
       - name: Verdict
