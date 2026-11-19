@@ -46,15 +46,18 @@ test('provider stages share one resolution, including after a provider fails', a
 });
 
 // Fake only the external SDK boundary; the bake performs its own polling, promotion and cleanup.
-async function ec2Fixture({ smoke = 'ok', job = 'success', applyOk = true, lostLaunch = false, refuseFirstSmoke = false, reportMissing = false, snapshotBytes = 12 * 2**30, promote = true, otherImages = [], lostSnapshot = false, lostRegistration = false, unseenReads = 0 } = {}) {
+async function ec2Fixture({ smoke = 'ok', job = 'success', applyOk = true, lostLaunch = false, refuseFirstSmoke = false, reportMissing = false, snapshotBytes = 12 * 2**30, promote = true, otherImages = [], lostSnapshot = false, lostRegistration = false, unseenReads = 0, refuse = () => undefined } = {}) {
   const api = await import('../../ec2/bake/bake.mjs');
-  const calls = [], instances = [], images = [], snapshots = [];
+  const calls = [], instances = [], images = [], snapshots = [], logs = [], sentAt = new Map();
   const tags = (x) => Object.fromEntries((x.Tags ?? []).map((t) => [t.Key,t.Value]));
   const send = async (command, role = 'bake') => {
     const name = command.constructor.name, input = command.input;
     calls.push([name, input, role]);
     if (name === 'GetParameterCommand') return { Parameter: { Value: 'ami-canonical' } };
     if (name === 'RunInstancesCommand') {
+      sentAt.set(input, time);
+      const refusal = refuse(input);
+      if (refusal) throw Object.assign(Error('refused'), { name: refusal });
       if (refuseFirstSmoke && input.ImageId !== 'ami-canonical' && input.NetworkInterfaces[0].SubnetId === 'subnet-c') throw Object.assign(Error('no capacity'),{name:'InsufficientInstanceCapacity'});
       const i = { InstanceId: `i-${instances.length}`, State: { Name: input.ImageId === 'ami-canonical' ? 'stopped' : 'terminated' }, Tags: input.TagSpecifications[0].Tags,
         BlockDeviceMappings: input.BlockDeviceMappings.map(d => ({ DeviceName: d.DeviceName, Ebs: { VolumeId: d.DeviceName === '/dev/sdf' ? 'vol-target' : 'vol-root', DeleteOnTermination: d.Ebs.DeleteOnTermination } })) };
@@ -99,8 +102,8 @@ async function ec2Fixture({ smoke = 'ok', job = 'success', applyOk = true, lostL
   };
   const cfg = {account:'123456789012',region:'us-east-2',disk_gb:50,initialization_mibps:200,security_group:'sg-pool',report_bucket:'reports',placements:[{zone:'us-east-2c',subnet:'subnet-c'},{zone:'us-east-2a',subnet:'subnet-a'},{zone:'us-east-2b',subnet:'subnet-b'}]};
   let time = 0;
-  const run = () => api.runEc2Bake(aws, { runtimeAws:{ec2:{send:(c)=>send(c,'launcher')}}, cfg, manifest:pins, promote, runId:'20261023-120000-abcd',token:'warm-token',gh,script:'#!/bin/bash\n__MANIFEST__\n__TOKEN__\n__REPORT__\n__KIT_SHA__',now:()=>time,sleep:async (ms)=>{time+=ms;} });
-  return {run,calls,images,tags};
+  const run = () => api.runEc2Bake(aws, { runtimeAws:{ec2:{send:(c)=>send(c,'launcher')}}, cfg, manifest:pins, promote, runId:'20261023-120000-abcd',token:'warm-token',gh,script:'#!/bin/bash\n__MANIFEST__\n__TOKEN__\n__REPORT__\n__KIT_SHA__',now:()=>time,sleep:async (ms)=>{time+=ms;},log:(line)=>logs.push(line) });
+  return {run,calls,images,tags,logs,sentAt};
 }
 
 test('EC2 bake stops an on-demand Canonical builder, proves smoke and real job, then promotes with full snapshot cost', async () => {
@@ -300,6 +303,47 @@ test('smoke and real check walk capacity-refused zones on spot with fresh zonal 
   const launches=f.calls.filter(([n,v])=>n==='RunInstancesCommand' && v.ImageId!=='ami-canonical').map(([,v])=>v);
   assert.deepEqual(launches.map((v)=>v.NetworkInterfaces[0].SubnetId),['subnet-c','subnet-a','subnet-c','subnet-a']);
   assert.equal(new Set(launches.map((v)=>v.ClientToken)).size,4);
+});
+
+const smokeSends = (f) => f.calls.filter(([n,v]) => n === 'RunInstancesCommand' && v.ImageId !== 'ami-canonical').map(([,v]) => v);
+const labelOf = (input, key) => input.TagSpecifications[0].Tags.find((t) => t.Key === key)?.Value;
+
+// 2026-11-19 16:30Z: a three-second capacity gap in every zone discarded a 45-minute image.
+test('a smoke every zone refuses for capacity is tried again after a pause, with fresh tokens and deadlines', async () => {
+  let refused = 0;
+  const f = await ec2Fixture({ refuse: (input) => input.ImageId !== 'ami-canonical' && refused++ < 9 ? 'InsufficientInstanceCapacity' : undefined });
+  const result = await f.run();
+  assert.equal(result.image, 'ami-new');
+  const sends = smokeSends(f);
+  assert.equal(sends.length, 11, 'three refused rounds, the smoke, then the real check');
+  assert.equal(new Set(sends.map((v) => v.ClientToken)).size, sends.length, 'every send that may create an instance has its own token');
+  assert.ok(sends.every((v) => v.InstanceMarketOptions?.MarketType === 'spot'), 'job images never fall back to on-demand');
+  const smoke = sends[9], sent = f.sentAt.get(smoke);
+  assert.ok(sent - f.sentAt.get(sends[0]) >= 3 * 60_000, 'rounds are paused, not spun');
+  assert.equal(labelOf(smoke, 'ci-kit-deadline'), new Date(sent + 30 * 60_000).toISOString());
+  assert.equal(JSON.parse(Buffer.from(smoke.UserData, 'base64').toString()).deadline, new Date(sent + 20 * 60_000).toISOString(),
+    'the guest deadline counts from the send that launched it');
+  const refusals = f.logs.filter((line) => /smoke refused/.test(line));
+  assert.equal(refusals.length, 3, 'one line per refused round');
+  for (const zone of ['us-east-2c', 'us-east-2a', 'us-east-2b']) assert.match(refusals[0], new RegExp(`${zone}: InsufficientInstanceCapacity`));
+});
+
+test('a smoke refused for capacity past the bound gives up and removes the unproven image', async () => {
+  const f = await ec2Fixture({ refuse: (input) => input.ImageId !== 'ami-canonical' ? 'InsufficientInstanceCapacity' : undefined });
+  await assert.rejects(f.run(), /no zone took smoke/);
+  const sends = smokeSends(f), span = f.sentAt.get(sends.at(-1)) - f.sentAt.get(sends[0]);
+  assert.ok(span >= 14 * 60_000 && span <= 15 * 60_000, `retried for about fifteen minutes, not ${span} ms`);
+  assert.ok(f.logs.filter((line) => /smoke refused/.test(line)).length <= 16, 'refusals are not hundreds of lines');
+  assert.ok(f.calls.some(([n]) => n === 'DeregisterImageCommand'));
+});
+
+for (const [label, refuse] of [
+  ['a builder every zone refuses for capacity', (input) => input.ImageId === 'ami-canonical' ? 'InsufficientInstanceCapacity' : undefined],
+  ['a smoke every zone refuses for a non-capacity reason', (input) => input.ImageId !== 'ami-canonical' ? 'Unsupported' : undefined],
+]) test(`${label} is not tried again`, async () => {
+  const f = await ec2Fixture({ refuse });
+  await assert.rejects(f.run(), /no zone took (builder|smoke)/);
+  assert.equal(f.calls.filter(([n, v]) => n === 'RunInstancesCommand' && refuse(v)).length, 3);
 });
 
 test('a terminated smoke with no terminal object times out instead of becoming ready',async()=>{

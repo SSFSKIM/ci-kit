@@ -10,6 +10,7 @@ import { CHECK, checkJitRequest, checkOutcome } from '../../gce/bake/plan.mjs';
 import { formatDiagnostic } from '../vm/diagnostics.mjs';
 
 const MINUTE = 60_000;
+const CAPACITY_PAUSE = MINUTE, CAPACITY_WAIT = 15 * MINUTE;
 const UBUNTU = '/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id';
 const tagsOf = (x) => Object.fromEntries((x.Tags ?? []).map(({ Key, Value }) => [Key, Value]));
 const tags = (obj) => Object.entries(obj).map(([Key, Value]) => ({ Key, Value: String(Value) }));
@@ -94,37 +95,53 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
       }
     }
   };
+  // A spot launch that every zone refuses for capacity is tried again in rounds: on 2026-11-19 a three-second gap in all
+  // three zones discarded a 45-minute image. Job images stay spot-only. The builder's on-demand launch keeps one pass.
+  // userData may be a function, rebuilt for each send so the guest's deadline and report URLs count from the launch.
   const launch = async (purpose, imageId, userData, builder = false) => {
-    if (Buffer.byteLength(userData) > 16384) throw new Error('EC2 user-data exceeds 16 KiB');
-    const labels = { ...pool, 'ci-kit-purpose': purpose, 'ci-kit-deadline': new Date(now() + (builder ? 120 : 30) * MINUTE).toISOString() };
     const client = builder ? ec2 : runtimeAws.ec2;
-    for (const [attempt, placement] of cfg.placements.entries()) {
-      let res;
-      try { res = await client.send(new RunInstancesCommand({
-      ImageId: imageId, InstanceType: 'c8a.2xlarge', MinCount: 1, MaxCount: 1,
-      ClientToken: `bake-${run}-${builder ? 'builder' : JSON.parse(userData).alloc.split('-').pop()}-${attempt}`,
-      NetworkInterfaces: [{DeviceIndex:0,SubnetId:placement.subnet,Groups:[cfg.security_group],AssociatePublicIpAddress:true}],
-      ...(!builder ? {InstanceMarketOptions:{MarketType:'spot',SpotOptions:{SpotInstanceType:'one-time',InstanceInterruptionBehavior:'terminate'}}} : {}),
-      MetadataOptions: { HttpTokens:'required', HttpPutResponseHopLimit:1, HttpEndpoint:'enabled', HttpProtocolIpv6:'disabled' },
-      InstanceInitiatedShutdownBehavior: builder ? 'stop' : 'terminate',
-      BlockDeviceMappings: [{DeviceName:'/dev/sda1',Ebs:{VolumeType:'gp3',VolumeSize:cfg.disk_gb,Encrypted:true,DeleteOnTermination:true,
-        ...(!builder ? {VolumeInitializationRate:cfg.initialization_mibps} : {})}},
-        ...(builder ? [{DeviceName:'/dev/sdf',Ebs:{VolumeType:'gp3',VolumeSize:cfg.disk_gb,Encrypted:true,DeleteOnTermination:true}}] : [])],
-      TagSpecifications: ['instance','volume'].map((ResourceType) => ({ ResourceType, Tags:tags(labels) })),
-      UserData: Buffer.from(userData).toString('base64'),
-      })); } catch (error) {
-        // Only definite zonal refusals permit another send. Transport ambiguity exits to tag-based cleanup.
-        if (!['InsufficientInstanceCapacity','SpotMaxPriceTooLow','Unsupported'].includes(error.name)) throw error;
-        log(`${cfg.account}: ${purpose} refused ${placement.zone}: ${error.name}`);
-        continue;
+    const started = now();
+    let send = 0;
+    for (let round = 1; ; round++) {
+      const refusals = [];
+      for (const placement of cfg.placements) {
+        const data = typeof userData === 'function' ? await userData() : userData;
+        if (Buffer.byteLength(data) > 16384) throw new Error('EC2 user-data exceeds 16 KiB');
+        const labels = { ...pool, 'ci-kit-purpose': purpose, 'ci-kit-deadline': new Date(now() + (builder ? 120 : 30) * MINUTE).toISOString() };
+        let res;
+        try { res = await client.send(new RunInstancesCommand({
+        ImageId: imageId, InstanceType: 'c8a.2xlarge', MinCount: 1, MaxCount: 1,
+        // One token per send: a send that may have created an instance is never replayed under another's token.
+        ClientToken: `bake-${run}-${builder ? 'builder' : JSON.parse(data).alloc.split('-').pop()}-${send++}`,
+        NetworkInterfaces: [{DeviceIndex:0,SubnetId:placement.subnet,Groups:[cfg.security_group],AssociatePublicIpAddress:true}],
+        ...(!builder ? {InstanceMarketOptions:{MarketType:'spot',SpotOptions:{SpotInstanceType:'one-time',InstanceInterruptionBehavior:'terminate'}}} : {}),
+        MetadataOptions: { HttpTokens:'required', HttpPutResponseHopLimit:1, HttpEndpoint:'enabled', HttpProtocolIpv6:'disabled' },
+        InstanceInitiatedShutdownBehavior: builder ? 'stop' : 'terminate',
+        BlockDeviceMappings: [{DeviceName:'/dev/sda1',Ebs:{VolumeType:'gp3',VolumeSize:cfg.disk_gb,Encrypted:true,DeleteOnTermination:true,
+          ...(!builder ? {VolumeInitializationRate:cfg.initialization_mibps} : {})}},
+          ...(builder ? [{DeviceName:'/dev/sdf',Ebs:{VolumeType:'gp3',VolumeSize:cfg.disk_gb,Encrypted:true,DeleteOnTermination:true}}] : [])],
+        TagSpecifications: ['instance','volume'].map((ResourceType) => ({ ResourceType, Tags:tags(labels) })),
+        UserData: Buffer.from(data).toString('base64'),
+        })); } catch (error) {
+          // Only definite zonal refusals permit another send. Transport ambiguity exits to tag-based cleanup.
+          if (!['InsufficientInstanceCapacity','SpotMaxPriceTooLow','Unsupported'].includes(error.name)) throw error;
+          refusals.push({ zone: placement.zone, name: error.name });
+          continue;
+        }
+        if (refusals.length) log(`${cfg.account}: ${purpose} refused ${refusals.map((r) => `${r.zone}: ${r.name}`).join(', ')}`);
+        const id = res.Instances?.[0]?.InstanceId;
+        if (!id) throw new Error('RunInstances returned no instance');
+        launched.set(id, now());
+        log(`${cfg.account}: ${purpose} ${id} launched (${builder ? 'Canonical on-demand builder' : 'pool image spot'})`);
+        return id;
       }
-      const id = res.Instances?.[0]?.InstanceId;
-      if (!id) throw new Error('RunInstances returned no instance');
-      launched.set(id, now());
-      log(`${cfg.account}: ${purpose} ${id} launched (${builder ? 'Canonical on-demand builder' : 'pool image spot'})`);
-      return id;
+      // One line per round keeps a quarter hour of refusals readable. Unsupported/price refusals alone are not waited on.
+      const again = !builder && refusals.some((r) => r.name === 'InsufficientInstanceCapacity') && now() - started + CAPACITY_PAUSE <= CAPACITY_WAIT;
+      log(`${cfg.account}: ${purpose} refused ${refusals.map((r) => `${r.zone}: ${r.name}`).join(', ')}`
+        + (again ? `; round ${round}, trying every zone again in ${CAPACITY_PAUSE / 1000} s` : ''));
+      if (!again) throw new Error(`${cfg.account}: no zone took ${purpose}${round > 1 ? ` in ${round} rounds over ${Math.round((now() - started) / MINUTE)} min` : ''}`);
+      await sleep(CAPACITY_PAUSE);
     }
-    throw new Error(`${cfg.account}: no zone took ${purpose}`);
   };
   const guestData = async (kind, extra) => ({ v:1,alloc:`bake-${run}-${kind}`,deadline:new Date(now()+20*MINUTE).toISOString(), ...extra,
     report:Object.fromEntries(await Promise.all(['boot','notice','exit'].map(async (event) => [event,await url(`${kind}/${event}`)]))) });
@@ -191,7 +208,7 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
     const initializationUsd = snapshotGiB*0.0024;
     await ec2.send(new CreateTagsCommand({Resources:[image],Tags:tags({'ci-kit-snapshot-gib':snapshotGiB,'ci-kit-initialization-usd':initializationUsd})}));
     log(`${cfg.account}: ${image} snapshot full written size ${snapshotGiB} GiB; initialization 200 MiB/s costs $${initializationUsd} per volume, including failed boots`);
-    const smoke = await launch('smoke',image,JSON.stringify(await guestData('smoke',{smoke:8})));
+    const smoke = await launch('smoke',image,async () => JSON.stringify(await guestData('smoke',{smoke:8})));
     await wait('smoke',20*MINUTE,() => terminal(smoke,'smoke'));
     log(`${cfg.account}: common smoke suite passed (${smoke})`);
     if ((await gh.getRepo(CHECK.repo)).private !== true) throw new Error('bake check repository must be private');
@@ -201,7 +218,7 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
     const dispatched = await gh.dispatchWorkflow(CHECK.repo,CHECK.workflow,{ref:CHECK.ref,inputs:{bake:run}});
     checkRun = dispatched?.workflow_run_id;
     if (!checkRun) throw new Error('sandbox dispatch returned no run');
-    const check = await launch('smoke',image,JSON.stringify(await guestData('check',{jit:jit.encoded_jit_config})));
+    const check = await launch('smoke',image,async () => JSON.stringify(await guestData('check',{jit:jit.encoded_jit_config})));
     await wait('real sandbox job',20*MINUTE,async () => {
       const r = await terminal(check,'check'), state = await gh.getRun(CHECK.repo,checkRun);
       const outcome = checkOutcome({vm:r ? {done:true,ok:true} : {done:false},run:state,jobs:state.status === 'completed' ? await gh.listJobs(CHECK.repo,checkRun) : [],runner:runnerName,elapsedMs:0,timeoutMs:Infinity});
