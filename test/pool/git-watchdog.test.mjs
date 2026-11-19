@@ -485,6 +485,9 @@ test('on Linux, a real git stalled on a silent server is recorded from /proc and
     log: (line) => logs.push(line),
   });
   await watchdog.tick(); // first sight
+  // The watchdog's own ticks are TICK_MS apart. /proc/uptime moves in 10 ms steps, so two ticks run back to back can
+  // read one time; the second is then the first sight again, takes no socket reading, and the third kills nothing.
+  offset += TICK_MS;
   await watchdog.tick(); // its sockets' first reading starts the idle window
   offset += STILL_MS;
   await watchdog.tick();
