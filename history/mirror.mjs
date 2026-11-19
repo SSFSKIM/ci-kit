@@ -40,14 +40,16 @@ export function openMirror({ dir, repo = null, url = `https://github.com/${repo}
       if (!r.ok) throw new Error(`history: the mirror clone failed: ${r.err.slice(0, 160)}`);
     },
     has: (sha) => SHA.test(sha ?? '') && run(['cat-file', '-e', `${sha}^{commit}`]).ok,
-    // Fetches the commits it lacks, in one request when every id is found and one by one otherwise, so an id the
-    // remote no longer has spoils no other. → the ids now present.
+    // Fetches the commits it lacks in one request; a request refused because one id is gone is split in halves, so
+    // that id spoils no other and costs a few requests, not one per id. → the ids now present.
     fetch(shas) {
       const wanted = [...new Set(shas.filter((s) => SHA.test(s ?? '')))];
-      const missing = wanted.filter((s) => !mirror.has(s));
-      if (missing.length > 0 && !run(['fetch', '--quiet', '--no-tags', '--filter=blob:none', 'origin', ...missing]).ok) {
-        for (const s of missing) run(['fetch', '--quiet', '--no-tags', '--filter=blob:none', 'origin', s]);
-      }
+      const get = (ids) => {
+        if (ids.length === 0 || run(['fetch', '--quiet', '--no-tags', '--filter=blob:none', 'origin', ...ids]).ok || ids.length === 1) return;
+        get(ids.slice(0, ids.length >> 1));
+        get(ids.slice(ids.length >> 1));
+      };
+      get(wanted.filter((s) => !mirror.has(s)));
       return new Set(wanted.filter((s) => mirror.has(s)));
     },
     // A commit's one parent, or null (absent, a root, or a merge).
