@@ -1145,7 +1145,8 @@ test("with the gate ledger's fetch, the sweep reads the runs that pass closed an
 
 test('the arguments: batch sizes, the pass and the mirrors', () => {
   const opts = collector.parseArgs(['--store', 's', '--pass', '44500000000.1', '--mirrors', '/m', '--attempts', '50', '--limit', '40']);
-  assert.deepEqual(opts, { repo: null, store: 's', limit: 40, attempts: 50, pass: '44500000000.1', mirrors: '/m' });
+  assert.deepEqual(opts, { repo: null, store: 's', limit: 40, attempts: 50, pass: '44500000000.1', mirrors: '/m', calls: null });
+  assert.equal(collector.parseArgs(['--store', 's', '--calls', '6000']).calls, 6000);
   assert.equal(collector.parseArgs(['--store', 's']).attempts, 300);
   process.env.HISTORY_PASS = '7.1';
   try {

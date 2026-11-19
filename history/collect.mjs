@@ -456,7 +456,7 @@ export function tokenFor(repo, kind = 'app') {
   return token;
 }
 
-const USAGE = 'history: usage: collect.mjs [--repo <alias>] --store <dir> [--limit <lines>] [--attempts <n>] [--pass <id>] [--mirrors <dir>]';
+const USAGE = 'history: usage: collect.mjs [--repo <alias>] --store <dir> [--limit <lines>] [--attempts <n>] [--pass <id>] [--mirrors <dir>] [--calls <n>]';
 const whole = (flag, value, what) => {
   const n = Number(value);
   if (!Number.isInteger(n) || n < 1) throw new Error(`history: ${flag} takes a whole number of ${what}, 1 or more`);
@@ -466,9 +466,11 @@ const whole = (flag, value, what) => {
 // --limit: per-test lines a batch builds; --attempts: attempts a batch of the gate ledger closes; --pass: the pass a
 // batch belongs to (the workflow's run), so only its first batch lists; --mirrors: where the mirrors are kept. The
 // workflow gives the last two as HISTORY_PASS and HISTORY_MIRRORS, which a collector from before them ignores.
+// --calls (HISTORY_CALLS): the calls a pass may make with each kind of token, in place of the daily pass's (a
+// backfill, the same pass over a longer backlog, is then held by the hour's limits alone).
 export function parseArgs(argv) {
   const env = process.env;
-  const opts = { repo: null, store: null, limit: Infinity, attempts: 300, pass: env.HISTORY_PASS || null, mirrors: env.HISTORY_MIRRORS || join(tmpdir(), 'ci-kit-mirrors') };
+  const opts = { repo: null, store: null, limit: Infinity, attempts: 300, pass: env.HISTORY_PASS || null, mirrors: env.HISTORY_MIRRORS || join(tmpdir(), 'ci-kit-mirrors'), calls: env.HISTORY_CALLS ? whole('HISTORY_CALLS', env.HISTORY_CALLS, 'calls') : null };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--repo') opts.repo = argv[++i];
     else if (argv[i] === '--store') opts.store = argv[++i];
@@ -476,6 +478,7 @@ export function parseArgs(argv) {
     else if (argv[i] === '--attempts') opts.attempts = whole('--attempts', argv[++i], 'attempts');
     else if (argv[i] === '--pass') opts.pass = argv[++i];
     else if (argv[i] === '--mirrors') opts.mirrors = argv[++i];
+    else if (argv[i] === '--calls') opts.calls = whole('--calls', argv[++i], 'calls');
     else throw new Error(`history: unknown argument ${argv[i]}`);
   }
   if (!opts.store || opts.pass === undefined || opts.mirrors === undefined) throw new Error(USAGE);
@@ -541,7 +544,8 @@ async function main(argv) {
   const repos = JSON.parse(readFileSync(new URL('./repos.json', import.meta.url), 'utf8'));
   const chosen = selectRepos(repos, opts.repo);
   const now = Date.now();
-  const pacer = createPacer({ pass: opts.pass });
+  const limits = opts.calls === null ? LIMITS : Object.fromEntries(Object.entries(LIMITS).map(([k, l]) => [k, { ...l, pass: opts.calls }]));
+  const pacer = createPacer({ pass: opts.pass, limits });
   let failed = false;
   const results = [];
   for (const entry of chosen) {
@@ -551,7 +555,7 @@ async function main(argv) {
     results.push(r);
   }
   for (const kind of new Set(chosen.map((e) => e.token))) {
-    console.log(`history: calls ${kind} ${pacer.passUsed(kind)} this pass of ${LIMITS[kind].pass}, ${pacer.hourUsed(kind)} in the hour of ${LIMITS[kind].hour}`);
+    console.log(`history: calls ${kind} ${pacer.passUsed(kind)} this pass of ${limits[kind].pass}, ${pacer.hourUsed(kind)} in the hour of ${limits[kind].hour}`);
   }
   // The workflow reads these: `more` to run another batch, `wait` to sleep before it (every repository with work
   // left is held by an hour's limit), the peak resident memory (maxRSS is in KiB) to watch it.
