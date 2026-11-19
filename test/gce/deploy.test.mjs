@@ -1,7 +1,8 @@
 // gce/deploy.sh against a fake gcloud (fake-gcloud.mjs). network: for every placement region of the shipped gce.json, a
 // subnetwork with Private Google Access, and a Cloud Router with a Cloud NAT (spec 2026-10-21 M6: job and bake VMs have
 // no external address); what exists is converged and kept, never deleted; an ingress rule on the network still stops
-// it. alert: the log-based metrics and the policies that mail the owner, A13's and M6's.
+// it. launcher-schedule: the minute tick and the EC2 guard's trigger. alert: the log-based metrics and the policies
+// that mail the owner, A13's, M6's and the silent EC2 guard's (ci-kit#222).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -82,6 +83,27 @@ test('bake-schedule creates or updates both schedules without changing the weekl
       assert.ok(schedule.includes('--time-zone=Etc/UTC'));
       assert.ok(schedule.includes('--http-method=POST'));
       assert.ok(schedule.includes('--oauth-service-account-email=ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com'));
+    }
+  }
+});
+
+test('launcher-schedule creates or updates the minute tick and the 15-minute guard trigger, both as the launcher\'s caller', () => {
+  const launcher = { 'ci-kit-launcher': pinned('ci-kit-launcher') };
+  for (const schedules of [undefined, { 'ci-kit-launcher-tick': [], 'ci-kit-pool-guard': [] }]) {
+    const run = deploy('launcher-schedule', { services: launcher, schedules });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(verb(run.calls, 'scheduler', 'jobs', schedules ? 'update' : 'create').length, 2);
+    const tick = run.state.schedules['ci-kit-launcher-tick'];
+    assert.ok(tick.includes('--schedule=* * * * *'));
+    assert.ok(tick.includes('--uri=https://ci-kit-launcher.run.app/tick'));
+    const guard = run.state.schedules['ci-kit-pool-guard'];
+    assert.ok(guard.includes('--schedule=*/15 * * * *'));
+    assert.ok(guard.includes('--uri=https://ci-kit-launcher.run.app/guard'));
+    for (const schedule of [tick, guard]) {
+      assert.ok(schedule.includes('--time-zone=Etc/UTC'));
+      assert.ok(schedule.includes('--http-method=POST'));
+      assert.ok(schedule.includes('--oidc-service-account-email=ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com'));
+      assert.ok(schedule.includes('--oidc-token-audience=https://ci-kit-launcher.run.app'));
     }
   }
 });
@@ -192,7 +214,7 @@ test('alert: each failure the owner is mailed for has its log-based metric and a
   const run = deploy('alert', {});
   assert.equal(run.status, 0, run.stderr);
   const filters = Object.fromEntries(run.state.metrics.map((m) => [m.name, m.filter]));
-  assert.deepEqual(Object.keys(filters), ['ci-kit-launcher-tick-failed', 'ci-kit-runner-never-online', 'ci-kit-nat-dropped']);
+  assert.deepEqual(Object.keys(filters), ['ci-kit-launcher-tick-failed', 'ci-kit-runner-never-online', 'ci-kit-nat-dropped', 'ci-kit-pool-guard-silent']);
   assert.equal(filters['ci-kit-launcher-tick-failed'],
     'resource.type="cloud_scheduler_job" AND resource.labels.job_id="ci-kit-launcher-tick" AND severity>=ERROR');
   // What the launcher logs for a VM whose runner never came online (launcher.mjs reportNeverOnline).
@@ -206,7 +228,11 @@ test('alert: each failure the owner is mailed for has its log-based metric and a
   assert.equal(on('ci-kit-launcher-tick-failed', 'cloud_scheduler_job').conditions[0].conditionThreshold.thresholdValue, 2, 'three failed ticks');
   assert.equal(on('ci-kit-runner-never-online', 'cloud_run_revision').conditions[0].conditionThreshold.thresholdValue, 0, 'any');
   assert.equal(on('ci-kit-nat-dropped', 'nat_gateway').conditions[0].conditionThreshold.thresholdValue, 0, 'any');
-  assert.equal(run.state.policies.length, 3);
+  // What the launcher's /guard logs while no pool-guard run has succeeded in an hour (guard.mjs).
+  assert.equal(filters['ci-kit-pool-guard-silent'],
+    'resource.type="cloud_run_revision" AND resource.labels.service_name="ci-kit-launcher" AND severity>=ERROR AND jsonPayload.event="pool-guard-silent"');
+  assert.equal(on('ci-kit-pool-guard-silent', 'cloud_run_revision').conditions[0].conditionThreshold.thresholdValue, 0, 'any');
+  assert.equal(run.state.policies.length, 4);
   for (const p of run.state.policies) {
     assert.deepEqual(p.notificationChannels, [run.state.channel]);
     assert.deepEqual(p.userLabels, { 'ci-kit': 'alert' });

@@ -18,12 +18,14 @@
 #   launcher           the Cloud Run service ci-kit-launcher, built from this checkout: no public ingress, one
 #                      instance, 300 s per request; requests are many at a time, ticks one. Like webhook, it ends with
 #                      all traffic on the revision it deployed, a rollback's pin undone, and fails if that does not serve
-#   launcher-schedule  the Scheduler job ci-kit-launcher-tick, which calls the launcher every minute with an OIDC token
+#   launcher-schedule  the Scheduler jobs ci-kit-launcher-tick, which calls the launcher's /tick every minute, and
+#                      ci-kit-pool-guard, its /guard every 15 minutes (the EC2 guard's trigger), both with an OIDC token
 #   webhook            the public Cloud Run service ci-kit-webhook (the App's webhook receiver), the Pub/Sub topic
 #                      ci-kit-tick-requests it publishes to, and the push subscription that asks the launcher for a
 #                      tick. Needs the launcher deployed and the webhook secret created by the owner (docs/pool.md, GCE)
 #   alert              log-based metrics and alert policies, mailed to CI_KIT_ALERT_EMAIL (default: the project's
-#                      owner): failed ci-kit-launcher-tick executions, VMs whose runner never came online, NAT drops
+#                      owner): failed ci-kit-launcher-tick executions, VMs whose runner never came online, NAT drops,
+#                      an EC2 guard with no successful run in an hour
 #   app-hook           points the GitHub App's webhook at ci-kit-webhook with the secret (gce/tools/app-hook.mjs); run
 #                      it after webhook's first deploy and after each rotation of the secret
 # The App's secrets (ci-kit-app-id, ci-kit-app-key, readable by ci-kit-launcher only) and the webhook secret
@@ -261,7 +263,14 @@ launcher_schedule() {
   g scheduler jobs "$verb" http ci-kit-launcher-tick --location="$REGION" \
     --schedule='* * * * *' --time-zone=Etc/UTC --http-method=POST --uri="$url/tick" \
     --oidc-service-account-email="$SA" --oidc-token-audience="$url" --attempt-deadline=300s > /dev/null
-  echo "deploy: launcher schedule ok (every minute → $url/tick)"
+  # GitHub starts pool-guard.yml's own 15-minute schedule only every 6 to 9 hours (ci-kit#222); the launcher dispatches
+  # it on this one, and the workflow's schedule stays as the second trigger.
+  verb=create
+  g scheduler jobs describe ci-kit-pool-guard --location="$REGION" > /dev/null 2>&1 && verb=update
+  g scheduler jobs "$verb" http ci-kit-pool-guard --location="$REGION" \
+    --schedule='*/15 * * * *' --time-zone=Etc/UTC --http-method=POST --uri="$url/guard" \
+    --oidc-service-account-email="$SA" --oidc-token-audience="$url" --attempt-deadline=60s > /dev/null
+  echo "deploy: launcher schedule ok (every minute → $url/tick; every 15 minutes → $url/guard)"
 }
 
 # The webhook path (spec 2026-10-21 M4): GitHub → ci-kit-webhook (public; the signature is its gate) → Pub/Sub topic
@@ -335,6 +344,8 @@ app_hook() {
 #   Lifetime bounds): three failed ticks within 10 minutes.
 # - A VM whose runner never came online (spec 2026-10-21 M6): it booted but cannot reach GitHub, and its job waits on
 #   another VM; the launcher logs it at ERROR each tick (launcher.mjs reportNeverOnline). Any in 10 minutes.
+# - An EC2 guard silent for an hour (ci-kit#222): the launcher's /guard logs it at ERROR every 15 minutes while no
+#   pool-guard run has succeeded in the last hour (gce/launcher/guard.mjs). Any in 10 minutes.
 # - A connection a pool NAT dropped (M6): a VM out of ports, or the NAT out of addresses. The NAT logs drops only
 #   (network). Any in 10 minutes.
 alert() {
@@ -357,7 +368,11 @@ alert() {
     "ci-kit: connections ci-kit-nat dropped (spec 2026-10-21 M6)" \
     'resource.type="nat_gateway" AND resource.labels.gateway_name="ci-kit-nat" AND jsonPayload.allocation_status="DROPPED"' \
     "A pool Cloud NAT (ci-kit-nat) dropped connections in the last 10 minutes: a VM ran out of NAT ports, or the NAT could not allocate an address. Jobs may fail to reach GitHub, apt or npm. Read the drops: gcloud logging read 'resource.type=\"nat_gateway\" AND jsonPayload.allocation_status=\"DROPPED\"' --project=ssfskim-ci-kit --freshness=1h, and the NAT's dropped_sent_packets_count by reason in Cloud Monitoring. The port settings are in gce/deploy.sh network. docs/pool.md, GCE, The network."
-  echo "deploy: alert ok (ticks failing, runners never online, NAT drops; mailed to $email)"
+  alert_on_log ci-kit-pool-guard-silent cloud_run_revision 0 'ci-kit EC2 guard silent' \
+    'ci-kit: no successful pool-guard run in the last hour (ci-kit#222)' \
+    'resource.type="cloud_run_revision" AND resource.labels.service_name="ci-kit-launcher" AND severity>=ERROR AND jsonPayload.event="pool-guard-silent"' \
+    "No run of the independent EC2 guard (.github/workflows/pool-guard.yml in SSFSKIM/ci-kit) has succeeded in the last hour, so EC2 instances, volumes and snapshots past their ci-kit-deadline are not being reaped. The launcher dispatches it every 15 minutes (Cloud Scheduler ci-kit-pool-guard → /guard). Its runs: gh run list --repo SSFSKIM/ci-kit --workflow pool-guard.yml --limit 5. A failed dispatch is logged as jsonPayload.event=\"pool-guard-dispatch-failed\": gcloud logging read 'jsonPayload.event=\"pool-guard-dispatch-failed\"' --project=ssfskim-ci-kit --freshness=2h. Run it by hand meanwhile: gh workflow run pool-guard.yml --repo SSFSKIM/ci-kit --ref main. docs/pool.md, Independent EC2 guard."
+  echo "deploy: alert ok (ticks failing, runners never online, NAT drops, EC2 guard silent; mailed to $email)"
 }
 
 # alert_on_log METRIC RESOURCE THRESHOLD TITLE DESCRIPTION FILTER DOC: the log-based metric METRIC of the entries FILTER
