@@ -1,12 +1,17 @@
 #!/usr/bin/env node
-// The test-history collector (test history spec, Design "Collector"):
-//   node history/collect.mjs [--repo <alias>] --store <dir> [--limit <lines>]
-// For each repo in history/repos.json (or the one named), it records every gate job's JUnit report into the store
-// directory: one run line per (run, attempt, job), the day's base and durations. A job a matrix shards, `<job> <k>/<n>`
-// uploading `test-results-<slug>-<k>of<n>-<attempt>`, makes one line of `<job>` from all n shards of the attempt.
-// It is idempotent by (run, attempt, job). Authentication is the ci-kit GitHub App's when CI_KIT_APP_ID and
-// CI_KIT_APP_KEY are set, else gh's token.
-// It prints one count line per repo and never a test's name, file or message: the repos it reads may be private.
+// The collector of the test history and the gate ledger (test history spec, Design "Collector"; gate ledger spec,
+// "Reading GitHub cheaply and completely"):
+//   node history/collect.mjs [--repo <alias>] --store <dir> [--limit <lines>] [--attempts <n>] [--pass <id>] [--mirrors <dir>]
+// For each repo in history/repos.json (or the one named), one batch of two passes:
+//   - the gate ledger's (history/ledger.mjs): every gate job's line, by its attempt's job listing, fetched once;
+//   - for a repo with a reporting set (`jobs`), the per-test pass: every gate job's JUnit report into the store
+//     directory: one run line per (run, attempt, job), the day's base and durations. A job a matrix shards, `<job> <k>/<n>`
+//     uploading `test-results-<slug>-<k>of<n>-<attempt>`, makes one line of `<job>` from all n shards of the attempt.
+//     It is idempotent by (run, attempt, job), and takes its jobs from the ledger's fetch.
+// Authentication is per repo (`token`): the ci-kit GitHub App's when CI_KIT_APP_ID and CI_KIT_APP_KEY are set, the
+// run's GITHUB_TOKEN for a public repo the App is not installed on, else gh's token.
+// It prints count lines and never a test's name, file or message, a commit message or a log line: the repos it reads
+// may be private.
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,6 +23,8 @@ import { createAppTokens } from '../lib/github-app.mjs';
 import { parseJUnit } from './junit.mjs';
 import { previousRun, resolveTested, startedBefore } from './provenance.mjs';
 import { buildBase, buildDurations, buildRunLine, jobSlug, lineArtifacts, lineKey, reportWithinJob, summarize } from './record.mjs';
+import { collectLedger, createPacer, formatLedger, LIMITS } from './ledger.mjs';
+import { openMirror } from './mirror.mjs';
 import { dayOf, openStore } from './store.mjs';
 
 const DAY = 86_400_000;
@@ -119,7 +126,10 @@ const own = (value) => JSON.parse(JSON.stringify(value));
 // builds, oldest first, so a backlog is taken in passes each durable on its own. → counts, `errors`, one line each,
 // naming runs and jobs only, and `more`: whether work was left for another pass (none is claimed after a rate-limit
 // error, which another pass would only repeat). A failed item writes nothing and is tried again by the next pass.
-export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Date.now(), readZip = readArtifact, limit = Infinity }) {
+// `jobsOf(run, attempt)`: an attempt's job listing shared with the gate ledger's pass, which fetches each attempt's
+// jobs once; `recentRuns`: the runs that pass closed attempts of in this batch, which the sweep (2.) reads instead of
+// listing the last 3 days again. Without them the pass lists and fetches for itself.
+export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Date.now(), readZip = readArtifact, limit = Infinity, jobsOf: sharedJobsOf = null, recentRuns = null }) {
   const counts = { artifacts: 0, lines: 0, present: 0, missing: 0, unparseable: 0, rejected: 0, relinked: 0, failures: 0, written: 0 };
   const errors = [];
   let limited = false;
@@ -140,7 +150,7 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
     };
   };
   const runOf = cached((id) => gh.getRun(repo, id));
-  const jobsOf = cached((id, attempt) => gh.attemptJobs(repo, id, attempt));
+  const jobsOf = sharedJobsOf ?? cached((id, attempt) => gh.attemptJobs(repo, id, attempt));
   const artifactsOf = cached((id) => gh.runArtifacts(repo, id));
   const testedOf = cached((id) => runOf(id).then((run) => resolveTested(gh, repo, run)));
 
@@ -187,7 +197,8 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
   //    batch is not yet full, and its items fill what is left of the batch.
   const sweepRecent = async () => {
     const swept = new Map();
-    for (const run of await gh.runsCreatedSince(repo, new Date(now - 3 * DAY).toISOString())) {
+    const since = new Date(now - 3 * DAY).toISOString();
+    for (const run of recentRuns ? recentRuns.filter((r) => r.created_at >= since) : await gh.runsCreatedSince(repo, since)) {
       for (let attempt = 1; attempt <= run.run_attempt; attempt += 1) {
         let attemptJobs;
         try {
@@ -445,17 +456,27 @@ export function tokenFor(repo, kind = 'app') {
   return token;
 }
 
+const USAGE = 'history: usage: collect.mjs [--repo <alias>] --store <dir> [--limit <lines>] [--attempts <n>] [--pass <id>] [--mirrors <dir>]';
+const whole = (flag, value, what) => {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`history: ${flag} takes a whole number of ${what}, 1 or more`);
+  return n;
+};
+
+// --limit: per-test lines a batch builds; --attempts: attempts a batch of the gate ledger closes; --pass: the pass a
+// batch belongs to (the workflow's run), so only its first batch lists; --mirrors: where the mirrors are kept.
 export function parseArgs(argv) {
-  const opts = { repo: null, store: null, limit: Infinity };
+  const opts = { repo: null, store: null, limit: Infinity, attempts: 300, pass: null, mirrors: join(tmpdir(), 'ci-kit-mirrors') };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--repo') opts.repo = argv[++i];
     else if (argv[i] === '--store') opts.store = argv[++i];
-    else if (argv[i] === '--limit') {
-      opts.limit = Number(argv[++i]);
-      if (!Number.isInteger(opts.limit) || opts.limit < 1) throw new Error('history: --limit takes a whole number of lines, 1 or more');
-    } else throw new Error(`history: unknown argument ${argv[i]}`);
+    else if (argv[i] === '--limit') opts.limit = whole('--limit', argv[++i], 'lines');
+    else if (argv[i] === '--attempts') opts.attempts = whole('--attempts', argv[++i], 'attempts');
+    else if (argv[i] === '--pass') opts.pass = argv[++i];
+    else if (argv[i] === '--mirrors') opts.mirrors = argv[++i];
+    else throw new Error(`history: unknown argument ${argv[i]}`);
   }
-  if (!opts.store) throw new Error('history: usage: collect.mjs [--repo <alias>] --store <dir> [--limit <lines>]');
+  if (!opts.store || opts.pass === undefined || opts.mirrors === undefined) throw new Error(USAGE);
   return opts;
 }
 
@@ -467,22 +488,71 @@ export function selectRepos(repos, alias) {
   return chosen;
 }
 
+// One repository's batch: the gate ledger's pass, then the per-test pass (for a repository with a reporting set),
+// which takes its jobs from the ledger's fetch. → { errors, more, wait }.
+async function collectBoth({ entry, opts, pacer, now }) {
+  const { repo, alias } = entry;
+  const token = tokenFor(repo, entry.token);
+  const gh = createGitHub(token);
+  const memo = new Map();
+  const jobsOf = (run, attempt) => {
+    const k = `${run}/${attempt}`;
+    if (!memo.has(k)) memo.set(k, gh.attemptJobs(repo, run, attempt));
+    return memo.get(k);
+  };
+  const errors = [];
+  let ledger = null;
+  let result = { more: false, wait: null, closed: null };
+  try {
+    const mirror = openMirror({ dir: join(opts.mirrors, `${alias}.git`), repo, token: typeof token === 'function' ? await token(repo) : token });
+    mirror.ensure();
+    result = await collectLedger({ gh, repo, alias, entry, root: opts.store, mirror, jobsOf, pacer, pass: opts.pass, now, limit: opts.attempts });
+    ledger = result.ledger;
+    errors.push(...result.errors);
+    console.log(formatLedger(repo, result.counts, result.errors.length));
+  } catch (err) {
+    errors.push(`ledger: ${describe(err)}`);
+  }
+  let more = result.more;
+  if (entry.jobs && pacer.allows(entry.token, 10)) {
+    const perTest = await collectRepo({ gh, repo, alias, jobs: entry.jobs, root: opts.store, now, limit: opts.limit, jobsOf, recentRuns: result.closed });
+    errors.push(...perTest.errors);
+    console.log(formatCounts(repo, perTest.counts, perTest.errors.length));
+    more ||= perTest.more;
+  }
+  // The per-test pass's calls count toward the pass too.
+  if (ledger) {
+    pacer.settle(ledger.state);
+    ledger.flush();
+  }
+  return { errors, more, wait: result.wait };
+}
+
 async function main(argv) {
   const opts = parseArgs(argv);
   const repos = JSON.parse(readFileSync(new URL('./repos.json', import.meta.url), 'utf8'));
   const chosen = selectRepos(repos, opts.repo);
+  const now = Date.now();
+  const pacer = createPacer({ pass: opts.pass });
   let failed = false;
-  let more = false;
-  for (const { repo, alias, jobs } of chosen) {
-    const result = await collectRepo({ gh: createGitHub(tokenFor(repo)), repo, alias, jobs, root: opts.store, limit: opts.limit });
-    for (const e of result.errors) console.error(`${repo}: ${e}`);
-    console.log(formatCounts(repo, result.counts, result.errors.length));
-    if (result.errors.length > 0) failed = true;
-    if (result.more) more = true;
+  const results = [];
+  for (const entry of chosen) {
+    const r = await collectBoth({ entry, opts, pacer, now });
+    for (const e of r.errors) console.error(`${entry.repo}: ${e}`);
+    if (r.errors.length > 0) failed = true;
+    results.push(r);
   }
-  // The workflow reads these: `more` to run another pass, the peak resident memory (maxRSS is in KiB) to watch it.
+  for (const kind of new Set(chosen.map((e) => e.token))) {
+    console.log(`history: calls ${kind} ${pacer.passUsed(kind)} this pass of ${LIMITS[kind].pass}, ${pacer.hourUsed(kind)} in the hour of ${LIMITS[kind].hour}`);
+  }
+  // The workflow reads these: `more` to run another batch, `wait` to sleep before it (every repository with work
+  // left is held by an hour's limit), the peak resident memory (maxRSS is in KiB) to watch it.
   console.log(`history: peak rss ${Math.round(process.resourceUsage().maxRSS / 1024)} MB`);
-  if (more) console.log('history: more');
+  const waiting = results.filter((r) => r.more);
+  if (waiting.length > 0) {
+    if (waiting.every((r) => r.wait !== null)) console.log(`history: wait ${Math.min(...waiting.map((r) => r.wait))}`);
+    console.log('history: more');
+  }
   return failed ? 1 : 0;
 }
 

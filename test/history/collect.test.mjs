@@ -1115,3 +1115,38 @@ test('a missing rerun that already records its copied shard artifact is not take
   const later = fake.requests.slice(asked); // the sweep of recent runs still lists the attempts' jobs
   assert.ok(!later.some((p) => /^\/actions\/runs\/891(\/artifacts)?(\?|$)/.test(p)), later.join('\n'));
 });
+
+test("with the gate ledger's fetch, the sweep reads the runs that pass closed and lists nothing itself", async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  run({ id: 950, ref: 'ci/shared-aaaaaaa', tested: c('a'), tree: 'TA', created: '2026-10-21T07:50:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z', suites: suitesA() }],
+  ] });
+  repo.artifacts = []; // the artifact listing misses it: only the sweep can find the job
+  const { fake, pass } = passes(repo, root);
+  const asked = [];
+  const client = createGitHub('t', { fetchImpl: fake.fetchImpl });
+  const memo = new Map(); // the collector's shared fetch is memoized, as here
+  const jobsOf = (id, attempt) => {
+    if (!memo.has(`${id}/${attempt}`)) {
+      asked.push(`${id}/${attempt}`);
+      memo.set(`${id}/${attempt}`, client.attemptJobs(REPO, id, attempt));
+    }
+    return memo.get(`${id}/${attempt}`);
+  };
+  const none = await pass({ jobsOf, recentRuns: [] });
+  assert.equal(none.counts.lines, 0);
+  assert.ok(!fake.requests.some((p) => p.startsWith('/actions/runs?')), 'no listing of recent runs');
+  const swept = await pass({ jobsOf, recentRuns: [{ id: 950, run_attempt: 1, created_at: '2026-10-21T07:50:00Z' }] });
+  assert.deepEqual([swept.errors, swept.counts.missing], [[], 1]);
+  assert.deepEqual(asked, ['950/1']);
+  assert.ok(!fake.requests.some((p) => p.startsWith('/actions/runs?')));
+});
+
+test('the arguments: batch sizes, the pass and the mirrors', () => {
+  const opts = collector.parseArgs(['--store', 's', '--pass', '44500000000.1', '--mirrors', '/m', '--attempts', '50', '--limit', '40']);
+  assert.deepEqual(opts, { repo: null, store: 's', limit: 40, attempts: 50, pass: '44500000000.1', mirrors: '/m' });
+  assert.equal(collector.parseArgs(['--store', 's']).attempts, 300);
+  assert.throws(() => collector.parseArgs(['--store', 's', '--attempts', '0']), /whole number of attempts/);
+  assert.throws(() => collector.parseArgs(['--store', 's', '--pass']), /usage/);
+});

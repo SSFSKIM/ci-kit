@@ -86,3 +86,82 @@ export function openStore(root, alias) {
     },
   };
 }
+
+// The gate ledger's files under <root>/<alias>/ (gate ledger spec, "One collector, one store, more kinds of line"):
+//   attempts.json              which (run, attempt) pairs are collected, which are still open, when each day was listed,
+//                              the pass under way (its listing's queue and its calls) and the calls of the last hour
+//   jobs/<YYYY-MM-DD>.jsonl    one line per job of a gate run, by the job's completion day (UTC)
+// Job lines are idempotent by (run, attempt, job id); writes are staged and flushed together, the job lines first, so
+// a batch stopped between the two leaves its attempts open with their lines written, and the next batch writes the
+// same lines again in place.
+const jobKey = (l) => `${l.run}/${l.attempt}/${l.job_id}`;
+const jobOrder = (a, b) => (a.completed < b.completed ? -1 : a.completed > b.completed ? 1 : a.run - b.run || a.attempt - b.attempt || a.job_id - b.job_id);
+const emptyAttempts = () => ({ v: 1, runs: {}, listed: {}, settled: {}, pass: null, calls: {} });
+
+export function openLedger(root, alias) {
+  const dir = join(root, alias);
+  const attemptsPath = join(dir, 'attempts.json');
+  const state = existsSync(attemptsPath) ? JSON.parse(readFileSync(attemptsPath, 'utf8')) : emptyAttempts();
+  const staged = new Map(); // day → lines
+  const jobsDir = join(dir, 'jobs');
+  const readDay = (day) => {
+    const path = join(jobsDir, `${day}.jsonl`);
+    return existsSync(path) ? readLines(path) : [];
+  };
+  const days = () => (existsSync(jobsDir) ? readdirSync(jobsDir).map((n) => DAY.exec(n)?.[1]).filter(Boolean) : []);
+  const closedAll = (run) => run.closed.length >= run.attempts && Array.from({ length: run.attempts }, (_, i) => i + 1).every((a) => run.closed.includes(a));
+
+  const ledger = {
+    state,
+    addJobLines(lines) {
+      for (const l of lines) {
+        const day = dayOf(l.completed);
+        staged.set(day, [...(staged.get(day) ?? []), l]);
+      }
+    },
+    // Every job line completed in [fromDay, toDay], the staged ones included.
+    jobLines(fromDay, toDay) {
+      const out = new Map();
+      for (const day of [...new Set([...days(), ...staged.keys()])].filter((d) => d >= fromDay && d <= toDay).sort()) {
+        for (const l of [...readDay(day), ...(staged.get(day) ?? [])]) out.set(jobKey(l), l);
+      }
+      return [...out.values()].sort(jobOrder);
+    },
+    // A day is covered when it was listed after it ended and every attempt found for it is closed. A day whose runs
+    // have aged out of the index keeps the answer it had then.
+    covered(day) {
+      if (day in state.settled) return state.settled[day];
+      const listed = state.listed[day];
+      if (!listed || listed < `${nextDay(day)}T00:00:00Z`) return false;
+      return Object.values(state.runs).filter((r) => r.day === day).every(closedAll);
+    },
+    // Runs created before `day` leave the index, each day settling as covered or not.
+    prune(day) {
+      for (const d of new Set(Object.values(state.runs).map((r) => r.day))) {
+        if (d < day && !(d in state.settled)) state.settled[d] = ledger.covered(d);
+      }
+      for (const [id, r] of Object.entries(state.runs)) if (r.day < day) delete state.runs[id];
+    },
+    // → files written.
+    flush() {
+      let written = 0;
+      const write = (path, text) => {
+        if (existsSync(path) && readFileSync(path, 'utf8') === text) return;
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, text);
+        written += 1;
+      };
+      for (const day of [...staged.keys()].sort()) {
+        const merged = new Map(readDay(day).map((l) => [jobKey(l), l]));
+        for (const l of staged.get(day)) merged.set(jobKey(l), l);
+        write(join(jobsDir, `${day}.jsonl`), [...merged.values()].sort(jobOrder).map((l) => `${JSON.stringify(l)}\n`).join(''));
+      }
+      staged.clear();
+      write(attemptsPath, `${JSON.stringify(state)}\n`);
+      return written;
+    },
+  };
+  return ledger;
+}
+
+export const nextDay = (day) => new Date(Date.parse(`${day}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
