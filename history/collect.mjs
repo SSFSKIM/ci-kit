@@ -464,9 +464,11 @@ const whole = (flag, value, what) => {
 };
 
 // --limit: per-test lines a batch builds; --attempts: attempts a batch of the gate ledger closes; --pass: the pass a
-// batch belongs to (the workflow's run), so only its first batch lists; --mirrors: where the mirrors are kept.
+// batch belongs to (the workflow's run), so only its first batch lists; --mirrors: where the mirrors are kept. The
+// workflow gives the last two as HISTORY_PASS and HISTORY_MIRRORS, which a collector from before them ignores.
 export function parseArgs(argv) {
-  const opts = { repo: null, store: null, limit: Infinity, attempts: 300, pass: null, mirrors: join(tmpdir(), 'ci-kit-mirrors') };
+  const env = process.env;
+  const opts = { repo: null, store: null, limit: Infinity, attempts: 300, pass: env.HISTORY_PASS || null, mirrors: env.HISTORY_MIRRORS || join(tmpdir(), 'ci-kit-mirrors') };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--repo') opts.repo = argv[++i];
     else if (argv[i] === '--store') opts.store = argv[++i];

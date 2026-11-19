@@ -1147,6 +1147,12 @@ test('the arguments: batch sizes, the pass and the mirrors', () => {
   const opts = collector.parseArgs(['--store', 's', '--pass', '44500000000.1', '--mirrors', '/m', '--attempts', '50', '--limit', '40']);
   assert.deepEqual(opts, { repo: null, store: 's', limit: 40, attempts: 50, pass: '44500000000.1', mirrors: '/m' });
   assert.equal(collector.parseArgs(['--store', 's']).attempts, 300);
+  process.env.HISTORY_PASS = '7.1';
+  try {
+    assert.equal(collector.parseArgs(['--store', 's']).pass, '7.1');
+  } finally {
+    delete process.env.HISTORY_PASS;
+  }
   assert.throws(() => collector.parseArgs(['--store', 's', '--attempts', '0']), /whole number of attempts/);
   assert.throws(() => collector.parseArgs(['--store', 's', '--pass']), /usage/);
 });
