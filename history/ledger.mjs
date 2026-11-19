@@ -25,12 +25,19 @@ const minute = (ms) => new Date(ms).toISOString().slice(0, 16);
 // passes (the last hour's, by minute), both kept in the repository's attempts.json.
 export function createPacer({ limits = LIMITS, pass = null, now = Date.now } = {}) {
   const clients = [];
-  const live = (c) => c.gh.stats().requests - c.base;
+  const live = (c) => (c.gh ? c.gh.stats().requests - c.base : 0);
   const of = (kind) => clients.filter((c) => c.kind === kind);
   const hourAgo = () => minute(now() - 60 * 60_000);
   const pacer = {
-    add(kind, gh, state) {
-      clients.push({ kind, gh, state, base: gh.stats().requests });
+    // A repository's state, before any of the batch's work: every repository's calls count from the batch's start,
+    // its own client's from when it is attached.
+    add(kind, state) {
+      if (!clients.some((c) => c.state === state)) clients.push({ kind, gh: null, state, base: 0 });
+    },
+    attach(kind, state, gh) {
+      pacer.add(kind, state);
+      const c = clients.find((x) => x.state === state);
+      if (!c.gh) Object.assign(c, { gh, base: gh.stats().requests });
     },
     passUsed: (kind) => of(kind).reduce((t, c) => t + (pass !== null && c.state.pass?.id === pass ? c.state.pass.calls : 0) + live(c), 0),
     hourUsed: (kind) => of(kind).reduce((t, c) => t + Object.entries(c.state.calls ?? {}).filter(([m]) => m > hourAgo()).reduce((s, [, n]) => s + n, 0) + live(c), 0),
@@ -118,16 +125,16 @@ export async function listDay(gh, repo, workflow, day, { delays = [3000, 10000] 
 // What a pass's error may say in a public log: GitHub's status and path, or a message this kit wrote.
 const describe = (err) => (err?.status || /^(history|junit): /.test(err?.message ?? '') ? err.message : err?.name ?? 'Error');
 
-// One repository's batch of the pass. `mirror`: the repository's mirror (history/mirror.mjs). `jobsOf(run, attempt)`:
+// One repository's batch of the pass. `ledger`: its store (openLedger), opened by the caller when the pacer must count
+// every repository's calls from the batch's start. `mirror`: the repository's mirror (history/mirror.mjs). `jobsOf(run, attempt)`:
 // the shared, cached job listing. → counts, `errors`, `more` (work left that this pass may still take), `wait` (seconds until the hour allows more, or null) and
 // `closed` (the runs whose attempts this batch closed, for the per-test pass's sweep) and the `ledger`, whose state
 // the caller settles and flushes again after the per-test pass's calls.
-export async function collectLedger({ gh, repo, alias = repo, entry, root, mirror, jobsOf, pacer, pass = null, now = Date.now(), limit = 300, listDelays = [3000, 10000], progress = () => {} }) {
+export async function collectLedger({ gh, repo, alias = repo, entry, root, ledger = openLedger(root, alias), mirror, jobsOf, pacer, pass = null, now = Date.now(), limit = 300, listDelays = [3000, 10000], progress = () => {} }) {
   const started = Date.now();
-  const ledger = openLedger(root, alias);
   const { state } = ledger;
   const kind = entry.token;
-  pacer.add(kind, gh, state);
+  pacer.attach(kind, state, gh);
   const counts = { listed: 0, days: 0, closed: 0, lines: 0, queued: 0, pending: 0, open: 0 };
   const errors = [];
   let limited = false;

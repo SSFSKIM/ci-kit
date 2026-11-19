@@ -88,9 +88,9 @@ function store() {
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 const jobsOfFor = (gh) => (run, attempt) => gh.attemptJobs(REPO, run, attempt);
-const pass = (world, root, { entry = MAWS, mirror = fakeMirror(Object.fromEntries(world.runs.map((r) => [r.head_sha, sha(r.id + 1)]))), passId = 'p1', limit = 300, limits, now = NOW, listDelays = [0, 0] } = {}) => {
+const pass = (world, root, { pacerFor = null, entry = MAWS, mirror = fakeMirror(Object.fromEntries(world.runs.map((r) => [r.head_sha, sha(r.id + 1)]))), passId = 'p1', limit = 300, limits, now = NOW, listDelays = [0, 0] } = {}) => {
   const fake = fakeGitHub(world);
-  const pacer = createPacer({ pass: passId, now: () => now, ...(limits ? { limits } : {}) });
+  const pacer = pacerFor ?? createPacer({ pass: passId, now: () => now, ...(limits ? { limits } : {}) });
   return collectLedger({ gh: fake.gh, repo: REPO, alias: 'o/r', entry, root, mirror, jobsOf: jobsOfFor(fake.gh), pacer, pass: passId, now, limit, listDelays }).then((result) => ({ ...result, requests: fake.requests }));
 };
 const allLines = (root) => {
@@ -358,6 +358,24 @@ test('a listing answered with a server error is tried again; one that keeps fail
     } finally {
       t.cleanup();
     }
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("a batch counts every repository's calls of the pass from its start, not only those it has reached", async () => {
+  const s = store();
+  try {
+    const world = { runs: Array.from({ length: 6 }, (_, i) => gateRun(1000 + i, `2026-11-18T0${i}:00:00Z`)), jobs: {} };
+    world.runs.forEach((r, i) => { world.jobs[`${r.id}/1`] = [job(i + 1, 'probes', r.created_at, 1)]; });
+    // Another repository of the same token already spent the pass's calls in an earlier batch.
+    const other = openLedger(s.root, 'o/other');
+    other.state.pass = { id: 'p1', listed_at: null, calls: 60, pending: [], queue: [] };
+    const pacer = createPacer({ pass: 'p1', now: () => NOW, limits: { app: { pass: 80, hour: 1000 } } });
+    pacer.add('app', other.state);
+    const r = await pass(world, s.root, { pacerFor: pacer });
+    assert.ok(r.requests.length <= 20, `${r.requests.length} calls`);
+    assert.equal(r.more, false);
   } finally {
     s.cleanup();
   }

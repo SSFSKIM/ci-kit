@@ -25,7 +25,7 @@ import { previousRun, resolveTested, startedBefore } from './provenance.mjs';
 import { buildBase, buildDurations, buildRunLine, jobSlug, lineArtifacts, lineKey, reportWithinJob, summarize } from './record.mjs';
 import { collectLedger, createPacer, formatLedger, LIMITS } from './ledger.mjs';
 import { openMirror } from './mirror.mjs';
-import { dayOf, openStore } from './store.mjs';
+import { dayOf, openLedger, openStore } from './store.mjs';
 
 const DAY = 86_400_000;
 const ARTIFACT = /^test-results-(.+)-(\d+)$/;
@@ -495,7 +495,7 @@ export function selectRepos(repos, alias) {
 
 // One repository's batch: the gate ledger's pass, then the per-test pass (for a repository with a reporting set),
 // which takes its jobs from the ledger's fetch. → { errors, more, wait }.
-async function collectBoth({ entry, opts, pacer, now }) {
+async function collectBoth({ entry, opts, pacer, now, ledger: opened }) {
   const { repo, alias } = entry;
   const token = tokenFor(repo, entry.token);
   const gh = createGitHub(token);
@@ -515,7 +515,7 @@ async function collectBoth({ entry, opts, pacer, now }) {
     console.error(`${repo}: mirror ready in ${Math.round((Date.now() - cloneStarted) / 1000)} s`);
     // Progress goes to stderr, which the workflow's log shows as it happens: counts and seconds only.
     const progress = (what) => console.error(`${repo}: ${what}`);
-    result = await collectLedger({ gh, repo, alias, entry, root: opts.store, mirror, jobsOf, pacer, pass: opts.pass, now, limit: opts.attempts, progress });
+    result = await collectLedger({ gh, repo, alias, entry, root: opts.store, ledger: opened, mirror, jobsOf, pacer, pass: opts.pass, now, limit: opts.attempts, progress });
     ledger = result.ledger;
     errors.push(...result.errors);
     console.log(formatLedger(repo, result.counts, result.errors.length));
@@ -546,10 +546,13 @@ async function main(argv) {
   const now = Date.now();
   const limits = opts.calls === null ? LIMITS : Object.fromEntries(Object.entries(LIMITS).map(([k, l]) => [k, { ...l, pass: opts.calls }]));
   const pacer = createPacer({ pass: opts.pass, limits });
+  // Every repository's calls this pass and hour count from the start, whichever comes first.
+  const ledgers = new Map(chosen.map((e) => [e.alias, openLedger(opts.store, e.alias)]));
+  for (const e of chosen) pacer.add(e.token, ledgers.get(e.alias).state);
   let failed = false;
   const results = [];
   for (const entry of chosen) {
-    const r = await collectBoth({ entry, opts, pacer, now });
+    const r = await collectBoth({ entry, opts, pacer, now, ledger: ledgers.get(entry.alias) });
     for (const e of r.errors) console.error(`${entry.repo}: ${e}`);
     if (r.errors.length > 0) failed = true;
     results.push(r);
