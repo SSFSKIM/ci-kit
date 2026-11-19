@@ -9,6 +9,7 @@ import { Launcher } from '../../gce/launcher/launcher.mjs';
 import { createGceLedger } from '../../gce/launcher/ledger-store.mjs';
 import { parseRow, renderRow } from '../../gce/launcher/ledger.mjs';
 import { ONE_REGION_CFG } from './config-fixtures.mjs';
+import { lostRunner } from '../../gce/launcher/logic.mjs';
 
 const SBX = 'SSFSKIM/ci-kit-sandbox';
 const CFG = { ...ONE_REGION_CFG, repos: [{ repo: SBX }] };
@@ -327,4 +328,15 @@ test('the sweep stops starting calls once its time budget is spent; what it left
   w.advance(MIN);
   await launcher.tick();
   assert.equal(reruns(w).length, 5, 'the three left are read on the next tick');
+});
+
+test('lostRunner: only a failed step timed before the preemption vetoes; one with no time leaves the loss signals to decide', () => {
+  const at = T0;
+  const failed = (completed_at) => ({ name: 'gate', status: 'completed', conclusion: 'failure', ...(completed_at ? { completed_at } : {}) });
+  const unfinished = { name: 'upload', status: 'in_progress', conclusion: null };
+  assert.equal(lostRunner({ steps: [failed(iso(at - 1000)), unfinished] }, at), false, 'a red before the preemption');
+  assert.equal(lostRunner({ steps: [failed(null), unfinished] }, at), true, 'no time on the failed step: the unfinished step decides');
+  assert.equal(lostRunner({ steps: [failed(null)], completed_at: iso(at + 5000) }, at), true, 'no time: the job\'s late end decides');
+  assert.equal(lostRunner({ steps: [failed(null)], completed_at: iso(at - 5000) }, at), false, 'no time, and the job ended before');
+  assert.equal(lostRunner({ steps: [failed(iso(at + 5000))], completed_at: iso(at + 5000) }, at), true, 'failed by the shutdown');
 });
