@@ -122,7 +122,7 @@ const describe = (err) => (err?.status || /^(history|junit): /.test(err?.message
 // the shared, cached job listing. → counts, `errors`, `more` (work left that this pass may still take), `wait` (seconds until the hour allows more, or null) and
 // `closed` (the runs whose attempts this batch closed, for the per-test pass's sweep) and the `ledger`, whose state
 // the caller settles and flushes again after the per-test pass's calls.
-export async function collectLedger({ gh, repo, alias = repo, entry, root, mirror, jobsOf, pacer, pass = null, now = Date.now(), limit = 300, listDelays = [3000, 10000] }) {
+export async function collectLedger({ gh, repo, alias = repo, entry, root, mirror, jobsOf, pacer, pass = null, now = Date.now(), limit = 300, listDelays = [3000, 10000], progress = () => {} }) {
   const started = Date.now();
   const ledger = openLedger(root, alias);
   const { state } = ledger;
@@ -174,6 +174,7 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, mirro
       }
     }
     state.pass.pending = still;
+    progress(`listed ${counts.days} days (${counts.listed} runs, ${still.length} days pending) in ${Math.round((Date.now() - started) / 1000)} s`);
     state.pass.queue.sort((a, b) => (a.run.created_at < b.run.created_at ? -1 : a.run.created_at > b.run.created_at ? 1 : a.run.id - b.run.id || a.attempt - b.attempt));
     if (still.length === 0) ledger.prune(dayOf(new Date(now - (WINDOW_DAYS + 5) * DAY).toISOString()));
   }
@@ -190,7 +191,9 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, mirro
   // 3. The tested commits and tree keys, from the mirror: every exact head the batch names, fetched in one request. A
   //    head the mirror cannot get (GitHub no longer serves it by id) is read by the API, one call, and has no key.
   const exactEvent = (run) => run.event !== 'pull_request' && run.event !== 'pull_request_target';
+  const fetchStarted = Date.now();
   const present = mirror.fetch(batch.filter((i) => exactEvent(i.run)).map((i) => i.run.head_sha));
+  progress(`mirror: ${present.size} heads present of ${batch.filter((i) => exactEvent(i.run)).length} in ${Math.round((Date.now() - fetchStarted) / 1000)} s`);
   const resolve = async (run) => {
     if (!exactEvent(run)) return { tested: null, treeKey: null };
     const ciGate = producerOf(run).producer !== 'other';

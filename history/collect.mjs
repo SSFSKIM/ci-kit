@@ -507,8 +507,12 @@ async function collectBoth({ entry, opts, pacer, now }) {
   let result = { more: false, wait: null, closed: null };
   try {
     const mirror = openMirror({ dir: join(opts.mirrors, `${alias}.git`), repo, token: typeof token === 'function' ? await token(repo) : token });
+    const cloneStarted = Date.now();
     mirror.ensure();
-    result = await collectLedger({ gh, repo, alias, entry, root: opts.store, mirror, jobsOf, pacer, pass: opts.pass, now, limit: opts.attempts });
+    console.error(`${repo}: mirror ready in ${Math.round((Date.now() - cloneStarted) / 1000)} s`);
+    // Progress goes to stderr, which the workflow's log shows as it happens: counts and seconds only.
+    const progress = (what) => console.error(`${repo}: ${what}`);
+    result = await collectLedger({ gh, repo, alias, entry, root: opts.store, mirror, jobsOf, pacer, pass: opts.pass, now, limit: opts.attempts, progress });
     ledger = result.ledger;
     errors.push(...result.errors);
     console.log(formatLedger(repo, result.counts, result.errors.length));
@@ -517,9 +521,11 @@ async function collectBoth({ entry, opts, pacer, now }) {
   }
   let more = result.more;
   if (entry.jobs && pacer.allows(entry.token, 10)) {
+    const perTestStarted = Date.now();
     const perTest = await collectRepo({ gh, repo, alias, jobs: entry.jobs, root: opts.store, now, limit: opts.limit, jobsOf, recentRuns: result.closed });
     errors.push(...perTest.errors);
     console.log(formatCounts(repo, perTest.counts, perTest.errors.length));
+    console.error(`${repo}: per-test pass in ${Math.round((Date.now() - perTestStarted) / 1000)} s`);
     more ||= perTest.more;
   }
   // The per-test pass's calls count toward the pass too.
