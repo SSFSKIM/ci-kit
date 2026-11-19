@@ -157,8 +157,9 @@ durations file is ≈ 200 KB gzipped. In all, about 20 MB a month in git.
 - a GCS bucket (new credentials).
 - the ledger issue.
 
-**Collector: `history/` in ci-kit, run daily by the sandbox.** `history/collect.mjs --repo <r> --store <dir>`:
-1. Lists the repo's artifacts named `test-results-*`, newest first, until the ones it has already stored. Listing by
+**Collector: `history/` in ci-kit, run daily by the sandbox.** `history/collect.mjs --repo <r> --store <dir> [--limit <n>]`:
+1. Lists the repo's artifacts named `test-results-*` back to the 8 days an artifact can live (7, and a margin), every
+   pass, whatever it already stored: a newer line stored never hides an older artifact not yet taken. Listing by
    artifact rather than by run creation day also finds a fresh attempt of an older run.
 2. For each new artifact, reads its run, the attempt (from the artifact name) and that attempt's jobs.
 3. Resolves the tested commit (the nonce commit's first parent) and its tree.
@@ -170,12 +171,26 @@ durations file is ≈ 200 KB gzipped. In all, about 20 MB a month in git.
 
 It also lists the last 3 days' runs and gives a `missing` line to each job in the repo's reporting set
 (`history/repos.json`) that completed without a matching artifact. The collector is idempotent by (run, attempt, job).
-The sandbox workflow `test-history.yml` runs daily at 00:40 UTC and on `workflow_dispatch`:
-1. check out ci-kit `main` (public) as the code;
+
+A pass builds at most `--limit` lines, oldest first (by upload, or by completion for a line without an artifact), and
+writes them when it ends; it prints `history: more` when it left work. Oldest first, because a line's previous run is
+looked up among the lines already stored, and the day's base is its first report. An item that writes no line (a shard
+still running, or one that never ran its tests) takes no room in the batch. The 3-day sweep costs a request per run
+and attempt, so it runs only once every listed item was taken and the batch still has room, and its items, oldest
+first, fill the rest; `more` means items were left or the sweep did not run. A waiting rerun is taken again by
+every listed artifact of the shard it copied, recorded or not, since a batch can record the shard's own attempt and
+leave the rerun for the next. Whatever outlives a report (a line, a
+base, durations) is copied from it, never sliced from its text (Surprises, 11-19). A rate-limit error ends the
+batching: no `more` is claimed.
+
+The sandbox workflow `test-history.yml` runs daily at 00:40 UTC and on `workflow_dispatch` (inputs: the ci-kit ref,
+default `main`; the batch size; the time budget), on the pool (`[self-hosted, ci-kit-pool, cpus-2]`):
+1. check out ci-kit at the ref (public) as the code;
 2. check out the sandbox's `test-history` branch as the store, creating it on first use;
-3. mint the App token;
-4. run the collector;
-5. commit and push only when the store changed.
+3. run the collector with `--limit`, then commit and push the store when it changed, and again while the collector
+   says `more` and the time budget lasts; a crash or a push failure ends the loop, keeping every batch already pushed;
+4. on failure, open a `ci-kit-alert` issue in the sandbox (comment on it when one is open already), the kit's alert
+   channel (kit spec, Guard).
 
 Its log prints counts only, never a test name or path. The repos come from `history/repos.json`, which starts as
 `[{ "repo": "SSFSKIM/MAWS", "jobs": ["unit", "unit:darwin"] }]` (the jobs that upload a report).
@@ -605,6 +620,19 @@ Each is written here in full when its condition holds:
     is part of its attempt's verdict; an artifact of any other attempt never stands in for a shard.
 
 ## Surprises & Discoveries
+
+- 2026-11-19 (the collector's repair): **28 days of failures, unseen.** After the first day the daily pass never
+  finished: through 11-10 it died after 16–27 min out of heap (2 GB, the stack ending in a Set growing) or hit the
+  job's 30 min, and from about 11-11 GitHub refused to start the hosted job at all (the account's billing lock). The
+  workflow alerted no one, and each day's retry faced a larger backlog, since a pass wrote only at its end.
+  - **Why the heap grew with the backlog.** An id or message the JUnit reader returns is a substring of the report's
+    text, and V8 keeps a sliced string's parent alive: each new line held until the end of the pass (an `added` id, a
+    failure message) and each day's base pinned its whole report, MAWS's 4 unit shards and `unit:darwin` a run.
+    Measured locally: 30 reports of 22k cases, keeping 2 ids of each, hold 85 MB of heap sliced and 10 MB copied.
+  - **The fix.** What outlives a report is copied (`own` in collect.mjs); a pass builds at most `--limit` lines,
+    oldest first; the workflow loops collect → commit → push on the pool, and alerts on failure.
+  - **What was lost.** MAWS's artifacts live 7 days, so the store has no lines between 10-22 and the first day still
+    kept when the repair ran.
 
 - 2026-10-21 (M2): what the build found, and what the collector does about it.
   - **A case id is not unique.** MAWS repeats 15 titles within one (project, file). The nth occurrence's id carries
