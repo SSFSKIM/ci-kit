@@ -12,6 +12,7 @@
 // An insert still unsettled RACE_AFTER_MS after it was sent is raced by a second allocation of its size in another zone
 // (spec M6), while the first keeps waiting on its own operation and is never moved; whichever VM's runner a job takes
 // first serves it, and the other is an ordinary unclaimed VM the idle rule removes.
+// A job lost to a preemption is rerun once its run has completed (settleReruns), from the rerun its row owes.
 import { providerKey, providerRunnerName } from './providers/contracts.mjs';
 import { keyOf, providerWalk, createAdmission, schedulingView } from './scheduling.mjs';
 import { createProvider, gceWalkResult } from './providers/gce.mjs';
@@ -25,6 +26,7 @@ import {
 import { planPrelaunches } from './prelaunch.mjs';
 import { createPreparation } from './preparation.mjs';
 import { launchRow, runningRow, withJob, jobRecord, finalRow, dailyLine, launchCounts } from './ledger.mjs';
+import { isRateLimited } from '../../lib/github.mjs';
 
 export const TICK_BUDGET_MS = 45_000;
 const INSERT_DEADLINE_MS = 40_000;
@@ -35,6 +37,9 @@ const DAILY_AFTER_MS = 5 * 60_000;
 // How long a launch waits for the placements' limits (room.mjs) when the cache must read them: the read runs beside the
 // tick's other reads and is done long before, so this only bounds a slow one, after which the walk runs without them.
 const LIMITS_WAIT_MS = 3_000;
+// How often the reruns rows owe are checked (settleReruns): GitHub fails a lost job about 10 min after its runner went,
+// and the run completes after that, so a few minutes' lag costs little against the REST budget every tool shares.
+const RERUN_EVERY_MS = 5 * 60_000;
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
 const iso = (ms) => new Date(ms).toISOString();
 const NEVER = new Promise(() => {});
@@ -98,6 +103,7 @@ export class Launcher {
     const failed = done.find((d) => d.status === 'rejected');
     if (failed) throw failed.reason;
     await this.daily(seen);
+    await this.settleReruns(seen);
     return Object.assign(out, launchCounts(seen.launches));
   }
 
@@ -877,6 +883,70 @@ export class Launcher {
       ctx.out.launched.push(r.name);
       ctx.out.raced.push(`${r.name} for ${name}`);
     }, (err) => this.log(`race of ${name}: ${err.message}`)));
+  }
+
+  // ── reruns ────────────────────────────────────────────────────────────────────────────────────────────────────
+  // A row that ended preempted while it held a job owes that job's run a rerun (ledger.mjs finalRow): GitHub fails the
+  // job after its lost-runner wait, and allows a rerun only once the run has completed. At most every RERUN_EVERY_MS,
+  // each run owed one is read (a conditional read, free while unchanged) and, once completed, settled on the rows: a
+  // run that failed in the attempt the job ran in, the job itself failed, is rerun, the one job (with the jobs that
+  // need it) when one is owed, its failed jobs when several are; anything else (cancelled, succeeded, already
+  // re-attempted, the job not failed) is dropped. The attempt check makes a second rerun of an attempt impossible
+  // whatever two overlapping ticks or a restart do: a fired rerun moves the run's attempt on. A transient failure leaves
+  // the rerun owed; a row's comment leaves the store's window 26 h after it ended, and its rerun with it.
+  async settleReruns(seen) {
+    const owed = [...seen.rowOf.values()].filter((r) => r?.state === 'final' && r.rerun?.state === 'owed');
+    if (!owed.length || this.now() - (this.rerunsCheckedAt ?? -Infinity) < RERUN_EVERY_MS) return;
+    this.rerunsCheckedAt = this.now();
+    const runs = new Map();
+    for (const r of owed) {
+      const key = `${r.repo}#${r.job.run}`;
+      runs.set(key, [...(runs.get(key) ?? []), r]);
+    }
+    for (const rows of runs.values()) {
+      const { repo, job: { run: id } } = rows[0];
+      const settle = async (row, rerun) => {
+        const next = { ...row, rerun: { ...rerun, at: iso(this.now()) } };
+        if (await this.write(next)) seen.rowOf.set(row.alloc, next);
+      };
+      try {
+        let run;
+        try {
+          run = await this.gh.getRun(repo, id);
+        } catch (err) {
+          if (err.status !== 404) throw err;
+          for (const row of rows) await settle(row, { state: 'dropped', reason: `run ${id} not found` });
+          continue;
+        }
+        if (run.status !== 'completed') continue;
+        const due = [];
+        for (const row of rows) {
+          const job = await this.gh.getJob(repo, row.job.id);
+          const reason = job.run_attempt !== run.run_attempt ? `run ${id} is at attempt ${run.run_attempt}, the job ran in ${job.run_attempt}`
+            : run.conclusion !== 'failure' ? `run ${id} ${run.conclusion}`
+              : job.conclusion !== 'failure' ? `job ${job.conclusion}` : null;
+          if (!reason) { due.push(row); continue; }
+          this.log(`rerun: none for ${row.job.name} (${row.job.id}) in ${repo}, lost with ${row.instance}: ${reason}`);
+          await settle(row, { state: 'dropped', reason });
+        }
+        if (!due.length) continue;
+        const how = due.length === 1 ? 'job' : 'failed-jobs';
+        try {
+          if (how === 'job') await this.gh.rerunJob(repo, due[0].job.id);
+          else await this.gh.rerunFailedJobs(repo, id);
+        } catch (err) {
+          if (!err.status || err.status >= 500 || isRateLimited(err)) throw err;
+          this.error(`rerun of run ${id} in ${repo} refused: ${err.message}`, { event: 'rerun-refused', repo, run: id });
+          for (const row of due) await settle(row, { state: 'dropped', reason: `refused: ${err.message}` });
+          continue;
+        }
+        const jobs = due.map((r) => `${r.job.name} (${r.job.id}, lost with ${r.instance})`).join(', ');
+        this.log(`rerun: run ${id} attempt ${run.run_attempt} in ${repo}, ${how === 'job' ? 'its job' : 'its failed jobs'} for ${jobs}`);
+        for (const row of due) await settle(row, { state: 'fired', attempt: run.run_attempt, how });
+      } catch (err) {
+        this.log(`rerun of run ${id} in ${repo}: ${err.message}; owed still`);
+      }
+    }
   }
 
   // ── the daily line ─────────────────────────────────────────────────────────────────────────────────────────────

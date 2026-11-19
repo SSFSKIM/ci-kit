@@ -167,6 +167,14 @@ export function jobRecord(job) {
 
 export const withJob = (row, job) => ({ ...v2Row(row), job: jobRecord(job) });
 
+// rerun: what a row whose VM was preempted while it held a job owes that job's run (launcher.mjs settleReruns). GitHub
+// fails such a job (at once, or after its lost-runner wait), and allows a rerun only once the run has completed, so the row is
+// marked `{state: 'owed'}` when it ends and settled later, once: `{state: 'fired', at, attempt, how}` or
+// `{state: 'dropped', at, reason}`. Its settling is the one write a final row takes (settlesRerun).
+const owedRerun = (row, end, job) => (row.rerun || end !== 'preempted' || !job?.run ? {} : { rerun: { state: 'owed' } });
+export const settlesRerun = (current, row) => current.state === 'final' && row.state === 'final' &&
+  current.rerun?.state === 'owed' && row.rerun != null && row.rerun.state !== 'owed';
+
 // Finalized, or about to be deleted (`state: 'deleting'`). Seconds run from the VM's creation to its deletion; an
 // allocation that never had a VM has neither. job: a jobRecord(). egress: the config's, which prices a row written
 // before rows named their own.
@@ -176,7 +184,7 @@ export function finalRow(row, { end, deleted, job, diskGb, egress, state = 'fina
     machine: row.machine, zone: row.zone, provisioning: row.provisioning, seconds, diskGb, diskType: row.diskType, egress: row.egress ?? egress,
   });
   return {
-    ...v2Row(row), ...(job ? { job } : {}),
+    ...v2Row(row), ...(job ? { job } : {}), ...owedRerun(row, end, job ?? row.job),
     ...(row.provider === 'ec2' && end === 'preempted' && seconds !== null && seconds < 3600 && row.price ? { price: { ...row.price, source: 'interrupted-free' } } : {}),
     deleted: iso(deleted), seconds, dollars: cost === null ? null : round4(cost), end, state,
   };
@@ -200,7 +208,7 @@ export function renderRow(row) {
     '|---|---|---|---|---|---|---|---|---|---|---|',
     `| ${row.alloc} | ${row.instance} | ${row.repo} | ${jobCell(row)} | ${row.created ? utc(row.created) : '-'} | ` +
       `${dash(deleted)} | ${row.machine ? `${row.machine}@${row.zone}` : '-'} | ${dash(row.provisioning)} | ${dash(row.seconds)} | ` +
-      `${row.dollars == null ? '-' : row.dollars.toFixed(4)} | ${dash(row.end)} |`,
+      `${row.dollars == null ? '-' : row.dollars.toFixed(4)} | ${dash(row.end)}${row.rerun ? `, rerun ${row.rerun.state}` : ''} |`,
   ].join('\n');
 }
 

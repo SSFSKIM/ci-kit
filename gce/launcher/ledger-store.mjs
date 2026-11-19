@@ -6,7 +6,8 @@
 // one after another before every tick's first launch). An incremental read shows no deletion, so at most every
 // FULL_READ_MS the store reads an issue again and forgets a comment GitHub no longer lists (another
 // writer's dedupe removed it), unless that comment is too recent for the listing to show yet. A row never moves back: before an update the comment is read
-// again and the write is dropped if the comment is already as far along (a final row is never rewritten). Issue
+// again and the write is dropped if the comment is already as far along (a final row is rewritten only to settle the
+// rerun it owed, ledger.mjs settlesRerun). Issue
 // comments have no compare-and-swap, so during an overlap of two ticks a row is eventually final rather than
 // finalized once: a stale writer whose update lands in the milliseconds after another finalized the row rolls it back
 // to running, and the next tick finalizes it again, possibly with a later deletion time and charge. As with every overlap (spec Decision Log, 2026-10-16), correctness does not rest
@@ -21,7 +22,7 @@
 // both issues are read. An issue this store opened stays in its reads until GitHub's listing shows it. An older
 // issue is closed once it has no non-final row or update inside the window and the issue
 // after it is a window old (a tick that listed before that one existed may still be writing to it).
-import { renderRow, parseRow, rowComments, rowsOf, moreFinal, renderDaily, dailyDays } from './ledger.mjs';
+import { renderRow, parseRow, rowComments, rowsOf, moreFinal, settlesRerun, renderDaily, dailyDays } from './ledger.mjs';
 
 export const WINDOW_MS = 26 * 3600_000;
 // 500 below the cap: about two days at MAWS's rate, for a rotation that keeps failing, a count GitHub reports late,
@@ -30,8 +31,8 @@ export const ROTATE_AT = 2000;
 export const READ_OVERLAP_MS = 5 * 60_000;
 export const FULL_READ_MS = 5 * 60_000;
 
-// `row` may replace `current` unless current is final or further along.
-const mayWrite = (current, row) => current !== null && current.state !== 'final' && !moreFinal(current, row);
+// `row` may replace `current` unless current is final or further along; a final row takes only its rerun's settling.
+const mayWrite = (current, row) => current !== null && ((current.state !== 'final' && !moreFinal(current, row)) || settlesRerun(current, row));
 const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 export function createGceLedger(gh, { repo, issue_title: title }, { now = Date.now, log = () => {} } = {}) {

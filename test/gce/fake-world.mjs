@@ -158,6 +158,21 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
     runsByStatus: async (repo, status) => gh.runs.filter((r) => r.repo === repo && r.status === status).map((r) => ({ ...r })),
     listJobs: async (repo, id) => gh.jobs.filter((j) => j.run_id === id).map((j) => ({ ...j, labels: [...j.labels] })),
     runsCreatedSince: async (repo, iso) => gh.runs.filter((r) => r.repo === repo && r.created_at >= iso).map((r) => ({ ...r })),
+    // A run and a job as GitHub reports them (`run_attempt` 1 unless set). A rerun, of one job or of a run's failed
+    // jobs, is refused while the run has not completed (as GitHub does), and starts the run's next attempt.
+    getRun: async (repo, id) => {
+      log.push(`get run ${id}`);
+      const run = gh.runs.find((r) => r.repo === repo && r.id === id);
+      if (!run) throw httpError(404, 'Not Found');
+      return { run_attempt: 1, conclusion: null, ...run };
+    },
+    getJob: async (repo, id) => {
+      const job = gh.jobs.find((j) => j.id === id);
+      if (!job) throw httpError(404, 'Not Found');
+      return { run_attempt: 1, conclusion: null, ...job, labels: [...job.labels] };
+    },
+    rerunJob: async (repo, id) => rerun(repo, gh.jobs.find((j) => j.id === id)?.run_id, `rerun job ${id}`),
+    rerunFailedJobs: async (repo, id) => rerun(repo, id, `rerun failed jobs of run ${id}`),
     jitConfig: async (repo, spec) => {
       hooks.beforeJit?.(repo, spec);
       const r = { id: nextId++, name: spec.name, status: 'offline', busy: false, labels: spec.labels.map((name) => ({ name })) };
@@ -216,6 +231,16 @@ export function world({ start, repos = { 'SSFSKIM/ci-kit-sandbox': { private: tr
     },
     ensureLabel: async () => {},
   };
+
+  async function rerun(repo, id, what) {
+    await hooks.rerun?.(what);
+    const run = gh.runs.find((r) => r.repo === repo && r.id === id);
+    if (!run) throw httpError(404, 'Not Found');
+    if (run.status !== 'completed') throw httpError(403, 'This workflow is already running');
+    log.push(what);
+    Object.assign(run, { status: 'queued', conclusion: null, run_attempt: (run.run_attempt ?? 1) + 1 });
+    return '';
+  }
 
   // GitHub's and the VM's side.
   let runId = 1000;

@@ -482,9 +482,17 @@ and it closes an older one once nothing on it changed in the last 26 h and its s
 the issue it was written on and is finalized there. For history, search the sandbox's issues, closed ones included,
 for "pool ledger".
 
-**Preemption** is recorded, not re-run. GCE deletes a preempted spot VM (its termination action), GitHub fails the
+**Preemption** is recorded and re-run once. GCE deletes a preempted spot VM (its termination action), GitHub fails the
 job, and the launcher finalizes the row `preempted` with the job the runner held, which it wrote on the row while the
-job ran. Re-run it, for example with `ci-gate` again. GitHub's conclusion is `failure`, the same as a red test's,
+job ran. Such a row owes the job's run a rerun (`rerun owed` in its `end` column). GitHub reruns a run's jobs only
+once the run has completed, so the launcher reads each run owed one every 5 minutes, and once it has completed it
+settles the rerun on the row: when the run failed in the attempt the lost job ran in, and that job failed, it reruns
+the job (POST `actions/jobs/<id>/rerun`, which also reruns the jobs that need it), or the run's failed jobs when
+several of its jobs were lost (`rerun fired`); otherwise, a run cancelled or green, already re-attempted by hand, or a
+job that had ended before its VM went, it reruns nothing (`rerun dropped`, with the reason in the row's JSON). Since
+a fired rerun moves the run to its next attempt, no attempt is rerun twice, and an attempt that fails on its own is
+left to a human. A rerun GitHub refuses is logged at ERROR (`rerun-refused`); one that fails transiently stays owed.
+A row leaves the ledger's 26 h window with its rerun. GitHub's conclusion is `failure`, the same as a red test's,
 not `cancelled`: the runner gets the guest's shutdown, so the job's annotations read "The operation was canceled."
 and "Process completed with exit code 130.", and its log "The runner has received a shutdown signal" (A13's
 simulated preemption, sandbox run 38927837115). A job that hits its `timeout-minutes` also reads "The operation was
@@ -1075,7 +1083,8 @@ name each provider/account; GCE-only daily output retains its established format
 EC2 row estimates include spot compute (60-second minimum), gp3 (its own minimum), IPv4 and the full snapshot's
 provisioned-initialization charge per created volume. A first-hour EC2-initiated interruption waives compute,
 not disk, IP or initialization. These estimates are not AWS invoices. Interruption notices are telemetry;
-only terminal evidence/actual disappearance retires the allocation, as `preempted`. No automatic rerun occurs.
+only terminal evidence/actual disappearance retires the allocation, as `preempted`, whose job is rerun as a GCE
+preemption's is (Preemption, above).
 
 ### Independent EC2 guard
 
