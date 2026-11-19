@@ -21,7 +21,7 @@ import { queuedPoolJobs } from '../../pool/agent/logic.mjs';
 import {
   allocationId, repoLabel, planLaunches, runnersNeverOnline, quotaBlocks, insertOutcome, walkPlacements, stockoutMemory,
   jitRequest, reviewInstances, reviewRows, orphanRunners, reportable, claimedInstances,
-  raceAttempts, walkRecord, unsettledInsert, quotaMetric, RACE_AFTER_MS,
+  raceAttempts, walkRecord, unsettledInsert, quotaMetric, lostRunner, RACE_AFTER_MS,
 } from './logic.mjs';
 import { planPrelaunches } from './prelaunch.mjs';
 import { createPreparation } from './preparation.mjs';
@@ -37,16 +37,20 @@ const DAILY_AFTER_MS = 5 * 60_000;
 // How long a launch waits for the placements' limits (room.mjs) when the cache must read them: the read runs beside the
 // tick's other reads and is done long before, so this only bounds a slow one, after which the walk runs without them.
 const LIMITS_WAIT_MS = 3_000;
-// How often the reruns rows owe are checked (settleReruns): GitHub fails a lost job about 10 min after its runner went,
-// and the run completes after that, so a few minutes' lag costs little against the REST budget every tool shares.
+// The reruns rows owe (settleReruns): each run owed one is read at most every RERUN_EVERY_MS (GitHub fails a lost job
+// at once or about 10 min after its runner went, and the run completes after that, so a few minutes' lag costs little
+// against the REST budget every tool shares), and at most RERUN_RUNS_PER_TICK runs a tick, so a burst of losses
+// cannot hold the tick. A run at RERUN_ATTEMPT_CAP is rerun no more: repeated preemptions do not chain reruns.
 const RERUN_EVERY_MS = 5 * 60_000;
-// A run at this attempt is rerun no more, however its jobs were lost: repeated preemptions do not chain reruns.
+const RERUN_RUNS_PER_TICK = 5;
 const RERUN_ATTEMPT_CAP = 3;
+// The events a public repo's runs are served for (docs/pool.md).
+const PUBLIC_EVENTS = ['push', 'workflow_dispatch', 'schedule'];
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
 const iso = (ms) => new Date(ms).toISOString();
 const NEVER = new Promise(() => {});
 
-// deps: {provider, gh, ledger, cfg, config, now, log, error, random, alert, after, stockouts}. A caller may
+// deps: {provider, gh, ledger, cfg, config, now, log, error, random, alert, after, stockouts, rerunChecks}. A caller may
 // supply gce/limits instead of provider to construct the same GCE adapter. error(message, fields) logs at ERROR
 // what a log-based alert watches (gce/deploy.sh alert), log otherwise.
 // cfg: the gce.json it runs, config: that file's commit.
@@ -61,6 +65,7 @@ export class Launcher {
     this.budgetMs ??= TICK_BUDGET_MS;
     this.insertDeadlineMs ??= INSERT_DEADLINE_MS;
     this.stockouts ??= stockoutMemory(); // the server passes one kept across ticks (logic.mjs stockoutMemory)
+    this.rerunChecks ??= new Map(); // `repo#run` → when it was last read for its owed rerun; the server keeps one across ticks
     this.after ??= (ms) => {
       let timer;
       const promise = new Promise((resolve) => { timer = setTimeout(resolve, ms); });
@@ -176,8 +181,10 @@ export class Launcher {
     // public refusal would; an unreadable run list launches nothing without triggering a drain (docs/pool.md).
     const allowPublic = new Set(this.cfg.repos.filter((r) => r.allow_public === true).map((r) => r.repo));
     const served = [];
+    const publicRepos = new Set();
     for (const [repo, read] of reads) {
       const visible = await read.visible;
+      if (visible === false) publicRepos.add(repo);
       if (visible === true) served.push(repo);
       else if (visible === false && allowPublic.has(repo)) {
         const active = await read.runs;
@@ -186,7 +193,7 @@ export class Launcher {
           served.push(repo);
           continue;
         }
-        const unsafe = active.find((run) => !['push', 'workflow_dispatch', 'schedule'].includes(run.event));
+        const unsafe = active.find((run) => !PUBLIC_EVENTS.includes(run.event));
         if (unsafe) {
           this.log(`refusing ${repo}: public run ${unsafe.id} has event ${unsafe.event ?? 'unknown'}`);
           await this.alert({
@@ -213,7 +220,7 @@ export class Launcher {
     for (const [repo, mine] of listings) if (mine) runners.set(repo, mine);
     // quota: the tick's memory of quota refusals (logic.mjs quotaScope), shared by its launches; launches: the rows they
     // wrote last, which the tick's counts read.
-    const seen = { served, instances, complete, inventories, unknown, rows, rowOf, byLabel, runners, images, quota: [], launches: [] };
+    const seen = { served, publicRepos, instances, complete, inventories, unknown, rows, rowOf, byLabel, runners, images, quota: [], launches: [] };
 
     // A VM whose job has ended says so in ci-kit/job before its guest powers off. Read beside the jobs, it serves both
     // the cover (an ended job's VM covers nothing) and the cleanup (the VM goes without waiting for its power-off).
@@ -888,71 +895,89 @@ export class Launcher {
   }
 
   // ── reruns ────────────────────────────────────────────────────────────────────────────────────────────────────
-  // A row that ended preempted while it held a job owes that job's run a rerun (ledger.mjs finalRow): GitHub fails the
-  // job after its lost-runner wait, and allows a rerun only once the run has completed. At most every RERUN_EVERY_MS,
-  // each run owed one is read (a conditional read, free while unchanged) and, once completed, settled on the rows: a
-  // run that failed in the attempt the job ran in, the job itself failed, is rerun, the one job (with the jobs that
-  // need it) when one is owed, its failed jobs when several are; anything else (cancelled, succeeded, already
-  // re-attempted, the job not failed, or the run already at RERUN_ATTEMPT_CAP) is dropped. The attempt check makes a second rerun of an attempt impossible
-  // whatever two overlapping ticks or a restart do: a fired rerun moves the run's attempt on. A transient failure leaves
-  // the rerun owed; a row's comment leaves the store's window 26 h after it ended, and its rerun with it.
+  // A row that ended preempted while it held a job owes that job's run a rerun (ledger.mjs finalRow), which GitHub
+  // allows only once the run has completed. Each run owed one is read (a conditional read, free while unchanged) at
+  // the cadence above, the least recently read first, and once completed its rows are settled: a run that failed in
+  // the attempt the job ran in, below the attempt cap, in a repo still served and for an event served, whose job
+  // failed because its runner was lost (logic.mjs lostRunner), is rerun: the one job (with the jobs that need it)
+  // when one is owed, its failed jobs when several are. Anything else is dropped with its reason. A fired rerun moves
+  // the run's attempt on, so no attempt is rerun twice whatever overlapping ticks or a restart do; a rerun GitHub
+  // refuses because the run is running again (another launcher's won) stays owed, and a later read settles it from
+  // the attempt it shows. A transient failure also leaves it owed; a row leaves the store's window 26 h after it ended.
   async settleReruns(seen) {
-    const owed = [...seen.rowOf.values()].filter((r) => r?.state === 'final' && r.rerun?.state === 'owed');
-    if (!owed.length || this.now() - (this.rerunsCheckedAt ?? -Infinity) < RERUN_EVERY_MS) return;
-    this.rerunsCheckedAt = this.now();
     const runs = new Map();
-    for (const r of owed) {
+    for (const r of seen.rowOf.values()) {
+      if (r?.state !== 'final' || r.rerun?.state !== 'owed') continue;
       const key = `${r.repo}#${r.job.run}`;
       runs.set(key, [...(runs.get(key) ?? []), r]);
     }
-    for (const rows of runs.values()) {
-      const { repo, job: { run: id } } = rows[0];
-      const settle = async (row, rerun) => {
-        const next = { ...row, rerun: { ...rerun, at: iso(this.now()) } };
-        if (await this.write(next)) seen.rowOf.set(row.alloc, next);
-      };
+    for (const key of this.rerunChecks.keys()) if (!runs.has(key)) this.rerunChecks.delete(key);
+    const last = (key) => this.rerunChecks.get(key) ?? -Infinity;
+    const due = [...runs].filter(([key]) => this.now() - last(key) >= RERUN_EVERY_MS).sort(([a], [b]) => last(a) - last(b));
+    for (const [key, rows] of due.slice(0, RERUN_RUNS_PER_TICK)) {
+      this.rerunChecks.set(key, this.now());
+      await this.settleRun(seen, rows);
+    }
+  }
+
+  async settleRun(seen, rows) {
+    const { repo, job: { run: id } } = rows[0];
+    const settle = async (row, rerun) => {
       try {
-        let run;
-        try {
-          run = await this.gh.getRun(repo, id);
-        } catch (err) {
-          if (err.status !== 404) throw err;
-          for (const row of rows) await settle(row, { state: 'dropped', reason: `run ${id} not found` });
-          continue;
-        }
-        if (run.status !== 'completed') continue;
-        if (run.run_attempt >= RERUN_ATTEMPT_CAP) {
-          this.log(`rerun: none for run ${id} in ${repo}: it is at attempt ${run.run_attempt}, the cap`);
-          for (const row of rows) await settle(row, { state: 'dropped', reason: 'attempt cap' });
-          continue;
-        }
-        const due = [];
-        for (const row of rows) {
-          const job = await this.gh.getJob(repo, row.job.id);
-          const reason = job.run_attempt !== run.run_attempt ? `run ${id} is at attempt ${run.run_attempt}, the job ran in ${job.run_attempt}`
-            : run.conclusion !== 'failure' ? `run ${id} ${run.conclusion}`
-              : job.conclusion !== 'failure' ? `job ${job.conclusion}` : null;
-          if (!reason) { due.push(row); continue; }
-          this.log(`rerun: none for ${row.job.name} (${row.job.id}) in ${repo}, lost with ${row.instance}: ${reason}`);
-          await settle(row, { state: 'dropped', reason });
-        }
-        if (!due.length) continue;
-        const how = due.length === 1 ? 'job' : 'failed-jobs';
-        try {
-          if (how === 'job') await this.gh.rerunJob(repo, due[0].job.id);
-          else await this.gh.rerunFailedJobs(repo, id);
-        } catch (err) {
-          if (!err.status || err.status >= 500 || isRateLimited(err)) throw err;
-          this.error(`rerun of run ${id} in ${repo} refused: ${err.message}`, { event: 'rerun-refused', repo, run: id });
-          for (const row of due) await settle(row, { state: 'dropped', reason: `refused: ${err.message}` });
-          continue;
-        }
-        const jobs = due.map((r) => `${r.job.name} (${r.job.id}, lost with ${r.instance})`).join(', ');
-        this.log(`rerun: run ${id} attempt ${run.run_attempt} in ${repo}, ${how === 'job' ? 'its job' : 'its failed jobs'} for ${jobs}`);
-        for (const row of due) await settle(row, { state: 'fired', attempt: run.run_attempt, how });
+        const next = await this.ledger.settleRerun(row, { ...rerun, at: iso(this.now()) });
+        if (next) seen.rowOf.set(row.alloc, next);
       } catch (err) {
-        this.log(`rerun of run ${id} in ${repo}: ${err.message}; owed still`);
+        this.log(`ledger ${row.alloc}: ${err.message}`);
       }
+    };
+    const drop = async (reason, list = rows) => {
+      for (const row of list) {
+        this.log(`rerun: none for ${row.job.name} (${row.job.id}) in ${repo}, lost with ${row.instance}: ${reason}`);
+        await settle(row, { state: 'dropped', reason });
+      }
+    };
+    try {
+      if (!this.cfg.repos.some((r) => r.repo === repo)) return await drop('not served');
+      let run;
+      try {
+        run = await this.gh.getRun(repo, id);
+      } catch (err) {
+        if (err.status === 404) return await drop(`run ${id} not found`);
+        throw err;
+      }
+      if (run.status !== 'completed') return;
+      if (run.run_attempt >= RERUN_ATTEMPT_CAP) return await drop('attempt cap');
+      if (seen.publicRepos.has(repo) && !PUBLIC_EVENTS.includes(run.event)) return await drop('not served');
+      if (!seen.served.includes(repo)) return; // not served this tick (its visibility unread, say): a later read decides
+      const lost = [];
+      for (const row of rows) {
+        const job = await this.gh.getJob(repo, row.job.id);
+        const reason = job.run_attempt !== run.run_attempt ? `run ${id} is at attempt ${run.run_attempt}, the job ran in ${job.run_attempt}`
+          : run.conclusion !== 'failure' ? `run ${id} ${run.conclusion}`
+            : job.conclusion !== 'failure' ? `job ${job.conclusion}`
+              : !lostRunner(job, Date.parse(row.deleted)) ? 'not a lost runner' : null;
+        if (reason) await drop(reason, [row]);
+        else lost.push(row);
+      }
+      if (!lost.length) return;
+      const how = lost.length === 1 ? 'job' : 'failed-jobs';
+      try {
+        if (how === 'job') await this.gh.rerunJob(repo, lost[0].job.id);
+        else await this.gh.rerunFailedJobs(repo, id);
+      } catch (err) {
+        if (!err.status || err.status >= 500 || isRateLimited(err)) throw err;
+        if (err.status === 409 || /already running/i.test(err.message)) {
+          this.log(`rerun of run ${id} in ${repo}: ${err.message}; it is running again, so a later read settles it`);
+          return;
+        }
+        this.error(`rerun of run ${id} in ${repo} refused: ${err.message}`, { event: 'rerun-refused', repo, run: id });
+        return await drop(`refused: ${err.message}`, lost);
+      }
+      const jobs = lost.map((r) => `${r.job.name} (${r.job.id}, lost with ${r.instance})`).join(', ');
+      this.log(`rerun: run ${id} attempt ${run.run_attempt} in ${repo}, ${how === 'job' ? 'its job' : 'its failed jobs'} for ${jobs}`);
+      for (const row of lost) await settle(row, { state: 'fired', attempt: run.run_attempt, how });
+    } catch (err) {
+      this.log(`rerun of run ${id} in ${repo}: ${err.message}; owed still`);
     }
   }
 

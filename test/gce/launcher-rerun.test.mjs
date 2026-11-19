@@ -1,12 +1,13 @@
 // A job lost to a spot preemption is rerun without a human (launcher.mjs settleReruns): the preempted row owes its run
-// a rerun, which fires once the run has completed with a failure in the attempt the job ran in, and never otherwise.
+// a rerun, which fires once the run has completed with a failure in the attempt the job ran in, and the job failed
+// because its runner was lost, and never otherwise.
 // Against the shared fake of Compute Engine and GitHub (fake-world.mjs).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { world } from './fake-world.mjs';
 import { Launcher } from '../../gce/launcher/launcher.mjs';
 import { createGceLedger } from '../../gce/launcher/ledger-store.mjs';
-import { parseRow } from '../../gce/launcher/ledger.mjs';
+import { parseRow, renderRow } from '../../gce/launcher/ledger.mjs';
 import { ONE_REGION_CFG } from './config-fixtures.mjs';
 
 const SBX = 'SSFSKIM/ci-kit-sandbox';
@@ -16,13 +17,22 @@ const MIN = 60_000;
 const L = (n) => ['self-hosted', 'ci-kit-pool', `cpus-${n}`];
 const COMMIT = 'c0ffee00aabbccddeeff00112233445566778899';
 
-function setup() {
-  const w = world({ start: T0 });
+// A process as server.mjs runs one: a ledger store and the reruns' read times kept for its life, and a new Launcher
+// every tick. `errors`: what it logged at ERROR.
+function setup({ w = world({ start: T0 }) } = {}) {
   let seq = 0;
-  const make = () => new Launcher({
-    gce: w.gce, gh: w.github, ledger: createGceLedger(w.github, CFG.ledger, { now: w.now }), cfg: CFG, config: COMMIT,
-    now: w.now, random: () => (seq += 1), alert: async () => {},
-  });
+  const make = ({ cfg = CFG } = {}) => {
+    const ledger = createGceLedger(w.github, cfg.ledger, { now: w.now });
+    const rerunChecks = new Map();
+    const errors = [];
+    return {
+      errors,
+      tick: () => new Launcher({
+        gce: w.gce, gh: w.github, ledger, cfg, config: COMMIT, now: w.now, random: () => (seq += 1), alert: async () => {},
+        rerunChecks, error: (m) => errors.push(m),
+      }).tick(),
+    };
+  };
   return { w, launcher: make(), make };
 }
 
@@ -30,9 +40,15 @@ const rowOf = (w, name) => w.gh.comments.map((c) => parseRow(c.body)).find((r) =
 const reruns = (w) => w.log.filter((l) => l.startsWith('rerun'));
 const runReads = (w) => w.log.filter((l) => l.startsWith('get run')).length;
 
+const iso = (ms) => new Date(ms).toISOString();
+const steps = (last) => [{ name: 'Set up job', status: 'completed', conclusion: 'success' }, { name: 'test', ...last }];
+
 // `job` (in its own run unless `run` is given) runs on a spot VM that is preempted: the row is finalized preempted with
-// the job it held, and GitHub, after its lost-runner wait, fails the job and frees the runner.
-async function lose(w, launcher, { name = 'ci / unit', run } = {}) {
+// the job it held, and GitHub fails the job and frees the runner. `ending`: how the job ended. `lost`: its runner
+// went outright (GitHub's lost-runner failure, its running step never concluded); `shutdown`: the guest's shutdown
+// failed the running step as the VM went; `before`: it failed on its own and reported, and the VM was preempted
+// afterwards, as it wound down.
+async function lose(w, launcher, { name = 'ci / unit', run, ending = 'lost' } = {}) {
   const job = w.sim.queue(SBX, L(4), { name, run });
   const before = new Set(w.g.instances.map((i) => i.name));
   await launcher.tick();
@@ -41,9 +57,15 @@ async function lose(w, launcher, { name = 'ci / unit', run } = {}) {
   w.sim.take(SBX, vm, job);
   w.advance(MIN);
   await launcher.tick();
+  if (ending === 'before') {
+    Object.assign(job, { status: 'completed', conclusion: 'failure', completed_at: iso(w.now()), steps: steps({ status: 'completed', conclusion: 'failure' }) });
+    w.advance(30_000);
+  }
   w.sim.preempt(vm);
   w.sim.runner(SBX, vm).status = 'offline';
+  if (ending === 'shutdown') Object.assign(job, { completed_at: iso(w.now() + 5_000), steps: steps({ status: 'completed', conclusion: 'failure' }) });
   await launcher.tick();
+  if (ending === 'lost') Object.assign(job, { completed_at: iso(w.now()), steps: steps({ status: 'in_progress', conclusion: null }) });
   Object.assign(job, { status: 'completed', conclusion: 'failure' });
   w.sim.runner(SBX, vm).busy = false;
   return { job, vm, run: w.gh.runs.find((r) => r.id === job.run_id) };
@@ -73,7 +95,7 @@ test('a preempted row that held a job owes its run a rerun; a row with no job ow
   assert.deepEqual([rowOf(w, unclaimed).end, rowOf(w, unclaimed).rerun], ['preempted', undefined]);
 });
 
-test('the rerun waits while the run is in progress, fires once when it completes failed, and only once', async () => {
+test('the rerun waits while the run is in progress (read at a cadence across per-tick launchers), fires once when it completes failed, and only once', async () => {
   const { w, launcher } = setup();
   const { job, vm, run } = await lose(w, launcher);
   await ticks(w, launcher, 20);
@@ -149,8 +171,7 @@ test('two jobs of one run lost to preemptions: its failed jobs are rerun once', 
 
 test('a rerun GitHub refuses is dropped and logged at ERROR; one that fails transiently stays owed and fires later', async () => {
   const refused = setup();
-  const errors = [];
-  refused.launcher.error = (m) => errors.push(m);
+  const { errors } = refused.launcher;
   const a = await lose(refused.w, refused.launcher);
   complete(a.run);
   refused.w.hooks.rerun = async () => { throw Object.assign(new Error('HTTP 403: Resource not accessible by integration'), { status: 403 }); };
@@ -190,4 +211,87 @@ test('attempt 2 lost to a preemption is still rerun: the cap is the third attemp
   await ticks(w, launcher, 6);
   assert.deepEqual(reruns(w), [`rerun job ${job.id}`]);
   assert.deepEqual([rowOf(w, vm).rerun.state, rowOf(w, vm).rerun.attempt, run.run_attempt], ['fired', 2, 3]);
+});
+
+test('a job that failed on its own before its VM was preempted is not rerun; one its guest\'s shutdown failed is', async () => {
+  const red = setup();
+  const a = await lose(red.w, red.launcher, { ending: 'before' });
+  assert.equal(rowOf(red.w, a.vm).rerun.state, 'owed');
+  complete(a.run);
+  await ticks(red.w, red.launcher, 6);
+  assert.deepEqual(reruns(red.w), []);
+  assert.deepEqual([rowOf(red.w, a.vm).rerun.state, rowOf(red.w, a.vm).rerun.reason], ['dropped', 'not a lost runner']);
+
+  const shutdown = setup();
+  const b = await lose(shutdown.w, shutdown.launcher, { ending: 'shutdown' });
+  complete(b.run);
+  await ticks(shutdown.w, shutdown.launcher, 6);
+  assert.deepEqual(reruns(shutdown.w), [`rerun job ${b.job.id}`]);
+});
+
+test('settling a rerun changes only the stored row\'s rerun, and only while it owes one for the same job', async () => {
+  const w = world({ start: T0 });
+  const ledger = createGceLedger(w.github, CFG.ledger, { now: w.now });
+  const stored = {
+    v: 2, provider: 'gce', account: null, alloc: 'a1', instance: 'ci-kit-gce-a1', repo: SBX, cpus: 4, at: iso(T0), config: 'c0ffee00',
+    created: iso(T0), job: { id: 7, name: 'ci / unit', run: 70 }, rerun: { state: 'owed' }, deleted: iso(T0 + 5 * MIN), seconds: 300, dollars: 0.01, end: 'preempted', state: 'final',
+  };
+  w.gh.comments.push({ id: 1, body: renderRow(stored), updated_at: iso(T0) });
+  await ledger.read();
+  const stale = { ...stored, deleted: iso(T0 + 9 * MIN), seconds: 540, dollars: 0.02 };
+  assert.equal(await ledger.settleRerun({ ...stale, job: { ...stale.job, id: 8 } }, { state: 'fired' }), null, 'another job: nothing written');
+  assert.deepEqual(parseRow(w.gh.comments[0].body), stored);
+  await ledger.settleRerun(stale, { state: 'fired', attempt: 1 });
+  assert.deepEqual(parseRow(w.gh.comments[0].body), { ...stored, rerun: { state: 'fired', attempt: 1 } });
+  assert.equal(await ledger.settleRerun(stale, { state: 'dropped' }), null, 'settled once');
+  assert.equal(parseRow(w.gh.comments[0].body).rerun.state, 'fired');
+});
+
+test('a rerun refused because the run is running again (another launcher\'s won) stays owed, then settles from the attempt', async () => {
+  const { w, launcher } = setup();
+  const { vm, run } = await lose(w, launcher);
+  complete(run);
+  w.hooks.rerun = async () => {
+    Object.assign(run, { status: 'in_progress', conclusion: null, run_attempt: 2 }); // the other launcher's rerun
+    throw Object.assign(new Error('HTTP 403: This workflow is already running'), { status: 403 });
+  };
+  await ticks(w, launcher, 5);
+  assert.equal(run.run_attempt, 2, 'the refused POST was sent');
+  assert.equal(rowOf(w, vm).rerun.state, 'owed');
+  delete w.hooks.rerun;
+  complete(run);
+  await ticks(w, launcher, 6);
+  assert.deepEqual([rowOf(w, vm).rerun.state, rowOf(w, vm).rerun.reason], ['dropped', 'run 1000 is at attempt 2, the job ran in 1']);
+  assert.deepEqual(launcher.errors, [], 'not a refusal');
+});
+
+test('a burst of owed reruns is read a few runs a tick, the least recently read first', async () => {
+  const { w, launcher } = setup();
+  const lost = [];
+  for (let k = 0; k < 7; k += 1) lost.push(await lose(w, launcher, { name: `ci / ${k}` }));
+  for (const l of lost) complete(l.run);
+  w.advance(5 * MIN);
+  const before = runReads(w);
+  await launcher.tick();
+  assert.equal(runReads(w) - before, 5);
+  w.advance(MIN);
+  await launcher.tick();
+  assert.equal(runReads(w) - before, 7);
+  assert.equal(reruns(w).length, 7);
+});
+
+test('no rerun for a repo the pool no longer serves, or a public repo\'s run for an event it does not serve', async () => {
+  const { w, launcher, make } = setup();
+  const a = await lose(w, launcher);
+  complete(a.run);
+  await make({ cfg: { ...CFG, repos: [] } }).tick();
+  assert.deepEqual([rowOf(w, a.vm).rerun.state, rowOf(w, a.vm).rerun.reason], ['dropped', 'not served']);
+
+  const pub = setup({ w: world({ start: T0, repos: { [SBX]: { private: false } } }) });
+  const proc = pub.make({ cfg: { ...CFG, repos: [{ repo: SBX, allow_public: true }] } });
+  const b = await lose(pub.w, proc);
+  Object.assign(complete(b.run), { event: 'pull_request' });
+  await ticks(pub.w, proc, 6);
+  assert.deepEqual(reruns(pub.w), []);
+  assert.deepEqual([rowOf(pub.w, b.vm).rerun.state, rowOf(pub.w, b.vm).rerun.reason], ['dropped', 'not served']);
 });

@@ -170,10 +170,8 @@ export const withJob = (row, job) => ({ ...v2Row(row), job: jobRecord(job) });
 // rerun: what a row whose VM was preempted while it held a job owes that job's run (launcher.mjs settleReruns). GitHub
 // fails such a job (at once, or after its lost-runner wait), and allows a rerun only once the run has completed, so the row is
 // marked `{state: 'owed'}` when it ends and settled later, once: `{state: 'fired', at, attempt, how}` or
-// `{state: 'dropped', at, reason}`. Its settling is the one write a final row takes (settlesRerun).
+// `{state: 'dropped', at, reason}`. Its settling is the one write a final row takes (ledger-store.mjs settleRerun).
 const owedRerun = (row, end, job) => (row.rerun || end !== 'preempted' || !job?.run ? {} : { rerun: { state: 'owed' } });
-export const settlesRerun = (current, row) => current.state === 'final' && row.state === 'final' &&
-  current.rerun?.state === 'owed' && row.rerun != null && row.rerun.state !== 'owed';
 
 // Finalized, or about to be deleted (`state: 'deleting'`). Seconds run from the VM's creation to its deletion; an
 // allocation that never had a VM has neither. job: a jobRecord(). egress: the config's, which prices a row written

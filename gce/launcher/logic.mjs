@@ -433,6 +433,17 @@ export function newestReadyImage(images, family) {
     .sort((a, b) => Date.parse(b.creationTimestamp) - Date.parse(a.creationTimestamp))[0] ?? null;
 }
 
+// Whether a failed job's end was its runner's loss rather than its own failure: a step GitHub never heard end (a runner
+// lost outright: MAWS run 44468141412's job, its running step left without a conclusion), or the job's end at or after
+// its VM's preemption (`preemptedAt`, ms; a guest's shutdown fails the running step and ends the job as the VM goes:
+// sandbox run 38927837115). A job that failed and reported before its VM was preempted (a red test, the VM reclaimed
+// as it wound down) is neither. GitHub's times are whole seconds, rounded down, so a job ending in the second its VM
+// was preempted reads as before it: the doubt goes to no rerun.
+export function lostRunner(job, preemptedAt) {
+  if ((job.steps ?? []).some((step) => step.conclusion == null)) return true;
+  return job.completed_at != null && Date.parse(job.completed_at) >= preemptedAt;
+}
+
 // What to do with each ci-kit=gce instance (spec §3a Cleanup). runnersOf(view) → Map runner name → runner for the
 // instance's repo, or undefined when that listing failed or the repo is unknown: then only the stopped and overage
 // rules apply, since a failed listing is never read as idleness. served: Set of served repo labels; an instance of
