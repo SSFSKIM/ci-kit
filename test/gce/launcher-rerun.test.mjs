@@ -169,3 +169,25 @@ test('a rerun GitHub refuses is dropped and logged at ERROR; one that fails tran
   assert.deepEqual(reruns(flaky.w), [`rerun job ${b.job.id}`]);
   assert.equal(rowOf(flaky.w, b.vm).rerun.state, 'fired');
 });
+
+test('no rerun once the run is at its third attempt: the cap stops repeated preemptions chaining reruns', async () => {
+  const { w, launcher } = setup();
+  const first = await lose(w, launcher, { name: 'ci / a' });
+  first.run.run_attempt = 3; // reruns 1 and 2 were lost too
+  for (const j of w.gh.jobs) j.run_attempt = 3;
+  complete(first.run);
+  await ticks(w, launcher, 6);
+  assert.deepEqual(reruns(w), []);
+  assert.deepEqual([rowOf(w, first.vm).rerun.state, rowOf(w, first.vm).rerun.reason], ['dropped', 'attempt cap']);
+});
+
+test('attempt 2 lost to a preemption is still rerun: the cap is the third attempt', async () => {
+  const { w, launcher } = setup();
+  const { job, vm, run } = await lose(w, launcher);
+  run.run_attempt = 2;
+  job.run_attempt = 2;
+  complete(run);
+  await ticks(w, launcher, 6);
+  assert.deepEqual(reruns(w), [`rerun job ${job.id}`]);
+  assert.deepEqual([rowOf(w, vm).rerun.state, rowOf(w, vm).rerun.attempt, run.run_attempt], ['fired', 2, 3]);
+});

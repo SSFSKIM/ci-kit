@@ -491,7 +491,7 @@ the job (POST `actions/jobs/<id>/rerun`, which also reruns the jobs that need it
 several of its jobs were lost (`rerun fired`); otherwise, a run cancelled or green, already re-attempted by hand, or a
 job that had ended before its VM went, it reruns nothing (`rerun dropped`, with the reason in the row's JSON). Since
 a fired rerun moves the run to its next attempt, no attempt is rerun twice, and an attempt that fails on its own is
-left to a human. A rerun GitHub refuses is logged at ERROR (`rerun-refused`); one that fails transiently stays owed.
+left to a human; a run already at its third attempt is rerun no more (`attempt cap`). A rerun GitHub refuses is logged at ERROR (`rerun-refused`); one that fails transiently stays owed.
 A row leaves the ledger's 26 h window with its rerun. GitHub's conclusion is `failure`, the same as a red test's,
 not `cancelled`: the runner gets the guest's shutdown, so the job's annotations read "The operation was canceled."
 and "Process completed with exit code 130.", and its log "The runner has received a shutdown signal" (A13's

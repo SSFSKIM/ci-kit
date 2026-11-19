@@ -40,6 +40,8 @@ const LIMITS_WAIT_MS = 3_000;
 // How often the reruns rows owe are checked (settleReruns): GitHub fails a lost job about 10 min after its runner went,
 // and the run completes after that, so a few minutes' lag costs little against the REST budget every tool shares.
 const RERUN_EVERY_MS = 5 * 60_000;
+// A run at this attempt is rerun no more, however its jobs were lost: repeated preemptions do not chain reruns.
+const RERUN_ATTEMPT_CAP = 3;
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
 const iso = (ms) => new Date(ms).toISOString();
 const NEVER = new Promise(() => {});
@@ -891,7 +893,7 @@ export class Launcher {
   // each run owed one is read (a conditional read, free while unchanged) and, once completed, settled on the rows: a
   // run that failed in the attempt the job ran in, the job itself failed, is rerun, the one job (with the jobs that
   // need it) when one is owed, its failed jobs when several are; anything else (cancelled, succeeded, already
-  // re-attempted, the job not failed) is dropped. The attempt check makes a second rerun of an attempt impossible
+  // re-attempted, the job not failed, or the run already at RERUN_ATTEMPT_CAP) is dropped. The attempt check makes a second rerun of an attempt impossible
   // whatever two overlapping ticks or a restart do: a fired rerun moves the run's attempt on. A transient failure leaves
   // the rerun owed; a row's comment leaves the store's window 26 h after it ended, and its rerun with it.
   async settleReruns(seen) {
@@ -919,6 +921,11 @@ export class Launcher {
           continue;
         }
         if (run.status !== 'completed') continue;
+        if (run.run_attempt >= RERUN_ATTEMPT_CAP) {
+          this.log(`rerun: none for run ${id} in ${repo}: it is at attempt ${run.run_attempt}, the cap`);
+          for (const row of rows) await settle(row, { state: 'dropped', reason: 'attempt cap' });
+          continue;
+        }
         const due = [];
         for (const row of rows) {
           const job = await this.gh.getJob(repo, row.job.id);
