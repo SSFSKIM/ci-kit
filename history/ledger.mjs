@@ -76,25 +76,41 @@ const slimRun = (r) => ({
   status: r.status, conclusion: r.conclusion, run_attempt: r.run_attempt, created_at: r.created_at,
 });
 
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// GitHub's listing answers a heavy filtered page with a 502 now and then (2026-11-19, MAWS): a server error or a
+// timeout is tried again after each of `delays`.
+const transient = (err) => err?.status >= 500 || err?.name === 'TimeoutError' || err?.name === 'AbortError';
+async function retried(fn, delays) {
+  for (let i = 0; ; i += 1) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!transient(err) || i >= delays.length) throw err;
+      await pause(delays[i]);
+    }
+  }
+}
+
 // One UTC day's runs of a workflow by creation. A filtered listing stops at 1,000 results, so a day with more is
 // listed hour by hour.
-export async function listDay(gh, repo, workflow, day) {
+export async function listDay(gh, repo, workflow, day, { delays = [3000, 10000] } = {}) {
+  const page = (created, n) => retried(() => gh.workflowRuns(repo, workflow, created, n), delays);
   const rest = async (created, first) => {
     const runs = [...first.workflow_runs];
-    for (let page = 2; first.workflow_runs.length === 100 && runs.length < first.total_count; page += 1) {
-      const body = await gh.workflowRuns(repo, workflow, created, page);
+    for (let n = 2; first.workflow_runs.length === 100 && runs.length < first.total_count; n += 1) {
+      const body = await page(created, n);
       runs.push(...body.workflow_runs);
       if (body.workflow_runs.length < 100) break;
     }
     return runs;
   };
   const whole = `${day}T00:00:00Z..${day}T23:59:59Z`;
-  const first = await gh.workflowRuns(repo, workflow, whole, 1);
+  const first = await page(whole, 1);
   if (first.total_count <= 1000) return rest(whole, first);
   const runs = [];
   for (let h = 0; h < 24; h += 1) {
     const hour = `${day}T${String(h).padStart(2, '0')}:00:00Z..${day}T${String(h).padStart(2, '0')}:59:59Z`;
-    runs.push(...(await rest(hour, await gh.workflowRuns(repo, workflow, hour, 1))));
+    runs.push(...(await rest(hour, await page(hour, 1))));
   }
   return runs;
 }
@@ -106,12 +122,13 @@ const describe = (err) => (err?.status || /^(history|junit): /.test(err?.message
 // the shared, cached job listing. → counts, `errors`, `more` (work left that this pass may still take), `wait` (seconds until the hour allows more, or null) and
 // `closed` (the runs whose attempts this batch closed, for the per-test pass's sweep) and the `ledger`, whose state
 // the caller settles and flushes again after the per-test pass's calls.
-export async function collectLedger({ gh, repo, alias = repo, entry, root, mirror, jobsOf, pacer, pass = null, now = Date.now(), limit = 300 }) {
+export async function collectLedger({ gh, repo, alias = repo, entry, root, mirror, jobsOf, pacer, pass = null, now = Date.now(), limit = 300, listDelays = [3000, 10000] }) {
+  const started = Date.now();
   const ledger = openLedger(root, alias);
   const { state } = ledger;
   const kind = entry.token;
   pacer.add(kind, gh, state);
-  const counts = { listed: 0, days: 0, closed: 0, lines: 0, queued: 0, open: 0 };
+  const counts = { listed: 0, days: 0, closed: 0, lines: 0, queued: 0, pending: 0, open: 0 };
   const errors = [];
   let limited = false;
   const failed = (what, err) => {
@@ -120,51 +137,45 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, mirro
   };
   const key = (run, attempt) => `${run}/${attempt}`;
 
-  // 1. Discovery, once a pass: its first batch, or the next one when a listing was cut short (`queue` null).
-  if (pass === null || state.pass?.id !== pass || state.pass.queue === null) {
-    if (pass === null || state.pass?.id !== pass) state.pass = { id: pass ?? `local-${now}`, listed_at: null, calls: 0, queue: null };
-    const today = dayOf(new Date(now).toISOString());
-    const first = dayOf(new Date(now - (WINDOW_DAYS - 1) * DAY).toISOString());
-    const found = new Map();
-    let complete = true;
-    for (let day = first; day <= today; day = nextDay(day)) {
+  // 1. Discovery, once a pass: its first batch lists each day of the window; a day whose listing failed, or that the
+  //    token's limits left, stays pending for a later batch of the pass. Each listed day's work joins the queue,
+  //    oldest first; its runs join the index at once, so a day listed is never covered by an index that lacks them.
+  if (pass === null || state.pass?.id !== pass) {
+    const days = [];
+    for (let d = dayOf(new Date(now - (WINDOW_DAYS - 1) * DAY).toISOString()); d <= dayOf(new Date(now).toISOString()); d = nextDay(d)) days.push(d);
+    state.pass = { id: pass ?? `local-${now}`, listed_at: new Date(now).toISOString(), calls: 0, pending: days, queue: [] };
+  }
+  if (state.pass.pending.length > 0) {
+    const queued = new Set(state.pass.queue.map((i) => key(i.run.id, i.attempt)));
+    const still = [];
+    for (const day of state.pass.pending) {
       if (!pacer.allows(kind, entry.workflows.length)) {
-        complete = false;
-        break;
+        still.push(day);
+        continue;
       }
       try {
-        const runs = (await Promise.all(entry.workflows.map((w) => listDay(gh, repo, w, day)))).flat();
-        for (const r of runs) {
-          found.set(r.id, slimRun(r));
-          // Into the index at once, so a day listed is never covered by an index that lacks its runs.
+        const runs = (await Promise.all(entry.workflows.map((w) => listDay(gh, repo, w, day, { delays: listDelays })))).flat();
+        for (const r of runs.map(slimRun)) {
           const held = (state.runs[r.id] ??= { day: dayOf(r.created_at), attempts: r.run_attempt, closed: [] });
           held.attempts = Math.max(held.attempts, r.run_attempt);
+          for (let attempt = 1; attempt <= r.run_attempt; attempt += 1) {
+            if (held.closed.includes(attempt) || queued.has(key(r.id, attempt))) continue;
+            if (attempt === r.run_attempt && r.status !== 'completed') continue; // open: read again next pass
+            state.pass.queue.push({ attempt, run: r });
+            queued.add(key(r.id, attempt));
+          }
         }
         state.listed[day] = new Date(now).toISOString().replace(/\.\d{3}Z$/, 'Z');
         counts.days += 1;
+        counts.listed += runs.length;
       } catch (err) {
         failed(`listing ${day}`, err);
-        complete = false;
+        still.push(day);
       }
     }
-    if (!complete) {
-      // A listing cut short is no pass: the next batch lists again.
-      pacer.settle(state);
-      ledger.flush();
-      return { counts, errors, more: !limited && !pacer.passSpent(kind), wait: pacer.passSpent(kind) ? null : pacer.waitSeconds(kind), closed: [], ledger };
-    }
-    const queue = [];
-    for (const r of [...found.values()].sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id - b.id))) {
-      const held = state.runs[r.id];
-      for (let attempt = 1; attempt <= r.run_attempt; attempt += 1) {
-        if (held.closed.includes(attempt)) continue;
-        if (attempt === r.run_attempt && r.status !== 'completed') continue; // open: read again next pass
-        queue.push({ attempt, run: r });
-      }
-    }
-    counts.listed = found.size;
-    Object.assign(state.pass, { listed_at: new Date(now).toISOString(), queue });
-    ledger.prune(dayOf(new Date(now - (WINDOW_DAYS + 5) * DAY).toISOString()));
+    state.pass.pending = still;
+    state.pass.queue.sort((a, b) => (a.run.created_at < b.run.created_at ? -1 : a.run.created_at > b.run.created_at ? 1 : a.run.id - b.run.id || a.attempt - b.attempt));
+    if (still.length === 0) ledger.prune(dayOf(new Date(now - (WINDOW_DAYS + 5) * DAY).toISOString()));
   }
 
   // 2. The work: the queue's oldest attempts, up to `limit`, each taken while the token's limits allow it.
@@ -250,12 +261,14 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, mirro
   }
   state.pass.queue = queue.filter((i) => !done.has(i));
   counts.queued = state.pass.queue.length;
+  counts.pending = state.pass.pending.length;
   counts.open = Object.values(state.runs).reduce((t, r) => t + r.attempts - r.closed.length, 0) - counts.queued; // still running
   pacer.settle(state);
   ledger.flush();
-  const more = state.pass.queue.length > 0 && !limited && !pacer.passSpent(kind);
+  counts.seconds = Math.round((Date.now() - started) / 1000);
+  const more = state.pass.queue.length + state.pass.pending.length > 0 && !limited && !pacer.passSpent(kind);
   return { counts, errors, more, wait: more && !pacer.allows(kind, 2) ? pacer.waitSeconds(kind) : null, closed: [...closed.values()], ledger };
 }
 
 export const formatLedger = (repo, c, errors) =>
-  `${repo}: ledger: listed ${c.listed} runs over ${c.days} days, attempts closed ${c.closed} (lines ${c.lines}), queued ${c.queued}, open ${c.open}, errors ${errors}`;
+  `${repo}: ledger: listed ${c.listed} runs over ${c.days} days (${c.pending} days pending), attempts closed ${c.closed} (lines ${c.lines}), queued ${c.queued}, open ${c.open}, errors ${errors}, ${c.seconds} s`;

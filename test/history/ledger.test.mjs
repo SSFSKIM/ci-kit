@@ -21,7 +21,8 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), { status
 
 // A fake GitHub. world: { runs: [run], jobs: { 'id/attempt': [job] }, conclusions: { 'id/attempt': c },
 // annotations: { jobId: [message] } | 'refused', logs: { jobId: text }, overfull: [day] (a day whose whole-day
-// listing reports more than 1,000 runs), failing: ['id/attempt'] (job listings answered 502) }.
+// listing reports more than 1,000 runs), failing: ['id/attempt'] (job listings answered 502), flaky: { day: n } (a
+// day's whole-day listing answered 502 n times) }.
 function fakeGitHub(world) {
   const requests = [];
   const fetchImpl = async (href) => {
@@ -34,6 +35,10 @@ function fakeGitHub(world) {
       const page = Number(url.searchParams.get('page'));
       const runs = world.runs.filter((r) => r.created_at >= from && r.created_at <= to).sort((a, b) => b.id - a.id);
       const wholeDay = from.endsWith('T00:00:00Z') && to.endsWith('T23:59:59Z');
+      if (wholeDay && world.flaky?.[from.slice(0, 10)] > 0) {
+        world.flaky[from.slice(0, 10)] -= 1;
+        return json({ message: 'Server Error' }, 502);
+      }
       const total = wholeDay && (world.overfull ?? []).includes(from.slice(0, 10)) ? 1500 : runs.length;
       return json({ total_count: total, workflow_runs: runs.slice((page - 1) * 100, page * 100) });
     }
@@ -83,10 +88,10 @@ function store() {
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 const jobsOfFor = (gh) => (run, attempt) => gh.attemptJobs(REPO, run, attempt);
-const pass = (world, root, { entry = MAWS, mirror = fakeMirror(Object.fromEntries(world.runs.map((r) => [r.head_sha, sha(r.id + 1)]))), passId = 'p1', limit = 300, limits, now = NOW } = {}) => {
+const pass = (world, root, { entry = MAWS, mirror = fakeMirror(Object.fromEntries(world.runs.map((r) => [r.head_sha, sha(r.id + 1)]))), passId = 'p1', limit = 300, limits, now = NOW, listDelays = [0, 0] } = {}) => {
   const fake = fakeGitHub(world);
   const pacer = createPacer({ pass: passId, now: () => now, ...(limits ? { limits } : {}) });
-  return collectLedger({ gh: fake.gh, repo: REPO, alias: 'o/r', entry, root, mirror, jobsOf: jobsOfFor(fake.gh), pacer, pass: passId, now, limit }).then((result) => ({ ...result, requests: fake.requests }));
+  return collectLedger({ gh: fake.gh, repo: REPO, alias: 'o/r', entry, root, mirror, jobsOf: jobsOfFor(fake.gh), pacer, pass: passId, now, limit, listDelays }).then((result) => ({ ...result, requests: fake.requests }));
 };
 const allLines = (root) => {
   const dir = join(root, 'o/r/jobs');
@@ -311,19 +316,48 @@ test('a pass interrupted between batches, or inside one, resumes without a missi
   }
 });
 
-test('a listing cut short is no pass, and a day it listed is not covered while its runs are open', async () => {
+test('days a listing could not reach stay pending, and a day it listed is not covered while its runs are open', async () => {
   const s = store();
   try {
     const world = { runs: [gateRun(990, '2026-10-17T08:00:00Z')], jobs: { '990/1': [job(1, 'probes', '2026-10-17T08:00:00Z', 1)] } };
     const r = await pass(world, s.root, { limits: { app: { pass: 5, hour: 1000 } } });
     assert.equal(listingCalls(r.requests), 5);
-    assert.equal(r.more, false);
+    assert.equal(r.more, false, 'the pass has spent its calls');
     const ledger = openLedger(s.root, 'o/r');
-    assert.equal(ledger.state.pass.queue, null);
+    assert.equal(ledger.state.pass.pending.length, 30);
+    assert.equal(ledger.state.pass.queue.length, 1);
     assert.equal(ledger.state.pass.calls, 5);
     assert.ok('2026-10-17' in ledger.state.listed);
     assert.equal(ledger.covered('2026-10-17'), false);
     assert.equal(ledger.covered('2026-10-16'), true, 'a listed day with no runs');
+    // The same pass with calls to spare lists only the pending days, then works.
+    const next = await pass(world, s.root);
+    assert.equal(listingCalls(next.requests), 30);
+    assert.deepEqual(allLines(s.root).map((l) => l.run), [990]);
+    assert.equal(openLedger(s.root, 'o/r').covered('2026-10-17'), true);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('a listing answered with a server error is tried again; one that keeps failing leaves its day pending', async () => {
+  const s = store();
+  try {
+    const world = { runs: [gateRun(995, '2026-11-12T08:00:00Z')], jobs: { '995/1': [job(1, 'probes', '2026-11-12T08:00:00Z', 1)] }, flaky: { '2026-11-12': 1 } };
+    const r = await pass(world, s.root, { listDelays: [0, 0] });
+    assert.deepEqual(r.errors, []);
+    assert.equal(listingCalls(r.requests), 36);
+    assert.deepEqual(allLines(s.root).map((l) => l.run), [995]);
+    const t = store();
+    try {
+      const bad = await pass({ ...world, flaky: { '2026-11-12': 9 } }, t.root, { listDelays: [0, 0] });
+      assert.equal(bad.errors.length, 1);
+      assert.match(bad.errors[0], /^listing 2026-11-12: HTTP 502/);
+      assert.deepEqual(openLedger(t.root, 'o/r').state.pass.pending, ['2026-11-12']);
+      assert.equal(bad.more, true);
+    } finally {
+      t.cleanup();
+    }
   } finally {
     s.cleanup();
   }
