@@ -67,7 +67,7 @@ copy() {
 }
 # s_free_blocks_count_lo and _hi of the superblock at byte 1024, read in one block, never failing the copy.
 superblock_free() {
-  { dd if="$1" bs=4096 count=1 status=none "${@:2}" 2>/dev/null || true; } | od -An -tu4 -v -j1036 -N336 |
+  { dd if="$1" bs=4096 count=1 status=none "${@:2}" 2>/dev/null || true; } | od -An -tu4 -v -j1036 -N336 2>/dev/null |
     awk '{ for (i = 1; i <= NF; i++) w[n++] = $i } END { if (n == 84) printf "%.0f\n", w[0] + w[83] * 4294967296; else print "unreadable" }'
 }
 # Read-only evidence while root is frozen: shell builtins find the loop's openers; output goes only to tmpfs.
