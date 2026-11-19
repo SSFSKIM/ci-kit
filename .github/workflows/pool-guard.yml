@@ -1,5 +1,7 @@
 # Independent EC2 backstop every 15 minutes, including disabled accounts.
-# Scheduled workflows run from the default branch only.
+# Scheduled workflows run from the default branch only. GitHub starts this schedule only every few hours, so the
+# launcher also dispatches it every 15 minutes (Cloud Scheduler ci-kit-pool-guard → /guard, gce/launcher/guard.mjs).
+# The concurrency group keeps the two triggers to one run and at most one pending.
 name: pool-guard
 on:
   schedule:

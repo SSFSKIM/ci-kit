@@ -14,7 +14,7 @@ launcher and bake, and [EC2 and credit preference](#ec2-and-credit-preference) f
 | alerts | `pool/lib/alerts.mjs` |
 | launcher, GCE bake, VM unit and deploy | `gce/`, `lib/gce.mjs` |
 | EC2 bake, VM unit and cloud setup | `ec2/`, `lib/aws.mjs` |
-| independent EC2 guard | `.github/workflows/pool-guard.yml`, `ec2/guard.mjs` |
+| independent EC2 guard | `.github/workflows/pool-guard.yml`, `ec2/guard.mjs`; its trigger `gce/launcher/guard.mjs` |
 | ledger | issues titled "pool ledger" or "pool ledger from …" in `SSFSKIM/ci-kit-sandbox` |
 
 ## Using the pool from a repo
@@ -128,7 +128,7 @@ each repo's configured GCE/EC2 provider preferences.
 
 | Piece | Where |
 |---|---|
-| launcher (Cloud Run service `ci-kit-launcher`) | `gce/launcher/`: `server.mjs` (the service), `routes.mjs` (its paths), `ticker.mjs` (when ticks run), `launcher.mjs` (one tick), decisions in `logic.mjs`, ledger rows in `ledger.mjs` and `ledger-store.mjs`, configs from main in `source.mjs` |
+| launcher (Cloud Run service `ci-kit-launcher`) | `gce/launcher/`: `server.mjs` (the service), `routes.mjs` (its paths), `ticker.mjs` (when ticks run), `guard.mjs` (the EC2 guard's trigger), `launcher.mjs` (one tick), decisions in `logic.mjs`, ledger rows in `ledger.mjs` and `ledger-store.mjs`, configs from main in `source.mjs` |
 | webhook receiver (Cloud Run service `ci-kit-webhook`) | `gce/webhook/`: `server.mjs` (the service), `receiver.mjs` (signature, filter, publish); the App's hook config: `gce/tools/app-hook.mjs` |
 | bake (orchestrator, decisions) | `gce/bake/bake.mjs`, `gce/bake/plan.mjs` |
 | builder (startup script) | `gce/bake/builder.sh`, sharing `pool/bake/prepare.sh` with the EC2 builder |
@@ -183,7 +183,9 @@ bake reads the `gce.json` bundled at its deploy, so a change to the placements r
 
 **The launcher.** Cloud Scheduler's `ci-kit-launcher-tick` POSTs to `ci-kit-launcher`'s `/tick` every minute with an
 OIDC token, and the webhook's Pub/Sub push POSTs to its `/request` when a job is queued in a served repo (The
-webhook, below).
+webhook, below). A third route is not a tick: Cloud Scheduler's `ci-kit-pool-guard` POSTs to `/guard` every 15
+minutes, and the launcher dispatches the EC2 guard's workflow (Independent EC2 guard, below) beside its ticks,
+neither waiting for one nor delaying one.
 The service has no public ingress (`--ingress=internal`, IAM-only: `ci-kit-launcher@` is its one invoker), runs one
 instance at a time and admits many requests at once, but runs one tick at a time (`ticker.mjs`). Every tick is the
 same full reconciliation, whoever asked, and nothing is kept between ticks: state is in GCE labels, the ledger and
@@ -1115,7 +1117,28 @@ preemption's is (Preemption, above).
 
 ### Independent EC2 guard
 
-`.github/workflows/pool-guard.yml` runs the independent EC2 guard every fifteen minutes. Each configured account, disabled ones included, gets an independent `ubuntu-latest` matrix leg;
+`.github/workflows/pool-guard.yml` runs the independent EC2 guard every fifteen minutes. Its own `*/15` schedule
+is not what keeps that cadence: GitHub started it only every 6 to 9 hours (ci-kit#222, 2026-11-17 to 19). Cloud
+Scheduler's `ci-kit-pool-guard` (`gce/deploy.sh launcher-schedule`) POSTs the launcher's `/guard` every 15 minutes,
+and the launcher dispatches the workflow on main with the App's token (`gce/launcher/guard.mjs`); the workflow's
+schedule stays as a second trigger. The guard depends on the launcher for this trigger only: it still runs on GitHub
+Actions under its own OIDC role. Its concurrency group (`pool-guard`, no cancel-in-progress) keeps one run going and
+at most one pending, so the two triggers never overlap or pile up: a newer pending run replaces an older one.
+Each `/guard` call costs the App two REST calls, the dispatch and one read of the newest successful run on main
+(`per_page=1`): eight an hour. The read runs whatever the dispatch did, since a guard that cannot be triggered is the
+one that goes silent. When that run completed over an hour ago, or there is none, the launcher logs an ERROR line with
+`jsonPayload.event="pool-guard-silent"`, which `gce/deploy.sh alert` mails the owner for (`ci-kit EC2 guard
+silent`). `/guard` answers 200 only when both the dispatch and the read worked. A refused dispatch (the App's
+installation lost `actions: write` on the kit, or the workflow was disabled) is an ERROR with
+`event="pool-guard-dispatch-failed"`, an unreadable run list one with `event="pool-guard-check-failed"`, and either
+answers 500: a failed execution of `ci-kit-pool-guard`, which has no retries (a retry after an accepted dispatch would
+dispatch again). Two failed executions in an hour mail the owner (`ci-kit EC2 guard trigger failing`), which also
+covers a launcher deployed without `/guard` and a call that times out (the job's deadline is 180 s, a cold call's
+bounded path 140 s).
+Pausing the launcher's tick does not pause this trigger: `gcloud scheduler jobs pause ci-kit-pool-guard
+--location=us-central1 --project=ssfskim-ci-kit` does.
+
+Each configured account, disabled ones included, gets an independent `ubuntu-latest` matrix leg;
 an absent file yields none, invalid config fails discovery, and one leg's failure does not cancel the others.
 Each leg exchanges GitHub OIDC for that account's guard role, trusted only for
 `repo:SSFSKIM/ci-kit:ref:refs/heads/main`, with temporary credentials kept in memory. It cannot launch resources.
