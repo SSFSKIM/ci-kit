@@ -433,18 +433,30 @@ export function newestReadyImage(images, family) {
     .sort((a, b) => Date.parse(b.creationTimestamp) - Date.parse(a.creationTimestamp))[0] ?? null;
 }
 
-// Whether a failed job's end was its runner's loss rather than its own failure. A step that failed with a time before
-// its VM was preempted (`preemptedAt`, ms) is a real red, whatever came after: the preemption only cut short what
-// followed (an artifact upload, say); a failed step with no time says nothing either way. Otherwise the loss shows as
-// a step GitHub never heard end (a runner lost outright: MAWS run 44468141412's job, its running step left without a
-// conclusion), or as the job's end at or after the preemption (a guest's shutdown fails the running step at that
-// moment and ends the job: sandbox run 38927837115, whose failed step therefore ends after the preemption, not
-// before). GitHub's times are whole seconds, rounded down, so an end in the second its VM was preempted reads as
+// Whether a failed job's end was its runner's loss rather than its own failure. `preemptedAt` (ms) is when the
+// launcher saw the VM gone, which is after the fact: GCE tells the guest to shut down, the runner is told to stop
+// inside that notice, and GCE records the preemption and the launcher sees it only afterwards. The loss shows in one
+// of three ways:
+// - a step GitHub never heard end (a runner lost outright: MAWS run 44468141412's job, its running step left without
+//   a conclusion; every EC2 interruption);
+// - a step the runner cancelled when it was told to stop (every GCE preemption seen in production: MAWS runs
+//   44605433018 and 44635029958 on 2026-11-19, whose jobs ended 11 and 10 s before GCE's record of the preemption);
+// - the job's end at or after `preemptedAt` (a guest's shutdown failing the running step as the VM went: sandbox run
+//   38927837115).
+// A step that failed on its own before any of that is a real red, whatever the preemption cut short afterwards (an
+// artifact upload, say), so it vetoes: before `preemptedAt` when no step was cancelled, and more than the notice
+// before the first cancelled step when one was, since the shutdown can fail a step before the runner hears of it
+// (44635029958's static-local: setup-go's tar killed 13 s before the cancel). A failed step with no time says nothing
+// either way. GitHub's times are whole seconds, rounded down, so an end in the second its VM was preempted reads as
 // before it: the doubt goes to no rerun.
+export const SHUTDOWN_NOTICE_MS = 30_000; // GCE's preemption notice
 export function lostRunner(job, preemptedAt) {
   const steps = job.steps ?? [];
-  if (steps.some((step) => step.conclusion === 'failure' && step.completed_at != null && Date.parse(step.completed_at) < preemptedAt)) return false;
-  if (steps.some((step) => step.conclusion == null)) return true;
+  const ended = (conclusion) => steps.filter((step) => step.conclusion === conclusion && step.completed_at != null).map((step) => Date.parse(step.completed_at));
+  const cancelled = ended('cancelled');
+  const redBefore = cancelled.length ? Math.min(preemptedAt, Math.min(...cancelled) - SHUTDOWN_NOTICE_MS) : preemptedAt;
+  if (ended('failure').some((at) => at < redBefore)) return false;
+  if (steps.some((step) => step.conclusion == null) || cancelled.length) return true;
   return job.completed_at != null && Date.parse(job.completed_at) >= preemptedAt;
 }
 

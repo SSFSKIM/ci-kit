@@ -330,6 +330,24 @@ test('the sweep stops starting calls once its time budget is spent; what it left
   assert.equal(reruns(w).length, 5, 'the three left are read on the next tick');
 });
 
+// The two GCE preemptions of 2026-11-19 as GitHub reported them: the runner is told to stop inside the 30 s notice, so
+// the running step ends `cancelled` and the job ends seconds before GCE records the preemption, and well before the
+// launcher sees the VM gone (the time the row carries).
+test('lostRunner: a step the shutdown cancelled is a loss, though the job ended before the launcher saw the VM gone', () => {
+  const step = (conclusion, completed_at) => ({ name: 's', status: 'completed', conclusion, completed_at });
+  const seen = Date.parse('2026-11-19T20:12:40Z'); // the launcher's tick after GCE's record at 20:11:50
+  // MAWS run 44605433018, unit 3/4: the running step cancelled, nothing failed.
+  assert.equal(lostRunner({ completed_at: '2026-11-19T20:11:39Z', steps: [step('success', '2026-11-19T20:09:25Z'), step('cancelled', '2026-11-19T20:11:37Z'), step('skipped', '2026-11-19T20:11:37Z')] }, seen), true);
+  // MAWS run 44635029958, static-local: the shutdown killed setup-go's tar 13 s before the runner heard of it.
+  const at = Date.parse('2026-11-19T23:11:00Z');
+  const staticLocal = [step('success', '2026-11-19T23:09:35Z'), step('failure', '2026-11-19T23:09:39Z'), step('cancelled', '2026-11-19T23:09:52Z'), step('skipped', '2026-11-19T23:09:52Z')];
+  assert.equal(lostRunner({ completed_at: '2026-11-19T23:09:53Z', steps: staticLocal }, at), true, 'a failure inside the notice before the cancel');
+  // A gate that failed on its own, then an upload the shutdown cancelled minutes later: a red.
+  const red = [step('failure', '2026-11-19T23:05:00Z'), step('cancelled', '2026-11-19T23:09:52Z')];
+  assert.equal(lostRunner({ completed_at: '2026-11-19T23:09:53Z', steps: red }, at), false, 'a failure well before the cancel');
+  assert.equal(lostRunner({ completed_at: '2026-11-19T23:09:53Z', steps: [step('failure', '2026-11-19T23:09:21Z'), step('cancelled', '2026-11-19T23:09:52Z')] }, at), false, '31 s before: outside the notice');
+});
+
 test('lostRunner: only a failed step timed before the preemption vetoes; one with no time leaves the loss signals to decide', () => {
   const at = T0;
   const failed = (completed_at) => ({ name: 'gate', status: 'completed', conclusion: 'failure', ...(completed_at ? { completed_at } : {}) });
