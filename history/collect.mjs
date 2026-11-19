@@ -428,7 +428,7 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
 export const formatCounts = (repo, c, errors) =>
   `${repo}: artifacts ${c.artifacts}, lines ${c.lines} (present ${c.present}, missing ${c.missing}, unparseable ${c.unparseable}, rejected ${c.rejected}), relinked ${c.relinked}, failures ${c.failures}, errors ${errors}, files written ${c.written}`;
 
-function tokenFor(repo) {
+export function tokenFor(repo) {
   const name = repo.split('/')[1];
   const appId = process.env.CI_KIT_APP_ID?.trim();
   const pem = process.env.CI_KIT_APP_KEY;
