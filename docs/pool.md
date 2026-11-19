@@ -1124,11 +1124,17 @@ and the launcher dispatches the workflow on main with the App's token (`gce/laun
 schedule stays as a second trigger. The guard depends on the launcher for this trigger only: it still runs on GitHub
 Actions under its own OIDC role. Its concurrency group (`pool-guard`, no cancel-in-progress) keeps one run going and
 at most one pending, so the two triggers never overlap or pile up: a newer pending run replaces an older one.
-Each `/guard` call costs the App two REST calls, the dispatch and one read of the newest successful run
-(`per_page=1`): eight an hour. When that run completed over an hour ago, or there is none, the launcher logs an ERROR
-line with `jsonPayload.event="pool-guard-silent"`, which `gce/deploy.sh alert` mails the owner for (`ci-kit EC2 guard
-silent`). A dispatch GitHub refused (the App's installation lost `actions: write` on the kit, or the workflow was
-disabled) is an ERROR with `event="pool-guard-dispatch-failed"` and a 500, a failed execution of `ci-kit-pool-guard`.
+Each `/guard` call costs the App two REST calls, the dispatch and one read of the newest successful run on main
+(`per_page=1`): eight an hour. The read runs whatever the dispatch did, since a guard that cannot be triggered is the
+one that goes silent. When that run completed over an hour ago, or there is none, the launcher logs an ERROR line with
+`jsonPayload.event="pool-guard-silent"`, which `gce/deploy.sh alert` mails the owner for (`ci-kit EC2 guard
+silent`). `/guard` answers 200 only when both the dispatch and the read worked. A refused dispatch (the App's
+installation lost `actions: write` on the kit, or the workflow was disabled) is an ERROR with
+`event="pool-guard-dispatch-failed"`, an unreadable run list one with `event="pool-guard-check-failed"`, and either
+answers 500: a failed execution of `ci-kit-pool-guard`, which has no retries (a retry after an accepted dispatch would
+dispatch again). Two failed executions in an hour mail the owner (`ci-kit EC2 guard trigger failing`), which also
+covers a launcher deployed without `/guard` and a call that times out (the job's deadline is 180 s, a cold call's
+bounded path 140 s).
 Pausing the launcher's tick does not pause this trigger: `gcloud scheduler jobs pause ci-kit-pool-guard
 --location=us-central1 --project=ssfskim-ci-kit` does.
 

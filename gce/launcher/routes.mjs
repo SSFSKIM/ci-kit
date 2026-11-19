@@ -7,8 +7,8 @@ export function createHandler({ serve, guard, say }) {
   return async function handle(req, res) {
     const path = new URL(req.url, 'http://launcher').pathname;
     if (req.method !== 'POST') return json(res, 405, { error: 'POST only' });
-    // Not a tick: it runs beside the ticker, neither waiting for a tick nor delaying one. A failed dispatch answers 500,
-    // which Cloud Scheduler records as a failed execution of ci-kit-pool-guard; guard() has logged it.
+    // Not a tick: it runs beside the ticker, neither waiting for a tick nor delaying one. A failed dispatch or run read
+    // answers 500, which Cloud Scheduler records as a failed execution of ci-kit-pool-guard; guard() has logged it.
     if (path === '/guard') {
       try {
         return json(res, 200, await guard());

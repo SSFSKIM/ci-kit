@@ -25,7 +25,7 @@
 #                      tick. Needs the launcher deployed and the webhook secret created by the owner (docs/pool.md, GCE)
 #   alert              log-based metrics and alert policies, mailed to CI_KIT_ALERT_EMAIL (default: the project's
 #                      owner): failed ci-kit-launcher-tick executions, VMs whose runner never came online, NAT drops,
-#                      an EC2 guard with no successful run in an hour
+#                      an EC2 guard with no successful run in an hour or whose trigger keeps failing
 #   app-hook           points the GitHub App's webhook at ci-kit-webhook with the secret (gce/tools/app-hook.mjs); run
 #                      it after webhook's first deploy and after each rotation of the secret
 # The App's secrets (ci-kit-app-id, ci-kit-app-key, readable by ci-kit-launcher only) and the webhook secret
@@ -264,12 +264,14 @@ launcher_schedule() {
     --schedule='* * * * *' --time-zone=Etc/UTC --http-method=POST --uri="$url/tick" \
     --oidc-service-account-email="$SA" --oidc-token-audience="$url" --attempt-deadline=300s > /dev/null
   # GitHub starts pool-guard.yml's own 15-minute schedule only every 6 to 9 hours (ci-kit#222); the launcher dispatches
-  # it on this one, and the workflow's schedule stays as the second trigger.
+  # it on this one, and the workflow's schedule stays as the second trigger. The deadline covers a cold /guard: the
+  # metadata token and the App's secrets (30 s each), then the installation, its token, the dispatch and the run read
+  # (20 s each), 140 s at worst. No retry: a 500 can follow an accepted dispatch, and the next trigger is 15 min away.
   verb=create
   g scheduler jobs describe ci-kit-pool-guard --location="$REGION" > /dev/null 2>&1 && verb=update
   g scheduler jobs "$verb" http ci-kit-pool-guard --location="$REGION" \
     --schedule='*/15 * * * *' --time-zone=Etc/UTC --http-method=POST --uri="$url/guard" \
-    --oidc-service-account-email="$SA" --oidc-token-audience="$url" --attempt-deadline=60s > /dev/null
+    --oidc-service-account-email="$SA" --oidc-token-audience="$url" --attempt-deadline=180s --max-retry-attempts=0 > /dev/null
   echo "deploy: launcher schedule ok (every minute → $url/tick; every 15 minutes → $url/guard)"
 }
 
@@ -345,7 +347,10 @@ app_hook() {
 # - A VM whose runner never came online (spec 2026-10-21 M6): it booted but cannot reach GitHub, and its job waits on
 #   another VM; the launcher logs it at ERROR each tick (launcher.mjs reportNeverOnline). Any in 10 minutes.
 # - An EC2 guard silent for an hour (ci-kit#222): the launcher's /guard logs it at ERROR every 15 minutes while no
-#   pool-guard run has succeeded in the last hour (gce/launcher/guard.mjs). Any in 10 minutes.
+#   pool-guard run has succeeded on main in the last hour (gce/launcher/guard.mjs). Any in 10 minutes.
+# - Its trigger failing (ci-kit#222): failed executions of ci-kit-pool-guard (a 500 from a refused dispatch or an
+#   unreadable run list, a missing route, a timeout). It runs every 15 minutes, so the window is an hour: two failures
+#   in it, so that one bad call does not mail.
 # - A connection a pool NAT dropped (M6): a VM out of ports, or the NAT out of addresses. The NAT logs drops only
 #   (network). Any in 10 minutes.
 alert() {
@@ -372,14 +377,22 @@ alert() {
     'ci-kit: no successful pool-guard run in the last hour (ci-kit#222)' \
     'resource.type="cloud_run_revision" AND resource.labels.service_name="ci-kit-launcher" AND severity>=ERROR AND jsonPayload.event="pool-guard-silent"' \
     "No run of the independent EC2 guard (.github/workflows/pool-guard.yml in SSFSKIM/ci-kit) has succeeded in the last hour, so EC2 instances, volumes and snapshots past their ci-kit-deadline are not being reaped. The launcher dispatches it every 15 minutes (Cloud Scheduler ci-kit-pool-guard → /guard). Its runs: gh run list --repo SSFSKIM/ci-kit --workflow pool-guard.yml --limit 5. A failed dispatch is logged as jsonPayload.event=\"pool-guard-dispatch-failed\": gcloud logging read 'jsonPayload.event=\"pool-guard-dispatch-failed\"' --project=ssfskim-ci-kit --freshness=2h. Run it by hand meanwhile: gh workflow run pool-guard.yml --repo SSFSKIM/ci-kit --ref main. docs/pool.md, Independent EC2 guard."
-  echo "deploy: alert ok (ticks failing, runners never online, NAT drops, EC2 guard silent; mailed to $email)"
+  alert_on_log ci-kit-pool-guard-trigger-failed cloud_scheduler_job 1 'ci-kit EC2 guard trigger failing' \
+    'ci-kit: failed executions of the Scheduler job ci-kit-pool-guard (ci-kit#222)' \
+    'resource.type="cloud_scheduler_job" AND resource.labels.job_id="ci-kit-pool-guard" AND severity>=ERROR' \
+    "Cloud Scheduler's ci-kit-pool-guard failed at least twice in an hour: the launcher's /guard could not dispatch the independent EC2 guard (.github/workflows/pool-guard.yml in SSFSKIM/ci-kit) or read its runs, or did not answer. The guard then runs only on GitHub's own schedule, every few hours. The launcher's ERROR entries say which: gcloud logging read 'jsonPayload.event=~\"^pool-guard-\"' --project=ssfskim-ci-kit --freshness=2h. A 403 or 404 on the dispatch is the App's installation on SSFSKIM/ci-kit missing actions: write (node gce/tools/app-access.mjs SSFSKIM/ci-kit); a 404 from the route itself is a launcher deployed before /guard (gce/deploy.sh launcher). Run the guard by hand meanwhile: gh workflow run pool-guard.yml --repo SSFSKIM/ci-kit --ref main. docs/pool.md, Independent EC2 guard." \
+    3600
+  echo "deploy: alert ok (ticks failing, runners never online, NAT drops, EC2 guard silent or its trigger failing; mailed to $email)"
 }
 
-# alert_on_log METRIC RESOURCE THRESHOLD TITLE DESCRIPTION FILTER DOC: the log-based metric METRIC of the entries FILTER
-# matches, and the policy TITLE mailing $channel when more than THRESHOLD of them fall in 10 minutes. Each is created
-# once, found by its name; one that exists is left as it is.
+# alert_on_log METRIC RESOURCE THRESHOLD TITLE DESCRIPTION FILTER DOC [WINDOW]: the log-based metric METRIC of the
+# entries FILTER matches, and the policy TITLE mailing $channel when more than THRESHOLD of them fall in WINDOW seconds
+# (default 600). Each is created once, found by its name; one that exists is left as it is. Monitoring may refuse a
+# policy on a metric created moments ago (up to 10 minutes, the 2026-10-21 placement-latency report): that refusal is
+# retried until then; any other fails at once.
+METRIC_PENDING='Cannot find metric|metric referenced by the provided filter is unknown'
 alert_on_log() {
-  local metric=$1 resource=$2 threshold=$3 title=$4 description=$5 filter=$6 doc=$7 policy file
+  local metric=$1 resource=$2 threshold=$3 title=$4 description=$5 filter=$6 doc=$7 window=${8:-600} policy file err
   g logging metrics describe "$metric" > /dev/null 2>&1 ||
     g logging metrics create "$metric" --description="$description" --log-filter="$filter"
   policy=$(g alpha monitoring policies list --filter="displayName=\"$title\"" --format='value(name)' | grep '^projects/' | head -1 || true)
@@ -387,7 +400,7 @@ alert_on_log() {
   file=$(mktemp)
   # shellcheck disable=SC2016 # a JavaScript template literal, not the shell's
   node -e '
-    const [title, doc, metric, resource, threshold, channel] = process.argv.slice(1);
+    const [title, doc, metric, resource, threshold, channel, window] = process.argv.slice(1);
     console.log(JSON.stringify({
       displayName: title,
       documentation: { content: doc, mimeType: "text/markdown" },
@@ -395,12 +408,20 @@ alert_on_log() {
       combiner: "OR",
       conditions: [{ displayName: metric, conditionThreshold: {
         filter: `metric.type="logging.googleapis.com/user/${metric}" AND resource.type="${resource}"`,
-        aggregations: [{ alignmentPeriod: "600s", perSeriesAligner: "ALIGN_SUM", crossSeriesReducer: "REDUCE_SUM" }],
+        aggregations: [{ alignmentPeriod: `${window}s`, perSeriesAligner: "ALIGN_SUM", crossSeriesReducer: "REDUCE_SUM" }],
         comparison: "COMPARISON_GT", thresholdValue: Number(threshold), duration: "0s", trigger: { count: 1 } } }],
       alertStrategy: { autoClose: "3600s" },
       notificationChannels: [channel],
-    }));' "$title" "$doc" "$metric" "$resource" "$threshold" "$channel" > "$file"
-  g alpha monitoring policies create --policy-from-file="$file" > /dev/null
+    }));' "$title" "$doc" "$metric" "$resource" "$threshold" "$channel" "$window" > "$file"
+  local deadline=$((SECONDS + 600))
+  until err=$(g alpha monitoring policies create --policy-from-file="$file" 2>&1 > /dev/null); do
+    if ! grep -qE "$METRIC_PENDING" <<< "$err" || [ "$SECONDS" -ge "$deadline" ]; then
+      rm -f "$file"
+      die "policy '$title': $err"
+    fi
+    echo "deploy: $metric not visible to Monitoring yet; retrying its policy in 15 s" >&2
+    sleep 15
+  done
   rm -f "$file"
 }
 

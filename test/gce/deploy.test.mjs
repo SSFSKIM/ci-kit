@@ -31,6 +31,9 @@ function deploy(part, state) {
     const gcloud = join(dir, 'gcloud');
     writeFileSync(gcloud, `#!/bin/sh\nexec "${process.execPath}" "${FAKE}" "$@"\n`);
     chmodSync(gcloud, 0o755);
+    // The script's waits (a policy retried while its metric propagates) pass at once.
+    writeFileSync(join(dir, 'sleep'), '#!/bin/sh\nexit 0\n');
+    chmodSync(join(dir, 'sleep'), 0o755);
     const files = { FAKE_GCLOUD_STATE: join(dir, 'state.json'), FAKE_GCLOUD_LOG: join(dir, 'calls') };
     const empty = { network: false, subnets: [], routers: [], nats: [], firewall: [], metrics: [], channel: null, policies: [] };
     writeFileSync(files.FAKE_GCLOUD_STATE, JSON.stringify({ ...empty, ...state }));
@@ -105,6 +108,9 @@ test('launcher-schedule creates or updates the minute tick and the 15-minute gua
       assert.ok(schedule.includes('--oidc-service-account-email=ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com'));
       assert.ok(schedule.includes('--oidc-token-audience=https://ci-kit-launcher.run.app'));
     }
+    // A cold /guard's bounded path is 140 s; a retry could dispatch again after a 500 that followed an accepted dispatch.
+    assert.ok(guard.includes('--attempt-deadline=180s'));
+    assert.ok(guard.includes('--max-retry-attempts=0'));
   }
 });
 
@@ -214,7 +220,7 @@ test('alert: each failure the owner is mailed for has its log-based metric and a
   const run = deploy('alert', {});
   assert.equal(run.status, 0, run.stderr);
   const filters = Object.fromEntries(run.state.metrics.map((m) => [m.name, m.filter]));
-  assert.deepEqual(Object.keys(filters), ['ci-kit-launcher-tick-failed', 'ci-kit-runner-never-online', 'ci-kit-nat-dropped', 'ci-kit-pool-guard-silent']);
+  assert.deepEqual(Object.keys(filters), ['ci-kit-launcher-tick-failed', 'ci-kit-runner-never-online', 'ci-kit-nat-dropped', 'ci-kit-pool-guard-silent', 'ci-kit-pool-guard-trigger-failed']);
   assert.equal(filters['ci-kit-launcher-tick-failed'],
     'resource.type="cloud_scheduler_job" AND resource.labels.job_id="ci-kit-launcher-tick" AND severity>=ERROR');
   // What the launcher logs for a VM whose runner never came online (launcher.mjs reportNeverOnline).
@@ -232,13 +238,34 @@ test('alert: each failure the owner is mailed for has its log-based metric and a
   assert.equal(filters['ci-kit-pool-guard-silent'],
     'resource.type="cloud_run_revision" AND resource.labels.service_name="ci-kit-launcher" AND severity>=ERROR AND jsonPayload.event="pool-guard-silent"');
   assert.equal(on('ci-kit-pool-guard-silent', 'cloud_run_revision').conditions[0].conditionThreshold.thresholdValue, 0, 'any');
-  assert.equal(run.state.policies.length, 4);
+  // The guard's trigger runs every 15 minutes: two failed executions in an hour, so that one bad call does not mail.
+  assert.equal(filters['ci-kit-pool-guard-trigger-failed'],
+    'resource.type="cloud_scheduler_job" AND resource.labels.job_id="ci-kit-pool-guard" AND severity>=ERROR');
+  const trigger = on('ci-kit-pool-guard-trigger-failed', 'cloud_scheduler_job').conditions[0].conditionThreshold;
+  assert.equal(trigger.thresholdValue, 1);
+  assert.equal(trigger.aggregations[0].alignmentPeriod, '3600s');
+  assert.equal(run.state.policies.length, 5);
   for (const p of run.state.policies) {
     assert.deepEqual(p.notificationChannels, [run.state.channel]);
     assert.deepEqual(p.userLabels, { 'ci-kit': 'alert' });
-    assert.equal(p.conditions[0].conditionThreshold.aggregations[0].alignmentPeriod, '600s');
+    if (p.displayName !== 'ci-kit EC2 guard trigger failing') assert.equal(p.conditions[0].conditionThreshold.aggregations[0].alignmentPeriod, '600s');
     assert.ok(p.documentation.content.length > 0);
   }
+});
+
+test('alert: a policy refused because its new metric is not visible yet is retried until it is', () => {
+  const run = deploy('alert', { metricPending: 2 });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.state.policies.length, 5);
+  assert.equal(verb(run.calls, 'alpha', 'monitoring', 'policies', 'create').length, 7);
+  assert.match(run.stderr, /ci-kit-launcher-tick-failed not visible to Monitoring yet/);
+});
+
+test('alert: any other refusal of a policy fails the deploy at once, naming it', () => {
+  const run = deploy('alert', { policyFails: 'PERMISSION_DENIED: monitoring.alertPolicies.create' });
+  assert.equal(run.status, 1);
+  assert.equal(verb(run.calls, 'alpha', 'monitoring', 'policies', 'create').length, 1);
+  assert.match(run.stderr, /policy 'ci-kit launcher ticks failing': .*PERMISSION_DENIED/);
 });
 
 test('alert: run again, it creates nothing', () => {

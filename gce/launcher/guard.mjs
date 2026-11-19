@@ -4,42 +4,47 @@
 // launcher for this trigger only, and its schedule stays as the second one. The workflow's concurrency group keeps
 // one run going and at most one pending, whichever trigger asked.
 export const GUARD = { repo: 'SSFSKIM/ci-kit', workflow: 'pool-guard.yml', ref: 'main' };
-// Four missed triggers: a guard with no successful run in this long is silent, and its ERROR line is alerted on
-// (gce/deploy.sh alert). The run just dispatched has not completed when this is read, so the check sees the previous one.
+// Four missed triggers: a guard with no successful run on main in this long is silent, and its ERROR line is alerted
+// on (gce/deploy.sh alert). The run just dispatched has not completed when this is read, so the check sees an earlier one.
 export const GUARD_SILENT_MS = 60 * 60_000;
 
 // github(): the launcher's App client (lib/github.mjs). say(severity, message, fields): the structured log line.
-// Answers what was dispatched and the newest successful run; throws when the dispatch failed, after logging it.
+// The dispatch and the silence check are independent: a refused dispatch still reads the runs, since a guard that
+// cannot be triggered is exactly the one that goes silent. Answers what both found; throws, after logging each
+// failure at ERROR, when either failed, so the caller answers 500 and Cloud Scheduler records a failed execution.
 export function createGuardTrigger({ github, say, now = Date.now }) {
   return async function guard() {
-    let dispatched;
+    let gh;
     try {
-      const gh = await github();
-      dispatched = await gh.dispatchWorkflow(GUARD.repo, GUARD.workflow, { ref: GUARD.ref });
+      gh = await github();
     } catch (err) {
-      say('ERROR', `pool-guard dispatch failed: ${err.message}`, { event: 'pool-guard-dispatch-failed' });
+      say('ERROR', `pool-guard trigger failed: no GitHub client: ${err.message}`, { event: 'pool-guard-dispatch-failed' });
       throw err;
     }
-    const out = { dispatched: dispatched?.workflow_run_id ?? null };
-    let last;
+    const out = {};
+    const failures = [];
     try {
-      last = await (await github()).latestRun(GUARD.repo, GUARD.workflow, 'success');
+      out.dispatched = (await gh.dispatchWorkflow(GUARD.repo, GUARD.workflow, { ref: GUARD.ref }))?.workflow_run_id ?? null;
     } catch (err) {
-      // The dispatch went through, so a guard run is on its way; only the silence check is lost this time.
-      say('WARNING', `pool-guard dispatched, but its last successful run is unreadable: ${err.message}`, out);
-      return out;
+      say('ERROR', `pool-guard dispatch failed: ${err.message}`, { event: 'pool-guard-dispatch-failed' });
+      failures.push(`dispatch: ${err.message}`);
     }
-    // updated_at is when a completed run last changed: its completion.
-    const completed = last ? last.updated_at : null;
-    out.lastSuccess = last ? { id: last.id, completed } : null;
-    const silentMs = completed ? now() - Date.parse(completed) : Infinity;
-    if (silentMs > GUARD_SILENT_MS) {
-      const since = completed ? `since ${completed}` : 'ever';
-      say('ERROR', `pool-guard silent: no successful run ${since}; expired EC2 instances, volumes and snapshots are not being reaped`,
-        { event: 'pool-guard-silent', ...out });
-    } else {
-      say('INFO', `pool-guard dispatched; last success ${completed}`, out);
+    try {
+      const last = await gh.latestRun(GUARD.repo, GUARD.workflow, { status: 'success', branch: GUARD.ref });
+      // updated_at is when a completed run last changed: its completion.
+      const completed = last ? last.updated_at : null;
+      out.lastSuccess = last ? { id: last.id, completed } : null;
+      if (!completed || now() - Date.parse(completed) > GUARD_SILENT_MS) {
+        say('ERROR', `pool-guard silent: no successful run on ${GUARD.ref} ${completed ? `since ${completed}` : 'ever'}; ` +
+          'expired EC2 instances, volumes and snapshots are not being reaped', { event: 'pool-guard-silent', ...out });
+      } else if (!failures.length) {
+        say('INFO', `pool-guard dispatched; last success ${completed}`, out);
+      }
+    } catch (err) {
+      say('ERROR', `pool-guard runs unreadable: ${err.message}`, { event: 'pool-guard-check-failed', ...out });
+      failures.push(`runs: ${err.message}`);
     }
+    if (failures.length) throw new Error(failures.join('; '));
     return out;
   };
 }
