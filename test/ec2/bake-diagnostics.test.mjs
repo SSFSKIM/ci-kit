@@ -139,3 +139,10 @@ for (const log_tail of [undefined, null, {}, [], 5, '', 'x'.repeat(9000)]) test(
   const message = await failedBake({value:'failed:compact', diagnostic:{...baseDiagnostic,log_tail}}, {builder:true});
   assert.equal(message, 'builder failed: failed:compact '+JSON.stringify(baseDiagnostic));
 });
+test('a builder step failure points to its S3 tail without echoing it', async () => {
+  const message = await failedBake({ value: 'failed:apt', diagnostic: { reason: 'builder-failed', exit_status: 100,
+    log_tail: 'E: private apt output\nghs_' + 'A'.repeat(36) + '\n' } }, { builder: true });
+  assert.equal(message, 'builder failed: failed:apt ' + JSON.stringify({ reason: 'builder-failed', exit_status: 100, log_tail: `${logLocation} (2 lines)` }));
+  const plain = await failedBake({ value: 'failed:job-images' }, { builder: true });
+  assert.equal(plain, 'builder failed: failed:job-images {"reason":"unexpected"}', 'every preparation step is a known outcome');
+});

@@ -25,7 +25,7 @@ test('serialized image diagnostics retain known reasons, fixed paths and filesys
 
 test('compact diagnostics retain only a finite phase and numeric shell failure status', () => {
   for (const phase of ['compact', 'disk-validation', 'boot-copy', 'copy-root-setup', 'source-inventory',
-    'root-copy', 'root-recovery', 'target-inventory', 'root-comparison', 'root-fsck', 'copy-root-cleanup', 'disk-verification']) {
+    'root-copy', 'root-copy-retry', 'root-recovery', 'target-inventory', 'root-comparison', 'root-fsck', 'copy-root-cleanup', 'disk-verification']) {
     assert.equal(formatDiagnostic({ reason: 'compact-failed', phase, exit_status: 124, path: 'secret', command: 'secret',
       stderr: 'secret', url: 'https://reports.example/?signature=secret' }),
     JSON.stringify({ reason: 'compact-failed', phase, exit_status: 124 }));
@@ -103,4 +103,25 @@ test('structured diagnostic formatting never admits tool text without a trusted 
     assert.equal(formatDiagnostic({...base,log_tail}), JSON.stringify(base));
   }
   assert.equal(formatDiagnostic({...base,phase:'forged',log_tail:'private'}, {logLocation:'s3://trusted/report'}), '{"reason":"unexpected"}');
+});
+
+test('a builder step failure keeps only its numeric status, and its tail only as a pointer to a trusted location', () => {
+  const tail = 'E: Could not get lock /var/lib/dpkg/lock-frontend\nghs_' + 'A'.repeat(36) + '\n';
+  assert.equal(formatDiagnostic({ reason: 'builder-failed', exit_status: 100, log_tail: tail, step: 'secret', stderr: 'secret' }),
+    '{"reason":"builder-failed","exit_status":100}');
+  assert.equal(formatDiagnostic({ reason: 'builder-failed', exit_status: 100, log_tail: tail }, { logLocation: 's3://trusted/builder.json' }),
+    '{"reason":"builder-failed","exit_status":100,"log_tail":"s3://trusted/builder.json (2 lines)"}');
+  for (const exit_status of [0, -1, 256, 1.5, '100', null, undefined, 'secret'])
+    assert.equal(formatDiagnostic({ reason: 'builder-failed', exit_status, log_tail: tail }, { logLocation: 's3://trusted/builder.json' }),
+      '{"reason":"unexpected"}');
+});
+
+test('a root copy tried twice keeps both attempts, each under the copy bound', () => {
+  const input = { elapsed_seconds: 400, exit_status: 0, phases: {
+    'root-copy': { elapsed_seconds: 3, exit_status: 1 }, 'root-copy-retry': { elapsed_seconds: 201, exit_status: 0, bound_seconds: 480 } } };
+  assert.equal(formatCompactTrace(input), JSON.stringify({ elapsed_seconds: 400, exit_status: 0, phases: {
+    'root-copy': { elapsed_seconds: 3, exit_status: 1, bound_seconds: 480 },
+    'root-copy-retry': { elapsed_seconds: 201, exit_status: 0, bound_seconds: 480 } } }));
+  assert.equal(formatCompactTrace({ ...input, phases: { 'root-copy-retry': { elapsed_seconds: 1, exit_status: 0, bound_seconds: 960 } } }),
+    '{"reason":"unexpected"}');
 });

@@ -7,12 +7,46 @@ REPORT=$(printf '%s' '__REPORT__' | base64 -d)
 WARM_TOKEN=$(printf '%s' '__TOKEN__' | base64 -d)
 export DEBIAN_FRONTEND=noninteractive HOME=/root
 step=start
+# The failure report carries a bounded tail of this script's output (cloud-init's output log, still on disk here) for
+# the S3 report only; the controller prints a pointer to it. python3 is the one interpreter Canonical's image has before
+# step apt. The GitHub token, also its basic-auth form, and the report URL are redacted, even after WARM_TOKEN is unset,
+# and so are both as user-data carries them (base64), which a traced line of this script would print.
+# shellcheck disable=SC2016
+FAILURE_REPORT='
+import base64, json, sys
+step, status, path = sys.argv[1:]
+token, url = sys.stdin.buffer.read().split(b"\0", 1)
+values, secrets = [token], {url, base64.b64encode(token), base64.b64encode(url)}
+try:
+    owners = json.loads(token)
+    if isinstance(owners, dict): values += [v.encode() for v in owners.values() if isinstance(v, str)]
+except ValueError: pass
+for v in values: secrets |= {v, base64.b64encode(b"x-access-token:" + v)}
+try:
+    with open(path, "rb") as f: data = f.read()
+except OSError: data = b""
+for s in sorted(secrets - {b""}, key=len, reverse=True): data = data.replace(s, b"[redacted]")
+# Whole lines only, within 8 KiB and 40 lines, as boundCompactLogTail keeps them.
+if len(data) > 8192:
+    newline = data.find(b"\n", len(data) - 8193)
+    data = data[newline + 1:] if newline >= 0 else b""
+lines = data.split(b"\n")
+tail = b"\n".join(lines[-41:] if data.endswith(b"\n") else lines[-40:]).decode("utf-8", "replace")
+diagnostic = {"reason": "builder-failed", "exit_status": int(status), **({"log_tail": tail} if tail else {})}
+print(json.dumps({"value": "failed:" + step, "diagnostic": diagnostic}))
+'
 finish() {
-  local status=$?
+  local status=$? report
   set +e
   if [ "$status" -ne 0 ]; then
     echo "ci-kit bake: failed at $step"
-    curl -sf --max-time 20 -X PUT --data "{\"value\":\"failed:$step\"}" "$REPORT" >/dev/null
+    report=$(printf '%s\0%s' "$(printf '%s' '__TOKEN__' | base64 -d)" "$REPORT" |
+      timeout 20 python3 -I -c "$FAILURE_REPORT" "$step" "$status" /var/log/cloud-init-output.log) || report=
+    if [ -n "$report" ]; then
+      printf '%s' "$report" | curl -sf --max-time 20 -X PUT --data-binary @- "$REPORT" >/dev/null
+    else
+      curl -sf --max-time 20 -X PUT --data "{\"value\":\"failed:$step\"}" "$REPORT" >/dev/null
+    fi
     rm -rf /run/ci-kit-bake
     sync
     poweroff

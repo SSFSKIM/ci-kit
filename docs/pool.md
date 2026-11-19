@@ -721,7 +721,7 @@ smoke, not a job's hash comparison: retain both the console and Actions evidence
 
 **Hourly declaration check (GCE and EC2).** `ci-kit-bake-check` runs the same source as the bake, with
 `CI_KIT_BAKE_IF_STALE=1`, as `ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com`. Its timeout is the bake's
-(180 minutes plus 120 per configured EC2 account). `ci-kit-bake-check-hourly` invokes it at minute 23 of every hour,
+(180 minutes plus 150 per configured EC2 account). `ci-kit-bake-check-hourly` invokes it at minute 23 of every hour,
 UTC. The weekly bake and manual `ci-kit-bake` executions remain unconditional; their job and weekly cadence are unchanged.
 
 Before comparing anything, the check lists **both** jobs' executions, excluding itself. A pending/running execution
@@ -1024,6 +1024,28 @@ instance profile and terminate on shutdown. Launcher/bake credentials come from 
 four-hour STS federation, never stored AWS keys. Cost Explorer alone uses/signs for us-east-1. Adding an
 account requires its entry and its own `ec2/setup.sh` run; the bake, billing reader and guard then cover it.
 The builder uses on-demand only to stop for CreateImage; there are no on-demand EC2 job candidates.
+
+**The EC2 bake's evidence and second chances.** The builder (`ec2/bake/builder.sh`, then `finalize.sh`) PUTs a JSON
+report to `s3://<report_bucket>/reports/bake-<run>/builder.json`. Free text from the VM stays in that report: the
+controller prints structured fields and the report's location (`ec2/vm/diagnostics.mjs` is the vocabulary).
+
+- A failed builder step reports `failed:<step>` with `{"reason":"builder-failed","exit_status":N,"log_tail":…}`: the last
+  40 whole lines (8 KiB) of cloud-init's output log, with the GitHub token, its basic-auth form and the report URL
+  redacted. The controller's error names the report and the tail's line count. If building the tail fails, the plain
+  `failed:<step>` is still sent.
+- `copy-root.sh` copies the frozen root with partclone. When partclone refuses it with `bitmap free count err` (the
+  superblock's free count read as it was before the freeze; three bakes of six on 2026-11-19, cause unknown), it records
+  read-only evidence while root is still frozen (kernel, the superblock free count through the loop alias buffered and
+  direct and from the source partition direct and buffered, the alias's direct-I/O flag and openers), drops the alias's
+  cached blocks (`blockdev --flushbufs`) and runs partclone once more as phase `root-copy-retry`; the content
+  inventories and `e2fsck -fn` still judge the copy. A timeout or any other failure is not retried. If the second
+  attempt fails, the evidence and its error are the failure's log tail; if it passes, the evidence is the ok report's
+  `root_copy_retry.log_tail`, and the controller logs `builder copied the root on a second partclone attempt` with
+  the report's location.
+- A smoke or real-check spot launch that every zone refuses, at least one for `InsufficientInstanceCapacity`, is tried
+  again over all zones every minute for up to fifteen minutes (one log line per round) before the bake gives up and
+  removes its image. Each send has its own `ClientToken`, `ci-kit-deadline` and guest deadline. The builder's launch
+  makes one pass over the zones.
 
 ### Enabling, demoting and disabling
 

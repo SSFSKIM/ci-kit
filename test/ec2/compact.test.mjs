@@ -21,7 +21,10 @@ lsblk() {
 blockdev() {
   if [[ "$*" == *getsize64* ]]; then
     if [ "$CASE" = size ] && [[ "$*" == *nvme1n1* ]]; then echo 10; else echo 50; fi
-  else echo "CALL blockdev $*"; fi
+  else
+    echo "CALL blockdev $* frozen=\${FROZEN:-0}"
+    if [[ "$*" == *--flushbufs* ]]; then [ "$CASE" != bitmap-flush-timeout ] || return 124; : > "$STATE/flushed"; fi
+  fi
 }
 wipefs() { [ "$CASE" != occupied ] || echo ext4; return 0; }
 systemctl() { echo "CALL systemctl $*"; }
@@ -38,7 +41,18 @@ rmdir() {
 }
 udevadm() { :; }
 sgdisk() { echo "CALL sgdisk $*"; if [[ "$*" == *'-v'* ]]; then [ "$CASE" != disk-verify-failure ] || return 13; echo 'No problems found.'; fi; }
-dd() { echo "CALL dd $*"; [ "$CASE" != boot-copy-failure ] || return 23; }
+dd() {
+  # A superblock read: through the loop alias it is stale until its cached blocks are flushed.
+  if [[ "$*" == *'bs=4096 count=1'* ]]; then
+    local free=9851892 arg out=
+    for arg in "$@"; do case "$arg" in of=*) out=\${arg#of=};; esac; done
+    if [ "$CASE" = bitmap-probe-timeout ] && [[ "$*" == *if=/dev/nvme0n1p1* ]]; then return 124; fi
+    if [[ "$*" == *if=/dev/loop7* && "$*" != *iflag=direct* ]] && [ ! -e "$STATE/flushed" ]; then free=11915999; fi
+    node -e 'const b = Buffer.alloc(4096); b.writeUInt32LE(Number(process.argv[1]), 1036); require("node:fs").writeFileSync(process.argv[2], b)' "$free" "$out"
+    return
+  fi
+  echo "CALL dd $*"; [ "$CASE" != boot-copy-failure ] || return 23;
+}
 sync() { :; }
 mktemp() {
   echo "CALL mktemp $*" >&2
@@ -82,6 +96,10 @@ write_log() {
   done
   [ -n "$log" ] || return 1
   case "$CASE" in
+    bitmap-*)
+      printf '%s\\n' 'Partclone v0.3.27 http://partclone.org' \
+        'Calculating bitmap... Please wait... extfsclone.c: bitmap free count err, partclone get free:9851892 but extfs get 11915999.' \
+        'Please run fsck to check and repair the file system' > "$log" ;;
     diagnostic-*)
       if [ "$CASE" = diagnostic-missing ]; then return 0; fi
       if [ "$CASE" = diagnostic-empty ]; then : > "$log"; return 0; fi
@@ -115,6 +133,11 @@ partclone.ext4() {
   [ "\${FROZEN:-0}" = 1 ] || return 2
   if [ "$CASE" = timed-copy ]; then node -e 'setTimeout(() => {}, 1100)'; fi
   case "$CASE" in
+    bitmap-retry|bitmap-retry-fails|bitmap-probe-timeout|bitmap-flush-timeout)
+      if [ "$CASE" != bitmap-retry-fails ] && [ -e "$STATE/attempted" ]; then return 0; fi
+      : > "$STATE/attempted"; write_log "$@"; return 1;;
+    bitmap-timeout) write_log "$@"; return 124;;
+    bitmap-killed) write_log "$@"; return 137;;
     diagnostic-later) write_log "$@"; return 0;;
     diagnostic-timeout-cleanup) write_log "$@"; return 124;;
     diagnostic-*) write_log "$@"; return 1;;
@@ -128,7 +151,7 @@ timeout() {
       if [ "$CASE" = source-timeout ] && [ "\${FROZEN:-0}" = 1 ]; then return 124; fi
       if [ "$CASE" = target-timeout ] && [ "\${FROZEN:-0}" = 0 ]; then return 124; fi
     fi
-  else echo "CALL timeout $*"; fi
+  else echo "CALL timeout $*" >&3; fi
   shift 2
   "$@"
 }
@@ -142,7 +165,7 @@ e2fsck() {
 }
 fsck.fat() { echo "CALL fsck.fat $*"; }
 # Run the real nested Bash processes, with only their Linux command boundary replaced.
-export -f write_log tail find mount umount rmdir mktemp losetup sync fsfreeze timeout partclone.ext4 partclone.fat e2fsck fsck.fat lsblk
+export -f write_log tail find mount umount rmdir mktemp losetup sync fsfreeze timeout partclone.ext4 partclone.fat e2fsck fsck.fat lsblk blockdev dd
 . "$1"
 `;
 const script = new URL('../../ec2/bake/compact.sh', import.meta.url).pathname;
@@ -150,15 +173,18 @@ const run = (scenario = 'ok', handoff = 'enabled') => {
   const dir = mkdtempSync(join(tmpdir(), 'ci-kit-compact-diagnostic-'));
   const diagnostic = join(dir, handoff === 'unwritable' ? 'missing/diagnostic' : 'diagnostic');
   const trace = join(dir, handoff === 'unwritable' ? 'missing/trace' : 'trace');
+  const retry = join(dir, 'retry');
   try {
     const result = spawnSync('bash', ['-c', driver, 'fixture', script], {
-      encoding: 'utf8', env: { ...process.env, CASE: scenario,
+      encoding: 'utf8', env: { ...process.env, CASE: scenario, STATE: dir,
+        CI_KIT_COMPACT_RETRY: handoff === 'disabled' ? undefined : retry,
         CI_KIT_COMPACT_DIAGNOSTIC: handoff === 'disabled' ? undefined : diagnostic,
         CI_KIT_COMPACT_TRACE: handoff === 'disabled' ? undefined : trace },
     });
     const rootOutput = result.stdout.slice(result.stdout.indexOf('CALL mount --bind'));
     return { ...result, rootOutput, diagnostic: existsSync(diagnostic) ? JSON.parse(readFileSync(diagnostic, 'utf8')) : undefined,
       logTail: existsSync(`${diagnostic}.log`) ? readFileSync(`${diagnostic}.log`, 'utf8') : undefined,
+      retryLog: existsSync(retry) ? readFileSync(retry, 'utf8') : undefined,
       trace: existsSync(trace) ? readFileSync(trace, 'utf8').trim().split('\n').map(line => {
         const [phase, elapsed, status] = line.split(' ');
         return { phase, elapsed_seconds: Number(elapsed), exit_status: Number(status) };
@@ -182,6 +208,7 @@ for (const [scenario, phase, exit_status] of [
   ['source-timeout', 'source-inventory', 124],
   ['copy-failure', 'root-copy', 1],
   ['copy-timeout', 'root-copy', 124],
+  ['bitmap-retry-fails', 'root-copy-retry', 1],
   ['recovery-failure', 'root-recovery', 1],
   ['target-hash-failure', 'target-inventory', 26],
   ['target-timeout', 'target-inventory', 124],
@@ -417,4 +444,69 @@ test('a full line exactly at the byte bound is preserved', () => {
   const r = run('diagnostic-boundary');
   assert.equal(r.status, 1);
   assert.equal(r.logTail, ' '.repeat(8190) + 'x\n');
+});
+
+// 2026-11-19: partclone refused three frozen roots of six, its superblock free count one from before the freeze.
+const rootCopies = (r) => r.stdout.split('\n').filter(line => line.startsWith('CALL partclone.ext4 ') && line.endsWith('--output /dev/nvme1n1p1'));
+const evidence = (text, when, loop) => new RegExp(`compact: ${when}: loop /dev/loop7 dio=1; superblock free blocks: loop ${loop}, `
+  + 'loop direct 9851892, source direct 9851892, source buffered 9851892; holders: ');
+test('a bitmap free-count refusal is copied again after flushing the frozen loop, its evidence handed to the report', () => {
+  const r = run('bitmap-retry');
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(r.diagnostic, undefined);
+  const copies = rootCopies(r), lines = r.stdout.split('\n');
+  assert.equal(copies.length, 2);
+  const flush = lines.findIndex(line => line === 'CALL blockdev --flushbufs /dev/loop7 frozen=1');
+  assert.ok(lines.findIndex(line => line.includes('fsfreeze -f /')) < lines.indexOf(copies[0]));
+  assert.ok(lines.indexOf(copies[0]) < flush && flush < lines.lastIndexOf(copies[1]), r.stdout);
+  assert.ok(lines.lastIndexOf(copies[1]) < lines.findIndex(line => line.includes('fsfreeze -u /')));
+  assert.notEqual(copies[0].match(/--logfile (\S+)/)[1], copies[1].match(/--logfile (\S+)/)[1], 'the first refusal stays readable');
+  assert.deepEqual(r.trace.filter(e => e.phase.startsWith('root-copy')).map(e => [e.phase, e.exit_status]),
+    [['root-copy', 1], ['root-copy-retry', 0]]);
+  assert.match(r.retryLog, /^compact: root-copy attempt 1 exit 1: .*bitmap free count err, partclone get free:9851892 but extfs get 11915999\.\n/);
+  assert.match(r.retryLog, /\ncompact: kernel \S+\n/);
+  assert.match(r.retryLog, evidence(r.retryLog, 'before flush', 11915999));
+  assert.match(r.retryLog, evidence(r.retryLog, 'after flush', 9851892));
+  assert.match(r.retryLog, /\ncompact: root-copy attempt 2 exit 0\n$/);
+  assert.ok(r.retryLog.split('\n').length <= 41);
+});
+
+test('a bitmap refusal that repeats fails with both errors and the evidence in the bounded tail', () => {
+  const r = run('bitmap-retry-fails');
+  assert.equal(r.status, 1);
+  assert.equal(rootCopies(r).length, 2);
+  assert.equal(r.retryLog, undefined, 'the success handoff is only for a copy that passed');
+  assert.match(r.logTail, /^compact: root-copy attempt 1 exit 1: .*bitmap free count err/);
+  assert.match(r.logTail, evidence(r.logTail, 'before flush', 11915999));
+  assert.match(r.logTail, evidence(r.logTail, 'after flush', 9851892));
+  assert.match(r.logTail, /\nCalculating bitmap\.\.\. .*bitmap free count err.*\nPlease run fsck .*\ncompact: root-copy attempt 2 exit 1\n$/);
+  assert.ok(r.logTail.split('\n').length <= 41 && Buffer.byteLength(r.logTail) <= 8192);
+  assert.ok(r.stdout.indexOf('CALL fsfreeze -u /') < r.stdout.indexOf('CALL tail'));
+});
+
+for (const scenario of ['copy-failure', 'copy-timeout', 'bitmap-timeout', 'bitmap-killed']) test(`${scenario} is not copied again`, () => {
+  const r = run(scenario);
+  assert.notEqual(r.status, 0);
+  assert.equal(rootCopies(r).length, 1);
+  assert.doesNotMatch(r.stdout, /--flushbufs/);
+  assert.equal(r.diagnostic.phase, 'root-copy');
+});
+
+test('every frozen probe is bounded; a probe past its deadline is recorded and the copy goes on', () => {
+  const r = run('bitmap-probe-timeout');
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(rootCopies(r).length, 2);
+  assert.match(r.retryLog, /source direct timed out, source buffered timed out; holders: /);
+  for (const command of ['dd', 'blockdev --flushbufs', 'losetup --noheadings', 'uname', 'bash -c'])
+    assert.match(r.stdout, new RegExp(`CALL timeout --kill-after=2s 5s ${command}`), command);
+});
+
+test('a flush that does not complete leaves the first failure standing, with the evidence gathered so far', () => {
+  const r = run('bitmap-flush-timeout');
+  assert.equal(r.status, 1);
+  assert.equal(rootCopies(r).length, 1);
+  assert.match(r.logTail, evidence(r.logTail, 'before flush', 11915999));
+  assert.match(r.logTail, /\ncompact: flush of \/dev\/loop7 exit 124; no second attempt\n$/);
+  assert.doesNotMatch(r.logTail, /after flush/);
+  assert.ok(r.stdout.indexOf('CALL fsfreeze -u /') < r.stdout.indexOf('CALL tail'));
 });
