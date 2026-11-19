@@ -50,7 +50,9 @@ store, print a weekly report, and show `ci-gate` printing the context lines.
   repository's visibility is: the store is the private sandbox's branch, and every log line this code prints in
   Actions carries counts only (the parent spec's rule).
 - **No new credentials or permissions.** The collector uses the ci-kit GitHub App with the permissions it has
-  (Actions read, Contents read); local commands use `gh`'s token. A design step that needs more is redesigned, not
+  (Actions read, Contents read) where the App is installed, and the sandbox run's own `GITHUB_TOKEN` for a public
+  repository it is not installed on (doperpowers, cua: public data, no grant; `token` in `history/repos.json`); local
+  commands use `gh`'s token. A design step that needs more is redesigned, not
   granted (M1's preflight proves each read with the token the daily run has).
 - **Not a report of time saved.** Four shards of eight minutes are 32 runner minutes and eight minutes of
   anyone's wait. The unit is runner minutes by lane, with the Mac's minutes shown apart because the one Mac is the
@@ -87,8 +89,9 @@ store, print a weekly report, and show `ci-gate` printing the context lines.
   head branch's name (a name alone can be reused by a later pull request).
 - **Lane.** Where a job ran: `pool-gce`, `pool-ec2`, `mini-host`, `mini-guest`, `hosted-linux`, `hosted-macos`, or
   `manual-host` / `manual-guest` for the hand-run Mac gate.
-- **Landing.** One update of a default branch: a push event with its `before` and `after` commits, from the
-  repository activity API. What landed is the difference between the two, whatever the tip commit alone changed.
+- **Landing.** One update of a default branch: an activity event (`push`, `force_push`, `pr_merge`,
+  `merge_queue_merge`; a merge by the pull request button is `pr_merge`, not `push`) with its `before` and `after`
+  commits, from the repository activity API. What landed is the difference between the two, whatever the tip commit alone changed.
 - **Tree key.** A tree's identity for comparing a landing with a gated tree: the tree id, unless the repository's
   entry in `history/repos.json` gives a path policy. MAWS's policy is its own (`.github/scripts/gate-affected.mjs`):
   `docs/` is outside the gates' reach except `docs/doperpowers/evidence/`, which a unit test reads. The key is then
@@ -215,10 +218,14 @@ only, a rerun keeps its run's creation date, and a filtered listing stops at 1,0
   written; an attempt still running stays open and is read again next pass. About 35 requests a repository a pass.
 - **Jobs.** One REST call per (run, attempt): the attempt's jobs, 100 a page (`lib/github.mjs` `attemptJobs`,
   which the per-test pass calls today for the same attempts). It is the only source that names a job's runner, its
-  labels and the attempt a job ran in: in the listing of a failed-jobs rerun, a shard carried over from the
-  earlier attempt keeps that attempt's number, which is how `copied_from` is read. The pass fetches each attempt's
+  labels and the attempt a job ran in. In the listing of a failed-jobs rerun every job carries the new attempt's
+  number and a new id; a job carried over from an earlier attempt is the one that completed before it was created
+  (`completed_at < created_at`, its times, runner and steps copied), and `copied_from` is the latest earlier attempt
+  whose job of the same name is not itself a copy (the preflight, Surprises & Discoveries). The pass fetches each attempt's
   jobs once, for the job lines and the per-test pass both, and records the attempt in `attempts.json`.
-  Annotations are read for unsuccessful jobs only, one call each (`annotations`). *Rejected:* GraphQL check runs,
+  Annotations are read for unsuccessful jobs only, one call each (`annotations`); where they are refused (a private
+  repository: the endpoint needs Checks read, which the App lacks) the job's log is read instead, one call, matched
+  and never printed, and a job with neither keeps `annotations: []`. *Rejected:* GraphQL check runs,
   which this spec's first revision chose for their batching: a check run has steps and annotations but no runner,
   no labels and no attempt of its own, so neither the lane nor a copied shard can be read from it.
 - **Discovery once a pass.** The sandbox workflow calls the collector in a loop of batches. The first call of a
@@ -624,6 +631,20 @@ inputs M0 added.
   only be read from the REST listing of an attempt's jobs. Evidence: GitHub's GraphQL reference for `CheckRun`;
   the measurement's query (`gate-observe-1119/scripts/common.py`) read names, outcomes and times only.
 
+- Observation: M1's preflight (App token, on the pool; sandbox `ledger-preflight.yml`, runs 44498395656 and
+  44499134717). MAWS, manim-master and ci-kit: the run listing by creation day, both attempts' jobs of a failed-jobs
+  rerun, the default branch's activity, the tree-only mirror (at most 19 MB and 2 s), a nonce commit fetched by id
+  after its ref was gone, and `refs/pull/<n>/head` all read. Four things the design had wrong or did not know:
+  (1) a failed-jobs rerun's listing gives every job the new attempt's number and a new id; a carried-over job is
+  told only by `completed_at < created_at` (MAWS 44468141412: 16 of 18 jobs; manim-master 42450145084: 4 of 6;
+  ci-kit 40122425522: 1 of 3). (2) The App is not installed on doperpowers or cua; every read fails at minting.
+  (3) Annotations answer 403 on the private manim-master (Checks read needed); its job logs read. A lost runner's
+  job has no log (404). (4) A merge by the pull request button is activity `pr_merge`, not `push`: ci-kit's newest
+  `push` on main is 2026-10-21. Also: the run listing carries the head's tree, message and pull requests, so
+  trailers need no per-run call; MAWS's `static` summary and `plan`, `docs`, `e2e:cross-build` run on hosted
+  runners (MAWS is public, so the billing lock does not stop them).
+  Evidence: the runs' logs, saved under `~/.local/share/ci-kit/gate-ledger/`; M1's report.
+
 ## Decision Log
 
 - Decision: verification. The spec is reviewed by `doperpowers:adversarial-reviewer` for design and buildability
@@ -661,6 +682,17 @@ inputs M0 added.
   found faults in what the first revision added, each with a concrete counterexample; those are now pins, and a
   third pass would review their wording, which the milestone reviews do against code.
   Date/Author: 2026-11-19, CI-opt.
+
+- Decision: the preflight's four findings resolved in place (2026-11-19, M1). A copy is read by
+  `completed_at < created_at`, and `copied_from` is the latest earlier attempt with a non-copied job of that name.
+  doperpowers and cua, public, are read with the sandbox run's `GITHUB_TOKEN` (`token: "actions"` in
+  `history/repos.json`, proved by the preflight before use), not by adding them to the App's installation: the App
+  holds Actions write, Administration write and Issues write, so installing it there is a grant on two more
+  repositories, which "What it must not be" excludes. Where annotations are refused the log is read; where neither
+  exists rule 1 rests on phase and corroboration, which leaves more `unattributed`, the safe direction. A landing
+  is any of the four activity types that move a branch. Until this branch merges, the daily scheduled run runs
+  ci-kit `main`, so the ledger's collections in this execution are dispatched with `ci-kit-ref=gate-ledger`.
+  Date/Author: 2026-11-19, the executing session.
 
 ## Outcomes & Retrospective
 
