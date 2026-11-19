@@ -2,7 +2,7 @@
 // The gate ledger's preflight (ci-kit docs/doperpowers/specs/2026-11-19-gate-ledger-design.md, "Reading GitHub cheaply
 // and completely"): proves, with the token the daily collection has, every read the ledger rests on.
 //   node history/preflight.mjs --plan '<json>'
-// The plan names, per repository: its gate workflow file, its default branch, candidate runs that were rerun (`reruns`),
+// The plan names, per repository (with `token: "actions"` for one read with the run's GITHUB_TOKEN): its gate workflow file, its default branch, candidate runs that were rerun (`reruns`),
 // runs whose ref may be gone (`nonce`), and runs with a failed job (`failed`). For each repository it prints:
 //   - the run listing of one UTC day by creation (total_count, and whether a run carries head_commit and pull_requests);
 //   - both attempts' jobs of the first candidate rerun that carried a job over, and how the later listing marks it;
@@ -41,10 +41,10 @@ async function attempt(label, fn) {
 }
 
 async function preflightRepo(entry) {
-  const { repo, workflow, branch, reruns = [], nonce = [], failed = [], day = '2026-11-18' } = entry;
-  const token = tokenFor(repo);
+  const { repo, workflow, branch, reruns = [], nonce = [], failed = [], day = '2026-11-18', token: kind = 'app' } = entry;
+  const token = tokenFor(repo, kind);
   const gh = createGitHub(token);
-  say(`== ${repo}`);
+  say(`== ${repo} (token ${kind})`);
 
   // 1. The listing.
   await attempt('listing', async () => {
@@ -150,6 +150,10 @@ async function preflightRepo(entry) {
     rmSync(root, { recursive: true, force: true });
     const s = gh.stats();
     say(`  calls ${s.requests}, budget ${s.remaining}/${s.limit}`);
+    await attempt('rate limit', async () => {
+      const core = await gh.rateLimit();
+      say(`  rate_limit core: ${core.remaining}/${core.limit}, used ${core.used}`);
+    });
   }
 }
 

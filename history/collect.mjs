@@ -428,15 +428,20 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
 export const formatCounts = (repo, c, errors) =>
   `${repo}: artifacts ${c.artifacts}, lines ${c.lines} (present ${c.present}, missing ${c.missing}, unparseable ${c.unparseable}, rejected ${c.rejected}), relinked ${c.relinked}, failures ${c.failures}, errors ${errors}, files written ${c.written}`;
 
-export function tokenFor(repo) {
+// A repository's token: the ci-kit App's, scoped to it and read-only, when CI_KIT_APP_ID and CI_KIT_APP_KEY are set;
+// for a public repository the App is not installed on (`token: "actions"` in history/repos.json), the run's own
+// GITHUB_TOKEN, which reads public data and grants nothing; else gh's.
+export function tokenFor(repo, kind = 'app') {
   const name = repo.split('/')[1];
   const appId = process.env.CI_KIT_APP_ID?.trim();
   const pem = process.env.CI_KIT_APP_KEY;
-  if (appId && pem) {
+  const actions = process.env.GITHUB_TOKEN?.trim();
+  if (kind === 'actions' && actions) return actions;
+  if (kind !== 'actions' && appId && pem) {
     return createAppTokens({ appId, pem, repo, scope: { repositories: [name], permissions: { actions: 'read', contents: 'read' } } });
   }
   const token = ghToken();
-  if (!token) throw new Error('history: no credentials: set CI_KIT_APP_ID and CI_KIT_APP_KEY, or log gh in');
+  if (!token) throw new Error('history: no credentials: set CI_KIT_APP_ID and CI_KIT_APP_KEY (or GITHUB_TOKEN for a repository read with it), or log gh in');
   return token;
 }
 
