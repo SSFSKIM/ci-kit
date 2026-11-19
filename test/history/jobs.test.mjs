@@ -66,6 +66,7 @@ test('a lane is read from the runner and the labels, and never guessed', () => {
   const job = (runner_name, labels) => ({ runner_name, labels });
   assert.equal(laneOf(job('ci-kit-gce-ht8psek6d8', ['self-hosted', 'ci-kit-pool', 'cpus-8'])), 'pool-gce');
   assert.equal(laneOf(job('ci-kit-ec2-a1b2c3', ['self-hosted', 'ci-kit-pool', 'cpus-8'])), 'pool-ec2');
+  assert.equal(laneOf(job('ci-kit-pool-170701310-9', ['self-hosted', 'ci-kit-pool'])), 'pool-hetzner');
   assert.equal(laneOf(job('ci-kit-mac-mini', ['self-hosted', 'ci-kit-mac'])), 'mini-host');
   assert.equal(laneOf(job('ci-kit-mac-mini-2', ['ci-kit-mac-shared'])), 'mini-host');
   assert.equal(laneOf(job('ci-kit-mac-mini-maws-vm-job-1-20261119T054617Z', ['ci-kit-mac-solo'])), 'mini-guest');
@@ -182,6 +183,8 @@ test('a job line: the fields, a copy without minutes, and the platform kinds onl
   assert.equal(line.lane, 'pool-gce');
   assert.equal(line.gates, 'static,unit,probes,e2e:desk-web');
   assert.equal(line.tree, 't'.repeat(40));
+  // A job cancelled while queued spans the queue, not a run: it has no runner and no minutes.
+  assert.equal(jobLine(facts, { ...job, runner_name: null, conclusion: 'cancelled' }, { copied_from: null, annotations: [] }, MAWS).minutes, 0);
   const copy = jobLine(facts, { ...job, id: 135000000002, created_at: '2026-11-19T09:00:00Z' }, { copied_from: 1, annotations: [] }, MAWS);
   assert.equal(copy.copied_from, 1);
   assert.equal(copy.minutes, null);

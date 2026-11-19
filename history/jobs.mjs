@@ -51,6 +51,7 @@ export function laneOf(job) {
   const labels = (job.labels ?? []).map((l) => l.toLowerCase());
   if (name.startsWith('ci-kit-gce-')) return 'pool-gce';
   if (name.startsWith('ci-kit-ec2-')) return 'pool-ec2';
+  if (/^ci-kit-pool-\d+-\d+$/.test(name)) return 'pool-hetzner'; // the pool's first backend, retired 2026-10 (ci-kit #167)
   if (name.startsWith('ci-kit-mac-')) return name.includes('-maws-vm-') ? 'mini-guest' : 'mini-host';
   if (name === '' || name.startsWith('GitHub Actions ')) {
     if (labels.some((l) => l.startsWith('macos-'))) return 'hosted-macos';
@@ -159,8 +160,10 @@ export function runFacts(run, attempt, { tested, treeKey }, entry, conclusion = 
   };
 }
 
+// A job's runner minutes: none for a job that never got a runner (cancelled or refused while queued, when GitHub's
+// times span the queue, not a run).
 const minutesOf = (job) => {
-  if (!job.started_at || !job.completed_at) return 0;
+  if (!job.runner_name || !job.started_at || !job.completed_at) return 0;
   return Math.max(0, Math.round((Date.parse(job.completed_at) - Date.parse(job.started_at)) / 6000) / 10);
 };
 
