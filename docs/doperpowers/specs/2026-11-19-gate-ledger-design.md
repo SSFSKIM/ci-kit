@@ -737,6 +737,15 @@ inputs M0 added.
   nominated; each has 7 to 42 `unattributed` reds in the window. Writing all 20 reports and 5 status files takes
   2.5 s at 417 MB peak. Evidence: M4's report; pool run 44690908797, store 93bce76.
 
+- Observation: the acceptance walk after M5 (collection 44695640449 at b59d696, store 39b2ed7; 220 App and 84
+  `GITHUB_TOKEN` calls, 315 MB peak): 1 to 9 met. Acceptance 6 on a throwaway failing commit with status copies on
+  throwaway sandbox branches: the fresh copy adds exactly the `base:` and `known:` lines (run 44695740714); the
+  stale copy, the real store, no status file, a missing branch, a refused token and a failed fetch give base's
+  output byte for byte (replayed through base's and the branch's `watchRun`). Acceptance 7's second half: `ci-gate
+  status --repo SSFSKIM/MAWS` printed 82 gates (78 succeeded, 4 failed) and no known entries. Acceptance 9 again on
+  a throwaway branch (alert 102, closed). The kit's full suite through `ci-gate`: GREEN at b59d696 (44695627754) and
+  5669a2e (44696978297). Evidence: M5's report.
+
 ## Decision Log
 
 - Decision: verification. The spec is reviewed by `doperpowers:adversarial-reviewer` for design and buildability
@@ -950,6 +959,19 @@ inputs M0 added.
   The chain-break line names the span the derivation checked, and a listing never run reads apart from one refused.
   A nomination states its kind in figures: "0 reds in N attempts" or "K `infra` reds in N attempts, 0 other" (the
   owner's session). Store 8ee561d (run 44693004233). Date/Author: 2026-11-20, the executing session.
+
+- Decision: M5's gaps, as built (2026-11-20, b59d696). The store is a constant, overridable with
+  `CI_KIT_STORE=OWNER/NAME@BRANCH`; only repositories in `history/repos.json` get the context call (one direct
+  contents call, 20 s timeout, outside the pacer). `known:` lines come from `status.json`'s `known`, re-checked for
+  being in force today, so a new entry shows at a failure after the next daily pass; `status` and `known list` read
+  `known.json` itself. A status is fresh under 48 hours (48 is stale) and at most 5 minutes ahead of the clock. A
+  context line collapses its reason to one line and leaves the case pattern off. `known add` takes optional `--id`
+  and `--by` (defaults `keep-<gate>` or `<gate>-<today>`, made unique, and git's user name), refuses no gate, an
+  invalid or past date, an empty case and a case on a `keep` entry, and treats 409 and 422 as a conflict to reapply,
+  five times at most. `status`'s errors are `ERROR`, exit 2. The code is `cli/ledger.mjs`, with `contents` and
+  `putContents` in `lib/github.mjs` (outside the milestone's Touches list). No version bump: the plugin has no
+  version; Claude Code versions it by main's commit (`docs/adopting.md`). Date/Author: 2026-11-20, the executing
+  session.
 
 ## Outcomes & Retrospective
 
