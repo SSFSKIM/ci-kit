@@ -50,6 +50,12 @@ test('in an adopted repo, its subdirectory and its worktree: the ci-gate note, n
     assert.match(r.stdout, /\/plugin-root\/bin\/ci-gate/);
     assert.match(r.stdout, /GREEN <run-url> \(exit 0\), RED <failed>\/<total> <run-url> \(exit 1\) or ERROR/);
     assert.match(r.stdout, /Do not run the gates' commands on this machine/);
+    // The gate ledger's context lines, and merging where the default branch requires the verdict.
+    assert.match(r.stdout, /After a FAIL, `base:` and `known:` lines may follow/);
+    assert.match(r.stdout, /context for your judgment, not a verdict/);
+    assert.match(r.stdout, /`ci-gate status`/);
+    assert.match(r.stdout, /`gh pr merge <n> --auto --merge --match-head-commit <sha>`/);
+    assert.match(r.stdout, /`--admin --body "Ship-with: <reason>"`/);
   }
 });
 

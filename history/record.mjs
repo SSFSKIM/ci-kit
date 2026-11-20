@@ -1,6 +1,8 @@
-// The record's pure parts (test history spec, Design "Store"): case ids, a report's summary, a day's base and
-// durations, a run line with exact membership (a delta or explicit ids, whichever is smaller), the reconstruction
-// that checks it, and the idempotent merge of lines.
+// The record's pure parts (test history spec, Design "Store"; gate ledger spec, "The per-test record, kept small"): case
+// ids, a report's summary, a day's base and durations, a run line that keeps its counts, the hashes of its ids and
+// skipped ids and its failed cases (never its membership), what such a line can say of one case, the one-time rewrite
+// of a line of the old shape (exact membership, a delta or explicit ids) from the membership it holds, and the
+// idempotent merge of lines.
 import { createHash } from 'node:crypto';
 
 // A case id is [project, file, name]. A report can hold the same triple more than once (one test title written
@@ -106,32 +108,17 @@ export function buildDurations(prov, summary) {
   return { ...source(prov), sampled: true, files: summary.files };
 }
 
-function delta(ids, baseIds) {
-  const inBase = new Set(baseIds.map(idKey));
-  const inRun = new Set(ids.map(idKey));
-  return { added: ids.filter((id) => !inBase.has(idKey(id))), removed: baseIds.filter((id) => !inRun.has(idKey(id))) };
-}
-
-// A selected run may omit almost all of a full base. Compare the serialized forms rather than the id counts:
-// titles have different lengths, and the explicit form needs only one field. Without a base it is self-contained.
-function compact(ids, baseIds) {
-  const explicit = { ids };
-  if (!baseIds) return explicit;
-  const diff = delta(ids, baseIds);
-  return Buffer.byteLength(JSON.stringify(explicit)) < Buffer.byteLength(JSON.stringify(diff)) ? explicit : diff;
-}
-
 const artifactRef = (a) => a && { id: a.id, name: a.name, created: a.created_at };
 
 // The artifacts a line was read from: its job's, or each shard's.
 export const lineArtifacts = (line) => [line.artifact, ...(line.shards ?? []).map((s) => s.artifact)].filter(Boolean);
 
 // One (run, attempt, job). `prov` is the provenance (collect.mjs builds it); `report` is 'present', 'missing',
-// 'unparseable' or 'rejected'; `summary` is given for a present report only, with a base when one exists. `previous`
+// 'unparseable' or 'rejected'; `summary` is given for a present report only. `previous`
 // starts null and is filled once every line of the pass is known (provenance.mjs, previousRun). A sharded job's line
 // has no job id, runner or artifact of its own: `shards` holds each shard's, in shard order (null when unsharded),
 // with the attempt it ran in (an earlier one for a shard a re-run copied).
-export function buildRunLine(prov, artifact, report, summary = null, base = null) {
+export function buildRunLine(prov, artifact, report, summary = null) {
   const line = {
     run: prov.run,
     attempt: prov.attempt,
@@ -164,9 +151,9 @@ export function buildRunLine(prov, artifact, report, summary = null, base = null
     previous: null,
   };
   if (report !== 'present') return line;
-  line.membership = { count: summary.ids.length, hash: hashIds(summary.ids), ...compact(summary.ids, base?.cases) };
+  line.membership = { count: summary.ids.length, hash: hashIds(summary.ids) };
   line.failed = summary.failed;
-  line.skipped = { count: summary.skipped.length, hash: hashIds(summary.skipped), ...compact(summary.skipped, base?.skipped) };
+  line.skipped = { count: summary.skipped.length, hash: hashIds(summary.skipped) };
   line.projects = summary.projects;
   line.ms = summary.ms;
   return line;
@@ -178,7 +165,44 @@ function rebuild(baseIds, { ids, added, removed }) {
   return sortIds([...baseIds.filter((id) => !gone.has(idKey(id))), ...added]);
 }
 
-// Both encodings reconstruct to canonical ids and check the stored hash. Only delta lines need the day's base.
+// What a run line says of one case: `failed` when the case is among its failed; `passed` only when the run's ids and
+// skipped ids hash as its day's base's (the same cases ran, the same were skipped), the base ran the case and did not
+// skip it, and the run did not fail it; otherwise `unknown`. So a run selected by --affected, or one that skipped other
+// cases, says nothing of the cases it did not fail: a passing observation is given up rather than invented.
+export function caseOutcome(line, base, id) {
+  if (line.report !== 'present') return 'unknown';
+  const k = idKey(id);
+  if (line.failed.some((f) => idKey(f.id) === k)) return 'failed';
+  if (!base || line.membership.hash !== base.hash || line.skipped.hash !== hashIds(base.skipped)) return 'unknown';
+  if (!base.cases.some((c) => idKey(c) === k) || base.skipped.some((c) => idKey(c) === k)) return 'unknown';
+  return 'passed';
+}
+
+// A present line in the old shape still holds its membership (explicit ids, or a delta from the day's base).
+export const isSlim = (line) => line.report !== 'present' || !['ids', 'added', 'removed'].some((k) => k in line.membership || k in line.skipped);
+
+// An old line in the small shape, from the exact membership it holds: its ids rebuilt and checked against its hash,
+// its skipped ids hashed (the parent spec's first delta lines kept a count only). A line whose membership does not
+// rebuild (a corrupt line, a delta whose base is gone) keeps its counts and no hash, so it never reads as the base's.
+// → { line, verified }; a line already small, or with no report, is returned as it is.
+export function slimLine(line, base) {
+  if (isSlim(line)) return { line, verified: true };
+  let membership;
+  let skipped;
+  let verified = true;
+  try {
+    membership = { count: line.membership.count, hash: hashIds(membershipOf(line, base)) };
+    skipped = { count: line.skipped.count, hash: hashIds(skippedOf(line, base)) };
+  } catch {
+    membership = { count: line.membership.count, hash: null };
+    skipped = { count: line.skipped.count, hash: null };
+    verified = false;
+  }
+  return { line: { ...line, membership, skipped }, verified };
+}
+
+// The old shape's two encodings reconstruct to canonical ids and check the stored hash. Only delta lines need the
+// day's base.
 export function membershipOf(line, base) {
   const ids = rebuild(base?.cases, line.membership);
   if (ids.length !== line.membership.count || hashIds(ids) !== line.membership.hash) {

@@ -1,5 +1,9 @@
 // Test helpers for the history collector: a zip writer, a vitest 5 report builder shaped like a real one, and a fake
 // GitHub that answers the client's requests from a scripted repo.
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { crc32, deflateRawSync } from 'node:zlib';
 
 // A zip archive of { name: text } entries, deflated, as upload-artifact's zips are.
@@ -142,4 +146,28 @@ export function fakeGitHub(repo) {
     return json({ message: `fake: no route for ${path}` }, 404);
   };
   return { fetchImpl, requests };
+}
+
+// A git origin on disk that serves any commit by id and fetches with a filter, as GitHub does. `commit(files,
+// message)`: files { path: text | null (removed) } → the new commit's id.
+export function gitOrigin() {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-kit-origin-'));
+  const git = (...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x' } }).trim();
+  git('init', '-q', '-b', 'main');
+  git('config', 'uploadpack.allowFilter', 'true');
+  git('config', 'uploadpack.allowAnySHA1InWant', 'true');
+  const commit = (files, message) => {
+    for (const [path, text] of Object.entries(files)) {
+      if (text === null) git('rm', '-q', path);
+      else {
+        mkdirSync(dirname(join(dir, path)), { recursive: true });
+        writeFileSync(join(dir, path), text);
+        git('add', path);
+      }
+    }
+    git('commit', '-q', '--allow-empty', '-m', message);
+    return git('rev-parse', 'HEAD');
+  };
+  const tree = (sha) => git('rev-parse', `${sha}^{tree}`);
+  return { dir, git, commit, tree, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }

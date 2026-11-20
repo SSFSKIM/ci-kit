@@ -460,6 +460,41 @@ the command that removes it (`git push origin --delete <ref>`); nothing removes 
 nobody pushes to starts nothing.
 Progress notes go to stderr.
 
+**Context at a failure.** For a repository the gate ledger collects (`history/repos.json`), `ci-gate` reads the
+repository's `status.json` from the ledger's store (the private `SSFSKIM/ci-kit-sandbox`, branch `test-history`) with
+one contents call, started when the first failure is seen (before its log is fetched) and never waited for; when the
+answer is in by the time a `FAIL` line prints and the file is under 48 hours old, it prints, under that line:
+
+```
+FAIL test 2m10s log=/tmp/…
+     base: test last ran on main at 3f2a91c (2026-11-18T10:49Z) and failed, run 44262593045. The failures may differ: compare before rerunning.
+     known: maws-778 (review by 2026-11-26): #778: the banner steals the float card's body on the guest. Whether this failure is that one is not checked.
+```
+
+`base:` appears only when the gate's latest result on the default branch is a failure; `known:` once for each
+recorded reason in force that names the gate (not the `keep` ones). They are context for the session's judgment,
+never a verdict: the other lines, the verdict, the exit code and the timing are unchanged, and with no status file, one
+that cannot be read or has not answered yet, or one 48 hours old or older, the output is exactly as without the ledger.
+The lookup has a client of its own (its answers never move `THROTTLE` or the `CI_GATE_DEBUG` log) and runs only with
+at least 525 requests left in the token's budget, room for the failure's own calls and itself above `THROTTLE`'s 500. Known entries reach `status.json` on the ledger's next daily pass.
+
+```
+ci-gate status [--repo OWNER/NAME]
+ci-gate known list [--repo OWNER/NAME]
+ci-gate known add --gate G [--case PATTERN] --reason TEXT --review-by YYYY-MM-DD [--keep] [--repo OWNER/NAME] [--id ID] [--by NAME]
+```
+
+`ci-gate status` prints each gate's latest result on the default branch, with its commit, time and run, how old the
+record is, and the known entries: for any repository the ledger collects, including one whose gates do not run
+through `ci-gate` (MAWS). `ci-gate known add` records a reason in the store's `<repo>/known.json`, in force from today
+through `--review-by` (required, as is `--reason`): without `--keep`, a failure someone decided to ship with, naming
+every failure of the gate or the cases `--case` matches (`<file> › <title>`, the file whole or by name, `*` for
+anything); with `--keep`, that the gate stays whatever it has caught, so the weekly report never nominates it. It
+writes through the contents API with the blob id it read and, when another writer got there first, reads again and
+reapplies its one entry. `CI_KIT_STORE=OWNER/NAME@BRANCH` points all three, and the context lines, at another copy of
+the store; `known add` writes only to `SSFSKIM/ci-kit-sandbox`, on `test-history` or a test copy whose branch is named
+`ledger-*`, and a set but empty `CI_KIT_STORE` is an error. A value that starts with `-` is written `--reason=<value>`.
+
 **It is gentle with the shared token.** Every session on the account shares the gh login's 5,000 REST requests an
 hour, so `ci-gate` polls the run and its jobs with conditional requests (a `304 Not Modified` is not counted against
 the limit), every 15 s for the first 2 minutes and every 30 s after that, and fetches logs only for failed gates. When
@@ -486,8 +521,10 @@ claude plugin install ci-kit@doperpowers
 - **`ci-gate`** is on the Bash PATH (the plugin's `bin/`). It has no npm dependencies; `ci-gate init` reads the
   planner, whose YAML parser is vendored under `vendor/yaml/`, so nothing is installed.
 - **A note at session start.** In a worktree whose repo has `.github/ci-kit.yml`, the session (and every subagent) is
-  told to verify commits with `ci-gate` rather than running the gates on the machine, and what its output means. In any
-  other repo the hook prints nothing. A repo needs no CLAUDE.md line for this.
+  told to verify commits with `ci-gate` rather than running the gates on the machine, what its output means (the
+  context lines after a `FAIL` included), and how to merge where the default branch requires `ci / verdict`
+  (`gh pr merge <n> --auto --merge --match-head-commit <sha>`; past a red gate, `--admin --body "Ship-with: <reason>"`).
+  In any other repo the hook prints nothing. A repo needs no CLAUDE.md line for this.
 - **`ci-kit:adopt`**, the skill a session uses when asked to set up CI: `ci-gate init`, judging the draft, a GREEN
   `ci-gate`, the PR, and for a private repo the steps only the owner can take.
 

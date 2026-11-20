@@ -9,11 +9,11 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
-import { createGitHub } from '../../lib/github.mjs';
+import { BudgetSpent, createGitHub } from '../../lib/github.mjs';
 import * as collector from '../../history/collect.mjs';
 import { ArchiveDefect, collectRepo, formatCounts, readArtifact } from '../../history/collect.mjs';
 import { parseJUnit } from '../../history/junit.mjs';
-import { membershipOf, skippedOf, summarize } from '../../history/record.mjs';
+import { caseOutcome, hashIds, summarize } from '../../history/record.mjs';
 import { fakeGitHub, vitestReport, zipOf } from './helpers.mjs';
 
 const REPO = 'o/r';
@@ -114,6 +114,10 @@ function scenario() {
   return { repo, reports };
 }
 
+// A present line holds its report's counts, the hashes of its ids and skipped ids, and its failed cases.
+const holdsCases = (line, summary) => assert.deepEqual([line.membership, line.skipped, line.failed], [
+  { count: summary.ids.length, hash: hashIds(summary.ids) }, { count: summary.skipped.length, hash: hashIds(summary.skipped) }, summary.failed,
+], `${line.run}/${line.attempt}/${line.job}`);
 const NOTHING = { artifacts: 0, lines: 0, present: 0, missing: 0, unparseable: 0, rejected: 0, relinked: 0, failures: 0, written: 0 };
 const readDir = (dir) => readdirSync(dir, { recursive: true }).filter((p) => /\.(jsonl|gz)$/.test(p)).sort();
 const linesOf = (root, day) => readFileSync(join(root, REPO, 'runs', `${day}.jsonl`), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
@@ -167,15 +171,13 @@ test('one pass records every job that ran its tests, and a second pass changes n
   // a fresh attempt of a run older than any window is found by its artifact, and filed by its job's day
   assert.deepEqual([byKey.get('108/2/unit').report, byKey.get('108/2/unit').started], ['present', '2026-10-21T10:50:00Z']);
 
-  // the day's base is its first report; every present line rebuilds its own report's cases from it exactly
+  // the day's base is its first report; every present line holds its own report's counts and hashes, never its cases
   const base = gz(root, 'base/2026-10-21/unit.json.gz');
   assert.deepEqual([base.run, base.attempt], [101, 1]);
-  for (const line of day.filter((l) => l.report === 'present' && l.job === 'unit')) {
-    const xml = reports.get(line.artifact.id);
-    assert.deepEqual(membershipOf(line, base), summarize([parseJUnit(xml)]).ids, `run ${line.run}`);
-  }
-  assert.deepEqual(byKey.get('108/2/unit').membership.removed, [['app', 'src/a.test.ts', 'a > two']]);
-  assert.deepEqual(byKey.get('103/1/unit').membership.added, [['app', 'src/c.test.ts', 'c > new']]);
+  for (const line of day.filter((l) => l.report === 'present' && l.job === 'unit')) holdsCases(line, summarize([parseJUnit(reports.get(line.artifact.id))]));
+  // a run that dropped a case says nothing of the base's other cases; one that ran the base's cases does
+  assert.equal(caseOutcome(byKey.get('108/2/unit'), base, ['app', 'src/a.test.ts', 'a > one']), 'unknown');
+  assert.equal(caseOutcome(byKey.get('101/1/unit'), base, ['app', 'src/a.test.ts', 'a > one']), 'passed');
   // durations come from the day's last green report
   const durations = gz(root, 'durations/2026-10-21/unit.json.gz');
   assert.deepEqual([durations.run, durations.attempt, durations.sampled], [108, 2, true]);
@@ -249,10 +251,7 @@ test('a day starting with selection has no base or durations until a full run, a
   assert.deepEqual(readDir(join(root, REPO)), ['runs/2026-10-21.jsonl']);
   const beforeBase = lineOf(root, '2026-10-21', '701/1/unit');
   assert.equal(beforeBase.selection, 'affected');
-  assert.deepEqual(beforeBase.membership.ids, selectedIds);
-  assert.deepEqual(beforeBase.skipped.ids, selectedIds);
-  assert.deepEqual(membershipOf(beforeBase), selectedIds);
-  assert.deepEqual(skippedOf(beforeBase), selectedIds);
+  assert.deepEqual([beforeBase.membership, beforeBase.skipped], [{ count: selectedIds.length, hash: hashIds(selectedIds) }, { count: selectedIds.length, hash: hashIds(selectedIds) }]);
 
   // A selected full-suite fallback is still ineligible for the base and the full-suite cost snapshot.
   add(702, 'b', '2026-10-21T08:30:00Z', suitesA(), 'affected');
@@ -269,17 +268,14 @@ test('a day starting with selection has no base or durations until a full run, a
   assert.equal(durations.run, 703);
   assert.equal(base.cases.length, 4);
   assert.equal(lineOf(root, '2026-10-21', '703/1/unit').selection, null);
-  assert.deepEqual(membershipOf(beforeBase, base), selectedIds);
-  assert.deepEqual(skippedOf(beforeBase, base), selectedIds);
+  assert.equal(caseOutcome(beforeBase, base, base.cases[0]), 'unknown', 'a selected run says nothing of the base');
 
   add(704, 'd', '2026-10-21T10:00:00Z', selectedSuites, 'affected');
   const later = await pass();
   assert.deepEqual([later.errors, later.counts.present], [[], 1]);
   const selected = lineOf(root, '2026-10-21', '704/1/unit');
   assert.equal(selected.selection, 'affected');
-  assert.deepEqual(selected.membership.ids, selectedIds);
-  assert.deepEqual(membershipOf(selected, base), selectedIds);
-  assert.deepEqual(skippedOf(selected, base), selectedIds);
+  assert.deepEqual(selected.membership, { count: selectedIds.length, hash: hashIds(selectedIds) });
   assert.deepEqual(gz(root, 'base/2026-10-21/unit.json.gz'), base);
   assert.deepEqual(gz(root, 'durations/2026-10-21/unit.json.gz'), durations);
   assert.deepEqual(lineOf(root, '2026-10-21', '701/1/unit'), beforeBase);
@@ -306,7 +302,7 @@ test('an artifact a pass could not download is listed again by the next, however
   const { pass } = passes(repo, root);
 
   const first = await pass();
-  assert.deepEqual(first.errors, [`run 200 attempt 2 unit: HTTP 502 GET /repos/o/r/actions/artifacts/${late.id}/zip: Bad Gateway`]);
+  assert.deepEqual(first.errors, [`run 200 attempt 2 unit: HTTP 502 GET /repos/o/r/actions/artifacts/${late.id}/zip`]);
   assert.deepEqual([first.counts.lines, first.counts.present], [101, 101]);
   assert.equal(lineOf(root, '2026-10-21', '200/2/unit'), undefined);
 
@@ -414,7 +410,7 @@ test('a line held back leaves no link to it on disk; the pass that takes it link
   repo.artifacts.push(...reportsA);
   repo.failing = [`${c('b')}...${c('c')}`];
   const second = await pass();
-  assert.deepEqual(second.errors, [`run 404 attempt 1 unit: previous run: HTTP 503 GET /repos/o/r/compare/${c('b')}...${c('c')}?per_page=1: Service Unavailable`]);
+  assert.deepEqual(second.errors, [`run 404 attempt 1 unit: previous run: HTTP 503 GET /repos/o/r/compare/${c('b')}...${c('c')}`]);
   assert.deepEqual([second.counts.lines, second.counts.relinked], [0, 0]);
   assert.deepEqual(dangling(root), []);
   assert.deepEqual(['402/1/unit', '402/2/unit'].map((k) => lineOf(root, '2026-10-21', k).report), ['missing', 'missing']);
@@ -550,8 +546,7 @@ test("a sharded job's full set is one line of the job: the union of the shards' 
   const union = unionOf(red);
   const base = gz(root, 'base/2026-10-21/unit.json.gz');
   assert.deepEqual([base.run, base.job, base.files], [801, 'unit', union.files]);
-  assert.deepEqual(membershipOf(line, base), union.ids);
-  assert.deepEqual(skippedOf(line, base), union.skipped);
+  holdsCases(line, union);
   assert.deepEqual([line.failed, line.projects, line.ms], [union.failed, union.projects, union.ms]);
   assert.ok(union.ids.some((id) => id[3] === 2));
 
@@ -564,7 +559,7 @@ test("a sharded job's full set is one line of the job: the union of the shards' 
     ['unit 2/3', 'vm-2', 'failure', '2026-10-21T08:01:00Z', '2026-10-21T08:09:00Z', 'test-results-unit-2of3-1'],
     ['unit 3/3', 'vm-3', 'success', '2026-10-21T07:59:30Z', '2026-10-21T08:05:00Z', 'test-results-unit-3of3-1'],
   ]);
-  for (const l of linesOf(root, '2026-10-21')) assert.deepEqual(membershipOf(l, base), readBack(reports, l).ids);
+  for (const l of linesOf(root, '2026-10-21')) holdsCases(l, readBack(reports, l));
 
   // durations from the green set; the change's next run links to it
   const durations = gz(root, 'durations/2026-10-21/unit.json.gz');
@@ -661,8 +656,8 @@ test('a shard a re-run copied takes its report from the attempt it ran in: a sha
   assert.deepEqual(line.shards.map((s) => s.jobId), ran.map((j) => j.id));
   assert.deepEqual([line.started, line.completed, line.conclusion], ['2026-10-21T07:59:00Z', '2026-10-21T08:38:00Z', 'success']);
   const base = gz(root, 'base/2026-10-21/unit.json.gz');
-  assert.deepEqual(membershipOf(line, base), unionOf(suites).ids);
-  for (const l of linesOf(root, '2026-10-21')) assert.deepEqual(membershipOf(l, base), readBack(reports, l).ids, `${l.run}/${l.attempt}`);
+  holdsCases(line, unionOf(suites));
+  for (const l of linesOf(root, '2026-10-21')) holdsCases(l, readBack(reports, l));
   // the red attempt keeps its failure; the rerun's copied shard is the first attempt's own report
   assert.deepEqual(lineOf(root, '2026-10-21', '821/1/unit').failed.length, 1);
   assert.deepEqual(lineOf(root, '2026-10-21', '821/2/unit').shards.map((s) => [s.attempt, s.artifact.name]), [[1, 'test-results-unit-1of2-1'], [2, 'test-results-unit-2of2-2']]);
@@ -753,7 +748,7 @@ test('the job unsharded and sharded across runs in one store: one base, every li
   const base = gz(root, 'base/2026-10-21/unit.json.gz');
   assert.equal(base.run, 831);
   assert.equal(gz(root, 'durations/2026-10-21/unit.json.gz').run, 833);
-  for (const l of day) assert.deepEqual(membershipOf(l, l.job === 'unit' ? base : gz(root, 'base/2026-10-21/unit-darwin.json.gz')), readBack(reports, l).ids, `${l.run} ${l.job}`);
+  for (const l of day) holdsCases(l, readBack(reports, l));
   const link = (run, paths) => ({ run, attempt: 1, relation: 'descendant', paths, truncated: false });
   assert.deepEqual(day.filter((l) => l.job === 'unit').map((l) => l.previous), [null, null, link(831, ['src/b.ts']), link(832, ['src/c.ts'])]);
 });
@@ -1114,4 +1109,290 @@ test('a missing rerun that already records its copied shard artifact is not take
   assert.deepEqual(await pass(), { counts: NOTHING, errors: [], more: false });
   const later = fake.requests.slice(asked); // the sweep of recent runs still lists the attempts' jobs
   assert.ok(!later.some((p) => /^\/actions\/runs\/891(\/artifacts)?(\?|$)/.test(p)), later.join('\n'));
+});
+
+test("with the gate ledger's fetch, the sweep reads the runs that pass closed and lists nothing itself", async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  run({ id: 950, ref: 'ci/shared-aaaaaaa', tested: c('a'), tree: 'TA', created: '2026-10-21T07:50:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z', suites: suitesA() }],
+  ] });
+  repo.artifacts = []; // the artifact listing misses it: only the sweep can find the job
+  const { fake, pass } = passes(repo, root);
+  const asked = [];
+  const client = createGitHub('t', { fetchImpl: fake.fetchImpl });
+  const memo = new Map(); // the collector's shared fetch is memoized, as here
+  const jobsOf = (id, attempt) => {
+    if (!memo.has(`${id}/${attempt}`)) {
+      asked.push(`${id}/${attempt}`);
+      memo.set(`${id}/${attempt}`, client.attemptJobs(REPO, id, attempt));
+    }
+    return memo.get(`${id}/${attempt}`);
+  };
+  const none = await pass({ jobsOf, recentRuns: [] });
+  assert.equal(none.counts.lines, 0);
+  assert.ok(!fake.requests.some((p) => p.startsWith('/actions/runs?')), 'no listing of recent runs');
+  const swept = await pass({ jobsOf, recentRuns: [{ id: 950, run_attempt: 1, created_at: '2026-10-21T07:50:00Z' }] });
+  assert.deepEqual([swept.errors, swept.counts.missing], [[], 1]);
+  assert.deepEqual(asked, ['950/1']);
+  assert.ok(!fake.requests.some((p) => p.startsWith('/actions/runs?')));
+});
+
+test("a run the ledger closed is offered to the sweep until a clean sweep covers it: a full batch or a failure keeps it", async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  // 950 ran its tests and uploaded nothing: only the sweep can find it. 951 has an artifact, which fills a batch of 1.
+  run({ id: 950, ref: 'ci/swept-aaaaaaa', tested: c('a'), tree: 'TA', created: '2026-10-21T07:50:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z', suites: suitesA() }],
+  ] });
+  repo.artifacts = [];
+  run({ id: 951, ref: 'ci/filled-aaaaaaa', tested: c('b'), tree: 'TB', created: '2026-10-21T07:55:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:07:00Z', suites: suitesA() }],
+  ] });
+  const { fake, pass } = passes(repo, root);
+  const client = createGitHub('t', { fetchImpl: fake.fetchImpl });
+  let failing = 0;
+  const jobsOf = (id, attempt) => (failing-- > 0 ? Promise.reject(Object.assign(new Error('history: a transient failure'), {})) : client.attemptJobs(REPO, id, attempt));
+  // The ledger's state: both runs closed in an earlier batch, created within the last 3 days.
+  const state = { runs: { 950: { day: '2026-10-21', attempts: 1, closed: [1], created: '2026-10-21T07:50:00Z' }, 951: { day: '2026-10-21', attempts: 1, closed: [1], created: '2026-10-21T07:55:00Z' } } };
+  const batch = async (over = {}) => {
+    const offered = collector.recentRuns(state, NOW);
+    const r = await pass({ jobsOf, recentRuns: offered, ...over });
+    if (r.errors.length === 0 && !r.more) collector.markSwept(state, offered);
+    return r;
+  };
+  // A full batch: 951's artifact takes the one line; the sweep does not run.
+  const full = await batch({ limit: 1 });
+  assert.deepEqual([full.counts.present, full.counts.missing, full.more], [1, 0, true]);
+  assert.deepEqual(collector.recentRuns(state, NOW).map((r) => r.id), [950, 951]);
+  // A failing sweep: nothing is marked.
+  failing = 1;
+  const broken = await batch();
+  assert.equal(broken.errors.length, 1);
+  assert.deepEqual(collector.recentRuns(state, NOW).map((r) => r.id), [950, 951]);
+  // The next clean sweep writes 950's missing line, and the runs are offered no more.
+  const clean = await batch();
+  assert.deepEqual([clean.errors, clean.counts.missing, clean.more], [[], 1, false]);
+  assert.equal(lineOf(root, '2026-10-21', '950/1/unit').report, 'missing');
+  assert.deepEqual(collector.recentRuns(state, NOW), []);
+  // An open attempt is offered, and stays offered after a clean sweep until it closes.
+  state.runs[952] = { day: '2026-10-21', attempts: 2, closed: [1], created: '2026-10-21T09:00:00Z' };
+  collector.markSwept(state, collector.recentRuns(state, NOW));
+  assert.deepEqual(collector.recentRuns(state, NOW).map((r) => [r.id, r.attempts]), [[952, [2]]]);
+  // A run created more than 3 days ago is never offered, as the sweep never read one.
+  state.runs[953] = { day: '2026-10-17', attempts: 1, closed: [1], created: '2026-10-17T09:00:00Z' };
+  assert.ok(!collector.recentRuns(state, NOW).some((r) => r.id === 953));
+});
+
+// The derivation of landings and causes, left out where a test is about the collection (history/derive.mjs has its
+// own).
+const noDerive = async () => ({ counts: { listed: 0, landings: 0, causes: {}, written: 0, seconds: 0 }, errors: [], paced: false });
+
+test("a job listing GitHub answers 502 is asked again before it counts as the batch's error", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'history-batch-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const entry = JSON.parse(readFileSync(new URL('../../history/repos.json', import.meta.url), 'utf8')).find((r) => r.alias === 'SSFSKIM/ci-kit');
+  let flaky = 1;
+  const fetchImpl = async (href) => {
+    const url = new URL(href);
+    const path = url.pathname.replace(/^\/repos\/[^/]+\/[^/]+/, '');
+    const ok = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (path.startsWith('/actions/workflows/')) {
+      const day = url.searchParams.get('created').slice(0, 10);
+      const runs = day === '2026-10-20' ? [{ id: 7, name: 'ci', event: 'push', head_branch: 'main', head_sha: 'a'.repeat(40), head_commit: { tree_id: 't', message: 'x' }, pull_requests: [], status: 'completed', conclusion: 'success', run_attempt: 1, created_at: '2026-10-20T08:00:00Z' }] : [];
+      return ok({ total_count: runs.length, workflow_runs: runs });
+    }
+    if (path === '/actions/runs/7/attempts/1/jobs') {
+      if (flaky-- > 0) return new Response(JSON.stringify({ message: 'Bad Gateway' }), { status: 502 });
+      return ok({ total_count: 1, jobs: [{ id: 70, name: 'ci / test', status: 'completed', conclusion: 'success', created_at: '2026-10-20T08:00:00Z', started_at: '2026-10-20T08:00:10Z', completed_at: '2026-10-20T08:03:10Z', runner_name: 'GitHub Actions 1', labels: ['ubuntu-latest'], steps: [] }] });
+    }
+    return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 });
+  };
+  const deps = { tokenFor: () => 't', createGitHub: (token, o) => createGitHub(token, { ...o, fetchImpl }), openMirror: () => ({ ensure() {}, fetch: () => new Set(), parentOf: () => null, treeKey: () => null }), delays: [0, 0], derive: noDerive };
+  const out = [];
+  const saved = { log: console.log, error: console.error };
+  console.log = (...a) => out.push(a.join(' '));
+  console.error = (...a) => out.push(a.join(' '));
+  let code;
+  try {
+    code = await collector.collectBatch({ chosen: [{ ...entry, alias: entry.repo }], opts: { store: root, mirrors: root, pass: 'p1', attempts: 300, limit: 40, calls: null }, now: NOW, deps });
+  } finally {
+    Object.assign(console, saved);
+  }
+  assert.equal(code, 0, out.join('\n'));
+  assert.equal(flaky, -1, 'asked twice');
+  assert.match(out.join('\n'), /attempts closed 1 \(lines 1\)/);
+});
+
+// A batch of the collector over MAWS-shaped repositories (a ledger and a per-test pass each) against a fake GitHub:
+// one run on 2026-10-20 per repository, `artifacts` recent artifacts that name no report, and `limitedOn`: the
+// repository whose first request is refused for the rate limit. → printed output, exit code, requests by repository.
+async function batchOf(t, { repos = ['o/a'], limits, artifacts = 0, limitedOn = null, root = null, pass = 'p1', repo = null, derive = noDerive } = {}) {
+  root ??= mkdtempSync(join(tmpdir(), 'history-batch-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const maws = JSON.parse(readFileSync(new URL('../../history/repos.json', import.meta.url), 'utf8')).find((r) => r.alias === 'SSFSKIM/MAWS');
+  const asked = {};
+  const ok = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  const fetchImpl = async (href) => {
+    const url = new URL(href);
+    const repo = /^\/repos\/([^/]+\/[^/]+)/.exec(url.pathname)[1];
+    const path = url.pathname.slice(repo.length + 7);
+    asked[repo] = (asked[repo] ?? 0) + 1;
+    if (repo === limitedOn) return new Response(JSON.stringify({ message: 'API rate limit exceeded for installation ID 1.' }), { status: 403 });
+    if (path.startsWith('/actions/workflows/')) {
+      const day = url.searchParams.get('created').slice(0, 10);
+      const runs = day === '2026-10-20' ? [{ id: 7, name: 'gate', event: 'push', head_branch: 'master', head_sha: 'a'.repeat(40), head_commit: { tree_id: 't', message: 'x' }, pull_requests: [], status: 'completed', conclusion: 'success', run_attempt: 1, created_at: '2026-10-20T08:00:00Z' }] : [];
+      return ok({ total_count: runs.length, workflow_runs: runs });
+    }
+    if (path === '/actions/runs/7/attempts/1/jobs') return ok({ total_count: 1, jobs: [{ id: 70, name: 'probes', status: 'completed', conclusion: 'success', created_at: '2026-10-20T08:00:00Z', started_at: '2026-10-20T08:00:10Z', completed_at: '2026-10-20T08:03:10Z', runner_name: 'ci-kit-gce-a', labels: [], steps: [] }] });
+    if (path === '/actions/artifacts') {
+      const page = Number(url.searchParams.get('page'));
+      const all = Array.from({ length: artifacts }, (_, i) => ({ id: i + 1, name: `other-${i}`, created_at: '2026-10-21T10:00:00Z', expired: false, workflow_run: { id: 7 } }));
+      return ok({ total_count: all.length, artifacts: all.slice((page - 1) * 100, page * 100) });
+    }
+    return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 });
+  };
+  const deps = { tokenFor: () => 't', createGitHub: (token, o) => createGitHub(token, { ...o, fetchImpl }), openMirror: () => ({ ensure() {}, fetch: () => new Set(), parentOf: () => null, treeKey: () => null }), delays: [0, 0], limits, derive };
+  const out = [];
+  const saved = { log: console.log, error: console.error };
+  console.log = (...a) => out.push(a.join(' '));
+  console.error = (...a) => out.push(a.join(' '));
+  let code;
+  try {
+    code = await collector.collectBatch({ chosen: repos.map((r) => ({ ...maws, repo: r, alias: r })), opts: { repo, store: root, mirrors: root, pass, attempts: 300, limit: 40, calls: null }, now: NOW, deps });
+  } finally {
+    Object.assign(console, saved);
+  }
+  return { out: out.join('\n'), code, asked, root };
+}
+
+test('the per-test pass stopped by the hour in its artifact listing waits for a later batch, and is no error', async (t) => {
+  // The ledger takes 36 calls (35 days, one job listing); 12 more leave room to start the per-test pass, whose
+  // artifact listing pages past them.
+  const { out, code, asked } = await batchOf(t, { limits: { app: { pass: 1500, hour: 48 } }, artifacts: 1500 });
+  assert.equal(code, 0, out);
+  assert.equal(asked['o/a'], 48);
+  assert.doesNotMatch(out, /per-test:|errors [1-9]/);
+  assert.match(out, /^history: wait \d+$/m);
+  assert.match(out, /^history: more$/m);
+});
+
+test("a drained ledger with too few of the hour's calls left for the per-test pass waits, rather than skipping it", async (t) => {
+  const { out, code, asked } = await batchOf(t, { limits: { app: { pass: 1500, hour: 40 } } });
+  assert.equal(code, 0, out);
+  assert.equal(asked['o/a'], 36);
+  assert.doesNotMatch(out, /artifacts \d+, lines/, 'the per-test pass did not start');
+  assert.match(out, /^history: wait \d+$/m);
+  assert.match(out, /^history: more$/m);
+});
+
+test("a pass that spends its own calls ends cleanly, with no wait, in either phase", async (t) => {
+  // The per-test pass starts with 12 of the pass's calls left, and its artifact listing pages past them.
+  const perTest = await batchOf(t, { limits: { app: { pass: 48, hour: 2000 } }, artifacts: 1500 });
+  assert.equal(perTest.code, 0, perTest.out);
+  assert.equal(perTest.asked['o/a'], 48);
+  assert.doesNotMatch(perTest.out, /per-test:|errors [1-9]/);
+  assert.doesNotMatch(perTest.out, /^history: (more|wait)/m);
+  // A second repository left unread by the pass's cap ends the pass too.
+  const two = await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 40, hour: 2000 } } });
+  assert.equal(two.code, 0, two.out);
+  assert.ok(two.asked['o/a'] + (two.asked['o/b'] ?? 0) <= 40);
+  assert.doesNotMatch(two.out, /^history: (more|wait)/m);
+});
+
+test("GitHub's rate limit on a token ends the pass on that token: no other repository, phase or batch asks again", async (t) => {
+  const first = await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 1500, hour: 2000 } }, limitedOn: 'o/a' });
+  assert.equal(first.code, 1, 'the refusal is an error');
+  assert.deepEqual(first.asked, { 'o/a': 1 });
+  assert.match(first.out, /o\/a: listing \d{4}-\d\d-\d\d: HTTP 403 \(rate limited\)/);
+  assert.doesNotMatch(first.out, /^history: (more|wait)/m);
+  // A later batch of the same pass keeps off the token.
+  const again = await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 1500, hour: 2000 } }, root: first.root });
+  assert.deepEqual(again.asked, {});
+});
+
+const marker = (root) => (existsSync(join(root, 'collected.json')) ? JSON.parse(readFileSync(join(root, 'collected.json'), 'utf8')) : null);
+
+test("a batch that ends the pass with every repository's work taken writes the marker: its time, each repository's last covered day", async (t) => {
+  const { out, code, root } = await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 1500, hour: 2000 } } });
+  assert.equal(code, 0, out);
+  assert.doesNotMatch(out, /^history: more$/m);
+  const m = marker(root);
+  assert.ok(m.at >= '2026-10-21T12:00:00' && m.at < '2026-10-21T12:10:00', m.at);
+  assert.deepEqual(m, { v: 1, at: m.at, repos: { 'o/a': { covered: '2026-10-20' }, 'o/b': { covered: '2026-10-20' } } });
+});
+
+test('no marker from a batch that leaves work, stops at a limit or a refusal, or names one repository', async (t) => {
+  assert.equal(marker((await batchOf(t, { limits: { app: { pass: 1500, hour: 40 } } })).root), null, 'held by the hour');
+  assert.equal(marker((await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 40, hour: 2000 } } })).root), null, "the pass's cap left o/b");
+  assert.equal(marker((await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 1500, hour: 2000 } }, limitedOn: 'o/b' })).root), null, 'rate limited');
+  assert.equal(marker((await batchOf(t, { limits: { app: { pass: 1500, hour: 2000 } }, repo: 'o/a' })).root), null, 'one repository');
+});
+
+test("a derivation held by the hour's limit resumes in a later batch; only one that completed without error lets the marker be written", async (t) => {
+  const calls = [];
+  // A derivation that lists until the hour's limit refuses it, as derive.mjs's listing is held.
+  const paced = async ({ gh }) => {
+    calls.push('paced');
+    for (let i = 0; i < 100; i += 1) {
+      try {
+        await gh.activityPage('o/a', 'refs/heads/master', null);
+      } catch (err) {
+        if (err instanceof BudgetSpent) break;
+      }
+    }
+    return { ...(await noDerive()), paced: true };
+  };
+  // 37 calls for the ledger and the per-test pass leave the derivation 9 of the hour's 46.
+  const held = await batchOf(t, { repos: ['o/a'], limits: { app: { pass: 1500, hour: 46 } }, derive: paced });
+  assert.equal(held.code, 0, held.out);
+  assert.deepEqual([calls, held.asked['o/a']], [['paced'], 46]);
+  assert.match(held.out, /^history: wait \d+$/m);
+  assert.match(held.out, /^history: more$/m);
+  // A whole batch whose derivation was held, or failed, writes no marker; nor does it count as taken.
+  const failing = async () => ({ ...(await noDerive()), errors: ['activity: HTTP 500 GET /repos/o/a/activity'] });
+  assert.equal(marker((await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 1500, hour: 2000 } }, derive: paced })).root), null, 'held');
+  const failed = await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 1500, hour: 2000 } }, derive: failing });
+  assert.equal(failed.code, 1);
+  assert.equal(marker(failed.root), null, 'failed');
+  // The pass's next batch derives again, and with that done the marker is written.
+  const ok = async (args) => (calls.push('ok'), noDerive(args));
+  const resumed = await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 1500, hour: 2000 } }, derive: ok, root: failed.root });
+  assert.equal(resumed.code, 0, resumed.out);
+  assert.notEqual(marker(resumed.root), null);
+});
+
+test('the landings and causes are derived once a pass, by a batch that leaves the ledger nothing queued or pending', async (t) => {
+  const calls = [];
+  const derive = async (args) => (calls.push(args.from), noDerive());
+  const drained = await batchOf(t, { limits: { app: { pass: 1500, hour: 2000 } }, derive });
+  assert.equal(drained.code, 0, drained.out);
+  assert.match(drained.out, /^o\/a: derived: landings 0 \(listed 0, chain breaks 0\)/m);
+  assert.deepEqual(calls, [null]);
+  // The pass's next batch does not derive again; a new pass does.
+  await batchOf(t, { limits: { app: { pass: 1500, hour: 2000 } }, derive, root: drained.root });
+  assert.equal(calls.length, 1);
+  await batchOf(t, { limits: { app: { pass: 1500, hour: 2000 } }, derive, root: drained.root, pass: 'p2' });
+  assert.equal(calls.length, 2);
+  // A batch held by the hour with days still to list derives nothing.
+  const held = await batchOf(t, { limits: { app: { pass: 1500, hour: 20 } }, derive });
+  assert.match(held.out, /^history: more$/m);
+  assert.equal(calls.length, 2);
+});
+
+test('the arguments: batch sizes, the pass and the mirrors', () => {
+  const opts = collector.parseArgs(['--store', 's', '--pass', '44500000000.1', '--mirrors', '/m', '--attempts', '50', '--limit', '40']);
+  assert.deepEqual(opts, { repo: null, store: 's', limit: 40, attempts: 50, pass: '44500000000.1', mirrors: '/m', calls: null, deriveFrom: null });
+  assert.equal(collector.parseArgs(['--store', 's', '--derive-from', '2026-10-22']).deriveFrom, '2026-10-22');
+  assert.throws(() => collector.parseArgs(['--store', 's', '--derive-from', '10-22']), /takes a day/);
+  assert.equal(collector.parseArgs(['--store', 's', '--calls', '6000']).calls, 6000);
+  assert.equal(collector.parseArgs(['--store', 's']).attempts, 300);
+  process.env.HISTORY_PASS = '7.1';
+  try {
+    assert.equal(collector.parseArgs(['--store', 's']).pass, '7.1');
+  } finally {
+    delete process.env.HISTORY_PASS;
+  }
+  assert.throws(() => collector.parseArgs(['--store', 's', '--attempts', '0']), /whole number of attempts/);
+  assert.throws(() => collector.parseArgs(['--store', 's', '--pass']), /usage/);
 });

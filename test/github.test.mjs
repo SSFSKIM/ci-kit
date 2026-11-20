@@ -1,7 +1,7 @@
 // The REST client against a fake fetch: conditional requests (ETag / If-None-Match) and the rate-limit reading.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createGitHub, GitHubError, isRateLimited } from '../lib/github.mjs';
+import { BudgetSpent, createGitHub, GitHubError, isRateLimited } from '../lib/github.mjs';
 
 // A fake fetch that answers from a script of responses, recording each request's headers.
 function fakeFetch(responses) {
@@ -165,4 +165,58 @@ test('rateLimit reads the core budget from /rate_limit (a read GitHub does not c
   const gh = createGitHub('t', { fetchImpl: f.impl });
   assert.deepEqual(await gh.rateLimit(), { limit: 5000, remaining: 0, reset: 1794309724, used: 5000 });
   assert.equal(f.requests[0].url, 'https://api.github.com/rate_limit');
+});
+
+test('a request the caller does not admit is never made, nor counted, and throws BudgetSpent', async () => {
+  const f = fakeFetch([{ status: 200, body: RUN }]);
+  let room = 1;
+  const gh = createGitHub('t', { fetchImpl: f.impl, admit: () => room > 0 });
+  assert.deepEqual(await gh.getRun('o/r', 7), RUN);
+  room = 0;
+  await assert.rejects(gh.getRun('o/r', 8), (err) => err instanceof BudgetSpent && !isRateLimited(err));
+  assert.equal(f.requests.length, 1);
+  assert.equal(gh.stats().requests, 1);
+});
+
+test("an error names its method, path and status apart from the body's message", async () => {
+  const f = fakeFetch([{ status: 502, body: { message: 'SENTINEL body text' } }]);
+  const gh = createGitHub('t', { fetchImpl: f.impl });
+  await assert.rejects(gh.getRun('o/r', 7), (err) => err.status === 502 && err.method === 'GET' && err.path === '/repos/o/r/actions/runs/7');
+});
+
+test('admission is decided after the token is in hand: concurrent requests cannot all pass one remaining slot', async () => {
+  const f = fakeFetch([{ status: 200, body: RUN }, { status: 200, body: RUN }, { status: 200, body: RUN }]);
+  // An App token arrives a tick later, as the pool's expiring tokens do; one request is left in the budget.
+  const token = () => new Promise((resolve) => setTimeout(() => resolve('t'), 1));
+  let gh;
+  gh = createGitHub(token, { fetchImpl: f.impl, admit: () => gh.stats().requests < 1 });
+  const results = await Promise.allSettled([gh.getRun('o/r', 1), gh.getRun('o/r', 2), gh.getRun('o/r', 3)]);
+  assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+  assert.ok(results.filter((r) => r.status === 'rejected').every((r) => r.reason instanceof BudgetSpent));
+  assert.equal(f.requests.length, 1);
+  assert.equal(gh.stats().requests, 1);
+});
+
+test('a store file is read and written on its branch through the contents API, each path segment encoded', async () => {
+  const requests = [];
+  const impl = async (url, init) => {
+    requests.push({ url, method: init.method, body: init.body });
+    return new Response(JSON.stringify(init.method === 'GET' ? { sha: 'b1', content: 'W10K' } : { content: {} }), { status: init.method === 'GET' ? 200 : 201 });
+  };
+  const gh = createGitHub('t', { fetchImpl: impl });
+  assert.deepEqual(await gh.contents('o/store', 'SSFSKIM/MAWS/known.json', 'test-history'), { sha: 'b1', content: 'W10K' });
+  await gh.putContents('o/store', 'SSFSKIM/MAWS/known.json', { message: 'm', content: 'W10K', branch: 'a b', sha: 'b1' });
+  assert.equal(requests[0].url, 'https://api.github.com/repos/o/store/contents/SSFSKIM/MAWS/known.json?ref=test-history');
+  assert.equal(requests[1].method, 'PUT');
+  assert.equal(requests[1].url, 'https://api.github.com/repos/o/store/contents/SSFSKIM/MAWS/known.json');
+  assert.deepEqual(JSON.parse(requests[1].body), { message: 'm', content: 'W10K', branch: 'a b', sha: 'b1' });
+});
+
+test('a client given a signal aborts its requests in flight when the signal fires', async () => {
+  const impl = (url, init) => new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason)));
+  const stop = new AbortController();
+  const gh = createGitHub('t', { fetchImpl: impl, signal: stop.signal });
+  const pending = gh.contents('o/store', 'a/status.json', 'b');
+  stop.abort();
+  await assert.rejects(pending);
 });
