@@ -940,6 +940,16 @@ inputs M0 added.
   `version-bump`). The sandbox writes reports and status files after the batch loop, inside the collect step, and
   reuses its push retries (sandbox #101). Date/Author: 2026-11-20, the executing session.
 
+- Decision: M4's task review folded (2026-11-20, e11c02a). `status.json` takes a new standing only from a pass whose
+  derivation completed; otherwise the previous gates and `as_of` are carried forward unchanged (no marker fallback),
+  so a partial pass never shows a failure whose later green is still queued; its `known` is re-read on every write.
+  `keep` eligibility and the known entries' state are read on the day a report is written, the evidence window
+  staying historical. Too little record is shown whatever keeps a gate, and a window short of 21 covered days says
+  no gate can be nominated. A failed attempt not yet derived is "attribution pending" and still blocks both lists.
+  The chain-break line names the span the derivation checked, and a listing never run reads apart from one refused.
+  A nomination states its kind in figures: "0 reds in N attempts" or "K `infra` reds in N attempts, 0 other" (the
+  owner's session). Store 8ee561d (run 44693004233). Date/Author: 2026-11-20, the executing session.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
