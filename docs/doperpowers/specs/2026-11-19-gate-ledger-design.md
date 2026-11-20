@@ -116,7 +116,8 @@ store, print a weekly report, and show `ci-gate` printing the context lines.
 - [x] (2026-11-19 09:1xZ) Adversarial review: 12 blocking findings and 3 lesser, all taken (Decision Log).
 - [x] (2026-11-19 09:2xZ) Its second pass: 8 blocking findings and 2 lesser on the revision, folded (Decision
   Log). The review ends here; the counterexamples it gave are test pins and acceptance cases.
-- [ ] M1 — Job lines.
+- [x] (2026-11-20 03:5xZ) M1 — Job lines: 890528d..d78c85a, task review converged after two fix rounds; backfill
+  from 10-22 in the store; acceptance 1, 2 and 8 met (M1's report).
 - [ ] M2 — The store kept small, watched, and fed by the hand-run gate.
 - [ ] M3 — Landings and causes.
 - [ ] M4 — The weekly report and the status file.
