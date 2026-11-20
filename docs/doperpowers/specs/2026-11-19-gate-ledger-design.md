@@ -741,6 +741,13 @@ inputs M0 added.
   and path, never a response body, git's stderr or an exception's message. The per-test sweep marks a run swept
   only after a batch that reached it cleanly. Date/Author: 2026-11-20, the executing session.
 
+- Decision: M1's second review folded (2026-11-20). Kinds read from a job's log are kept in `log_kinds`, apart from
+  `annotations`, and M3 counts a log's `runner-lost` as lost only with phase `lost`; `not-started` is taken only from
+  the billing messages on a job that never started (no runner, no step that ran). A copy is filed on its own gate's
+  `available` day. After a real rate-limit answer the token is not used again in that pass, in any repository or
+  phase (`pass.rate_limited` in `attempts.json`). A stop at the hour's cap is `more` with a wait; at the pass's cap,
+  a clean end. Date/Author: 2026-11-20, the executing session.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
