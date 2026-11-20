@@ -74,29 +74,32 @@ export function analyze(lines, { created = {} } = {}) {
 
 // A job cancelled from outside it (its run cancelled, by a newer run or by hand), apart from one that reached its time
 // limit: GitHub concludes that `cancelled` too, but it ended on its own, which a deadlock in the product does.
-const timeLimited = (l) => l.annotations.includes('time-limit') || l.log_kinds.includes('time-limit');
+const timeLimited = (l) => l.conclusion === 'timed_out' || l.annotations.includes('time-limit') || l.log_kinds.includes('time-limit');
 const cancelledFromOutside = (l) => l.conclusion === 'cancelled' && !timeLimited(l);
 
-// The unsuccessful jobs that speak for an attempt. A summary job's failure restates a part's only where a part failed:
-// beside parts that were only cancelled, a failed or timed-out summary is the attempt's own failure.
+// The unsuccessful jobs that speak for an attempt. A summary job's failure is dropped only where it restates a part's:
+// a part failed (beside parts only cancelled, a failed summary is the attempt's own failure), and the summary did not
+// reach its own time limit (that is its own failure, whatever its parts did).
 function unsuccessful(a) {
   const bad = a.lines.filter((l) => l.conclusion !== null && l.conclusion !== 'success');
-  const parts = bad.filter((l) => l.role !== 'summary');
-  return parts.some((l) => !cancelledFromOutside(l)) ? parts : bad;
+  if (!bad.some((l) => l.role !== 'summary' && !cancelledFromOutside(l))) return bad;
+  return bad.filter((l) => l.role !== 'summary' || timeLimited(l));
 }
 
 // Whether the default branch held still from `from` to `to`, by its landing record (`{ since, events }`, events by
-// time): no landing in between, and the chain unbroken across it (the landing after the interval moved the branch
-// from where the one before left it). A record that starts later, or is null, or a break: not known, so false.
+// time): a landing on each side of the interval, none inside it, and the one after moved the branch from where the one
+// before left it. Anything less (no landing before, none yet after, a break, a record starting later, no record) does
+// not show it unbroken: not known, so false. Only the default branch's landings are read: a pull request to another
+// branch is compared against the default's (rare here, and rerun-green nominates nothing).
 export function baseHeld(record, from, to) {
   if (!record || !from || !to || from < record.since) return false;
   let prev = null;
   for (const e of record.events) {
     if (e.at <= from) prev = e;
     else if (e.at <= to) return false;
-    else return !prev || e.before === prev.after;
+    else return prev !== null && e.before === prev.after;
   }
-  return true;
+  return false;
 }
 
 // Whether two attempts tested the same tree: two exact attempts of one tree; two pull request runs of one head while

@@ -190,11 +190,13 @@ test("two pull request runs of one head are one tree for rerun-green only while 
   const lines = [red({ run: 1, at: 0, ...pr() }), line({ run: 1, attempt: 2, at: 30, ...pr() })];
   const record = (events, since = iso(-120)) => ({ since, events });
   const before = { at: iso(-60), before: 'b0', after: 'b1' };
-  assert.equal(causeOf(derive(lines, { entry: KIT, record: record([before]) }), 1).cause, 'rerun-green');
-  const moved = derive(lines, { entry: KIT, record: record([before, { at: iso(20), before: 'b1', after: 'b2' }]) });
-  assert.deepEqual([causeOf(moved, 1).cause, causeOf(moved, 1).why], ['unattributed', 'basis']);
   // The landing after the interval names the branch where the one before left it: the chain is whole, nothing moved.
   assert.equal(causeOf(derive(lines, { entry: KIT, record: record([before, { at: iso(90), before: 'b1', after: 'b2' }]) }), 1).cause, 'rerun-green');
+  const moved = derive(lines, { entry: KIT, record: record([before, { at: iso(20), before: 'b1', after: 'b2' }]) });
+  assert.deepEqual([causeOf(moved, 1).cause, causeOf(moved, 1).why], ['unattributed', 'basis']);
+  // At the record's tail (no landing yet after the interval) or with none before it, nothing shows the chain unbroken.
+  assert.equal(causeOf(derive(lines, { entry: KIT, record: record([before]) }), 1).cause, 'unattributed', 'the tail');
+  assert.equal(causeOf(derive(lines, { entry: KIT, record: record([{ at: iso(90), before: 'b1', after: 'b2' }]) }), 1).cause, 'unattributed', 'nothing before');
   // A break in the chain across the interval: a landing the record lacks may have moved the base. Not known.
   const broken = derive(lines, { entry: KIT, record: record([before, { at: iso(90), before: 'bX', after: 'b2' }]) });
   assert.deepEqual([causeOf(broken, 1).cause, causeOf(broken, 1).why], ['unattributed', 'basis']);
@@ -252,6 +254,20 @@ test("a summary's failure restates a part's only where a part failed: beside par
   assert.equal(both.cause, 'cancelled');
   const failedPart = causeOf(derive([part({ run: 1, at: 0, conclusion: 'failure', run_conclusion: 'failure' }), summary({ run: 1, at: 5 })]), 1);
   assert.deepEqual(failedPart.evidence.jobs.map((j) => j.job), ['unit 1/2']);
+});
+
+test("a summary that reached its own time limit is its own failure: beside a lost part the attempt is not infra", () => {
+  const lostPart = { job: 'unit 1/2', shard: [1, 2], conclusion: 'failure', run_conclusion: 'failure', phase: 'lost', failed_step: null, annotations: ['runner-lost'] };
+  for (const own of [{ conclusion: 'timed_out' }, { conclusion: 'cancelled', annotations: ['time-limit'] }, { conclusion: 'failure', log_kinds: ['time-limit'] }]) {
+    const c = causeOf(derive([
+      line({ run: 1, at: 0, ...lostPart }),
+      line({ run: 1, at: 5, job: 'unit', role: 'summary', run_conclusion: 'failure', failed_step: 'Check shards', phase: 'test', ...own }),
+    ]), 1);
+    assert.deepEqual([c.cause, c.evidence.jobs.map((j) => [j.job, j.lost])], ['unattributed', [['unit 1/2', 'annotation:runner-lost'], ['unit', null]]], JSON.stringify(own));
+  }
+  // A summary that failed beside the lost part, not at its time limit, restates it: infra.
+  const restated = causeOf(derive([line({ run: 1, at: 0, ...lostPart }), line({ run: 1, at: 5, job: 'unit', role: 'summary', conclusion: 'failure', run_conclusion: 'failure', failed_step: 'Check shards', phase: 'test' })]), 1);
+  assert.equal(restated.cause, 'infra');
 });
 
 test('superseded: the cancelled jobs of a run cancelled while a later run existed for its ref or its change; they are not reds', () => {

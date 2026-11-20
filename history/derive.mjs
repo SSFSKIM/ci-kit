@@ -1,17 +1,18 @@
 // The gate ledger's derived lines (gate ledger spec, M3), written once a pass when a repository's job lines are in:
 //   landings/<YYYY-MM-DD>.jsonl   one line per update of the default branch, by its push day (landings.mjs)
 //   causes/<YYYY-MM-DD>.jsonl     one line per red gate attempt, by the day its result was known (cause.mjs)
-// Both are recomputed while younger than 14 days, then final: an older day's file is left as it is, unread, and only a
-// day with no file yet gets one. A first derivation (no lines held), or one asked from a day (`from`), computes every
-// line from that day on. Files are chosen by their day's name before any is read: the job lines, landings and test
-// records of the 35-day window with a day's margin each side (a batch that crosses midnight sees the next day's
-// jobs), and the causes of the recompute window.
+// Both are recomputed while younger than 14 days, then final: an older day's lines are left as they are, its file
+// read only when a line computed now (a red that arrived late) falls on it, and only lines of keys it lacks join it.
+// A first derivation (no lines held), or one asked from a day (`from`), computes every line from that day on. Files
+// are chosen by their day's name before any is read: the job lines, landings and test records of the 35-day window
+// with a day's margin each side (a batch that crosses midnight sees the next day's jobs), and the causes of the
+// recompute window.
 // New landings come from the activity listing, a page of 100 a call. What it has covered is kept in attempts.json,
 // apart from the derived files: `activity: { since, through, breaks }`, the listing reaching back to `since` once and
-// on from the newest landing listed (`through`) after, so a first listing that failed is taken again from the start.
-// `breaks`: the window's landings whose `before` is not where the previous one left the branch (a landing the listing
-// lacks). A repository whose listing is refused has no landing record (`activity: "refused"`). It prints nothing of
-// what it reads: its counts name causes and days only.
+// on from the newest landing listed (`through`) after, so a first listing that failed is taken again from the start;
+// it advances only once the landings it covers are written. `breaks`: the window's landings whose `before` no landing
+// left the branch at (a landing the listing lacks). A repository whose listing is refused has no landing record
+// (`activity: "refused"`). It prints nothing of what it reads: its counts name causes and days only.
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BudgetSpent, isRateLimited } from '../lib/github.mjs';
@@ -50,9 +51,9 @@ const writeDays = (dir, days) => {
   return written;
 };
 
-// Held lines kept where final (their day before `from`), computed lines elsewhere and wherever none is held; by day.
-// `final`: the days before `from` that have a file left unread, which no computed line joins.
-function merged(held, computed, { keyOf, dayOfLine, from, final, order }) {
+// Held lines kept where final (their day before `from`), computed lines elsewhere and wherever none is held, by key:
+// a final day keeps its lines as they are and gains only lines of new keys (a red that arrived late); by day.
+function merged(held, computed, { keyOf, dayOfLine, from, order }) {
   const days = new Map();
   const heldKeys = new Set();
   for (const [day, lines] of held) {
@@ -62,7 +63,7 @@ function merged(held, computed, { keyOf, dayOfLine, from, final, order }) {
   }
   for (const l of computed) {
     const day = dayOfLine(l);
-    if (day < from && (heldKeys.has(keyOf(l)) || final.has(day))) continue;
+    if (day < from && heldKeys.has(keyOf(l))) continue;
     (days.get(day) ?? days.set(day, []).get(day)).push(l);
   }
   for (const lines of days.values()) lines.sort(order);
@@ -113,8 +114,6 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
   const asked = from && from > windowStart ? from : from ? windowStart : null;
   const recomputeFrom = asked ?? (first ? windowStart : day(now - FINAL_DAYS * DAY));
   const heldLandings = readDays(landingsDir, inputFrom, inputTo);
-  const heldCauses = readDays(causesDir, recomputeFrom, inputTo);
-  const finalDays = (dir2, before) => new Set(dayFiles(dir2).filter((d) => d < before));
   const errors = [];
   let paced = false;
   const counts = { listed: 0, landings: 0, breaks: 0, causes: {} };
@@ -126,6 +125,7 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
   const events = new Map(held.map((l) => [l.id, { id: l.id, type: l.type, before: l.before, after: l.after, at: l.at }]));
   let landingsKnown = state.activity !== 'refused';
   const covered = landingsKnown && state.activity ? state.activity : null;
+  let activity = covered; // what the listing will have covered, kept in state once the landings are written
   const backfill = `${windowStart}T00:00:00Z`;
   let listed = false; // this pass's listing reached back to where the record left off: the record is whole
   if (landingsKnown) {
@@ -139,12 +139,12 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
         if (e.at > through) through = e.at;
       }
       listed = true;
-      state.activity = { since: covered && covered.since < since ? covered.since : since, through, breaks: covered?.breaks ?? [] };
+      activity = { since: covered && covered.since < since ? covered.since : since, through, breaks: covered?.breaks ?? [] };
     } catch (err) {
       if (err instanceof BudgetSpent) paced = true; // the next pass lists
       else if ([403, 404].includes(err.status) && !isRateLimited(err)) {
         state.activity = 'refused';
-        landingsKnown = false;
+        [activity, landingsKnown] = [null, false];
       } else errors.push(`activity: ${describeError(err)}`);
     }
   }
@@ -162,7 +162,7 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
   const index = landingIndex(analysis, lines, state.runs ?? {});
   const computedLandings = toCompute.map((e) => landingLine(e, { entry, mirror, index, pulls }));
   const landingDays = landingsKnown
-    ? merged(heldLandings, computedLandings, { keyOf: (l) => l.id, dayOfLine: (l) => dayOf(l.at), from: recomputeFrom, final: finalDays(landingsDir, inputFrom), order: byTime('at') })
+    ? merged(heldLandings, computedLandings, { keyOf: (l) => l.id, dayOfLine: (l) => dayOf(l.at), from: recomputeFrom, order: byTime('at') })
     : new Map();
   const landings = landingsKnown ? [...landingDays.values()].flat().sort(byTime('at')) : null;
   counts.landings = landings?.length ?? 0;
@@ -170,11 +170,11 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
   // left the branch at starts a chain; past the first start (where the record begins), each start is a break: a
   // landing is missing before it. Linked by commit, not by time: GitHub's times run out of order around the
   // fall-back hour (MAWS's and cua's 2026-11-01 09:00-12:00Z), which is no gap.
-  if (landings && typeof state.activity === 'object' && state.activity) {
+  if (landings && activity) {
     const afters = new Set(landings.map((l) => l.after));
     const starts = landings.filter((l) => !afters.has(l.before) && !ZERO.test(l.before ?? ''));
-    state.activity.breaks = starts.slice(landings.some((l) => ZERO.test(l.before ?? '')) ? 0 : 1).map((l) => ({ at: l.at, id: l.id }));
-    counts.breaks = state.activity.breaks.length;
+    activity = { ...activity, breaks: starts.slice(landings.some((l) => ZERO.test(l.before ?? '')) ? 0 : 1).map((l) => ({ at: l.at, id: l.id })) };
+    counts.breaks = activity.breaks.length;
   }
 
   // 4. Causes: a first pass learns which trees' differences are asked for, so the heads holding them are fetched in
@@ -183,7 +183,7 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
   const headOfTree = new Map(analysis.attempts.filter((a) => a.basis === 'exact' && a.tree).map((a) => [a.tree, a.head]));
   const wanted = new Set();
   // Whether the base moved between two pull request runs is read only from a record this pass's listing made whole.
-  const record = listed ? { since: [state.activity.since, `${inputFrom}T00:00:00Z`].sort().at(-1), events: landings } : null;
+  const record = listed ? { since: [activity.since, `${inputFrom}T00:00:00Z`].sort().at(-1), events: landings } : null;
   const inputs = {
     analysis, entry, record, standing: observations.standing, known: readKnown(root, alias), casesOf: failedCases(dir, inputFrom, inputTo),
     prOf: pullsByBranch(lines, pulls), from: windowStart,
@@ -198,10 +198,16 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
     }
   };
   const computedCauses = deriveCauses({ ...inputs, paths });
-  const causeDays = merged(heldCauses, computedCauses, { keyOf: causeKey, dayOfLine: (c) => dayOf(c.available), from: recomputeFrom, final: finalDays(causesDir, recomputeFrom), order: byTime('available') });
+  // The causes held: the recompute window's, and a final day's only where a line computed now falls on it.
+  const finalDays = new Set(dayFiles(causesDir).filter((d) => d < recomputeFrom));
+  const lateDays = [...new Set(computedCauses.map((c) => dayOf(c.available)))].filter((d) => finalDays.has(d));
+  const heldCauses = new Map([...readDays(causesDir, recomputeFrom, inputTo), ...lateDays.map((d) => [d, readDays(causesDir, d, d).get(d)])]);
+  const causeDays = merged(heldCauses, computedCauses, { keyOf: causeKey, dayOfLine: (c) => dayOf(c.available), from: recomputeFrom, order: byTime('available') });
   for (const c of [...causeDays.values()].flat()) counts.causes[c.cause] = (counts.causes[c.cause] ?? 0) + 1;
 
   counts.written = (landingsKnown ? writeDays(landingsDir, landingDays) : 0) + writeDays(causesDir, causeDays);
+  // The listing's coverage advances only once the landings it covers are written.
+  if (activity) state.activity = activity;
   counts.refused = !landingsKnown;
   counts.seconds = Math.round((Date.now() - started) / 1000);
   return { counts, errors, paced };

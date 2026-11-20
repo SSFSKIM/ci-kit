@@ -122,14 +122,14 @@ test("pr_check reads the ledger's run records: a run pending at the landing, one
   const { o, mirror } = world(t);
   const base = o.commit({ '.github/ci-kit.yml': KIT_CONFIG, 'src/a.ts': '1' }, 'base');
   const heads = {};
-  for (const n of [20, 21, 22]) {
+  for (const n of [20, 21, 22, 25, 26]) {
     o.git('checkout', '-q', '-b', `topic${n}`, base);
     heads[n] = o.commit({ [`src/${n}.ts`]: 'x' }, `work ${n}`);
     o.git('update-ref', `refs/pull/${n}/head`, heads[n]);
   }
   o.git('checkout', '-q', 'main');
   const tips = [base];
-  for (const n of [20, 21, 22, 23, 24]) tips.push(o.commit({ [`src/${n}.ts`]: 'x' }, `change ${n} (#${n})`));
+  for (const n of [20, 21, 22, 23, 24, 25, 26]) tips.push(o.commit({ [`src/${n}.ts`]: 'x' }, `change ${n} (#${n})`));
   const m = mirror();
   const pr = (head, n, o2) => ({ day: '2026-11-18', event: 'pull_request', head, pr: n, created: iso(0), ...o2 });
   const runs = {
@@ -137,12 +137,17 @@ test("pr_check reads the ledger's run records: a run pending at the landing, one
     301: pr(heads[21], 21, { attempts: 1, closed: [1], attempt_info: { 1: { started: iso(0), status: 'completed', conclusion: 'startup_failure', completed: iso(1) } } }),
     302: pr(heads[22], 22, { attempts: 2, closed: [1, 2], attempt_info: { 2: { started: iso(20), status: 'completed', conclusion: 'success', completed: iso(46) } } }),
     303: pr('d'.repeat(40), 23, { attempts: 1, closed: [1] }),
+    // A run that created no jobs and succeeded: no check ever passed.
+    304: pr(heads[25], 25, { attempts: 1, closed: [1], attempt_info: { 1: { started: iso(0), status: 'completed', conclusion: 'success', completed: iso(1) } } }),
+    // A run of #26's head that records another pull request: not #26's check.
+    305: pr(heads[26], 99, { attempts: 1, closed: [1] }),
   };
   const lines = [
     ...prRun(302, heads[22], { at: 0, conclusion: 'failure' }),
     // The rerun began at 20; its jobs waited for a runner until 40.
     ...prRun(302, heads[22], { at: 40, attempt: 2 }),
     ...prRun(303, 'd'.repeat(40), { at: 0 }),
+    ...prRun(305, heads[26], { at: 0 }),
   ];
   const at = (i, minutes) => landed(lines, event(i, tips[i - 1], tips[i], minutes), { mirror: m, runs }).pr_check;
   assert.deepEqual(at(1, 10), { result: 'unrun', run: 300, attempt: 1, inflight: true, eventual: null });
@@ -152,6 +157,13 @@ test("pr_check reads the ledger's run records: a run pending at the landing, one
   assert.deepEqual(at(4, 10), { result: 'green', run: 303, attempt: 1 });
   // #24: no head and no run of it: not known, which is not `none`.
   assert.deepEqual(at(5, 10), { result: 'unknown' });
+  assert.deepEqual(at(6, 10), { result: 'unknown', run: 304, attempt: 1, read: 'run' });
+  assert.deepEqual(at(7, 10), { result: 'none' });
+  // A jobless failure that completed after the landing was in flight; with no completion recorded it is not known.
+  const late = { ...runs, 301: { ...runs[301], attempt_info: { 1: { ...runs[301].attempt_info[1], completed: iso(30) } } } };
+  assert.deepEqual(landed(lines, event(2, tips[1], tips[2], 10), { mirror: m, runs: late }).pr_check, { result: 'unrun', run: 301, attempt: 1, inflight: true, eventual: 'startup_failure', read: 'run' });
+  const open = { ...runs, 301: { ...runs[301], attempt_info: { 1: { started: iso(0), status: 'in_progress', conclusion: null, completed: null } } } };
+  assert.deepEqual(landed(lines, event(2, tips[1], tips[2], 10), { mirror: m, runs: open }).pr_check, { result: 'unknown', run: 301, attempt: 1, read: 'run' });
 });
 
 test("exact: the latest full, exact attempt of each required gate on the landed tree, completed before the landing", (t) => {

@@ -76,14 +76,15 @@ function verdictOn(index, required, key, at) {
 }
 
 // The required check as it stood at the landing: the verdict job of the latest pull request run created before it,
-// in that run's latest attempt begun before it (a rerun by its own start). A run is the landing's by its head; where
-// the head could not be read (a squash whose refs/pull head is gone), by the pull request the run records. `none`:
-// the head has no pull request run; `unknown`: neither the head nor a run of the pull request is known. Without a
-// verdict line, an attempt still open is `unrun` in flight, and one closed with no jobs reads as its run's conclusion
-// (it failed before creating any: the check failed, which is what the check showed).
+// in that run's latest attempt begun before it (a rerun by its own start). A run is the landing's by its head, unless
+// the pull request it records is another; where the head could not be read (a squash whose refs/pull head is gone),
+// by the pull request the run records. `none`: the head has no pull request run; `unknown`: neither the head nor a
+// run of the pull request is known. Without a verdict line, an attempt still open is `unrun` in flight; one closed
+// with no jobs never showed a passing check: a failure completed before the landing is `red`, one completed after is
+// in flight, and a success or a run with no completion recorded is `unknown` (`read: "run"` on each).
 function prCheck(index, { pr, head }, at, verdictJob) {
   const runs = [...index.pr.values()]
-    .filter((r) => r.created && r.created < at && (head !== null ? r.head === head : pr !== null && r.pr === pr))
+    .filter((r) => r.created && r.created < at && (head !== null ? r.head === head && (r.pr === null || pr === null || r.pr === pr) : pr !== null && r.pr === pr))
     .sort((x, y) => (x.created < y.created ? -1 : 1));
   const latest = runs.at(-1);
   if (!latest) return { result: head === null ? 'unknown' : 'none' };
@@ -99,9 +100,10 @@ function prCheck(index, { pr, head }, at, verdictJob) {
   }
   const info = latest.info[attempt] ?? null;
   if (!latest.closed.has(attempt)) return { result: 'unrun', ...where, inflight: true, eventual: null };
-  if (lines.length === 0 && info?.conclusion) {
-    if ((info.completed ?? startOf(attempt)) <= at) return { result: info.conclusion === 'success' ? 'green' : 'red', ...where, read: 'run' };
-    return { result: 'unrun', ...where, inflight: true, eventual: info.conclusion };
+  if (lines.length === 0) {
+    if (!info?.conclusion || !info.completed || info.conclusion === 'success') return { result: 'unknown', ...where, read: 'run' };
+    if (info.completed <= at) return { result: 'red', ...where, read: 'run' };
+    return { result: 'unrun', ...where, inflight: true, eventual: info.conclusion, read: 'run' };
   }
   return { result: 'unrun', ...where, verdict: 'missing' };
 }

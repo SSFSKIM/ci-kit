@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { createGitHub } from '../../lib/github.mjs';
 import { deriveRepo, formatDerived } from '../../history/derive.mjs';
 import { openMirror } from '../../history/mirror.mjs';
-import { openLedger } from '../../history/store.mjs';
+import { io, openLedger } from '../../history/store.mjs';
 import { gitOrigin } from './helpers.mjs';
 
 const repos = JSON.parse(readFileSync(new URL('../../history/repos.json', import.meta.url), 'utf8'));
@@ -159,9 +159,10 @@ test('a first listing that failed is taken again from the window start: the olde
 test("files are chosen by day before any is read: final causes, landings and test records outside the window stay unread", async (t) => {
   const w = setup(t);
   await deriveRepo({ gh: ghWith(page(w.activity)), repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger: w.ledger(), mirror: w.mirror, now: w.now });
-  // Files no derivation may read: a final cause day, a landing day before the window, a test record day before it.
+  // Files no derivation may read: a final cause day no line computed now falls on, a landing day before the window, a
+  // test record day before it.
   const unreadable = 'not a line\n';
-  const planted = [['causes', '2026-10-31'], ['landings', '2026-09-01'], ['runs', '2026-09-01']].map(([kind, day]) => {
+  const planted = [['causes', '2026-10-25'], ['landings', '2026-09-01'], ['runs', '2026-09-01']].map(([kind, day]) => {
     mkdirSync(join(w.root, ALIAS, kind), { recursive: true });
     const path = join(w.root, ALIAS, kind, `${day}.jsonl`);
     writeFileSync(path, unreadable);
@@ -202,4 +203,41 @@ test('the chain breaks of the window are counted where the report reads them', a
   const again = v.ledger();
   await deriveRepo({ gh: ghWith(page(swapped)), repo: 'o/r', alias: ALIAS, entry: KIT, root: v.root, ledger: again, mirror: v.mirror, now: v.now });
   assert.deepEqual(again.state.activity.breaks, []);
+});
+
+test('a red that arrived late joins its final day by key: the lines there stay as they are', async (t) => {
+  const w = setup(t);
+  await deriveRepo({ gh: ghWith(page(w.activity)), repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger: w.ledger(), mirror: w.mirror, now: w.now });
+  const oldPath = join(w.root, ALIAS, 'causes', '2026-10-31.jsonl');
+  writeFileSync(oldPath, readFileSync(oldPath, 'utf8').replace('"rerun-green"', '"held"'));
+  // An attempt of 10-31 the ledger closed only now: red, nothing after it on its tree or in its change.
+  const ledger = w.ledger();
+  const at = w.now - 20 * DAY + 3600_000;
+  ledger.addJobLines([line({ run: 9, head: 'h9', tree: 'T9', tree_key: 'T9', change: 'ci-kit-ci-gate:late', started: iso(at), completed: iso(at + 5 * 60_000), ...failed })]);
+  ledger.flush();
+  const r = await deriveRepo({ gh: ghWith(page(w.activity)), repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger: w.ledger(), mirror: w.mirror, now: w.now + DAY });
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(read(w.root, 'causes')['2026-10-31'].map((c) => [c.run, c.cause]), [[1, 'held'], [9, 'unattributed']]);
+});
+
+test('the listing\'s coverage advances only once its landings are written: a failure after the listing lists again', async (t) => {
+  const w = setup(t);
+  const ledger = w.ledger();
+  const saved = io.write;
+  io.write = (path, data) => {
+    if (path.includes('/landings/')) throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+    return saved(path, data);
+  };
+  try {
+    await assert.rejects(deriveRepo({ gh: ghWith(page(w.activity)), repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger, mirror: w.mirror, now: w.now }), /ENOSPC/);
+  } finally {
+    io.write = saved;
+  }
+  assert.equal(ledger.state.activity, undefined, 'nothing covered');
+  ledger.flush(); // the collector flushes the ledger after a failed derivation
+  const again = w.ledger();
+  const r = await deriveRepo({ gh: ghWith(page(w.activity)), repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger: again, mirror: w.mirror, now: w.now });
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(Object.keys(read(w.root, 'landings')), ['2026-10-31', '2026-11-18']);
+  assert.equal(again.state.activity.through, iso(w.now - 2 * DAY));
 });
