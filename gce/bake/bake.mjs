@@ -317,22 +317,27 @@ async function main() {
   try { ec2Config = parseEc2Config(await readFile(new URL('../../pool/config/ec2.json', import.meta.url), 'utf8')); }
   catch (err) { if (err.code !== 'ENOENT') throw err; }
   const accounts = ec2Config?.accounts ?? [];
-  if (process.env.CI_KIT_BAKE_IF_STALE === '1' && !await checkStale({
-    cfg, gce, gh: contents, accounts, token: googleToken,
-    execution: process.env.CLOUD_RUN_EXECUTION, job: process.env.CLOUD_RUN_JOB, log,
-  })) return;
-  // A stale check continues here, in this execution; the weekly/manual bake remains unconditional.
+  // A stale check continues here, in this execution, for the providers it found stale; the weekly/manual bake
+  // remains unconditional and bakes every provider.
+  let only;
+  if (process.env.CI_KIT_BAKE_IF_STALE === '1') {
+    only = await checkStale({
+      cfg, gce, gh: contents, accounts, token: googleToken,
+      execution: process.env.CLOUD_RUN_EXECUTION, job: process.env.CLOUD_RUN_JOB, log,
+    });
+    if (!only.length) return;
+  }
   const sha = process.env.CI_KIT_COMMIT || (await mainHead());
   const runId = process.env.CI_KIT_BAKE_RUN || bakeRunId(new Date());
   // The real job's: ci-kit-sandbox only, minted as needed, so it is fresh after a long build.
   const gh = createGitHub(createAppTokens({ ...app, repo: 'SSFSKIM/ci-kit-sandbox', scope: CHECK_SCOPE }));
   const script = fillBuilderScript(await readFile(new URL('./builder.sh', import.meta.url), 'utf8'), { sha });
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  log(`bake ${runId}: kit ${sha.slice(0, 8)}, project ${cfg.project}, ${accounts.length} EC2 accounts`);
+  log(`bake ${runId}: kit ${sha.slice(0, 8)}, project ${cfg.project}, ${only ? `only the stale ${only.join(', ')}` : `gce and ${accounts.length} EC2 accounts`}`);
   await bakeProviders({
     resolve: () => resolveManifest({ sha, gh: contents, repos: cfg.repos }),
     gce: async (manifest) => runBake(gce, { cfg, sha, manifest, runId, token: await access.builderToken(), gh, script, sleep, log }),
-    accounts,
+    accounts, only,
     ec2: async (account, manifest) => {
       const { createAws } = await import('../../lib/aws.mjs');
       const { runEc2Bake } = await import('../../ec2/bake/bake.mjs');
@@ -344,7 +349,7 @@ async function main() {
         script: await readFile(new URL('../../ec2/bake/builder.sh', import.meta.url), 'utf8'), sleep, log });
     },
   });
-  log('done: every configured provider passed smoke and its real sandbox job');
+  log(`done: ${only ? only.join(', ') : 'every configured provider'} passed smoke and its real sandbox job`);
 }
 
 // Both sides canonical: argv[1] is the path as typed, the module URL is resolved through symlinks.
