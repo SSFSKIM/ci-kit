@@ -183,3 +183,16 @@ test("an error names its method, path and status apart from the body's message",
   const gh = createGitHub('t', { fetchImpl: f.impl });
   await assert.rejects(gh.getRun('o/r', 7), (err) => err.status === 502 && err.method === 'GET' && err.path === '/repos/o/r/actions/runs/7');
 });
+
+test('admission is decided after the token is in hand: concurrent requests cannot all pass one remaining slot', async () => {
+  const f = fakeFetch([{ status: 200, body: RUN }, { status: 200, body: RUN }, { status: 200, body: RUN }]);
+  // An App token arrives a tick later, as the pool's expiring tokens do; one request is left in the budget.
+  const token = () => new Promise((resolve) => setTimeout(() => resolve('t'), 1));
+  let gh;
+  gh = createGitHub(token, { fetchImpl: f.impl, admit: () => gh.stats().requests < 1 });
+  const results = await Promise.allSettled([gh.getRun('o/r', 1), gh.getRun('o/r', 2), gh.getRun('o/r', 3)]);
+  assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+  assert.ok(results.filter((r) => r.status === 'rejected').every((r) => r.reason instanceof BudgetSpent));
+  assert.equal(f.requests.length, 1);
+  assert.equal(gh.stats().requests, 1);
+});

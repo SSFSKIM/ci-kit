@@ -1225,6 +1225,93 @@ test("a job listing GitHub answers 502 is asked again before it counts as the ba
   assert.match(out.join('\n'), /attempts closed 1 \(lines 1\)/);
 });
 
+// A batch of the collector over MAWS-shaped repositories (a ledger and a per-test pass each) against a fake GitHub:
+// one run on 2026-10-20 per repository, `artifacts` recent artifacts that name no report, and `limitedOn`: the
+// repository whose first request is refused for the rate limit. → printed output, exit code, requests by repository.
+async function batchOf(t, { repos = ['o/a'], limits, artifacts = 0, limitedOn = null, root = null, pass = 'p1' } = {}) {
+  root ??= mkdtempSync(join(tmpdir(), 'history-batch-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const maws = JSON.parse(readFileSync(new URL('../../history/repos.json', import.meta.url), 'utf8')).find((r) => r.alias === 'SSFSKIM/MAWS');
+  const asked = {};
+  const ok = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  const fetchImpl = async (href) => {
+    const url = new URL(href);
+    const repo = /^\/repos\/([^/]+\/[^/]+)/.exec(url.pathname)[1];
+    const path = url.pathname.slice(repo.length + 7);
+    asked[repo] = (asked[repo] ?? 0) + 1;
+    if (repo === limitedOn) return new Response(JSON.stringify({ message: 'API rate limit exceeded for installation ID 1.' }), { status: 403 });
+    if (path.startsWith('/actions/workflows/')) {
+      const day = url.searchParams.get('created').slice(0, 10);
+      const runs = day === '2026-10-20' ? [{ id: 7, name: 'gate', event: 'push', head_branch: 'master', head_sha: 'a'.repeat(40), head_commit: { tree_id: 't', message: 'x' }, pull_requests: [], status: 'completed', conclusion: 'success', run_attempt: 1, created_at: '2026-10-20T08:00:00Z' }] : [];
+      return ok({ total_count: runs.length, workflow_runs: runs });
+    }
+    if (path === '/actions/runs/7/attempts/1/jobs') return ok({ total_count: 1, jobs: [{ id: 70, name: 'probes', status: 'completed', conclusion: 'success', created_at: '2026-10-20T08:00:00Z', started_at: '2026-10-20T08:00:10Z', completed_at: '2026-10-20T08:03:10Z', runner_name: 'ci-kit-gce-a', labels: [], steps: [] }] });
+    if (path === '/actions/artifacts') {
+      const page = Number(url.searchParams.get('page'));
+      const all = Array.from({ length: artifacts }, (_, i) => ({ id: i + 1, name: `other-${i}`, created_at: '2026-10-21T10:00:00Z', expired: false, workflow_run: { id: 7 } }));
+      return ok({ total_count: all.length, artifacts: all.slice((page - 1) * 100, page * 100) });
+    }
+    return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 });
+  };
+  const deps = { tokenFor: () => 't', createGitHub: (token, o) => createGitHub(token, { ...o, fetchImpl }), openMirror: () => ({ ensure() {}, fetch: () => new Set(), parentOf: () => null, treeKey: () => null }), delays: [0, 0], limits };
+  const out = [];
+  const saved = { log: console.log, error: console.error };
+  console.log = (...a) => out.push(a.join(' '));
+  console.error = (...a) => out.push(a.join(' '));
+  let code;
+  try {
+    code = await collector.collectBatch({ chosen: repos.map((r) => ({ ...maws, repo: r, alias: r })), opts: { store: root, mirrors: root, pass, attempts: 300, limit: 40, calls: null }, now: NOW, deps });
+  } finally {
+    Object.assign(console, saved);
+  }
+  return { out: out.join('\n'), code, asked, root };
+}
+
+test('the per-test pass stopped by the hour in its artifact listing waits for a later batch, and is no error', async (t) => {
+  // The ledger takes 36 calls (35 days, one job listing); 12 more leave room to start the per-test pass, whose
+  // artifact listing pages past them.
+  const { out, code, asked } = await batchOf(t, { limits: { app: { pass: 1500, hour: 48 } }, artifacts: 1500 });
+  assert.equal(code, 0, out);
+  assert.equal(asked['o/a'], 48);
+  assert.doesNotMatch(out, /per-test:|errors [1-9]/);
+  assert.match(out, /^history: wait \d+$/m);
+  assert.match(out, /^history: more$/m);
+});
+
+test("a drained ledger with too few of the hour's calls left for the per-test pass waits, rather than skipping it", async (t) => {
+  const { out, code, asked } = await batchOf(t, { limits: { app: { pass: 1500, hour: 40 } } });
+  assert.equal(code, 0, out);
+  assert.equal(asked['o/a'], 36);
+  assert.doesNotMatch(out, /artifacts \d+, lines/, 'the per-test pass did not start');
+  assert.match(out, /^history: wait \d+$/m);
+  assert.match(out, /^history: more$/m);
+});
+
+test("a pass that spends its own calls ends cleanly, with no wait, in either phase", async (t) => {
+  // The per-test pass starts with 12 of the pass's calls left, and its artifact listing pages past them.
+  const perTest = await batchOf(t, { limits: { app: { pass: 48, hour: 2000 } }, artifacts: 1500 });
+  assert.equal(perTest.code, 0, perTest.out);
+  assert.equal(perTest.asked['o/a'], 48);
+  assert.doesNotMatch(perTest.out, /per-test:|errors [1-9]/);
+  assert.doesNotMatch(perTest.out, /^history: (more|wait)/m);
+  // A second repository left unread by the pass's cap ends the pass too.
+  const two = await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 40, hour: 2000 } } });
+  assert.equal(two.code, 0, two.out);
+  assert.ok(two.asked['o/a'] + (two.asked['o/b'] ?? 0) <= 40);
+  assert.doesNotMatch(two.out, /^history: (more|wait)/m);
+});
+
+test("GitHub's rate limit on a token ends the pass on that token: no other repository, phase or batch asks again", async (t) => {
+  const first = await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 1500, hour: 2000 } }, limitedOn: 'o/a' });
+  assert.equal(first.code, 1, 'the refusal is an error');
+  assert.deepEqual(first.asked, { 'o/a': 1 });
+  assert.match(first.out, /o\/a: listing \d{4}-\d\d-\d\d: HTTP 403 \(rate limited\)/);
+  assert.doesNotMatch(first.out, /^history: (more|wait)/m);
+  // A later batch of the same pass keeps off the token.
+  const again = await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 1500, hour: 2000 } }, root: first.root });
+  assert.deepEqual(again.asked, {});
+});
+
 test('the arguments: batch sizes, the pass and the mirrors', () => {
   const opts = collector.parseArgs(['--store', 's', '--pass', '44500000000.1', '--mirrors', '/m', '--attempts', '50', '--limit', '40']);
   assert.deepEqual(opts, { repo: null, store: 's', limit: 40, attempts: 50, pass: '44500000000.1', mirrors: '/m', calls: null });

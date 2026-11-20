@@ -241,8 +241,10 @@ test('where annotations are refused the log is read, and a job with neither keep
     const r = await pass(world, s.root, { entry: KIT, mirror: fakeMirror({ [sha(600)]: sha(0) }) });
     assert.deepEqual(r.errors, []);
     const lines = allLines(s.root);
-    assert.deepEqual(lines.find((l) => l.job === 'ci / test').annotations, ['time-limit']);
+    assert.deepEqual(lines.find((l) => l.job === 'ci / test').annotations, []);
+    assert.deepEqual(lines.find((l) => l.job === 'ci / test').log_kinds, ['time-limit'], 'read from the log, and marked so');
     assert.deepEqual(lines.find((l) => l.job === 'ci / lint').annotations, []);
+    assert.deepEqual(lines.find((l) => l.job === 'ci / lint').log_kinds, []);
     const test0 = lines.find((l) => l.job === 'ci / test');
     assert.equal(test0.gate, 'test');
     assert.equal(test0.tree_key, 'tree600', 'no path policy: the tree is its key');
@@ -488,6 +490,43 @@ test("a rerun's copies fold the same from any window that holds its fresh jobs",
     const fold = (from, to) => gateAttempts(ledger.jobLines(from, to)).filter((a) => a.attempt === 2).map((a) => [a.gate, a.result, a.minutes, a.available, a.copied]);
     assert.deepEqual(fold('2026-11-18', '2026-11-18'), [['unit', 'succeeded', 6, '2026-11-18T09:06:00Z', false]]);
     assert.deepEqual(fold('2026-11-01', '2026-11-30'), fold('2026-11-18', '2026-11-18'));
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("a copy is filed by its own gate's availability, whatever another job of the rerun does after midnight", async () => {
+  const s = store();
+  try {
+    const created = '2026-11-17T20:00:00Z';
+    // The rerun: unit's copied shard (11-17) and its fresh shard (11-18 23:50); probes, rerun too, ends after midnight.
+    const world = { runs: [gateRun(4100, created, { attempt: 2 })], jobs: {
+      '4100/1': [job(1, 'unit 1/2', created, 30), job(2, 'unit 2/2', created, 30, { conclusion: 'failure' }), job(3, 'probes', created, 5, { conclusion: 'failure' })],
+      '4100/2': [{ ...job(11, 'unit 1/2', created, 30), created_at: '2026-11-18T23:40:00Z' }, job(12, 'unit 2/2', '2026-11-18T23:40:00Z', 10), job(13, 'probes', '2026-11-18T23:55:00Z', 20)],
+    } };
+    const r = await pass(world, s.root);
+    assert.deepEqual(r.errors, []);
+    const ledger = openLedger(s.root, 'o/r');
+    assert.deepEqual(ledger.jobLines('2026-11-18', '2026-11-18').map((l) => l.job).sort(), ['unit 1/2', 'unit 2/2']);
+    const unit = gateAttempts(ledger.jobLines('2026-11-18', '2026-11-18')).find((a) => a.attempt === 2);
+    assert.deepEqual([unit.result, unit.available], ['succeeded', '2026-11-18T23:50:00Z']);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("fresh shards of one gate across midnight fold whole from a window with a day's margin", async () => {
+  const s = store();
+  try {
+    const created = '2026-11-17T23:50:00Z';
+    const world = { runs: [gateRun(4200, created)], jobs: { '4200/1': [job(1, 'unit 1/2', created, 5), job(2, 'unit 2/2', created, 15)] } };
+    await pass(world, s.root);
+    const ledger = openLedger(s.root, 'o/r');
+    // Each shard is filed by its own completion: one day holds half the attempt.
+    assert.equal(gateAttempts(ledger.jobLines('2026-11-18', '2026-11-18'))[0].result, 'incomplete');
+    // A reader of 11-18 that reads a day either side, attributing by `available`, has it whole.
+    const [a] = gateAttempts(ledger.jobLines('2026-11-17', '2026-11-19'));
+    assert.deepEqual([a.result, a.available.slice(0, 10)], ['succeeded', '2026-11-18']);
   } finally {
     s.cleanup();
   }

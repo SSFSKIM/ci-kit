@@ -27,6 +27,8 @@ test("platform messages are named by kind only when they are the platform's own,
   // Not the platform's: its words inside something else, or a message too vague to name a cause.
   assert.equal(platformKind('AssertionError: expected "The runner has received a shutdown signal." to be logged'), null);
   assert.equal(platformKind('test said: the job was not started because the fixture was missing'), null);
+  // `not-started` is the billing refusal only.
+  assert.equal(platformKind('The job was not started because a dependency failed.'), null);
   assert.equal(platformKind('The operation was canceled.'), null);
   assert.equal(platformKind('Process completed with exit code 1.'), null);
   assert.equal(platformKind(undefined), null);
@@ -214,7 +216,7 @@ test('a job line: the fields, a copy without minutes, and the platform kinds onl
   assert.equal(facts.basis, 'exact');
   const job = { id: 135000000001, name: 'e2e:desk-web', run_attempt: 1, status: 'completed', conclusion: 'success', created_at: '2026-11-19T08:17:40Z', started_at: '2026-11-19T08:18:10Z', completed_at: '2026-11-19T08:25:45Z', runner_name: 'ci-kit-gce-x1', labels: ['self-hosted', 'ci-kit-pool', 'cpus-4'], steps: [] };
   const line = jobLine(facts, job, { copied_from: null, annotations: [] }, MAWS);
-  assert.deepEqual(Object.keys(line), ['v', 'run', 'attempt', 'workflow', 'event', 'ref', 'producer', 'label', 'change', 'gates', 'scope', 'scope_key', 'head', 'tested', 'tree', 'tree_key', 'basis', 'job_id', 'job', 'gate', 'shard', 'kind', 'role', 'copy', 'copied_from', 'lane', 'runner', 'started', 'completed', 'minutes', 'conclusion', 'run_conclusion', 'failed_step', 'phase', 'annotations']);
+  assert.deepEqual(Object.keys(line), ['v', 'run', 'attempt', 'workflow', 'event', 'ref', 'producer', 'label', 'change', 'gates', 'scope', 'scope_key', 'head', 'tested', 'tree', 'tree_key', 'basis', 'job_id', 'job', 'gate', 'shard', 'kind', 'role', 'copy', 'copied_from', 'lane', 'runner', 'started', 'completed', 'minutes', 'conclusion', 'run_conclusion', 'failed_step', 'phase', 'annotations', 'log_kinds']);
   assert.equal(line.minutes, 7.6);
   assert.equal(line.lane, 'pool-gce');
   assert.equal(line.gates, 'static,unit,probes,e2e:desk-web');
@@ -242,6 +244,15 @@ test('a job line: the fields, a copy without minutes, and the platform kinds onl
   assert.equal(prLine.tree, null);
   assert.equal(prLine.head_tree, 't'.repeat(40));
   assert.deepEqual(prLine.annotations, ['time-limit']);
+  assert.deepEqual(prLine.log_kinds, []);
+  // A kind read from a log is kept apart from the annotations' (M3 counts it only beside the job's own evidence).
+  const logged = jobLine(pr, { ...job, name: 'ci / mods-types', conclusion: 'failure' }, { copied_from: null, annotations: [], log_kinds: ['runner-lost'] }, DOPER);
+  assert.deepEqual([logged.annotations, logged.log_kinds], [[], ['runner-lost']]);
+  // `not-started` stands only on a job that never started: no runner, no step that ran.
+  const refused = { ...job, runner_name: null, started_at: job.created_at, steps: [], conclusion: 'failure' };
+  assert.deepEqual(jobLine(facts, refused, { copied_from: null, annotations: ['not-started'] }, MAWS).annotations, ['not-started']);
+  assert.deepEqual(jobLine(facts, { ...refused, runner_name: 'ci-kit-gce-x1' }, { copied_from: null, annotations: ['not-started'] }, MAWS).annotations, []);
+  assert.deepEqual(jobLine(facts, { ...refused, steps: [{ name: 'Set up job', conclusion: 'success' }] }, { copied_from: null, annotations: [], log_kinds: ['not-started'] }, MAWS).log_kinds, []);
   // A branch's run without a pull request is the branch's change; a fallback label is no change.
   assert.equal(runFacts({ ...run, event: 'pull_request', head_branch: 'feature', pull_requests: [] }, 1, { tested: null, treeKey: null }, DOPER).change, 'branch:feature');
   const gate = runFacts({ ...run, head_branch: 'ci/gate-0123abcd-ab12cd' }, 1, { tested: '0123abcd'.padEnd(40, '0'), treeKey: 't'.repeat(40) }, KIT);
@@ -322,10 +333,16 @@ test('a gate attempt made only of copies is no new execution, and its result is 
   const probes = attempts.find((a) => a.gate === 'probes');
   assert.equal(probes.copied, true);
   assert.equal(probes.available, null);
-  // A copy is filed with its attempt's latest fresh job, so a window that holds the fresh jobs holds the copies.
-  assert.equal(filingTime(lines), '2026-11-19T09:06:00Z');
-  // An attempt of copies only is filed by the copies' latest time.
-  assert.equal(filingTime(lines.filter((l) => l.copy)), '2026-11-18T23:10:00Z');
+  // A copy is filed when its own gate's result became available, so a window that holds the gate's fresh jobs holds
+  // its copies; a gate of copies only, by its copies' latest time.
+  assert.equal(filingTime(lines, lines[0]), '2026-11-19T09:06:00Z');
+  assert.equal(filingTime(lines, lines[2]), '2026-11-18T23:02:00Z');
+  // A job of another gate finishing after midnight moves no copy of this one.
+  const late = lineOf({ attempt: 2, job: 'e2e:desk-web', gate: 'e2e:desk-web', minutes: 30, completed: '2026-11-20T00:20:00Z' });
+  assert.equal(filingTime([...lines, late], lines[0]), '2026-11-19T09:06:00Z');
+  // Another scope of the same gate is another gate attempt.
+  const other = lineOf({ attempt: 2, job: 'unit 2/2 (mini copy)', shard: [2, 2], scope_key: 'other', completed: '2026-11-20T00:30:00Z' });
+  assert.equal(filingTime([...lines, other], lines[0]), '2026-11-19T09:06:00Z');
 });
 
 test('a gate attempt with summary parts: the parts carry the minutes and lanes, and a failed part or summary fails it', () => {

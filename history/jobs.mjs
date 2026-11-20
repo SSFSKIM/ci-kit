@@ -9,7 +9,7 @@ import { gatesOf, producerOf } from './provenance.mjs';
 // vague to name a cause (`The operation was canceled.`) is no kind, since a false `runner-lost` would call a real
 // failure infra. A message is kept as its kind, never as its text.
 const PLATFORM = [
-  ['not-started', /^The job was not started because /],
+  ['not-started', /^The job was not started because (?:recent account payments have failed|your account is locked due to a billing issue)/],
   ['runner-lost', /^The (?:self-hosted |hosted )?runner(?:: \S+)? lost communication with the server\./],
   ['runner-lost', /^The runner has received a shutdown signal\./],
   ['time-limit', /^The job has exceeded the maximum execution time of [0-9hms]+\.?$/],
@@ -134,12 +134,14 @@ export function copiedFrom(name, attempt, listingOf) {
   return null;
 }
 
-// When one attempt's lines are filed: a line by its own completion, a copy by its attempt's latest fresh job (else the
-// latest copy), so the day that holds an attempt's last fresh job holds every copy beside it, whatever day the copied
-// shards ran. → the copies' filing time (ISO), from the attempt's lines.
-export function filingTime(lines) {
+// When a copy is filed: when its own gate attempt's result became available (the latest fresh completion among the
+// attempt's jobs of its gate and scope key), else, for a gate of copies only, by its copies' latest time. So the day
+// that holds a gate attempt's last fresh job holds its copies, whatever its copied shards' days or another gate's
+// jobs. A line that ran in its attempt is filed by its own completion. `lines`: the attempt's lines.
+export function filingTime(lines, copy) {
+  const same = lines.filter((l) => l.gate === copy.gate && l.scope_key === copy.scope_key);
   const latest = (list) => list.map((l) => l.completed).filter(Boolean).sort().at(-1) ?? null;
-  return latest(lines.filter((l) => !l.copy)) ?? latest(lines);
+  return latest(same.filter((l) => !l.copy)) ?? latest(same);
 }
 
 // One attempt of a run, as its job lines share it. `resolved`: the tested commit read from the mirror (a ci-gate
@@ -196,10 +198,16 @@ const roleOf = (name, gate, entry) => {
   return gate !== null && raw === gate && gate in (entry.parts ?? {}) ? 'summary' : null;
 };
 
+// A job that never started: no runner took it and no step ran. The billing refusal (`not-started`) is believed of
+// such a job only.
+const neverStarted = (job) => !job.runner_name && !(job.steps ?? []).some((s) => s.conclusion && s.conclusion !== 'skipped');
+const believed = (job, kinds) => kinds.filter((k) => k !== 'not-started' || neverStarted(job));
+
 // A job's line. `copy`: carried over from an earlier attempt; `copied_from`: the attempt it ran in (null when it ran
-// here, or for a copy whose origin no earlier listing shows); a copy has no minutes. `annotations`: the platform
-// kinds read for an unsuccessful job.
-export function jobLine(facts, job, { copied_from = null, annotations = [] }, entry) {
+// here, or for a copy whose origin no earlier listing shows); a copy has no minutes. The platform kinds read for an
+// unsuccessful job, by where they were read: `annotations` from its annotations, `log_kinds` from its log's runner
+// lines (where annotations are refused), which only the job's own structure can corroborate.
+export function jobLine(facts, job, { copied_from = null, annotations = [], log_kinds = [] }, entry) {
   const { gate, shard, kind, variant } = gateOf(job.name, entry);
   const copy = isCopy(job, facts.attempt);
   const { scope, scope_key } = scopeOf(facts.source, gate, variant, entry);
@@ -218,7 +226,7 @@ export function jobLine(facts, job, { copied_from = null, annotations = [] }, en
     started: job.started_at ?? null, completed: job.completed_at ?? null,
     minutes: copy ? null : minutesOf(job),
     conclusion: job.conclusion, run_conclusion: facts.run_conclusion,
-    failed_step, phase, annotations,
+    failed_step, phase, annotations: believed(job, annotations), log_kinds: believed(job, log_kinds),
   };
 }
 

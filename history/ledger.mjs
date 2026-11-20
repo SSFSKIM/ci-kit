@@ -28,6 +28,7 @@ const minute = (ms) => new Date(ms).toISOString().slice(0, 16);
 // passes (the last hour's, by minute), both kept in the repository's attempts.json.
 export function createPacer({ limits = LIMITS, pass = null, now = Date.now } = {}) {
   const clients = [];
+  const refusedKinds = new Set();
   const live = (c) => (c.gh ? c.gh.stats().requests - c.base : 0);
   const of = (kind) => clients.filter((c) => c.kind === kind);
   const hourAgo = () => minute(now() - 60 * 60_000);
@@ -44,10 +45,23 @@ export function createPacer({ limits = LIMITS, pass = null, now = Date.now } = {
     },
     passUsed: (kind) => of(kind).reduce((t, c) => t + (pass !== null && c.state.pass?.id === pass ? c.state.pass.calls : 0) + live(c), 0),
     hourUsed: (kind) => of(kind).reduce((t, c) => t + Object.entries(c.state.calls ?? {}).filter(([m]) => m > hourAgo()).reduce((s, [, n]) => s + n, 0) + live(c), 0),
-    allows: (kind, cost = 1) => pacer.passUsed(kind) + cost <= limits[kind].pass && pacer.hourUsed(kind) + cost <= limits[kind].hour,
+    // GitHub refused the token for its rate limit this pass: no further request on it, in any repository or phase.
+    // Kept in the pass's state, so later batches of the pass keep off it too.
+    rateLimited(kind) {
+      refusedKinds.add(kind);
+      for (const c of of(kind)) if (pass !== null && c.state.pass?.id === pass) c.state.pass.rate_limited = true;
+    },
+    // Why a request of `cost` would not be admitted: 'rate-limited', 'pass' (this pass's calls are spent: it ends),
+    // 'hour' (the last hour's are: it waits), or null.
+    reason(kind, cost = 1) {
+      if (refusedKinds.has(kind) || of(kind).some((c) => pass !== null && c.state.pass?.id === pass && c.state.pass.rate_limited)) return 'rate-limited';
+      if (pacer.passUsed(kind) + cost > limits[kind].pass) return 'pass';
+      if (pacer.hourUsed(kind) + cost > limits[kind].hour) return 'hour';
+      return null;
+    },
+    allows: (kind, cost = 1) => pacer.reason(kind, cost) === null,
     // Whether the pass's own limit is what stops the kind (then nothing more this pass), else seconds until the last
     // hour's calls fall under the hour's limit.
-    passSpent: (kind, cost = 2) => pacer.passUsed(kind) + cost > limits[kind].pass,
     waitSeconds(kind) {
       const buckets = of(kind).flatMap((c) => Object.entries(c.state.calls ?? {})).filter(([m]) => m > hourAgo()).sort();
       let over = pacer.hourUsed(kind) - limits[kind].hour + 1;
@@ -147,7 +161,10 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, ledge
       paced = true;
       return;
     }
-    limited ||= isRateLimited(err);
+    if (isRateLimited(err)) {
+      limited = true;
+      pacer.rateLimited(kind);
+    }
     errors.push(`${what}: ${describeError(err)}`);
   };
   const key = (run, attempt) => `${run}/${attempt}`;
@@ -226,10 +243,11 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, ledge
   };
 
   let refused = state.annotations === 'refused';
+  // → { annotations, log_kinds }: the kinds by where they were read.
   const kindsOf = async (job) => {
     if (!refused) {
       try {
-        return [...new Set((await gh.annotations(repo, job.id)).map(annotationKind).filter(Boolean))];
+        return { annotations: [...new Set((await gh.annotations(repo, job.id)).map(annotationKind).filter(Boolean))], log_kinds: [] };
       } catch (err) {
         if (err.status !== 403 || isRateLimited(err)) throw err;
         refused = true; // a private repository: the endpoint needs Checks read, which the App does not have
@@ -238,9 +256,9 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, ledge
     }
     try {
       // The runner writes its own errors at a log's end; nothing of the log is kept but the kinds matched.
-      return logKinds((await gh.jobLog(repo, job.id)).slice(-20_000));
+      return { annotations: [], log_kinds: logKinds((await gh.jobLog(repo, job.id)).slice(-20_000)) };
     } catch (err) {
-      if (err.status === 404 || err.status === 410) return []; // a job with no log (a lost runner's, a refused one's)
+      if (err.status === 404 || err.status === 410) return { annotations: [], log_kinds: [] }; // a job with no log (a lost runner's, a refused one's)
       throw err;
     }
   };
@@ -276,10 +294,10 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, ledge
           copied = copiedFrom(job.name, attempt, (k) => listings.get(key(run.id, k)) ?? null);
         }
         const unsuccessful = !isCopy(job, attempt) && !['success', 'neutral'].includes(job.conclusion);
-        lines.push(jobLine(facts, job, { copied_from: copied, annotations: unsuccessful ? await kindsOf(job) : [] }, entry));
+        lines.push(jobLine(facts, job, { copied_from: copied, ...(unsuccessful ? await kindsOf(job) : {}) }, entry));
       }
       ledger.addJobLines(lines.filter((l) => !l.copy));
-      ledger.addJobLines(lines.filter((l) => l.copy), filingTime(lines));
+      for (const copy of lines.filter((l) => l.copy)) ledger.addJobLines([copy], filingTime(lines, copy));
       const held = (state.runs[run.id] ??= { day: dayOf(run.created_at), attempts: run.run_attempt, closed: [] });
       held.closed = [...new Set([...held.closed, attempt])].sort((a, b) => a - b);
       done.add(item);
@@ -296,8 +314,9 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, ledge
   pacer.settle(state);
   ledger.flush();
   counts.seconds = Math.round((Date.now() - started) / 1000);
-  const more = state.pass.queue.length + state.pass.pending.length > 0 && !limited && !pacer.passSpent(kind);
-  return { counts, errors, more, wait: more && (paced || !pacer.allows(kind, 2)) ? pacer.waitSeconds(kind) : null, ledger };
+  const why = pacer.reason(kind, 2);
+  const more = state.pass.queue.length + state.pass.pending.length > 0 && !limited && why !== 'pass' && why !== 'rate-limited';
+  return { counts, errors, more, wait: more && why === 'hour' ? pacer.waitSeconds(kind) : null, ledger };
 }
 
 export const formatLedger = (repo, c, errors) =>

@@ -525,9 +525,10 @@ export function selectRepos(repos, alias) {
 const DEPS = { createGitHub, openMirror, tokenFor, delays: [3000, 10000] };
 async function collectBoth({ entry, opts, pacer, now, ledger: opened, deps }) {
   const { repo, alias } = entry;
-  const token = deps.tokenFor(repo, entry.token);
-  const gh = deps.createGitHub(token, { admit: () => pacer.allows(entry.token, 1) });
-  pacer.attach(entry.token, opened.state, gh);
+  const kind = entry.token;
+  const token = deps.tokenFor(repo, kind);
+  const gh = deps.createGitHub(token, { admit: () => pacer.allows(kind, 1), onError: (err) => isRateLimited(err) && pacer.rateLimited(kind) });
+  pacer.attach(kind, opened.state, gh);
   const memo = new Map();
   const jobsOf = (run, attempt) => {
     const k = `${run}/${attempt}`;
@@ -536,7 +537,7 @@ async function collectBoth({ entry, opts, pacer, now, ledger: opened, deps }) {
   };
   const errors = [];
   let ledger = null;
-  let result = { more: false, wait: null };
+  let result = { more: false };
   try {
     const mirror = deps.openMirror({ dir: join(opts.mirrors, `${alias}.git`), repo, token: typeof token === 'function' ? await token(repo) : token });
     const cloneStarted = Date.now();
@@ -552,32 +553,43 @@ async function collectBoth({ entry, opts, pacer, now, ledger: opened, deps }) {
     errors.push(`ledger: ${describe(err)}`);
   }
   let more = result.more;
-  if (entry.jobs && pacer.allows(entry.token, 10)) {
-    const perTestStarted = Date.now();
-    const offered = ledger ? recentRuns(ledger.state, now) : null;
-    try {
-      const perTest = await collectRepo({ gh, repo, alias, jobs: entry.jobs, root: opts.store, now, limit: opts.limit, jobsOf, recentRuns: offered });
-      errors.push(...perTest.errors);
-      console.log(formatCounts(repo, perTest.counts, perTest.errors.length));
-      more ||= perTest.more;
-      if (offered && perTest.errors.length === 0 && !perTest.more) markSwept(ledger.state, offered);
-    } catch (err) {
-      errors.push(`per-test: ${describe(err)}`);
+  let held = null;
+  if (entry.jobs) {
+    // The per-test pass starts with room for a few calls; held by the hour instead, it is work for a later batch.
+    held = pacer.reason(kind, 10);
+    if (held === 'hour') more = true;
+    if (held === null) {
+      const perTestStarted = Date.now();
+      const offered = ledger ? recentRuns(ledger.state, now) : null;
+      try {
+        const perTest = await collectRepo({ gh, repo, alias, jobs: entry.jobs, root: opts.store, now, limit: opts.limit, jobsOf, recentRuns: offered });
+        errors.push(...perTest.errors);
+        console.log(formatCounts(repo, perTest.counts, perTest.errors.length));
+        more ||= perTest.more;
+        if (offered && perTest.errors.length === 0 && !perTest.more) markSwept(ledger.state, offered);
+      } catch (err) {
+        if (err instanceof BudgetSpent) more = true; // stopped by the budget before its first line: a later batch's
+        else errors.push(`per-test: ${describe(err)}`);
+      }
+      console.error(`${repo}: per-test pass in ${Math.round((Date.now() - perTestStarted) / 1000)} s`);
     }
-    console.error(`${repo}: per-test pass in ${Math.round((Date.now() - perTestStarted) / 1000)} s`);
   }
   // The per-test pass's calls count toward the pass too.
   if (ledger) {
     pacer.settle(ledger.state);
     ledger.flush();
   }
-  return { errors, more, wait: more && !pacer.allows(entry.token, 2) ? (result.wait ?? pacer.waitSeconds(entry.token)) : result.wait };
+  // A pass whose calls are spent, or whose token GitHub refused, ends; one held by the hour waits.
+  const why = held === 'hour' ? 'hour' : pacer.reason(kind, 2);
+  if (why === 'pass' || why === 'rate-limited') return { errors, more: false, wait: null };
+  return { errors, more, wait: more && why === 'hour' ? pacer.waitSeconds(kind) : null };
 }
 
 // One batch over the chosen repositories, printing count lines, errors (naming runs, jobs and statuses only) and the
 // lines the workflow reads. → the exit code.
 export async function collectBatch({ chosen, opts, now = Date.now(), deps = DEPS }) {
-  const limits = opts.calls === null ? LIMITS : Object.fromEntries(Object.entries(LIMITS).map(([k, l]) => [k, { ...l, pass: opts.calls }]));
+  const base = deps.limits ?? LIMITS; // a test's smaller limits
+  const limits = opts.calls === null ? base : Object.fromEntries(Object.entries(base).map(([k, l]) => [k, { ...l, pass: opts.calls }]));
   const started = Date.now();
   const pacer = createPacer({ pass: opts.pass, limits, now: () => now + (Date.now() - started) }); // the clock runs on from `now`
   // Every repository's calls this pass and hour count from the start, whichever comes first.

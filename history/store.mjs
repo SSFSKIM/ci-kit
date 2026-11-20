@@ -91,7 +91,7 @@ export function openStore(root, alias) {
 //   attempts.json              which (run, attempt) pairs are collected, which are still open, when each day was listed,
 //                              the pass under way (its listing's queue and its calls) and the calls of the last hour
 //   jobs/<YYYY-MM-DD>.jsonl    one line per job of a gate run, by the job's completion day (UTC); a copy by its
-//                              attempt's filing time (jobs.mjs filingTime)
+//                              gate attempt's availability (jobs.mjs filingTime)
 // Job lines are idempotent by (run, attempt, job id); writes are staged and flushed together, the job lines first, so
 // a batch stopped between the two leaves its attempts open with their lines written, and the next batch writes the
 // same lines again in place.
