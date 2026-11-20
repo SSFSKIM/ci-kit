@@ -312,7 +312,7 @@ export function renderReport(m) {
     p(`- \`${g.gate}\`: ${g.attempts} attempts, ${recentText(g)}, of ${fmtMinutes(g.minutes)} in the four weeks; ${cancelledText(g.cancelled)}; reds: ${reds.join(', ')}.`);
   }
   p('', '### No attempts in the last week', '');
-  p(`A gate with attempts in the four weeks and none in the most recent ${RECENT_DAYS} covered days${recentSpan}: it has probably been retired or renamed, and removing it would free nothing now. Neither nominated nor a candidate.`, '');
+  p(`A gate with attempts in the four weeks and none in the most recent ${RECENT_DAYS} covered days${recentSpan}: it may have been retired or renamed (an attempt on a day not yet covered does not show here), and over those days removing it would have freed nothing. Neither nominated nor a candidate.`, '');
   if (m.idle.length === 0) p('None.');
   for (const g of m.idle) p(`- \`${g.gate}\`: last attempt ${g.last}, ${plural(g.attempts, 'attempt')} in the four weeks${g.keep ? `; held by ${g.keep.id}` : ''}.`);
   p('', '### Too little record', '');
