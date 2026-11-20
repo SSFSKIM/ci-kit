@@ -120,7 +120,8 @@ store, print a weekly report, and show `ci-gate` printing the context lines.
   from 10-22 in the store; acceptance 1, 2 and 8 met (M1's report).
 - [x] (2026-11-20 03:5xZ) M2 — The store kept small, watched, and fed by the hand-run gate: d5e07ae..9b4c438, task
   review converged after two fix rounds; acceptance 7's first half and 9 met (M2's report); sandbox #95, #97.
-- [ ] M3 — Landings and causes.
+- [x] (2026-11-20 06:3xZ) M3 — Landings and causes: db4246f..c59c48c, task review converged after three fix rounds;
+  acceptance 3 and 4 met on the record (store 9f069e6); sandbox #100.
 - [ ] M4 — The weekly report and the status file.
 - [ ] M5 — `ci-gate`'s context lines and known entries.
 - [ ] M6 — The per-test condensation report (a later sitting).
@@ -855,7 +856,7 @@ inputs M0 added.
   the ref or the change (MAWS makes a ref per commit). A job cancelled before any runner took it is never lost by
   corroboration. A summary job that failed beside a failed part is the part's failure. Phase is re-read from
   `failed_step`, and MAWS's `setup_steps` add `Set up runner`, the browser install, `download-artifact` and
-  `cache/restore`. Rule 1's corroboration for `pr-merge` uses rule 2's sameness. `why` adds `unreadable` (the next
+  `cache/restore`. Rule 1's corroboration for `pr-merge` uses rule 2's sameness (reversed by M3's final check, below). `why` adds `unreadable` (the next
   green exists, the mirror could not read the difference), and its order is `setup-uncorroborated`, `basis`,
   `incomparable`, `no-change`, `unreadable`, `no-later-green`. A cause line is keyed by (run, attempt, gate, scope
   key), filed by `available`. `pr_check` reads the latest `pull_request` run of the head created before the landing,
@@ -910,6 +911,12 @@ inputs M0 added.
   completed before the landing, in flight otherwise), and a jobless success or one with no completion is `unknown`.
   The activity watermark advances only once the landing files it covers are written; a late red on a final day is
   added by key, existing lines kept. Store 9f069e6 (run 44686199797); acceptance 3, 4 and 8 recheck as before.
+  Date/Author: 2026-11-20, the executing session.
+
+- Decision: M3's final check folded (2026-11-20, c59c48c). Rule 1's corroboration rests on exact trees only: two
+  `pr-merge` attempts of one head are one tree for rule 2 alone, since `infra` is the cause that nominates and their
+  base is best effort. A listed landing whose day lies before the input window is not written again (an idle
+  repository's watermark day would otherwise be rewritten with its last event alone). No stored line moved.
   Date/Author: 2026-11-20, the executing session.
 
 ## Outcomes & Retrospective
