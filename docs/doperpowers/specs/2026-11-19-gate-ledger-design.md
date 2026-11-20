@@ -874,6 +874,13 @@ inputs M0 added.
   nominated gate should see how many of its attempts were stopped by hand. Date/Author: 2026-11-20, CI-opt (the
   dispatching session), on the `cancelled` ruling.
 
+- Decision: the `cancelled` ruling, as built (2026-11-20, 419d432). `superseded` takes precedence over `cancelled`;
+  a cancelled attempt is neither an observation nor an `exact` verdict on a landed tree; a cancelled line's evidence
+  lists its jobs with `started` and `minutes`; a red's evidence keeps each job's `cancelled`, and the attempt-level
+  flag is gone. Re-derived on the pool (run 44678294456, store d8b2e59): MAWS superseded 247, cancelled 1,751, infra
+  130, rerun-green 224, test-only-diff 105, product-diff 229, unattributed 1,396 (reds 3,835 to 2,084).
+  Date/Author: 2026-11-20, the executing session.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
