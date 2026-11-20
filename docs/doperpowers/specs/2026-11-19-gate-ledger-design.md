@@ -124,7 +124,8 @@ store, print a weekly report, and show `ci-gate` printing the context lines.
   acceptance 3 and 4 met on the record (store 9f069e6); sandbox #100.
 - [x] (2026-11-20 07:2xZ) M4 — The weekly report and the status file: f2523d0..e11c02a, task review clean after one
   fix round; acceptance 5 met (store 8ee561d); sandbox #101.
-- [ ] M5 — `ci-gate`'s context lines and known entries.
+- [x] (2026-11-20 08:1xZ) M5 — `ci-gate`'s context lines and known entries: fc324b8..5edad76, task review converged
+  after two fix rounds; acceptance 6 and 7's second half met, and the whole acceptance section walked (1 to 9 met).
 - [ ] M6 — The per-test condensation report (a later sitting).
 
 ## Acceptance
@@ -983,6 +984,13 @@ inputs M0 added.
   `CI_KIT_STORE`, an option token in a value position, and an id or gate that is not one printable word; a 422 is
   retried only for the create race. Invalid, future and stale dates are three diagnostics. Date/Author: 2026-11-20,
   the executing session.
+
+- Decision: M5's second review folded (2026-11-20, 5edad76). The context lookup starts only with 525 or more of the
+  shared budget left, 25 above the pacer's threshold (one failure's own calls, the next poll and the lookup), and an
+  unreported budget counts as none. A hand-run gate's run id (`<sha12>-<YYYYMMDD>T<HHMMSS>Z`) is accepted and printed
+  as it is. `known add` writes only to `test-history` or a `ledger-*` branch of SSFSKIM/ci-kit-sandbox. An impossible
+  date is unreadable, never a throw. Left as is: any create answered 422 without a blob id is read as the create race.
+  Date/Author: 2026-11-20, the executing session.
 
 ## Outcomes & Retrospective
 
