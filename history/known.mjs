@@ -47,14 +47,19 @@ export class KnownError extends Error {}
 export class KnownConflict extends Error {}
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
-const isDay = (s) => typeof s === 'string' && DAY_RE.test(s) && new Date(`${s}T00:00:00Z`).toISOString().startsWith(s);
+export const isDay = (s) => typeof s === 'string' && DAY_RE.test(s) && new Date(`${s}T00:00:00Z`).toISOString().startsWith(s);
 const given = (s) => typeof s === 'string' && s.trim() !== '';
 
-export function validateKnown({ gate, case: pattern, reason, review_by: reviewBy, keep }, today) {
+// An id or a gate is one word of printable text: it is printed inside a line of ci-gate's output.
+const WORD_RE = /^[^\s\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+$/u;
+
+export function validateKnown({ id, gate, case: pattern, reason, review_by: reviewBy, keep }, today) {
   if (!given(gate)) throw new KnownError('an entry names its gate (--gate)');
+  if (!WORD_RE.test(gate.trim())) throw new KnownError('a gate is one word of printable text');
+  if (id !== undefined && id !== null && !(typeof id === 'string' && WORD_RE.test(id))) throw new KnownError('an id is one word of printable text');
   if (!given(reason)) throw new KnownError('an entry needs a reason (--reason)');
   if (reviewBy === undefined || reviewBy === null || reviewBy === '') throw new KnownError('an entry needs a review date (--review-by YYYY-MM-DD)');
-  if (!isDay(reviewBy)) throw new KnownError(`the review date is a day, YYYY-MM-DD, not ${reviewBy}`);
+  if (!isDay(reviewBy)) throw new KnownError(`the review date is a day, YYYY-MM-DD, not ${JSON.stringify(reviewBy)}`);
   if (reviewBy < today) throw new KnownError(`the review date ${reviewBy} is already past (today is ${today})`);
   if (keep && pattern !== undefined && pattern !== null) throw new KnownError('a keep entry is about a gate and names no case');
   if (pattern !== undefined && pattern !== null && !given(pattern)) throw new KnownError('an empty case names nothing');

@@ -112,6 +112,11 @@ test('parseKnownArgs: refuses what it does not know; what an entry needs is the 
   assert.throws(() => parseKnownArgs(['add', '--reason']), UsageError);
   assert.throws(() => parseKnownArgs(['add', '--nope']), UsageError);
   assert.throws(() => parseKnownArgs(['add', 'extra']), UsageError);
+  // An option token in a value position is refused; the = form keeps a value that starts with a dash.
+  assert.throws(() => parseKnownArgs(['add', '--reason', '--keep', '--gate', 't']), /--reason needs a value, not the option --keep/);
+  assert.throws(() => parseStatusArgs(['--repo', '--keep']), UsageError);
+  assert.equal(parseKnownArgs(['add', '--reason=--keep is not set here']).reason, '--keep is not set here');
+  assert.equal(parseKnownArgs(['add', '--reason=-1 run in 10']).reason, '-1 run in 10');
   // Parsed, then refused by validateKnown before anything is read.
   assert.equal(parseKnownArgs(['add', '--gate', 't']).reason, undefined);
 });

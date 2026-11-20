@@ -12,7 +12,7 @@ import { assertCaller, deleteRef, nonceCommit, pushRef, resolveRemote, resolveTa
 import { cleanLog, nonceMessage, pushFailure, refName, sanitizeLabel } from './naming.mjs';
 import { findRun } from './discover.mjs';
 import { contextReader, runLedger, storeOf } from './ledger.mjs';
-import { BudgetExhausted, createPacer } from './pace.mjs';
+import { BudgetExhausted, createPacer, isLow } from './pace.mjs';
 import { watchRun } from './watch.mjs';
 
 const CALLER = '.github/workflows/ci.yml';
@@ -159,11 +159,12 @@ async function main(argv) {
 
   let result;
   try {
-    result = await follow(gh, repo, commit, ref, (id) => { runId = id; }, () => { runMayExist = true; });
+    result = await follow(gh, repo, commit, ref, (id) => { runId = id; }, () => { runMayExist = true; }, ledgerContext(token, gh, repo));
   } catch (e) {
     result = failure(e);
   }
   for (const signal of Object.keys(SIGNALS)) process.removeListener(signal, interrupted); // the call has its result: a late stop must not turn it into ERROR
+  contextStop.abort(); // a lookup still in flight cannot hold the process after the verdict
   cleanup(result.code !== 2);
   if (DEBUG) {
     const { requests, notModified, remaining } = gh.stats();
@@ -178,8 +179,15 @@ function failure(e) {
   return { line: `ERROR ci-gate failed: ${e?.message ?? e}`, code: 2 };
 }
 
-// onRun(id): the run was found; onUnseen(): the budget hides it from discovery, so a run may exist all the same.
-async function follow(gh, repo, commit, ref, onRun, onUnseen) {
+// The gate ledger's context lines (cli/ledger.mjs): a client of their own, so the lookup's answers never reach the
+// watch's pacer, its counts or the debug log, and no lookup while the shared budget is low.
+const contextStop = new AbortController();
+const ledgerContext = (token, gh, repo) =>
+  contextReader({ gh: createGitHub(token, { signal: contextStop.signal }), repo, store: storeOf(), now: Date.now, lowBudget: () => isLow(gh.stats().remaining) });
+
+// onRun(id): the run was found; onUnseen(): the budget hides it from discovery, so a run may exist all the same;
+// context: the ledger's lines after a FAIL.
+async function follow(gh, repo, commit, ref, onRun, onUnseen, context) {
   // One per call: discovery and the watch say the low-budget THROTTLE at most once between them.
   const pacer = createPacer(gh, out, { now: Date.now, sleep });
   const found = await findRun({ gh, repo, commit, caller: CALLER, ref, pacer, now: Date.now, sleep, note, onHidden: onUnseen });
@@ -196,7 +204,7 @@ async function follow(gh, repo, commit, ref, onRun, onUnseen) {
     emit: out,
     onFail: failureSaver(gh, pacer, repo, run.id, join('/tmp/ci-gate', `${owner}-${name}`, String(run.id))),
     planError: planErrorReader(gh, repo),
-    context: contextReader({ gh, repo, store: storeOf(), now: Date.now }),
+    context,
     now: Date.now,
     sleep,
     pacer,

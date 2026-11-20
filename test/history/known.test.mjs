@@ -72,6 +72,11 @@ test('an entry with no reason, no review date, a date that is not one, or one al
   assert.throws(() => validateKnown({ ...ok, review_by: '27.11.2026' }, TODAY), KnownError);
   assert.throws(() => validateKnown({ ...ok, review_by: '2026-11-19' }, TODAY), KnownError);
   assert.throws(() => validateKnown({ ...ok, gate: undefined }, TODAY), KnownError);
+  // An id or a gate is printed inside a line: one word of printable text.
+  assert.throws(() => validateKnown({ ...ok, id: 'a\nFAIL x' }, TODAY), /an id is one word/);
+  assert.throws(() => validateKnown({ ...ok, id: 'a b' }, TODAY), KnownError);
+  assert.throws(() => validateKnown({ ...ok, gate: 'te\u001bst' }, TODAY), /a gate is one word/);
+  assert.doesNotThrow(() => validateKnown({ ...ok, id: 'maws-778' }, TODAY));
   // A keep entry is about a gate, never a case.
   assert.throws(() => validateKnown({ ...ok, keep: true, case: 'a.ts › x' }, TODAY), KnownError);
 });

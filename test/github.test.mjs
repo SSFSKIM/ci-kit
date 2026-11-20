@@ -211,3 +211,12 @@ test('a store file is read and written on its branch through the contents API, e
   assert.equal(requests[1].url, 'https://api.github.com/repos/o/store/contents/SSFSKIM/MAWS/known.json');
   assert.deepEqual(JSON.parse(requests[1].body), { message: 'm', content: 'W10K', branch: 'a b', sha: 'b1' });
 });
+
+test('a client given a signal aborts its requests in flight when the signal fires', async () => {
+  const impl = (url, init) => new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason)));
+  const stop = new AbortController();
+  const gh = createGitHub('t', { fetchImpl: impl, signal: stop.signal });
+  const pending = gh.contents('o/store', 'a/status.json', 'b');
+  stop.abort();
+  await assert.rejects(pending);
+});

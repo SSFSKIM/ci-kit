@@ -89,6 +89,18 @@ function verdict(run, jobs, runUrl) {
   return { line: `RED ${failed}/${gates.length} ${runUrl}`, code: 1 };
 }
 
+// A call into the context, whose throw (or rejection) is nobody's business but its own: THREW when it threw.
+const THREW = Symbol('threw');
+const attempt = (f) => {
+  try {
+    const r = f();
+    if (typeof r?.then === 'function') r.then(null, () => {});
+    return r;
+  } catch {
+    return THREW;
+  }
+};
+
 // How long to wait before the next poll with a healthy budget: 15 s for the first 2 minutes of watching, 30 s after.
 export function pollInterval(elapsedMs) {
   return elapsedMs < FAST_FOR_MS ? FAST_MS : SLOW_MS;
@@ -100,9 +112,10 @@ export function pollInterval(elapsedMs) {
 //   gh: { getRun(repo, id), listJobs(repo, id), stats() → { remaining }, rateLimit() }; emit(line): one stdout line;
 //   onFail(job, gate) → the path of the failed gate's downloaded log; planError(job) → the plan's error message;
 //   pacer: the call's pacer, shared with discovery so THROTTLE is said once (one is made when none is given);
-//   context(gate) → lines printed after that gate's FAIL line (the gate ledger's base and known lines, cli/ledger.mjs):
-//   context only, so a context that fails prints nothing and changes nothing else.
-export async function watchRun({ gh, repo, runId, runUrl, emit, onFail, planError, now, sleep, pacer = createPacer(gh, emit, { now, sleep }), maxUnreadable = 20, context = async () => [] }) {
+//   context: the gate ledger's lines after a FAIL (cli/ledger.mjs contextReader), or null: start() is called as the
+//   first failure is seen, before its log is fetched, and linesFor(gate) after its FAIL line, taking only what is
+//   ready by then. Context only: nothing is waited for, and a context that throws prints nothing and changes nothing.
+export async function watchRun({ gh, repo, runId, runUrl, emit, onFail, planError, now, sleep, pacer = createPacer(gh, emit, { now, sleep }), maxUnreadable = 20, context = null }) {
   const seen = new Map();
   const started = now();
   let unreadable = 0;
@@ -122,8 +135,14 @@ export async function watchRun({ gh, repo, runId, runUrl, emit, onFail, planErro
       continue;
     }
     for (const event of jobEvents(jobs, seen, now())) {
+      // A context whose start throws is off for the rest of the watch.
+      if (event.kind === 'FAIL' && context !== null && attempt(() => context.start()) === THREW) context = null;
+      const failed = event.kind === 'FAIL' && context !== null;
       emit(await eventLine(event, onFail));
-      if (event.kind === 'FAIL') for (const line of await context(event.gate).catch(() => [])) emit(line);
+      if (failed) {
+        const lines = attempt(() => context.linesFor(event.gate));
+        if (Array.isArray(lines)) for (const line of lines) if (typeof line === 'string') emit(line);
+      }
     }
 
     const planJob = jobs.find(isPlan);

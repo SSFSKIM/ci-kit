@@ -297,57 +297,96 @@ test('a watch whose budget stays exhausted for 90 min is an ERROR naming the rat
 });
 
 // The gate ledger's context (gate ledger spec, "`ci-gate` at a failure", M5): lines after a FAIL, and nothing else
-// changed. With no readable status, a stale one or an unreadable store, the output is exactly the output without it.
+// changed. With no readable status, a stale one, an unreadable store or a stalled one, the output, the verdict and the
+// poll schedule are exactly as without it.
 import { contextReader, STORE } from '../cli/ledger.mjs';
+import { createGitHub } from '../lib/github.mjs';
 
 const redRun = () => [
   { run: run('in_progress'), jobs: [plan(), job(2, 'ci / test', { conclusion: 'failure', completed: 65 }), job(3, 'ci / lint', { status: 'in_progress' })] },
   { run: run('completed', 'failure'), jobs: [plan(), job(2, 'ci / test', { conclusion: 'failure', completed: 65 }), job(3, 'ci / lint', { conclusion: 'failure', completed: 80 }), job(4, 'ci / verdict', { conclusion: 'failure' })] },
 ];
+// A failed gate's log takes a while to fetch (a macrotask here, a few requests in ci-gate): a lookup started as the
+// failure is seen settles within it.
+const slowLog = async (j, gate) => { await new Promise((r) => setImmediate(r)); return `/tmp/ci-gate/SSFSKIM-ci-kit/7/${gate}.log`; };
+const watchWith = async (context, { snapshots = redRun(), onFail = slowLog } = {}) => {
+  const h = harness(snapshots, { onFail });
+  const r = await watchRun({ ...h.opts, ...(context === undefined ? {} : { context }) });
+  return { lines: h.lines, r, sleeps: h.calls.sleeps };
+};
+const b64 = (o) => ({ sha: 's', content: Buffer.from(typeof o === 'string' ? o : JSON.stringify(o)).toString('base64') });
+const FRESH = { v: 1, as_of: at(-3600), gates: { test: { result: 'failed', commit: '3f2a91c0123', at: '2026-10-15T10:49:33Z', run: 44262593045, attempt: 1 } }, known: [] };
+const BASE_LINE = '     base: test last ran on main at 3f2a91c (2026-10-15T10:49Z) and failed, run 44262593045. The failures may differ: compare before rerunning.';
 
-test('the context lines follow their FAIL line; the other lines, the verdict and the exit code are as without them', async () => {
-  const plain = harness(redRun());
-  const without = await watchRun(plain.opts);
-  const asked = [];
-  const h = harness(redRun());
-  const r = await watchRun({ ...h.opts, context: async (gate) => (asked.push(gate), gate === 'test' ? ['     base: x', '     known: y'] : []) });
+test('the context starts at the first failure, before its log, and its lines follow their FAIL line; nothing else changes', async () => {
+  const plain = await watchWith(undefined);
+  const calls = [];
+  const context = {
+    start: () => calls.push('start'),
+    linesFor: (gate) => (calls.push(gate), gate === 'test' ? ['     base: x', '     known: y'] : []),
+  };
+  const h = harness(redRun(), { onFail: async (j, gate) => (calls.push(`log ${gate}`), `/tmp/ci-gate/SSFSKIM-ci-kit/7/${gate}.log`) });
+  const r = await watchRun({ ...h.opts, context });
   assert.deepEqual(h.lines, [plain.lines[0], '     base: x', '     known: y', plain.lines[1]]);
-  assert.deepEqual(asked, ['test', 'lint']);
-  assert.deepEqual(r, without);
+  assert.deepEqual(calls, ['start', 'log test', 'test', 'start', 'log lint', 'lint']);
+  assert.deepEqual([r, h.calls.sleeps], [plain.r, plain.sleeps]);
   assert.deepEqual(r, { line: `RED 2/2 ${URL}`, code: 1 });
 });
 
-test('no status, a stale status, an unreadable store or a context that throws: exactly the output without the ledger', async () => {
-  const plain = harness(redRun());
-  const without = await watchRun(plain.opts);
-  const b64 = (o) => ({ sha: 's', content: Buffer.from(JSON.stringify(o)).toString('base64') });
-  const stale = { v: 1, as_of: new Date(T0 - 49 * 3_600_000).toISOString(), gates: { test: { result: 'failed', commit: 'abcdef0', at: at(-100000), run: 1, attempt: 1 } }, known: [] };
+test('a fresh status whose gate last failed on the default branch prints the base line after the FAIL', async () => {
+  const gh = { contents: async () => b64(FRESH) };
+  const w = await watchWith(contextReader({ gh, repo: 'SSFSKIM/ci-kit', store: STORE, now: () => T0 }));
+  assert.deepEqual(w.lines, [
+    'FAIL test 1m00s log=/tmp/ci-gate/SSFSKIM-ci-kit/7/test.log',
+    BASE_LINE,
+    'FAIL lint 1m15s log=/tmp/ci-gate/SSFSKIM-ci-kit/7/lint.log',
+  ]);
+  assert.equal(w.r.code, 1);
+});
+
+test('no status, a stale one, an unreadable store, a stalled one, or a context that throws: exactly the output without it', async () => {
+  const plain = await watchWith(undefined);
+  const stale = { ...FRESH, as_of: new Date(T0 - 49 * 3_600_000).toISOString() };
+  let stalledCalls = 0;
   const readers = {
     'no status': { contents: async () => { throw new GitHubError(404, 'HTTP 404'); } },
     'a stale status': { contents: async () => b64(stale) },
     'an unreadable store': { contents: async () => { throw new TypeError('fetch failed'); } },
-    'a status that is not JSON': { contents: async () => ({ sha: 's', content: Buffer.from('{').toString('base64') }) },
+    'a status that is not JSON': { contents: async () => b64('{') },
+    // Never answers: the verdict and the poll schedule are not held for it.
+    'a stalled store': { contents: () => { stalledCalls += 1; return new Promise(() => {}); } },
   };
   for (const [name, gh] of Object.entries(readers)) {
-    const h = harness(redRun());
-    const r = await watchRun({ ...h.opts, context: contextReader({ gh, repo: 'SSFSKIM/ci-kit', store: STORE, now: h.opts.now }) });
-    assert.deepEqual(h.lines, plain.lines, name);
-    assert.deepEqual(r, without, name);
+    const w = await watchWith(contextReader({ gh, repo: 'SSFSKIM/ci-kit', store: STORE, now: () => T0 }));
+    assert.deepEqual([w.lines, w.r, w.sleeps], [plain.lines, plain.r, plain.sleeps], name);
   }
-  const h = harness(redRun());
-  const r = await watchRun({ ...h.opts, context: async () => { throw new Error('boom'); } });
-  assert.deepEqual([h.lines, r], [plain.lines, without]);
+  assert.equal(stalledCalls, 1);
+  const broken = {
+    'start throws': { start: () => { throw new Error('boom'); }, linesFor: () => ['x'] },
+    'linesFor throws': { start: () => {}, linesFor: () => { throw new Error('boom'); } },
+    'start rejects, linesFor answers a promise': { start: async () => { throw new Error('boom'); }, linesFor: async () => ['x'] },
+    'linesFor answers no strings': { start: () => {}, linesFor: () => [7, null] },
+  };
+  for (const [name, context] of Object.entries(broken)) {
+    const w = await watchWith(context);
+    assert.deepEqual([w.lines, w.r, w.sleeps], [plain.lines, plain.r, plain.sleeps], name);
+  }
 });
 
-test('a fresh status whose gate last failed on the default branch prints the base line after the FAIL', async () => {
-  const status = { v: 1, as_of: at(-3600), gates: { test: { result: 'failed', commit: '3f2a91c0123', at: '2026-10-15T10:49:33Z', run: 44262593045, attempt: 1 } }, known: [] };
-  const gh = { contents: async () => ({ sha: 's', content: Buffer.from(JSON.stringify(status)).toString('base64') }) };
-  const h = harness(redRun());
-  const r = await watchRun({ ...h.opts, context: contextReader({ gh, repo: 'SSFSKIM/ci-kit', store: STORE, now: h.opts.now }) });
-  assert.deepEqual(h.lines, [
-    'FAIL test 1m00s log=/tmp/ci-gate/SSFSKIM-ci-kit/7/test.log',
-    '     base: test last ran on main at 3f2a91c (2026-10-15T10:49Z) and failed, run 44262593045. The failures may differ: compare before rerunning.',
-    'FAIL lint 1m15s log=/tmp/ci-gate/SSFSKIM-ci-kit/7/lint.log',
-  ]);
-  assert.equal(r.code, 1);
+test("the context's own client: a low budget in its answer prints no THROTTLE, and a low shared budget makes no lookup", async () => {
+  const plain = await watchWith(undefined);
+  // The context's answer says 3 requests remain; the watch's own client never hears of it.
+  const answered = createGitHub('t', {
+    now: () => T0,
+    fetchImpl: async () => new Response(JSON.stringify(b64(FRESH)), { status: 200, headers: { 'x-ratelimit-remaining': '3', 'x-ratelimit-reset': String(Math.floor(T0 / 1000) + 3600) } }),
+  });
+  const w = await watchWith(contextReader({ gh: answered, repo: 'SSFSKIM/ci-kit', store: STORE, now: () => T0 }));
+  assert.deepEqual(w.lines, [plain.lines[0], BASE_LINE, plain.lines[1]]);
+  assert.equal(w.lines.some((l) => l.startsWith('THROTTLE')), false);
+  assert.deepEqual([w.r, w.sleeps], [plain.r, plain.sleeps]);
+  assert.equal(answered.stats().remaining, 3);
+  // The shared budget is low: no lookup at all.
+  let calls = 0;
+  const low = await watchWith(contextReader({ gh: { contents: async () => (calls += 1, b64(FRESH)) }, repo: 'SSFSKIM/ci-kit', store: STORE, now: () => T0, lowBudget: () => true }));
+  assert.deepEqual([low.lines, low.r, low.sleeps, calls], [plain.lines, plain.r, plain.sleeps, 0]);
 });

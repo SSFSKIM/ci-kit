@@ -3,13 +3,13 @@
 // contents API on the store's branch with gh's token; the store is the private sandbox's `test-history` branch, laid out
 // by `<alias>/status.json` and `<alias>/known.json` (history/status.mjs, history/known.mjs).
 //
-// The context is context, never a verdict: it is read with one contents call at an invocation's first failure, and a
-// status that cannot be read, is not a status, or is 48 hours old or older adds nothing, so ci-gate's output is then
-// exactly what it was without the ledger.
+// The context is context, never a verdict: one contents call, started at an invocation's first failure on a client
+// of its own and never waited for. A status not yet answered, that cannot be read, is not a status, or is 48 hours old
+// or older adds nothing, so ci-gate's output, verdict and timing are then exactly what they were without the ledger.
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createGitHub, ghToken, GitHubError } from '../lib/github.mjs';
-import { addKnown, inForce, KnownConflict, KnownError, validateKnown } from '../history/known.mjs';
+import { addKnown, inForce, isDay, KnownConflict, KnownError, validateKnown } from '../history/known.mjs';
 import { LEDGER_USAGE, parseKnownArgs, parseStatusArgs, UsageError } from './args.mjs';
 import { resolveRemote, TargetError } from './git.mjs';
 
@@ -18,21 +18,25 @@ const STALE_MS = 48 * 3_600_000;
 // The pool's clock and this machine's may differ a little; a status further ahead than this is not a reading.
 const SKEW_MS = 5 * 60_000;
 const INDENT = '     '; // under the gate name of `FAIL <gate>`
+const HOUR = 3_600_000;
 
-// CI_KIT_STORE=OWNER/NAME@BRANCH points every read and write at another copy of the store (a test branch); null when
-// it is set and is not that.
+// CI_KIT_STORE=OWNER/NAME@BRANCH points every read at another copy of the store (a test branch; `known add` writes only
+// to the store's own repository); null when it is set and is not that, an empty value included.
 export function storeOf(env = process.env) {
   const value = env.CI_KIT_STORE;
-  if (value === undefined || value === '') return STORE;
+  if (value === undefined) return STORE;
   const m = /^([\w.-]+\/[\w.-]+)@(\S+)$/.exec(value);
   return m ? { repo: m[1], branch: m[2] } : null;
 }
 
-const REPOS = JSON.parse(readFileSync(new URL('../history/repos.json', import.meta.url), 'utf8'));
+// The repositories the ledger collects. Read when first asked for, never at import: ci-gate's gate path loads this
+// module, and a repos.json that cannot be read must cost it only the context.
+let repos = null;
+export const loadRepos = () => (repos ??= JSON.parse(readFileSync(new URL('../history/repos.json', import.meta.url), 'utf8')));
 
 // A repository the ledger collects, by its GitHub name: its directory in the store and its default branch.
-export function ledgerEntry(repo) {
-  const e = REPOS.find((r) => r.repo.toLowerCase() === repo.toLowerCase());
+export function ledgerEntry(repo, list = loadRepos()) {
+  const e = list.find((r) => typeof r.repo === 'string' && r.repo.toLowerCase() === repo.toLowerCase());
   return e ? { alias: e.alias ?? e.repo, branch: e.default_branch } : null;
 }
 
@@ -47,55 +51,90 @@ export async function readStoreFile(gh, store, path) {
   }
 }
 
-const minute = (iso) => `${iso.slice(0, 16)}Z`;
-const oneLine = (s) => String(s).replace(/\s+/g, ' ').trim();
-const sentence = (s) => oneLine(s).replace(/\.+$/, '');
+// A field of the record as printed: one line of printable text ('' for anything that is not a string), so no value
+// can open a line of its own or carry a terminal control sequence.
+const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+export const printable = (v) => (typeof v === 'string' ? v.replace(UNPRINTABLE, ' ').replace(/\s+/g, ' ').trim() : '');
+const sentence = (s) => printable(s).replace(/\.+$/, '');
+const timeOf = (v) => (typeof v === 'string' && !Number.isNaN(Date.parse(v)) ? Date.parse(v) : null);
+const minute = (ms) => `${new Date(ms).toISOString().slice(0, 16)}Z`;
+const commitOf = (v) => (typeof v === 'string' && /^[0-9a-f]{7,40}$/i.test(v) ? v.slice(0, 7) : null);
+const runOf = (v) => ((Number.isSafeInteger(v) && v > 0) || (typeof v === 'string' && /^[1-9]\d{0,19}$/.test(v)) ? String(v) : null);
 const dayOf = (ms) => new Date(ms).toISOString().slice(0, 10);
 
-// The status's age in ms, or null when it is not a status with a time of its own.
-function ageOf(status, now) {
-  if (!status || typeof status !== 'object' || Array.isArray(status)) return null;
-  if (!status.gates || typeof status.gates !== 'object' || Array.isArray(status.gates)) return null;
-  if (typeof status.as_of !== 'string') return null;
-  const at = Date.parse(status.as_of);
-  return Number.isNaN(at) ? null : now - at;
+// What the status's as_of says of the record: `none` (null: no pass has derived it), `invalid` (not a status, or a
+// time that does not parse), `ahead` (further ahead of this clock than the skew), `stale` (48 hours or older), `fresh`.
+function freshness(status, now) {
+  if (!status || typeof status !== 'object' || Array.isArray(status)) return { kind: 'invalid' };
+  if (!status.gates || typeof status.gates !== 'object' || Array.isArray(status.gates)) return { kind: 'invalid' };
+  if (status.as_of === null || status.as_of === undefined) return { kind: 'none' };
+  const at = timeOf(status.as_of);
+  if (at === null) return { kind: 'invalid' };
+  const age = now - at;
+  if (age <= -SKEW_MS) return { kind: 'ahead', at, age };
+  return { kind: age < STALE_MS ? 'fresh' : 'stale', at, age };
 }
 
-const fresh = (status, now) => {
-  const age = ageOf(status, now);
-  return age !== null && age > -SKEW_MS && age < STALE_MS;
-};
-
 // The lines printed after `FAIL <gate>`: `base:` when the gate's latest observation on the default branch is a
-// failure, `known:` for each entry in force today without keep that names the gate.
+// failure with a commit, a time and a run that read as such; `known:` for each entry in force today without keep that
+// names the gate and has an id and a reason.
 export function contextLines(status, gate, { now, branch }) {
-  if (!fresh(status, now)) return [];
+  if (freshness(status, now).kind !== 'fresh') return [];
   const lines = [];
   const g = status.gates[gate];
   if (g?.result === 'failed') {
-    lines.push(`${INDENT}base: ${gate} last ran on ${branch} at ${String(g.commit).slice(0, 7)} (${minute(g.at)}) and failed, run ${g.run}. The failures may differ: compare before rerunning.`);
+    const [commit, at, run] = [commitOf(g.commit), timeOf(g.at), runOf(g.run)];
+    if (commit && at !== null && run) {
+      lines.push(`${INDENT}base: ${gate} last ran on ${printable(branch)} at ${commit} (${minute(at)}) and failed, run ${run}. The failures may differ: compare before rerunning.`);
+    }
   }
   const today = dayOf(now);
   for (const e of Array.isArray(status.known) ? status.known : []) {
-    if (e?.gate !== gate || e.keep || !inForce(e, today)) continue;
-    lines.push(`${INDENT}known: ${e.id} (review by ${e.review_by}): ${sentence(e.reason)}. Whether this failure is that one is not checked.`);
+    if (!e || e.gate !== gate || e.keep || !isDay(e.since) || !isDay(e.review_by) || !inForce(e, today)) continue;
+    const [id, reason] = [printable(e.id), sentence(e.reason)];
+    if (!id || !reason) continue;
+    lines.push(`${INDENT}known: ${id} (review by ${e.review_by}): ${reason}. Whether this failure is that one is not checked.`);
   }
   return lines;
 }
 
-// context(gate) → the lines to print after that gate's FAIL. The status is read once, at the first call; any failure
-// to read it, or a repository the ledger does not collect, gives no lines. It never throws.
-export function contextReader({ gh, repo, store, now }) {
-  const entry = ledgerEntry(repo);
-  let status;
-  return async (gate) => {
-    if (!entry || !store) return [];
-    try {
-      status ??= readStoreFile(gh, store, `${entry.alias}/status.json`).then((f) => (f ? JSON.parse(f.text) : null));
-      return contextLines(await status, gate, { now: now(), branch: entry.branch });
-    } catch {
-      return [];
-    }
+// One invocation's context. start() begins the one contents call, at the first failure, without waiting for it; it
+// does nothing when the shared budget is low (lowBudget()), the store or the repository is not the ledger's, or
+// repos.json cannot be read. linesFor(gate) answers that gate's lines once the call has settled and [] until then, so a
+// slow or stalled store delays nothing. Neither throws. gh should be a client of its own, so its answers never reach
+// the watch's pacer, its counts or its debug log.
+export function contextReader({ gh, repo, store, now, lowBudget = () => false, readRepos = loadRepos }) {
+  let state = 'idle'; // idle → pending → ready | off
+  let status = null;
+  let entry = null;
+  return {
+    start() {
+      if (state !== 'idle') return;
+      state = 'off';
+      try {
+        if (!store || lowBudget()) return;
+        entry = ledgerEntry(repo, readRepos());
+        if (!entry) return;
+        state = 'pending';
+        readStoreFile(gh, store, `${entry.alias}/status.json`).then(
+          (f) => {
+            status = f ? JSON.parse(f.text) : null;
+            state = 'ready';
+          },
+          () => { state = 'off'; },
+        ).catch(() => { state = 'off'; });
+      } catch {
+        state = 'off';
+      }
+    },
+    linesFor(gate) {
+      if (state !== 'ready') return [];
+      try {
+        return contextLines(status, gate, { now: now(), branch: entry.branch });
+      } catch {
+        return [];
+      }
+    },
   };
 }
 
@@ -104,20 +143,32 @@ const pad = (rows) => {
   return rows.map((r) => `  ${r.map((c, i) => (i === r.length - 1 ? c : c.padEnd(widths[i]))).join('  ')}`);
 };
 
+const NOT_SHOWN = 'so ci-gate shows none of it at a failure';
+
 // `ci-gate status`: the standing of each gate on the default branch, how old the record behind it is, and the entries.
 export function statusReport({ status, known, repo, branch, now }) {
-  const age = ageOf(status, now);
-  if (age === null) return [`${repo} on ${branch}: no standing yet (no pass has derived the record).`, ...knownReport(known, dayOf(now))];
-  const hours = `${(Math.max(0, age) / 3_600_000).toFixed(1)} hours ago`;
-  const stale = fresh(status, now) ? '' : '; older than 48 hours, so ci-gate shows none of it at a failure';
+  const f = freshness(status, now);
+  const where = `${printable(repo)} on ${printable(branch)}`;
+  const tail = knownReport(known, dayOf(now));
+  if (f.kind === 'none') return [`${where}: no standing yet (no pass has derived the record).`, ...tail];
+  if (!status?.gates || typeof status.gates !== 'object' || Array.isArray(status.gates)) return [`${where}: the store's status.json is not a status file.`, ...tail];
   const rows = Object.keys(status.gates).sort().map((gate) => {
-    const g = status.gates[gate];
-    return [gate, String(g.result), String(g.commit).slice(0, 7), minute(String(g.at)), `run ${g.run}${g.attempt > 1 ? ` attempt ${g.attempt}` : ''}`];
+    const g = status.gates[gate] ?? {};
+    const at = timeOf(g.at);
+    return [printable(gate), printable(g.result) || '?', commitOf(g.commit) ?? '?', at === null ? '?' : minute(at), `run ${runOf(g.run) ?? '?'}${Number.isSafeInteger(g.attempt) && g.attempt > 1 ? ` attempt ${g.attempt}` : ''}`];
   });
-  return [`${repo} on ${branch}, as of ${minute(status.as_of)} (${hours}${stale}):`, ...pad(rows), ...knownReport(known, dayOf(now))];
+  const hours = (ms) => (Math.abs(ms) / HOUR).toFixed(1);
+  const head = {
+    invalid: `${where}: the status's as_of is not a time (${printable(String(status.as_of))}), ${NOT_SHOWN}:`,
+    ahead: `${where}, as of ${f.at === undefined ? '' : minute(f.at)} (${hours(f.age)} hours ahead of this machine's clock, ${NOT_SHOWN}):`,
+    stale: `${where}, as of ${f.at === undefined ? '' : minute(f.at)} (${hours(f.age)} hours ago; older than 48 hours, ${NOT_SHOWN}):`,
+    fresh: `${where}, as of ${f.at === undefined ? '' : minute(f.at)} (${hours(f.age)} hours ago):`,
+  }[f.kind];
+  return [head, ...pad(rows), ...tail];
 }
 
 function stateOf(e, today) {
+  if (!isDay(e.since) || !isDay(e.review_by)) return 'dates unreadable, never in force';
   if (today > e.review_by) return `expired ${e.review_by}`;
   const span = today < e.since ? `from ${e.since}, review by ${e.review_by}` : `in force, review by ${e.review_by}`;
   return e.keep ? `keep, ${span}` : span;
@@ -125,18 +176,20 @@ function stateOf(e, today) {
 
 // `ci-gate known list`, and the tail of `ci-gate status`: every entry of known.json with its state today.
 export function knownReport(entries, today) {
-  if (entries.length === 0) return ['Known entries: none.'];
-  const lines = [`Known entries (${entries.length}):`];
-  for (const e of entries) {
-    lines.push(`  ${e.id}  ${e.gate}  ${stateOf(e, today)}  (by ${e.by}, since ${e.since})`);
-    if (e.case) lines.push(`      case: ${oneLine(e.case)}`);
-    lines.push(`      reason: ${oneLine(e.reason)}`);
+  const list = Array.isArray(entries) ? entries.filter((e) => e && typeof e === 'object') : [];
+  if (list.length === 0) return ['Known entries: none.'];
+  const lines = [`Known entries (${list.length}):`];
+  for (const e of list) {
+    lines.push(`  ${printable(e.id) || '?'}  ${printable(e.gate) || '?'}  ${stateOf(e, today)}  (by ${printable(e.by) || '?'}, since ${printable(e.since) || '?'})`);
+    if (e.case) lines.push(`      case: ${printable(e.case)}`);
+    lines.push(`      reason: ${printable(e.reason)}`);
   }
   return lines;
 }
 
 // known.json of one repository as addKnown reads and writes it: a write names the blob it read, and the contents API's
-// refusal of a stale blob (409; 422 when another writer created the file first) is a KnownConflict.
+// refusal of a stale blob (409), or of a create when another writer created the file first (422 on a write that named
+// no blob), is a KnownConflict; any other 422 is an error.
 export function knownFile({ gh, store, alias }) {
   const path = `${alias}/known.json`;
   return {
@@ -155,7 +208,7 @@ export function knownFile({ gh, store, alias }) {
       try {
         await gh.putContents(store.repo, path, body);
       } catch (e) {
-        if (e instanceof GitHubError && (e.status === 409 || e.status === 422)) throw new KnownConflict();
+        if (e instanceof GitHubError && (e.status === 409 || (e.status === 422 && !sha))) throw new KnownConflict();
         throw e;
       }
     },
@@ -183,9 +236,20 @@ export async function runLedger(argv, { gh = null, out, note, env = process.env,
   try {
     const opts = argv[0] === 'status' ? { action: 'status', ...parseStatusArgs(argv.slice(1)) } : parseKnownArgs(argv.slice(1));
     const store = storeOf(env);
-    if (!store) throw new LedgerError(`CI_KIT_STORE is OWNER/NAME@BRANCH, not ${env.CI_KIT_STORE}`);
+    if (!store && env.CI_KIT_STORE === '') throw new LedgerError('CI_KIT_STORE is set and empty; it is OWNER/NAME@BRANCH, or unset for the live store');
+    if (!store) throw new LedgerError(`CI_KIT_STORE is OWNER/NAME@BRANCH, not ${printable(env.CI_KIT_STORE)}`);
+    // A write goes only to the private store's repository (any branch: a test copy is one); reads may go anywhere.
+    if (opts.action === 'add' && store.repo.toLowerCase() !== STORE.repo.toLowerCase()) {
+      throw new LedgerError(`known add writes only to the private store, ${STORE.repo}, not ${store.repo}`);
+    }
     const repo = opts.repo ?? resolveRemote('.', null).repo;
-    const entry = ledgerEntry(repo);
+    let list;
+    try {
+      list = loadRepos();
+    } catch (e) {
+      throw new LedgerError(`history/repos.json cannot be read: ${e.message}`);
+    }
+    const entry = ledgerEntry(repo, list);
     if (!entry) throw new LedgerError(`${repo} is not a repository the gate ledger collects (history/repos.json)`);
     const today = dayOf(now());
     if (opts.action === 'add') validateKnown(opts, today);

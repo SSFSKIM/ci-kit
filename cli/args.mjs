@@ -147,6 +147,9 @@ function parseOptions(argv, allowed, what) {
     if (value === undefined) {
       value = argv[i + 1];
       i += 1;
+      // An option where a value belongs is the next option, not the value (`--reason --keep`); a value that starts
+      // with a dash is written --name=value.
+      if (value?.startsWith('-')) throw new UsageError(`${arg} needs a value, not the option ${value} (for a value that starts with -, write ${arg}=<value>)`);
     }
     if (value === undefined || value === '') throw new UsageError(`${arg} needs a value`);
     if (name === 'repo' && !/^[\w.-]+\/[\w.-]+$/.test(value)) throw new UsageError(`--repo is OWNER/NAME, not ${value}`);
