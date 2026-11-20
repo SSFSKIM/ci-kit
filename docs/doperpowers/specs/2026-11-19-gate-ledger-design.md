@@ -122,7 +122,7 @@ store, print a weekly report, and show `ci-gate` printing the context lines.
   review converged after two fix rounds; acceptance 7's first half and 9 met (M2's report); sandbox #95, #97.
 - [x] (2026-11-20 06:3xZ) M3 — Landings and causes: db4246f..c59c48c, task review converged after three fix rounds;
   acceptance 3 and 4 met on the record (store 9f069e6); sandbox #100.
-- [x] (2026-11-20 07:4xZ) M4 — The weekly report and the status file: f2523d0..e11c02a, task review clean after one
+- [x] (2026-11-20 07:2xZ) M4 — The weekly report and the status file: f2523d0..e11c02a, task review clean after one
   fix round; acceptance 5 met (store 8ee561d); sandbox #101.
 - [ ] M5 — `ci-gate`'s context lines and known entries.
 - [ ] M6 — The per-test condensation report (a later sitting).
