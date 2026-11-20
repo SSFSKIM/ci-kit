@@ -27,6 +27,25 @@ export function gatesOf(message) {
   return m ? m[1] : null;
 }
 
+// A commit message's trailers: the key: value lines of its last paragraph, when it has more than one. Key → values.
+export function trailersOf(message) {
+  const paragraphs = (message ?? '').trim().split(/\n[ \t]*\n/);
+  if (paragraphs.length < 2) return {};
+  const out = {};
+  for (const line of paragraphs.at(-1).split('\n')) {
+    const m = /^([A-Za-z][A-Za-z0-9-]*):[ \t]*(.*?)[ \t]*$/.exec(line);
+    if (m) (out[m[1]] ??= []).push(m[2]);
+  }
+  return out;
+}
+
+// The change a nonce commit names in its trailers (`Change: <value>`, MAWS's ci-gate from the worktree's branch), so
+// retries pushed under new labels stay one change; null without one or with an empty value, the last one where several.
+// It decides no scope: never a semantic trailer.
+export function changeTrailerOf(message) {
+  return (trailersOf(message).Change ?? []).filter(Boolean).at(-1) ?? null;
+}
+
 // Selected runs are marked on the pushed head, even when selection fell back to the full suite.
 export function selectionOf(message) {
   return /^Selection:[ \t]*affected[ \t]*$/m.test(message ?? '') ? 'affected' : null;
