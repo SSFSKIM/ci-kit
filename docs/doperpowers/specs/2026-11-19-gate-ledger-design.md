@@ -140,7 +140,9 @@ token; a run made with `gh`'s token proves nothing about the daily run.
    landing evidence, standing) reads it as green, and its sibling shards' success is not a later pass of its tree.
 3. **Causes say what the record shows, on cases whose cause is known.**
    - `infra`: MAWS run 44468141412's first `static-local` (runner lost in the setup step; the rerun got past it)
-     and run 44472434480's `e2e:desk-web` (cancelled inside `playwright install`; its rerun got past it).
+     and run 44478359816's `e2e:desk-web` (stalled at its time limit inside `playwright install`; run 44487801654
+     on the same tree got past it). Run 44472434480, named here first, does not hold: its rerun stalled in the same
+     step and nothing on its tree got past it, so it is `unattributed` (`setup-uncorroborated`), as it should be.
    - Not red at all: the jobs of a pull request run cancelled because a newer push superseded it (the executor
      names one from the store) are `superseded`.
    - `unattributed`: doperpowers pull request 481's `mods-types` failure of 2026-11-10 12:40Z (merged red: no later
@@ -284,8 +286,10 @@ only, a rerun keeps its run's creation date, and a filtered listing stops at 1,0
 ### What a red gate attempt's record shows (M3)
 
 A cause line is `{ run, attempt, gate, cause, why, evidence, context }`. Cancelled jobs of a run that was itself
-cancelled while a later run existed for the same ref or head branch are `superseded`: they are not reds, and their
-minutes are reported as superseded cost. For every other gate attempt that failed, each of its unsuccessful jobs
+cancelled while a later run existed for the same ref or change are `superseded`: they are not reds, and their
+minutes are reported as superseded cost. A gate attempt whose every unsuccessful job was cancelled from outside (none
+failed, none reached its time limit) with no such later run is `cancelled`: someone stopped it, which says nothing of
+the product either way; it is not a red, and its minutes are reported as cancelled cost beside superseded. For every other gate attempt that failed, each of its unsuccessful jobs
 is first read on its own:
 
 - **lost:** the pool's record says the job's runner was preempted; or the job has a `runner-lost` or `not-started`
@@ -311,6 +315,8 @@ Then the first rule that holds decides the attempt:
   retrospective told each pair apart by reading; the report keeps the three apart and proposes removal on none of
   them (Nominations).
 - An attempt with one shard lost and another failed is not `infra`: rule 1 needs every unsuccessful job lost.
+- A job that reached its time limit is never cancelled from outside, never superseded and never `cancelled`: it
+  ended on its own, as a product deadlock does.
 
 - Rules 2 to 4 need `basis: "exact"` on both attempts, except that two `pr-merge` attempts of one head commit
   count as the same tree for rule 2 only when the base branch did not move between them.
@@ -673,6 +679,51 @@ inputs M0 added.
   `node --test test/history/` fails to resolve a directory on this Node 22; `node --test test/history/*.test.mjs`
   runs the files. Evidence: M2's report.
 
+- Observation: M3's acceptance 3 on the record (store d66d56b, collection 44676449415). `infra`: MAWS 44468141412
+  `static` (a `runner-lost` part; the summary's failure beside it is the part's), 44478359816 `e2e:desk-web` and
+  44476737149 (corroborated on their trees); 44472434480 is `setup-uncorroborated` (acceptance 3 revised).
+  `superseded`: doperpowers 44489998299 (pull request 532) by 44490765334. `unattributed`: doperpowers 42817698515
+  `mods-types` (`basis`, pull request 481 merged red); MAWS 41995538110 `e2e:library` (`setup-uncorroborated`).
+  Read on GitHub, none contradicting its label: `rerun-green` doperpowers 44479636843 → 44482863597 and cua
+  44499632695 → 44502837065 (same trees); `test-only-diff` doperpowers 44508395215 → 44511346953 (a test script)
+  and ci-kit 40844185287 → 40845071091 (a test file); `product-diff` doperpowers 44517481738 → 44520503188 (a
+  product script and a test script) and ci-kit 40012863651 → 40013078049 (the launcher and a spec doc).
+  The pool's preemption record is not read: it is comments on the sandbox's pool-ledger issues, hundreds a day, not
+  one call a pass. A GCE preemption fails its running step ("The operation was canceled."), so it stays `failed` and
+  usually reads `rerun-green` after the launcher's rerun.
+  Evidence: M3's report, "Acceptance 3".
+- Observation: acceptance 4, `pr_check` beside the hand measurement (10-22 to the hand's cut-offs). doperpowers:
+  hand 184 (165 green, 2 red, 17 unrun), ledger 183 landed (139 green, 2 red, 38 unrun in flight, 4 none) and 370
+  missing. ci-kit: 116 (113, 0, 3) against 116 (107 green, 9 in flight). cua: 69 green against 68 green and 1 in
+  flight. manim-master: 207 (188 green, 19 none) against 204 green, with 121, 122 and 169 missing. Every difference:
+  - in flight at the merge, the hand having taken a `ci-gate` push's green: doperpowers 338, 339, 348, 374, 382,
+    383, 398, 401, 402, 419, 423, 424, 429, 431, 441, 442, 445, 448, 450, 479, 509, and 427 and 428 (whose checks
+    then went red); ci-kit 98, 148, 162, 169, 176; cua 262;
+  - merged in the seconds between the last gate job and the verdict job: doperpowers 380, ci-kit 139;
+  - no `pull_request` run of the head yet at the merge (`none`): doperpowers 365, 366, 524, 528;
+  - red at the merge, the hand having taken a push's green: doperpowers 426;
+  - a push's red, the check green: doperpowers 410 (the spec's case);
+  - a gate the base's config required and the head's check did not run, the check green: doperpowers 336, 463;
+  - none required by the hand, the verdict job run and green: manim-master 109, 117, 123, 132, 135, 138, 141, 191,
+    197, 219, 223, 228, 253, 255, 280, 281, 298 (17 of them `exact: exempt`);
+  - no landing: manim-master 121, 122, 169 (not on master's first-parent line, by the hand's own note) and
+    doperpowers 370, whose merge GitHub's activity listing lacks: the next event's `before` is its commit and the
+    event before ends elsewhere. It is the only real chain break in the five repositories; the listing's times are
+    also out of order at the 2026-11-01 fall-back hour.
+  `exact`, different by design: doperpowers 91 green, 1 red, 94 unrun (15 `head_green`); ci-kit 49 green, 67
+  unrun (9); cua 38 green, 31 unrun; manim-master 64 green, 17 exempt, 123 unrun (60). MAWS, counts only: 884
+  landings (863 `push`, 21 `pr_merge`; the recount 880 pushes), 465 exempt (465), 419 others (415): 206 green, 2 red,
+  211 unrun (98 with some of the three gates green on the tree, 113 with none; 54 `head_green`), against the
+  recount's 170, 124 and 121. The tree key carries almost all of the difference (by tree id: 123, 116, 180); scope
+  changes nothing in this window; latest attempt against any green moves one landing.
+  Evidence: M3's report, "Acceptance 4".
+- Observation: MAWS's attempts cancelled from outside with no later run for their ref or change: 1,751 (1,236 never
+  got a runner), mostly a session interrupting `ci-gate`; cua 61, doperpowers 10, manim-master 17. Read as reds they
+  would have been 1,452 `unattributed` and 193 `product-diff` (an interrupted gate credited with a catch). MAWS's
+  sessions give each retry a new label, so 1,032 of its 1,100 failed `no-later-green` reds have no later attempt in
+  their change: rules 3 and 4 seldom apply there. doperpowers' sessions merge before the check ends, having gated the
+  head by a `ci-gate` push (38 of 183 in flight). Evidence: M3's report, Discoveries.
+
 ## Decision Log
 
 - Decision: verification. The spec is reviewed by `doperpowers:adversarial-reviewer` for design and buildability
@@ -789,6 +840,31 @@ inputs M0 added.
   charged to the job's end with no conclusion. Left as is: such an interrupted slot has no `available` (the record
   holds none), and a re-import's cross-day move writes the source before the destination (a re-import with
   `--git-dir` restores any key lost to a failed write). Date/Author: 2026-11-20, the executing session.
+
+- Decision: an attempt cancelled from outside with no later run is `cancelled`, not a red (2026-11-20, M3). The spec
+  left it to the rules, which made 1,751 MAWS interruptions into reds and credited 193 of them with a product catch.
+  A cancellation is someone's act and shows nothing of the product, as `superseded` does; a job at its time limit is
+  never one. Its minutes are cancelled cost. Rejected: keeping them reds flagged `cancelled: true` for M4 to set
+  apart: every reader would need the flag, and a missed one counts an interruption as a catch.
+  Date/Author: 2026-11-20, the executing session.
+- Decision: M3's gaps, as built (2026-11-20). `history/derive.mjs` reads the store, lists activity, fetches the
+  mirror and writes landings and causes; `cause.mjs` and `landings.mjs` stay pure. Superseded is by a later run for
+  the ref or the change (MAWS makes a ref per commit). A job cancelled before any runner took it is never lost by
+  corroboration. A summary job that failed beside a failed part is the part's failure. Phase is re-read from
+  `failed_step`, and MAWS's `setup_steps` add `Set up runner`, the browser install, `download-artifact` and
+  `cache/restore`. Rule 1's corroboration for `pr-merge` uses rule 2's sameness. `why` adds `unreadable` (the next
+  green exists, the mirror could not read the difference), and its order is `setup-uncorroborated`, `basis`,
+  `incomparable`, `no-change`, `unreadable`, `no-later-green`. A cause line is keyed by (run, attempt, gate, scope
+  key), filed by `available`. `pr_check` reads the latest `pull_request` run of the head created before the landing,
+  its latest attempt begun before it; a run created after is `none`. Standing is the observation of the newest landed
+  tree usable before the reader's time, `{ result, commit, at, run, attempt, tree_key, landed }`. The activity
+  listing refused (not a rate limit) leaves a repository with no landing lines; a listing cut short leaves the
+  base's movement unknown to rule 2. A known entry's `case` is `<file> › <title>` (file whole or by name), `*`
+  matching anything, in force from `since` through `review_by` inclusive. The mirror fetches `refs/pull/*/head`
+  once a pass, and a pull request run's change is resolved to `pr:<n>` per branch when lines are read (doperpowers
+  241 of 241, ci-kit 25 of 25, cua 105 of 105, manim-master 144 of 155), else `branch:`. `Merge pull request #n:
+  <title>` names its pull request. A dispatch's `derive-from` recomputes from a day. Date/Author: 2026-11-20, the
+  executing session.
 
 ## Outcomes & Retrospective
 
