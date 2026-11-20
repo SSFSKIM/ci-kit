@@ -1189,6 +1189,42 @@ test("a run the ledger closed is offered to the sweep until a clean sweep covers
   assert.ok(!collector.recentRuns(state, NOW).some((r) => r.id === 953));
 });
 
+test("a job listing GitHub answers 502 is asked again before it counts as the batch's error", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'history-batch-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const entry = JSON.parse(readFileSync(new URL('../../history/repos.json', import.meta.url), 'utf8')).find((r) => r.alias === 'SSFSKIM/ci-kit');
+  let flaky = 1;
+  const fetchImpl = async (href) => {
+    const url = new URL(href);
+    const path = url.pathname.replace(/^\/repos\/[^/]+\/[^/]+/, '');
+    const ok = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (path.startsWith('/actions/workflows/')) {
+      const day = url.searchParams.get('created').slice(0, 10);
+      const runs = day === '2026-10-20' ? [{ id: 7, name: 'ci', event: 'push', head_branch: 'main', head_sha: 'a'.repeat(40), head_commit: { tree_id: 't', message: 'x' }, pull_requests: [], status: 'completed', conclusion: 'success', run_attempt: 1, created_at: '2026-10-20T08:00:00Z' }] : [];
+      return ok({ total_count: runs.length, workflow_runs: runs });
+    }
+    if (path === '/actions/runs/7/attempts/1/jobs') {
+      if (flaky-- > 0) return new Response(JSON.stringify({ message: 'Bad Gateway' }), { status: 502 });
+      return ok({ total_count: 1, jobs: [{ id: 70, name: 'ci / test', status: 'completed', conclusion: 'success', created_at: '2026-10-20T08:00:00Z', started_at: '2026-10-20T08:00:10Z', completed_at: '2026-10-20T08:03:10Z', runner_name: 'GitHub Actions 1', labels: ['ubuntu-latest'], steps: [] }] });
+    }
+    return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 });
+  };
+  const deps = { tokenFor: () => 't', createGitHub: (token, o) => createGitHub(token, { ...o, fetchImpl }), openMirror: () => ({ ensure() {}, fetch: () => new Set(), parentOf: () => null, treeKey: () => null }), delays: [0, 0] };
+  const out = [];
+  const saved = { log: console.log, error: console.error };
+  console.log = (...a) => out.push(a.join(' '));
+  console.error = (...a) => out.push(a.join(' '));
+  let code;
+  try {
+    code = await collector.collectBatch({ chosen: [{ ...entry, alias: entry.repo }], opts: { store: root, mirrors: root, pass: 'p1', attempts: 300, limit: 40, calls: null }, now: NOW, deps });
+  } finally {
+    Object.assign(console, saved);
+  }
+  assert.equal(code, 0, out.join('\n'));
+  assert.equal(flaky, -1, 'asked twice');
+  assert.match(out.join('\n'), /attempts closed 1 \(lines 1\)/);
+});
+
 test('the arguments: batch sizes, the pass and the mirrors', () => {
   const opts = collector.parseArgs(['--store', 's', '--pass', '44500000000.1', '--mirrors', '/m', '--attempts', '50', '--limit', '40']);
   assert.deepEqual(opts, { repo: null, store: 's', limit: 40, attempts: 50, pass: '44500000000.1', mirrors: '/m', calls: null });

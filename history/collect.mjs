@@ -24,7 +24,7 @@ import { parseJUnit } from './junit.mjs';
 import { previousRun, resolveTested, startedBefore } from './provenance.mjs';
 import { buildBase, buildDurations, buildRunLine, jobSlug, lineArtifacts, lineKey, reportWithinJob, summarize } from './record.mjs';
 import { describeError } from './errors.mjs';
-import { collectLedger, createPacer, formatLedger, LIMITS } from './ledger.mjs';
+import { collectLedger, createPacer, formatLedger, LIMITS, retried } from './ledger.mjs';
 import { openMirror } from './mirror.mjs';
 import { dayOf, openLedger, openStore } from './store.mjs';
 
@@ -519,8 +519,10 @@ export function selectRepos(repos, alias) {
 
 // One repository's batch: the gate ledger's pass, then the per-test pass (for a repository with a reporting set),
 // which takes its jobs from the ledger's fetch. Every request of both goes through the pacer (`admit`). → { errors,
-// more, wait }. `deps`: the client, the mirror and the token, replaced in tests.
-const DEPS = { createGitHub, openMirror, tokenFor };
+// more, wait }. A job listing answered with a server error is asked again after each of `delays`, as a listing day
+// is: one 502 among a pass's hundreds of calls would otherwise fail the day's run. `deps`: the client, the mirror,
+// the token and the delays, replaced in tests.
+const DEPS = { createGitHub, openMirror, tokenFor, delays: [3000, 10000] };
 async function collectBoth({ entry, opts, pacer, now, ledger: opened, deps }) {
   const { repo, alias } = entry;
   const token = deps.tokenFor(repo, entry.token);
@@ -529,7 +531,7 @@ async function collectBoth({ entry, opts, pacer, now, ledger: opened, deps }) {
   const memo = new Map();
   const jobsOf = (run, attempt) => {
     const k = `${run}/${attempt}`;
-    if (!memo.has(k)) memo.set(k, gh.attemptJobs(repo, run, attempt));
+    if (!memo.has(k)) memo.set(k, retried(() => gh.attemptJobs(repo, run, attempt), deps.delays));
     return memo.get(k);
   };
   const errors = [];

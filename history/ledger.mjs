@@ -90,7 +90,7 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // GitHub's listing answers a heavy filtered page with a 502 now and then (2026-11-19, MAWS): a server error or a
 // timeout is tried again after each of `delays`.
 const transient = (err) => err?.status >= 500 || err?.name === 'TimeoutError' || err?.name === 'AbortError';
-async function retried(fn, delays) {
+export async function retried(fn, delays) {
   for (let i = 0; ; i += 1) {
     try {
       return await fn();
