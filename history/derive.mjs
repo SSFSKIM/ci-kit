@@ -31,7 +31,7 @@ const ZERO = /^0{40}$/;
 // The days a directory has a file for, by name only.
 const dayFiles = (dir) => (existsSync(dir) ? readdirSync(dir).map((n) => DAYFILE.exec(n)?.[1]).filter(Boolean).sort() : []);
 // The lines of the days in [fromDay, toDay], chosen by name before any is read.
-const readDays = (dir, fromDay, toDay) => {
+export const readDays = (dir, fromDay, toDay) => {
   const out = new Map();
   for (const day of dayFiles(dir).filter((d) => d >= fromDay && d <= toDay)) {
     out.set(day, readFileSync(join(dir, `${day}.jsonl`), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)));
