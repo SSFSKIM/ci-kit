@@ -585,6 +585,55 @@ curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat > "$TEST_ROOT/report.js
   } finally { await rm(root,{recursive:true,force:true}); }
 });
 
+// 2026-11-19, bake 20261119-232507-taub: us-east-2's EC2 mirror answered 503 for partclone after eleven minutes.
+test('the builder installs from the main archive when the region\'s mirror fails, and leaves the image on the region\'s mirror', async () => {
+  const {readFile,writeFile,mkdtemp,mkdir,rm} = await import('node:fs/promises');
+  const {tmpdir} = await import('node:os');
+  const {join} = await import('node:path');
+  const {execFileSync} = await import('node:child_process');
+  const {fillEc2Builder} = await import('../../ec2/bake/bake.mjs');
+  const root = await mkdtemp(join(tmpdir(),'ci-kit-builder-mirror-'));
+  const relocate = (s) => s.replace(/\/(etc|opt|var|root|run|tmp|snap)(?=\/|\s|$)/g,`${root}/$1`);
+  const sources = join(root,'etc/apt/sources.list.d/ubuntu.sources');
+  const regional = 'Types: deb\nURIs: http://us-east-2.ec2.archive.ubuntu.com/ubuntu/\nSuites: noble noble-updates\n\nTypes: deb\nURIs: http://security.ubuntu.com/ubuntu/\nSuites: noble-security\n';
+  // The region's mirror fails the install; any other source serves it. Each call records the mirror it would use.
+  const driver = `set -euo pipefail
+apt-get() {
+  [ "$1" = update ] || [ "$1" = install ] || return 0
+  echo "$1 $(grep -c ec2.archive "$TEST_SOURCES" || true)" >> "$TEST_ROOT/apt-calls"
+  [ "$1" != install ] || ! grep -q "$TEST_MIRROR" "$TEST_SOURCES"
+}
+systemctl() { :; }; sync() { :; }; poweroff() { :; }; git() { return 7; }
+curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat > "$TEST_ROOT/report.json"; else :; fi; }
+. "$1"
+`;
+  const run = async (mirror) => {
+    for (const p of ['report.json','apt-calls']) await rm(join(root,p),{force:true});
+    for (const d of ['var/log','etc/apt/preferences.d','etc/apt/sources.list.d','run']) await mkdir(join(root,d),{recursive:true});
+    await writeFile(sources, regional);
+    const template = await readFile(new URL('../../ec2/bake/builder.sh',import.meta.url),'utf8');
+    await writeFile(join(root,'builder.sh'),relocate(fillEc2Builder(template,{manifest:built,token:'{}',report:'https://reports.invalid/builder.json'})));
+    let status = 0;
+    try { execFileSync('bash',['-c',driver,'fixture',join(root,'builder.sh')],{env:{...process.env,TEST_ROOT:root,TEST_SOURCES:sources,TEST_MIRROR:mirror},stdio:'pipe'}); } catch (error) { status = error.status; }
+    return {status, step: JSON.parse(await readFile(join(root,'report.json'),'utf8')).value,
+      calls: (await readFile(join(root,'apt-calls'),'utf8')).trim().split('\n'), sources: await readFile(sources,'utf8')};
+  };
+  try {
+    const fellBack = await run('ec2.archive.ubuntu.com');
+    assert.deepEqual(fellBack.calls, ['update 1','install 1','update 0','install 0'], 'the second pass reads no regional mirror');
+    assert.equal(fellBack.step, 'failed:kit', 'apt passed: the fixture stops at the next step');
+    assert.equal(fellBack.sources, regional, 'the image keeps the region\'s mirror and the security archive as they were');
+
+    const healthy = await run('no-such-mirror');
+    assert.deepEqual(healthy.calls, ['update 1','install 1'], 'a healthy mirror is asked once');
+    assert.equal(healthy.step, 'failed:kit');
+
+    const down = await run('ubuntu.com'); // both passes fail
+    assert.deepEqual([down.step, down.status], ['failed:apt', 1]);
+    assert.equal(down.calls.length, 4);
+  } finally { await rm(root,{recursive:true,force:true}); }
+});
+
 test('a just-launched builder that DescribeInstances does not know yet is read again, not failed', async () => {
   const f = await ec2Fixture({ unseenReads: 2 });
   const result = await f.run();
