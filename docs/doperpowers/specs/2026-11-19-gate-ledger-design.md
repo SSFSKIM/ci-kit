@@ -397,7 +397,9 @@ second parent and `pr_link: "message"` when the tip has one parent (a squash) an
 `history/report.mjs` reads a repository's files for an ISO week and the three before it and writes
 `reports/<week>.md`:
 
-1. **Per gate:** attempts, runner minutes by lane (the Mac's apart), superseded minutes, reds by cause.
+1. **Per gate:** attempts, runner minutes by lane (the Mac's apart), superseded minutes, reds by cause, and on the
+   same line its `cancelled` attempts and minutes (a person can stop a hanging job before its time limit, so a
+   reader of a gate's reds sees how many of its attempts were stopped by hand).
 2. **Reds to read:** each gate's `unattributed` attempts, newest first, with their `why` and run links. This is the
    list a person reads to learn what a gate is really catching.
 3. **Nominations:** a gate is nominated only when its window is covered (at least 21 covered days of the 28 with
@@ -405,7 +407,8 @@ second parent and `pr_link: "message"` when the tip has one parent (a squash) an
    gives its runner minutes a week and says which lane they free. A gate that fails the coverage test is listed as
    "too little record", never nominated.
    **Candidates to read:** a covered gate with no `product-diff` and no `unattributed` red and no `keep` entry,
-   whose other reds are `rerun-green` or `test-only-diff`. It is listed with each of those reds linked, under the
+   whose other reds are `rerun-green` or `test-only-diff`. It is listed with each of those reds linked and its
+   `cancelled` attempts and minutes, under the
    sentence that a rerun's pass does not rule out an intermittent product fault and a test-only change may have
    weakened the test. The report proposes nothing for it; a person who has read the reds may.
 4. **Landings:** counts by both verdicts; each landing that was `red`, `unrun` and not in flight, or `head_green`,
