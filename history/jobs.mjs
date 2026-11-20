@@ -2,7 +2,9 @@
 // "Scope", "Tree basis", "Change", "Lane"): pure functions of a run as the run listing gives it, one attempt's jobs as
 // the attempt's job listing gives them, and the repository's entry in history/repos.json.
 import { createHash } from 'node:crypto';
-import { gatesOf, producerOf } from './provenance.mjs';
+import { changeTrailerOf, gatesOf, producerOf, trailersOf } from './provenance.mjs';
+
+export { trailersOf };
 
 // The platform's own messages about a job, by kind (spec, "A job line": `annotations`), as GitHub words them, whole
 // from their first word (its annotations, 2026-10/11): a test's output that quotes them is not them, and a message too
@@ -84,18 +86,6 @@ export function phaseOf(job, entry) {
   return { failed_step: step.name, phase };
 }
 
-// A commit message's trailers: the key: value lines of its last paragraph, when it has more than one. Key → values.
-export function trailersOf(message) {
-  const paragraphs = (message ?? '').trim().split(/\n[ \t]*\n/);
-  if (paragraphs.length < 2) return {};
-  const out = {};
-  for (const line of paragraphs.at(-1).split('\n')) {
-    const m = /^([A-Za-z][A-Za-z0-9-]*):[ \t]*(.*?)[ \t]*$/.exec(line);
-    if (m) (out[m[1]] ??= []).push(m[2]);
-  }
-  return out;
-}
-
 const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 16);
 // A scope key: the scope, the job's variant and what else decides what ran or where (`semantic`), hashed.
 export const scopeKey = (scope, variant, semantic) => hash({ scope, variant, semantic });
@@ -162,7 +152,12 @@ export function runFacts(run, attempt, { tested, treeKey }, entry, conclusion = 
   if (basis === 'pr-merge') {
     const pr = run.pull_requests?.[0]?.number;
     change = pr ? `pr:${pr}` : `branch:${run.head_branch}`;
-  } else if (producer !== 'other' && !entry.fallback_labels.includes(label)) change = `${producer}:${label}`;
+  } else if (producer !== 'other') {
+    // A `Change:` trailer names the change across retries that each push a new label; without one, the label does.
+    const named = changeTrailerOf(run.head_commit?.message);
+    if (named) change = `${producer}:${named}`;
+    else if (!entry.fallback_labels.includes(label)) change = `${producer}:${label}`;
+  }
   // A ci-gate's nonce commit and the commit it tests share a tree, so the head's tree is the tested tree.
   const tree = basis === 'exact' ? headTree : null;
   return {

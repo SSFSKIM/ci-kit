@@ -265,6 +265,39 @@ test('a job line: the fields, a copy without minutes, and the platform kinds onl
   assert.equal(other.tested, run.head_sha);
 });
 
+test('a nonce commit\'s `Change:` trailer names the change across retries; it is no semantic trailer', () => {
+  const msg = (extra) => `ci-gate: 55f4887d\n\nNonce: 1-1\nGates: unit\nRunner: linux${extra}`;
+  const run = (head_branch, message, over = {}) => ({
+    id: 1, run_attempt: 1, name: 'gate', event: 'push', head_branch, head_sha: 'a'.repeat(40),
+    head_commit: { tree_id: 't'.repeat(40), message }, pull_requests: [], status: 'completed', conclusion: 'failure', ...over,
+  });
+  const resolved = { tested: '55f4887d'.padEnd(40, '0'), treeKey: 't'.repeat(40) };
+  // Two retries of one branch, each under a new label, are one change.
+  const first = runFacts(run('ci/retry1-55f4887d', msg('\nChange: fix-login')), 1, resolved, MAWS);
+  const second = runFacts(run('ci/retry2-55f4887d', msg('\nChange: fix-login')), 1, resolved, MAWS);
+  assert.equal(first.change, 'maws-ci-gate:fix-login');
+  assert.equal(second.change, first.change);
+  assert.equal(first.label, 'retry1'); // the label is still the ref's
+  // Without the trailer, or with an empty one, the label names the change as before.
+  assert.equal(runFacts(run('ci/retry1-55f4887d', msg('')), 1, resolved, MAWS).change, 'maws-ci-gate:retry1');
+  assert.equal(runFacts(run('ci/retry1-55f4887d', msg('\nChange:   ')), 1, resolved, MAWS).change, 'maws-ci-gate:retry1');
+  // Only the trailer paragraph holds it: a body line that reads like one is not.
+  assert.equal(runFacts(run('ci/retry1-55f4887d', 'ci-gate: 55f4887d\n\nChange: body\n\nNonce: 1-1\nGates: unit'), 1, resolved, MAWS).change, 'maws-ci-gate:retry1');
+  // It names the change even under a fallback label, which alone has none; the fallback rule stands without it.
+  const kitRef = 'ci/gate-0123abcd-ab12cd';
+  const kitResolved = { tested: '0123abcd'.padEnd(40, '0'), treeKey: 't'.repeat(40) };
+  assert.equal(runFacts(run(kitRef, 'ci-gate 0123abcd\n\nCI-Gates: test\nChange: topic'), 1, kitResolved, KIT).change, 'ci-kit-ci-gate:topic');
+  assert.equal(runFacts(run(kitRef, 'ci-gate 0123abcd\n\nCI-Gates: test'), 1, kitResolved, KIT).change, null);
+  // A head that is not a ci-gate's nonce commit, or a pull request run, keeps its own rule.
+  assert.equal(runFacts(run('ci/retry1-55f4887d', msg('\nChange: fix-login')), 1, { tested: null, treeKey: null }, MAWS).change, null);
+  assert.equal(runFacts(run('feature', msg('\nChange: fix-login'), { event: 'pull_request', pull_requests: [{ number: 7 }] }), 1, resolved, DOPER).change, 'pr:7');
+  // Not semantic: two attempts differing only in it keep one scope key, so they stay comparable.
+  const a = scopeOf(run('ci/retry1-55f4887d', msg('\nChange: fix-login')), 'unit', null, MAWS);
+  const b = scopeOf(run('ci/retry2-55f4887d', msg('')), 'unit', null, MAWS);
+  assert.equal(a.scope_key, b.scope_key);
+  assert.ok(comparable({ gate: 'unit', ...a }, { gate: 'unit', ...b }));
+});
+
 // Job lines of one attempt, shaped as the collector writes them.
 let nextId = 1;
 const lineOf = (over) => ({ run: 1, attempt: 1, gate: 'unit', kind: 'gate', shard: null, role: null, scope: 'full', scope_key: 'k', basis: 'exact', tree: 't1', tree_key: 't1', head: 'h', tested: 'h', change: 'c', event: 'push', ref: 'ci/x', workflow: 'gate', copy: false, copied_from: null, conclusion: 'success', started: '2026-11-19T08:00:00Z', completed: '2026-11-19T08:05:00Z', minutes: 5, lane: 'pool-gce', run_conclusion: 'success', job_id: nextId++, ...over });

@@ -83,9 +83,12 @@ store, print a weekly report, and show `ci-gate` printing the context lines.
 - **Tree basis.** `exact`: the run tested exactly the tree recorded (a ci-gate ref, whose nonce commit is empty; a
   push to a branch). `pr-merge`: a `pull_request` run, which checks out GitHub's merge of the head into the base
   of that moment; the head's tree is recorded and the tested tree is not known.
-- **Change.** For a ci-gate ref, its producer and label, unless the label is one a repository uses as a fallback
-  for unrelated targets (`gate` in ci-kit's own `ci-gate`; the list is in `history/repos.json`), in which case the
-  attempt has no change. For a `pull_request` run, the pull request's number when the run names one, else the
+- **Change.** For a ci-gate ref whose nonce commit carries a `Change: <value>` trailer with a non-empty value (in
+  its trailer paragraph; MAWS's `ci-gate.sh` derives it from the worktree's branch), its producer and that value,
+  so retries pushed under new labels stay one change. Otherwise its producer and label, unless the label is one a
+  repository uses as a fallback for unrelated targets (`gate` in ci-kit's own `ci-gate`; the list is in
+  `history/repos.json`), in which case the attempt has no change. `Change:` is never a semantic trailer: it is not
+  in the scope key. For a `pull_request` run, the pull request's number when the run names one, else the
   head branch's name (a name alone can be reused by a later pull request).
 - **Lane.** Where a job ran: `pool-gce`, `pool-ec2`, `mini-host`, `mini-guest`, `hosted-linux`, `hosted-macos`, or
   `manual-host` / `manual-guest` for the hand-run Mac gate.
@@ -406,12 +409,18 @@ second parent and `pr_link: "message"` when the tip has one parent (a squash) an
 2. **Reds to read:** each gate's `unattributed` attempts, newest first, with their `why` and run links. This is the
    list a person reads to learn what a gate is really catching.
 3. **Nominations:** a gate is nominated only when its window is covered (at least 21 covered days of the 28 with
-   lines, and at least 20 attempts), its only reds in the window are `infra`, and it has no `keep` entry. The line
-   gives its runner minutes a week and says which lane they free. A gate that fails the coverage test is listed as
-   "too little record", never nominated.
+   lines, and at least 20 attempts), its only reds in the window are `infra`, it has at least one attempt in the
+   window's most recent 7 covered days, and it has no `keep` entry. The line gives its runner minutes over those 7
+   covered days and the lanes they would free, with the four weeks' total beside them for scale: what the gate
+   costs now, not the window's mean. A gate that fails the coverage test is listed as "too little record", never
+   nominated.
+   **No attempts in the last week:** a gate with attempts in the window and none in its most recent 7 covered days
+   is neither nominated nor a candidate (nor "too little record"); it is listed here with its last attempt's date,
+   since it has probably been retired or renamed. A `keep` entry still lists it among the kept.
    **Candidates to read:** a covered gate with no `product-diff` and no `unattributed` red and no `keep` entry,
-   whose other reds are `rerun-green` or `test-only-diff`. It is listed with each of those reds linked and its
-   `cancelled` attempts and minutes, under the
+   whose other reds are `rerun-green` or `test-only-diff`, and which ran in the most recent 7 covered days. It is
+   listed with its minutes as a nomination's are, each of those reds linked and its `cancelled` attempts and
+   minutes, under the
    sentence that a rerun's pass does not rule out an intermittent product fault and a test-only change may have
    weakened the test. The report proposes nothing for it; a person who has read the reds may.
 4. **Landings:** counts by both verdicts; each landing that was `red`, `unrun` and not in flight, or `head_green`,
@@ -999,6 +1008,22 @@ inputs M0 added.
   of its recompute window or of a line it added; later passes recompute from that day, past the 14-day finality if
   need be (never before the job lines' window), until one completes and clears it. Rejected: a per-line provisional
   flag (a schema change readers would have to know). Date/Author: 2026-11-20, the executing session.
+
+- Decision: an attempt's change follows a `Change:` trailer, and a nomination describes what the gate costs now
+  (2026-11-20). Asked by MAWS's landing session (2026-11-20) after reading the first weekly reports. (1) MAWS's
+  sessions give each retry a new label, so 1,032 of its 1,100 `no-later-green` reds had no later attempt of their
+  change; MAWS's `ci-gate.sh` will write `Change: <value>` (from the worktree's branch) in the nonce commit's
+  trailer paragraph, and a non-empty value makes the change `<producer>:<value>`, ahead of the label and of the
+  fallback-label rule; without it the label rule stands. It is read with the other nonce trailers
+  (`history/provenance.mjs`, `changeTrailerOf`), is not semantic, and stored job lines are not rewritten: the
+  identity takes effect for attempts the collector closes after this change, and a `derive-from` does not reach
+  older days, since causes read the `change` the job lines hold. (2) MAWS W47 nominated `e2e:c7-utility`, a gate no
+  longer in the repository (0 attempts that week), and quoted `e2e:browser-import` at 142 runner minutes a week when
+  it ran twice for 2.1 minutes that week, its cadence having changed. A nomination's purpose is "removing this would
+  free X on these lanes", so a gate with no attempt in the most recent 7 covered days is neither nominated nor a
+  candidate and is listed apart with its last attempt's date, and a nomination's and a candidate's minutes are those
+  7 covered days', the four weeks' total beside them. The qualification rule is unchanged. Date/Author: 2026-11-20,
+  CI-opt's session.
 
 ## Outcomes & Retrospective
 

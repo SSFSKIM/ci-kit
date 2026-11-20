@@ -24,6 +24,7 @@ const DAY = 86_400_000;
 const WEEKS = 4;
 const MIN_COVERED = 21; // covered days of the window's 28
 const MIN_ATTEMPTS = 20;
+const RECENT_DAYS = 7; // the covered days a nomination's and a candidate's minutes are counted over
 const RED_CAUSES = ['infra', 'rerun-green', 'test-only-diff', 'product-diff', 'unattributed'];
 // The reds a candidate to read may have; any other (a `product-diff`, an `unattributed`, a red whose attribution is
 // pending or whose cause this report does not know) keeps a gate out of both lists. A nomination's are `infra` alone.
@@ -94,17 +95,34 @@ export function weekModel({ week, now, entry, record }) {
   const gates = new Map();
   const gateOf = (gate) =>
     gates.get(gate) ??
-    gates.set(gate, { gate, attempts: 0, minutes: 0, lanes: {}, mac: {}, superseded: { n: 0, minutes: 0 }, cancelled: { n: 0, minutes: 0 }, reds: {}, pending: [], week: { attempts: 0, minutes: 0 } }).get(gate);
+    gates.set(gate, { gate, attempts: 0, minutes: 0, lanes: {}, mac: {}, superseded: { n: 0, minutes: 0 }, cancelled: { n: 0, minutes: 0 }, reds: {}, pending: [], week: { attempts: 0, minutes: 0 }, recent: { attempts: 0, minutes: 0, lanes: {} }, last: null }).get(gate);
+  // Coverage of the window's 28 days.
+  const today = day(now);
+  const days = Array.from({ length: WEEKS * 7 }, (_, i) => day(from + i * DAY));
+  const ended = days.filter((d) => d < today);
+  const notCovered = ended.filter((d) => !record.covered(d));
+  const coveredCount = ended.length - notCovered.length;
+  const covered = { count: coveredCount, enough: coveredCount >= MIN_COVERED, notCovered, notEnded: days.filter((d) => d >= today) };
+  // The most recent 7 covered days: what a gate costs now, which is what a nomination says removing it would free.
+  const recent = new Set(ended.filter((d) => record.covered(d)).slice(-RECENT_DAYS));
+
   const windowLanes = new Set();
   const weekLanes = new Set();
   for (const a of attempts) {
     const g = gateOf(a.gate);
     g.attempts += 1;
+    const isRecent = recent.has(day(Date.parse(a.available)));
+    if (isRecent) g.recent.attempts += 1;
+    if (!g.last || a.available > g.last) g.last = a.available;
     for (const l of billed.get(keyOf(a)) ?? []) {
       const lane = l.lane ?? 'no lane';
       const into = MAC_LANES.has(lane) ? g.mac : g.lanes;
       if (l.minutes) into[lane] = (into[lane] ?? 0) + l.minutes;
       g.minutes += l.minutes ?? 0;
+      if (isRecent && l.minutes) {
+        g.recent.minutes += l.minutes;
+        g.recent.lanes[lane] = (g.recent.lanes[lane] ?? 0) + l.minutes;
+      }
       if (l.lane) windowLanes.add(l.lane);
       if (l.lane && inWeek(a.available)) weekLanes.add(l.lane);
     }
@@ -122,29 +140,27 @@ export function weekModel({ week, now, entry, record }) {
     } else (g.reds[c.cause] ??= []).push(c);
   }
   for (const g of gates.values()) {
-    for (const o of [g.lanes, g.mac]) for (const k of Object.keys(o)) o[k] = round(o[k]);
-    for (const x of [g, g.superseded, g.cancelled, g.week]) x.minutes = round(x.minutes);
+    for (const o of [g.lanes, g.mac, g.recent.lanes]) for (const k of Object.keys(o)) o[k] = round(o[k]);
+    for (const x of [g, g.superseded, g.cancelled, g.week, g.recent]) x.minutes = round(x.minutes);
+    g.last = g.last?.slice(0, 10) ?? null;
     for (const list of Object.values(g.reds)) list.sort(newestFirst);
   }
   const rows = [...gates.values()].sort((x, y) => y.minutes - x.minutes || (x.gate < y.gate ? -1 : 1));
 
-  // Coverage of the window's 28 days.
-  const today = day(now);
-  const days = Array.from({ length: WEEKS * 7 }, (_, i) => day(from + i * DAY));
-  const ended = days.filter((d) => d < today);
-  const notCovered = ended.filter((d) => !record.covered(d));
-  const coveredCount = ended.length - notCovered.length;
-  const covered = { count: coveredCount, enough: coveredCount >= MIN_COVERED, notCovered, notEnded: days.filter((d) => d >= today) };
   // Too little record is a fact of its own, shown whether or not a keep entry holds the gate.
   for (const g of rows) g.thin = !covered.enough || g.attempts < MIN_ATTEMPTS;
 
   // Nominations and candidates.
   const known = record.known;
   const keepOf = (gate) => known.find((e) => e.keep && e.gate === gate && inForce(e, today)) ?? null;
-  const [nominations, candidates, tooLittle, kept] = [[], [], [], []];
+  const [nominations, candidates, tooLittle, kept, idle] = [[], [], [], [], []];
   for (const g of rows) {
     const keep = keepOf(g.gate);
+    // No attempt in the most recent covered days: probably retired or renamed, so it frees nothing now. A keep entry
+    // still shows it among the kept.
+    if (recent.size && g.recent.attempts === 0) idle.push({ ...g, keep });
     if (keep) kept.push({ ...g, keep });
+    else if (recent.size && g.recent.attempts === 0) continue;
     else if (g.thin) tooLittle.push(g);
     else if (g.pending.length || Object.keys(g.reds).some((c) => !READABLE.has(c))) continue;
     else if (Object.keys(g.reds).some((c) => c !== 'infra')) candidates.push(g);
@@ -198,7 +214,7 @@ export function weekModel({ week, now, entry, record }) {
   }
   return {
     week, repo: entry.repo, hasCheck: Boolean(entry.verdict_job), from: day(from), weekFrom: day(weekFrom), to: day(to - DAY), inProgress: now < to, asOf: record.asOf, today,
-    gates: rows, covered, nominations, candidates, tooLittle, kept, toRead, landings, known: knownSplit,
+    gates: rows, covered, recentDays: recent.size ? [[...recent][0], [...recent].at(-1)] : null, nominations, candidates, tooLittle, kept, idle, toRead, landings, known: knownSplit,
     landingRecord,
     quietLanes: [...windowLanes].filter((l) => !weekLanes.has(l)).sort(),
     comparesBase: (entry.compares_base ?? []).filter((g) => gates.has(g)),
@@ -222,6 +238,7 @@ const CAUSE_TEXT = {
 const fmtMinutes = (m) => String(round(m));
 const plural = (n, what) => `${n} ${what}${n === 1 ? '' : 's'}`;
 const lanesText = (o) => Object.entries(o).sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1)).map(([k, v]) => `${k} ${fmtMinutes(v)}`).join(', ') || '–';
+const recentText = (g) => `${fmtMinutes(g.recent.minutes)} runner minutes in the last ${RECENT_DAYS} covered days (${lanesText(g.recent.lanes)})`;
 const costText = ({ n, minutes }) => (n ? `${n} (${fmtMinutes(minutes)} min)` : '–');
 const cancelledText = ({ n, minutes }) => (n ? `cancelled ${n} (${fmtMinutes(minutes)} min)` : 'cancelled 0');
 const time = (t) => (t ? t.replace(/:\d\d(\.\d+)?Z$/, 'Z').replace('T', ' ') : '?');
@@ -277,23 +294,27 @@ export function renderReport(m) {
   }
 
   p('## Nominations', '');
-  p(`A gate is nominated only when its four weeks are covered (at least ${MIN_COVERED} of the 28 days covered, and at least ${MIN_ATTEMPTS} attempts), every red it had is \`infra\`, and no \`keep\` entry holds it. A person decides; nothing here removes a check.`, '');
+  const recentSpan = m.recentDays ? ` (${m.recentDays[0]} to ${m.recentDays[1]})` : '';
+  p(`A gate is nominated only when its four weeks are covered (at least ${MIN_COVERED} of the 28 days covered, and at least ${MIN_ATTEMPTS} attempts), every red it had is \`infra\`, it ran in the most recent ${RECENT_DAYS} covered days, and no \`keep\` entry holds it. A person decides; nothing here removes a check.`, '');
+  p(`A nomination's and a candidate's minutes are those of the most recent ${RECENT_DAYS} covered days${recentSpan}, what the gate costs now; the four weeks' total is beside them for scale.`, '');
   if (!m.covered.enough) p(`These four weeks hold ${m.covered.count} covered days of the ${MIN_COVERED} a nomination needs: no gate can be nominated.`, '');
   if (m.nominations.length === 0) p('None.');
   for (const g of m.nominations) {
-    const perWeek = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, v / WEEKS]));
-    const lanes = { ...perWeek(g.lanes), ...perWeek(g.mac) };
     const infra = g.reds.infra?.length ?? 0;
     const kind = infra ? `${infra} \`infra\` red${infra === 1 ? '' : 's'} in ${g.attempts} attempts, 0 other` : `0 reds in ${g.attempts} attempts`;
-    p(`- \`${g.gate}\`: ${kind}; ${fmtMinutes(g.minutes / WEEKS)} runner minutes a week (${lanesText(lanes)}), which removing or demoting it would free on those lanes; ${cancelledText(g.cancelled)}.`);
+    p(`- \`${g.gate}\`: ${kind}; ${recentText(g)}, which removing or demoting it would free on those lanes, of ${fmtMinutes(g.minutes)} in the four weeks; ${cancelledText(g.cancelled)}.`);
   }
   p('', '### Candidates to read', '');
   p('A covered gate whose reds are only `rerun-green` or `test-only-diff` (and `infra`). A rerun\'s pass does not rule out an intermittent product fault, and a test-only change may have weakened the test: nothing is proposed for these gates. A person who has read the reds below may.', '');
   if (m.candidates.length === 0) p('None.');
   for (const g of m.candidates) {
     const reds = ['rerun-green', 'test-only-diff'].flatMap((c) => (g.reds[c] ?? []).map((r) => `${c} ${runLink(m.repo, r.run, r.attempt)}`));
-    p(`- \`${g.gate}\`: ${g.attempts} attempts, ${fmtMinutes(g.minutes / WEEKS)} runner minutes a week; ${cancelledText(g.cancelled)}; reds: ${reds.join(', ')}.`);
+    p(`- \`${g.gate}\`: ${g.attempts} attempts, ${recentText(g)}, of ${fmtMinutes(g.minutes)} in the four weeks; ${cancelledText(g.cancelled)}; reds: ${reds.join(', ')}.`);
   }
+  p('', '### No attempts in the last week', '');
+  p(`A gate with attempts in the four weeks and none in the most recent ${RECENT_DAYS} covered days${recentSpan}: it may have been retired or renamed (an attempt on a day not yet covered does not show here), and over those days removing it would have freed nothing. Neither nominated nor a candidate.`, '');
+  if (m.idle.length === 0) p('None.');
+  for (const g of m.idle) p(`- \`${g.gate}\`: last attempt ${g.last}, ${plural(g.attempts, 'attempt')} in the four weeks${g.keep ? `; held by ${g.keep.id}` : ''}.`);
   p('', '### Too little record', '');
   p(`Fewer than ${MIN_COVERED} covered days in the four weeks (${m.covered.count} here), or fewer than ${MIN_ATTEMPTS} attempts: never nominated.`, '');
   if (m.tooLittle.length === 0) p('None.');
