@@ -54,7 +54,7 @@ function makeStore(t, { lines, causes = [], landings = [], known = [], listedFro
   }
   const listed = {};
   for (let d = Date.parse(`${listedFrom}T00:00:00Z`); d < NOW - DAY; d += DAY) listed[dayOf(d)] = `${dayOf(d + DAY)}T01:00:00Z`;
-  const state = { v: 1, runs: {}, listed, settled: {}, pass: pass ?? { id: 'p', listed_at: '2026-11-20T05:00:00.000Z', pending: [], queue: [], derived: true }, calls: {}, activity: activity ?? { since: '2026-10-15T00:00:00Z', through: iso(NOW), breaks: [] } };
+  const state = { v: 1, runs: {}, listed, settled: {}, pass: pass ?? { id: 'p', listed_at: '2026-11-20T05:00:00.000Z', pending: [], queue: [], derived: true }, calls: {}, activity: activity === undefined ? { since: '2026-10-15T00:00:00Z', through: iso(NOW), breaks: [] } : activity };
   writeFileSync(join(dir, 'attempts.json'), `${JSON.stringify(state)}\n`);
   if (known.length) writeFileSync(join(dir, 'known.json'), JSON.stringify(known));
   if (marker) writeFileSync(join(root, 'collected.json'), JSON.stringify({ v: 1, at: marker, repos: {} }));
@@ -88,8 +88,9 @@ function world(t) {
   const caught = gate('caught');
   causes.push(causeOf(red(caught[12]), 'product-diff'));
   gate('kept');
-  const uncaused = gate('uncaused');
-  red(uncaused[8]); // a failed attempt with no cause line
+  // An attempt cancelled from outside whose cause the derivation has not written yet: its attribution is pending.
+  const pending = gate('pending');
+  Object.assign(pending[8], { conclusion: 'cancelled', run_conclusion: 'cancelled', failed_step: 'Run tests', phase: 'test' });
   const unknown = gate('unknown');
   causes.push(causeOf(red(unknown[4]), 'a-cause-from-a-later-collector'));
   const superseded = gate('busy');
@@ -117,7 +118,7 @@ test('ISO weeks: a day to its week, a week to its Monday; a week the year lacks 
   assert.throws(() => weekStart('2026-47'), /week/);
 });
 
-test('nominations: a covered gate with no red but infra; candidates: rerun-green or test-only-diff, each red linked; neither for unattributed, product-diff, no cause line, keep', (t) => {
+test('nominations: a covered gate with no red but infra; candidates: rerun-green or test-only-diff, each red linked; neither for unattributed, product-diff, attribution pending, keep', (t) => {
   const w = world(t);
   const root = makeStore(t, w);
   const { model, text } = weekReport({ root, alias: ALIAS, entry: ENTRY, week: '2026-W47', now: NOW });
@@ -125,7 +126,7 @@ test('nominations: a covered gate with no red but infra; candidates: rerun-green
   assert.deepEqual(model.candidates.map((g) => g.gate).sort(), ['flaky', 'testfix']);
   assert.deepEqual(model.tooLittle.map((g) => g.gate), ['sparse']);
   assert.deepEqual(model.kept.map((g) => g.gate), ['kept']);
-  for (const g of ['mystery', 'caught', 'uncaused', 'unknown', 'kept', 'sparse']) {
+  for (const g of ['mystery', 'caught', 'pending', 'unknown', 'kept', 'sparse']) {
     assert.ok(!model.nominations.some((n) => n.gate === g) && !model.candidates.some((n) => n.gate === g), g);
   }
   // The candidate's red is linked, with its cancelled attempts and minutes on the same line.
@@ -135,7 +136,9 @@ test('nominations: a covered gate with no red but infra; candidates: rerun-green
   assert.match(line, /cancelled 1 \(3 min\)/);
   assert.match(text, /a rerun's pass does not rule out an intermittent product fault/i);
   // A nomination gives its runner minutes a week and the lanes it would free: 24 attempts of 2 minutes over 4 weeks.
-  assert.match(text.split('\n').find((l) => l.startsWith('- `steady`')), /12 runner minutes a week \(pool-gce 12\)/);
+  // Each nomination states its kind in figures.
+  assert.match(text.split('\n').find((l) => l.startsWith('- `steady`')), /: 1 `infra` red in 24 attempts, 0 other; 12 runner minutes a week \(pool-gce 12\)/);
+  assert.match(text.split('\n').find((l) => l.startsWith('- `busy`')), /: 0 reds in 24 attempts; /);
   assert.match(text.split('\n').find((l) => l.startsWith('- `sparse`')), /3 attempts/);
 });
 
@@ -164,7 +167,9 @@ test('per gate: attempts, minutes by lane with the Mac apart, superseded and can
   assert.deepEqual(g('flaky').cancelled, { n: 1, minutes: 3 });
   assert.deepEqual(g('busy').superseded, { n: 1, minutes: 2 });
   assert.equal(g('busy').reds.superseded, undefined);
-  assert.equal(g('uncaused').uncaused.length, 1);
+  assert.equal(g('pending').pending.length, 1);
+  assert.match(text.split('\n').find((l) => l.startsWith('| Gate')), /attribution pending/);
+  assert.match(text, /1 failed attempts await attribution/);
   assert.equal(g('flaky').week.attempts, 4); // 11-16 to 11-19
   const row = text.split('\n').find((l) => l.startsWith('| `flaky`'));
   assert.match(row, /mini-host 72/);
@@ -243,10 +248,9 @@ test('status.json: each gate\'s standing on the default branch, its time and run
     lint: { result: 'failed', commit: 'c'.repeat(40), at: iso(landedAt + 3600_000), run: 2, attempt: 1 },
     test: { result: 'succeeded', commit: 'c'.repeat(40), at: iso(landedAt - 3600_000), run: 1, attempt: 1 },
   });
-  // A pass that has not derived: the collector's last whole pass, else nothing (a reader takes it as unreadable).
+  // A pass that has not derived, with no status before it: no standing, and no time a reader could take as fresh.
   const undrained = { id: 'q', listed_at: '2026-11-20T05:30:00.000Z', pending: [], queue: [1], derived: false };
-  assert.equal(statusOf({ root: makeStore(t, { lines, landings, pass: undrained, marker: '2026-11-19T01:00:00.000Z' }), alias: ALIAS, entry: ENTRY, now: NOW }).as_of, '2026-11-19T01:00:00.000Z');
-  assert.equal(statusOf({ root: makeStore(t, { lines, landings, pass: undrained }), alias: ALIAS, entry: ENTRY, now: NOW }).as_of, null);
+  assert.deepEqual(statusOf({ root: makeStore(t, { lines, landings, pass: undrained, marker: '2026-11-20T05:40:00.000Z' }), alias: ALIAS, entry: ENTRY, now: NOW }), { v: 1, as_of: null, gates: {}, known: [] });
 });
 
 test('the daily write: the current week\'s report and the three before it, and status.json, per repository; counts printed, never a gate', (t) => {
@@ -262,4 +266,77 @@ test('the daily write: the current week\'s report and the three before it, and s
   assert.equal(writeAll({ root, repos: [ENTRY], now: NOW + 60_000 })[0].reports, 0);
   // A repository with nothing in the store is skipped.
   assert.deepEqual(writeAll({ root, repos: [{ ...MAWS }], now: NOW }), []);
+});
+
+test('status.json: a pass still under way, its job files changed and the marker fresh, leaves the certified standing as it was', (t) => {
+  const landedAt = Date.parse('2026-11-18T10:00:00Z');
+  const lines = [job({ run: 1, gate: 'lint', end: landedAt + 3600_000, tree: 'L', tree_key: 'L', conclusion: 'failure' })];
+  const landings = [{ v: 1, id: 1, type: 'pr_merge', before: 'a', after: 'c'.repeat(40), at: iso(landedAt), tree: 'L', tree_key: 'L' }];
+  const root = makeStore(t, { lines, landings, marker: '2026-11-20T05:10:00.000Z' });
+  writeAll({ root, repos: [ENTRY], now: NOW });
+  const path = join(root, ALIAS, 'status.json');
+  const certified = readFileSync(path, 'utf8');
+  assert.equal(JSON.parse(certified).gates.lint.result, 'failed');
+  // The next pass lists and writes a later green of the landed tree, its derivation not done; the marker is fresh.
+  const attemptsPath = join(root, ALIAS, 'attempts.json');
+  const state = JSON.parse(readFileSync(attemptsPath, 'utf8'));
+  state.pass = { id: 'q', listed_at: '2026-11-20T07:00:00.000Z', pending: [7], queue: [], derived: false };
+  writeFileSync(attemptsPath, JSON.stringify(state));
+  writeFileSync(join(root, 'collected.json'), JSON.stringify({ v: 1, at: '2026-11-20T07:05:00.000Z', repos: {} }));
+  const green = job({ run: 2, gate: 'lint', end: Date.parse('2026-11-20T06:30:00Z'), tree: 'L', tree_key: 'L' });
+  writeFileSync(join(root, ALIAS, 'jobs', '2026-11-20.jsonl'), `${JSON.stringify(green)}\n`);
+  writeAll({ root, repos: [ENTRY], now: NOW + 3 * 3600_000 });
+  assert.equal(readFileSync(path, 'utf8'), certified);
+  // Once that pass derives, its standing is written with its own time.
+  state.pass.derived = true;
+  writeFileSync(attemptsPath, JSON.stringify(state));
+  writeAll({ root, repos: [ENTRY], now: NOW + 3 * 3600_000 });
+  const next = JSON.parse(readFileSync(path, 'utf8'));
+  assert.deepEqual([next.as_of, next.gates.lint.result, next.gates.lint.run], ['2026-11-20T07:00:00.000Z', 'succeeded', 2]);
+});
+
+test('policy is read on the day the report is made: a keep added Monday holds a gate in the week before; an entry that expired Sunday is not in force', (t) => {
+  const w = world(t);
+  const monday = Date.parse('2026-11-23T06:00:00Z');
+  const known = [
+    { id: 'keep-steady', gate: 'steady', keep: true, reason: 'added Monday', since: '2026-11-23', review_by: '2027-01-01', by: 'x' },
+    { id: 'sunday-1', gate: 'mystery', reason: 'until Sunday', since: '2026-11-10', review_by: '2026-11-22', by: 'x' },
+  ];
+  const root = makeStore(t, { ...w, known, listedFrom: '2026-10-15' });
+  const { model, text } = weekReport({ root, alias: ALIAS, entry: ENTRY, week: '2026-W47', now: monday });
+  assert.deepEqual(model.kept.map((g) => g.gate), ['steady']);
+  assert.ok(!model.nominations.some((g) => g.gate === 'steady'));
+  assert.deepEqual(model.known.inForce.map((e) => e.id), ['keep-steady']);
+  assert.deepEqual(model.known.expired.map((e) => e.id), ['sunday-1']);
+  assert.match(text, /Expired on 2026-11-23:\n\n- sunday-1/);
+});
+
+test('a keep entry does not hide thin coverage: a kept gate with too little record says so, and so does a window short of 21 covered days', (t) => {
+  const w = world(t);
+  const known = [...w.known, { id: 'keep-sparse', gate: 'sparse', keep: true, reason: 'guards a costly miss.', since: '2026-11-01', review_by: '2027-02-01', by: 'x' }];
+  const { model, text } = weekReport({ root: makeStore(t, { ...w, known }), alias: ALIAS, entry: ENTRY, week: '2026-W47', now: NOW });
+  assert.equal(model.kept.find((g) => g.gate === 'sparse').thin, true);
+  assert.equal(model.kept.find((g) => g.gate === 'kept').thin, false);
+  assert.match(text.split('\n').find((l) => l.startsWith('- `sparse`: keep-sparse')), /Too little record: 3 attempts, 25 covered days\./);
+  assert.doesNotMatch(text, /no gate can be nominated/);
+  const short = weekReport({ root: makeStore(t, { ...w, known, listedFrom: '2026-11-05' }), alias: ALIAS, entry: ENTRY, week: '2026-W47', now: NOW });
+  assert.match(short.text, /These four weeks hold 15 covered days of the 21 a nomination needs: no gate can be nominated\./);
+  assert.equal(short.model.kept.find((g) => g.gate === 'kept').thin, true);
+});
+
+test('chain breaks are reported over the part of the window the derivation checked; a listing never run is not a refused one', (t) => {
+  const lines = daily('steady');
+  const activity = { since: '2026-10-17T00:00:00Z', through: iso(NOW), breaks: [{ at: '2026-10-25T13:00:00Z', id: 9 }] };
+  // W44's window, 2026-10-05 to 11-01, from a pass of 2026-11-20 05:00Z: checked from 10-17 (the listing's start),
+  // which the 35 days back from the pass (10-16) also reach.
+  const w44 = weekReport({ root: makeStore(t, { lines, activity }), alias: ALIAS, entry: ENTRY, week: '2026-W44', now: NOW });
+  assert.deepEqual(w44.model.landingRecord.checked, ['2026-10-17', '2026-11-01']);
+  assert.match(w44.text, /1 chain break from 2026-10-17 to 2026-11-01, the part of these four weeks the derivation checked/);
+  const w47 = weekReport({ root: makeStore(t, { lines, activity }), alias: ALIAS, entry: ENTRY, week: '2026-W47', now: NOW });
+  assert.match(w47.text, /no chain break from 2026-10-26 to 2026-11-20, the part of these four weeks/);
+  const never = weekReport({ root: makeStore(t, { lines, activity: null }), alias: ALIAS, entry: ENTRY, week: '2026-W47', now: NOW });
+  assert.match(never.text, /no landing record yet: its activity listing has not run/);
+  assert.doesNotMatch(never.text, /refused/);
+  const refused = weekReport({ root: makeStore(t, { lines, activity: 'refused' }), alias: ALIAS, entry: ENTRY, week: '2026-W47', now: NOW });
+  assert.match(refused.text, /its activity listing is refused/);
 });

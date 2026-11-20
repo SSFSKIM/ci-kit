@@ -13,11 +13,11 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { readDays } from './derive.mjs';
+import { readDays, WINDOW_DAYS } from './derive.mjs';
 import { describeError } from './errors.mjs';
 import { gateAttempts } from './jobs.mjs';
 import { inForce, readKnown } from './known.mjs';
-import { recordAsOf, statusOf } from './status.mjs';
+import { derivedAt, statusOf } from './status.mjs';
 import { dayOf, openLedger, writeAtomic } from './store.mjs';
 
 const DAY = 86_400_000;
@@ -25,8 +25,8 @@ const WEEKS = 4;
 const MIN_COVERED = 21; // covered days of the window's 28
 const MIN_ATTEMPTS = 20;
 const RED_CAUSES = ['infra', 'rerun-green', 'test-only-diff', 'product-diff', 'unattributed'];
-// The reds a candidate to read may have; any other (a `product-diff`, an `unattributed`, a red with no cause line or
-// with a cause this report does not know) keeps a gate out of both lists. A nomination's are `infra` alone.
+// The reds a candidate to read may have; any other (a `product-diff`, an `unattributed`, a red whose attribution is
+// pending or whose cause this report does not know) keeps a gate out of both lists. A nomination's are `infra` alone.
 const READABLE = new Set(['infra', 'rerun-green', 'test-only-diff']);
 // The one Mac (the mini, under Actions and by hand): the scarce machine, whose minutes are shown apart.
 const MAC_LANES = new Set(['mini-host', 'mini-guest', 'manual-host', 'manual-guest']);
@@ -62,17 +62,18 @@ export function loadRecord(root, alias, from, to) {
   return {
     lines: ledger.jobLines(a, b),
     causes: flat('causes'),
-    // No landing record where the activity listing was refused or never made.
+    // No landing record where the activity listing was refused or has never run.
     landings: ledger.state.activity && ledger.state.activity !== 'refused' ? flat('landings') : null,
     covered: (d) => ledger.covered(d),
     activity: ledger.state.activity ?? null,
     known: readKnown(root, alias),
-    asOf: recordAsOf(root, ledger.state),
+    asOf: derivedAt(ledger.state),
   };
 }
 
 // The report's figures for `week`, from a loaded record (pure). `now`: the time the report is made; days from its
-// own on have not ended.
+// own on have not ended, and it is the day the report's policy is read on: which `keep` entries hold and which known
+// entries are in force, expiring or expired are what they are when the report is made, whatever week its evidence is.
 export function weekModel({ week, now, entry, record }) {
   const weekFrom = weekStart(week);
   const to = weekFrom + 7 * DAY;
@@ -80,7 +81,6 @@ export function weekModel({ week, now, entry, record }) {
   const [fromIso, weekIso, toIso] = [from, weekFrom, to].map(isoOf);
   const inWindow = (t) => Boolean(t) && t >= fromIso && t < toIso;
   const inWeek = (t) => Boolean(t) && t >= weekIso && t < toIso;
-  const reportDay = day(Math.min(now, to) - 1);
 
   // Gate attempts, each counted where its result was known; copies are no execution.
   const attempts = gateAttempts(record.lines).filter((a) => !a.copied && inWindow(a.available));
@@ -94,7 +94,7 @@ export function weekModel({ week, now, entry, record }) {
   const gates = new Map();
   const gateOf = (gate) =>
     gates.get(gate) ??
-    gates.set(gate, { gate, attempts: 0, minutes: 0, lanes: {}, mac: {}, superseded: { n: 0, minutes: 0 }, cancelled: { n: 0, minutes: 0 }, reds: {}, uncaused: [], week: { attempts: 0, minutes: 0 } }).get(gate);
+    gates.set(gate, { gate, attempts: 0, minutes: 0, lanes: {}, mac: {}, superseded: { n: 0, minutes: 0 }, cancelled: { n: 0, minutes: 0 }, reds: {}, pending: [], week: { attempts: 0, minutes: 0 } }).get(gate);
   const windowLanes = new Set();
   const weekLanes = new Set();
   for (const a of attempts) {
@@ -112,7 +112,7 @@ export function weekModel({ week, now, entry, record }) {
       g.week.attempts += 1;
       g.week.minutes += a.minutes;
     }
-    if (a.result === 'failed' && !caused.has(keyOf(a))) g.uncaused.push(a);
+    if (a.result === 'failed' && !caused.has(keyOf(a))) g.pending.push(a); // its cause not derived yet
   }
   for (const c of causes) {
     const g = gateOf(c.gate);
@@ -133,17 +133,20 @@ export function weekModel({ week, now, entry, record }) {
   const days = Array.from({ length: WEEKS * 7 }, (_, i) => day(from + i * DAY));
   const ended = days.filter((d) => d < today);
   const notCovered = ended.filter((d) => !record.covered(d));
-  const covered = { count: ended.length - notCovered.length, notCovered, notEnded: days.filter((d) => d >= today) };
+  const coveredCount = ended.length - notCovered.length;
+  const covered = { count: coveredCount, enough: coveredCount >= MIN_COVERED, notCovered, notEnded: days.filter((d) => d >= today) };
+  // Too little record is a fact of its own, shown whether or not a keep entry holds the gate.
+  for (const g of rows) g.thin = !covered.enough || g.attempts < MIN_ATTEMPTS;
 
   // Nominations and candidates.
   const known = record.known;
-  const keepOf = (gate) => known.find((e) => e.keep && e.gate === gate && inForce(e, reportDay)) ?? null;
+  const keepOf = (gate) => known.find((e) => e.keep && e.gate === gate && inForce(e, today)) ?? null;
   const [nominations, candidates, tooLittle, kept] = [[], [], [], []];
   for (const g of rows) {
     const keep = keepOf(g.gate);
     if (keep) kept.push({ ...g, keep });
-    else if (covered.count < MIN_COVERED || g.attempts < MIN_ATTEMPTS) tooLittle.push(g);
-    else if (g.uncaused.length || Object.keys(g.reds).some((c) => !READABLE.has(c))) continue;
+    else if (g.thin) tooLittle.push(g);
+    else if (g.pending.length || Object.keys(g.reds).some((c) => !READABLE.has(c))) continue;
     else if (Object.keys(g.reds).some((c) => c !== 'infra')) candidates.push(g);
     else nominations.push(g);
   }
@@ -177,20 +180,29 @@ export function weekModel({ week, now, entry, record }) {
   }
 
   const knownSplit = {
-    inForce: known.filter((e) => inForce(e, reportDay)).sort(byId),
-    expiring: known.filter((e) => inForce(e, reportDay) && e.review_by < day(Date.parse(`${reportDay}T00:00:00Z`) + 7 * DAY)).sort(byId),
-    expired: known.filter((e) => e.review_by < reportDay).sort(byId),
-    notYet: known.filter((e) => e.since > reportDay).sort(byId),
+    inForce: known.filter((e) => inForce(e, today)).sort(byId),
+    expiring: known.filter((e) => inForce(e, today) && e.review_by < day(now + 7 * DAY)).sort(byId),
+    expired: known.filter((e) => e.review_by < today).sort(byId),
+    notYet: known.filter((e) => e.since > today).sort(byId),
   };
 
-  const breaks = record.activity && record.activity !== 'refused' ? (record.activity.breaks ?? []).filter((b) => inWindow(b.at)) : [];
+  // Chain breaks are found by the derivation over its own input window (the 35 days before its pass, with a day's
+  // margin) from where the activity listing began: the part of these four weeks that was checked.
+  let landingRecord = record.activity === 'refused' ? { state: 'refused' } : !record.activity ? { state: 'never-listed' } : null;
+  if (!landingRecord) {
+    const derived = record.asOf ? Date.parse(record.asOf) : now;
+    const checkedFrom = [day(from), day(derived - WINDOW_DAYS * DAY), (record.activity.since ?? '').slice(0, 10)].sort().at(-1);
+    const checkedTo = [day(to - DAY), day(derived)].sort()[0];
+    const breaks = (record.activity.breaks ?? []).filter((b) => inWindow(b.at) && b.at.slice(0, 10) >= checkedFrom);
+    landingRecord = { state: 'listed', checked: checkedFrom <= checkedTo ? [checkedFrom, checkedTo] : null, breaks };
+  }
   return {
-    week, repo: entry.repo, hasCheck: Boolean(entry.verdict_job), from: day(from), weekFrom: day(weekFrom), to: day(to - DAY), inProgress: now < to, asOf: record.asOf, reportDay,
+    week, repo: entry.repo, hasCheck: Boolean(entry.verdict_job), from: day(from), weekFrom: day(weekFrom), to: day(to - DAY), inProgress: now < to, asOf: record.asOf, today,
     gates: rows, covered, nominations, candidates, tooLittle, kept, toRead, landings, known: knownSplit,
-    landingRecord: record.landings ? { breaks } : null,
+    landingRecord,
     quietLanes: [...windowLanes].filter((l) => !weekLanes.has(l)).sort(),
     comparesBase: (entry.compares_base ?? []).filter((g) => gates.has(g)),
-    uncaused: rows.reduce((n, g) => n + g.uncaused.length, 0),
+    pending: rows.reduce((n, g) => n + g.pending.length, 0),
   };
 }
 const newestFirst = (x, y) => (x.available < y.available ? 1 : x.available > y.available ? -1 : 0);
@@ -235,7 +247,8 @@ export function renderReport(m) {
   const out = [];
   const p = (...lines) => out.push(...lines);
   p(`# ${m.repo}: gate ledger, ${m.week} (${m.weekFrom} to ${m.to})`, '');
-  p(m.inProgress ? `The week is in progress; the record is as of ${m.asOf ?? 'an unknown time'}.` : `The record is as of ${m.asOf ?? 'an unknown time'}.`);
+  const record = m.asOf ? `the record is as of ${m.asOf}` : 'the record is from a pass still under way, its causes not all derived';
+  p(m.inProgress ? `The week is in progress; ${record}.` : `${record[0].toUpperCase()}${record.slice(1)}.`);
   p(
     `Per gate, nominations and candidates are over four weeks, ${m.from} to ${m.to}, each gate attempt counted in the week its result was known; the reds to read and the landings are this week's. ` +
       'Runner minutes are summed over jobs, a summary job adding none: they are never elapsed time. The Mac\'s minutes (the mini, under Actions and by hand) are shown apart. Superseded and cancelled minutes are counted in the lanes too.',
@@ -243,12 +256,12 @@ export function renderReport(m) {
   );
 
   p('## Per gate', '');
-  const extra = m.uncaused > 0;
-  p(`| Gate | Attempts | Minutes by lane | The Mac's minutes | Superseded | Cancelled | ${RED_CAUSES.join(' | ')}${extra ? ' | no cause line' : ''} | This week |`);
+  const extra = m.pending > 0;
+  p(`| Gate | Attempts | Minutes by lane | The Mac's minutes | Superseded | Cancelled | ${RED_CAUSES.join(' | ')}${extra ? ' | attribution pending' : ''} | This week |`);
   p(`|---|--:|---|---|--:|--:|${RED_CAUSES.map(() => '--:').join('|')}|${extra ? '--:|' : ''}---|`);
   for (const g of m.gates) {
     const reds = RED_CAUSES.map((c) => String(g.reds[c]?.length ?? 0)).join(' | ');
-    p(`| \`${g.gate}\` | ${g.attempts} | ${lanesText(g.lanes)} | ${lanesText(g.mac)} | ${costText(g.superseded)} | ${costText(g.cancelled)} | ${reds}${extra ? ` | ${g.uncaused.length}` : ''} | ${plural(g.week.attempts, 'attempt')}, ${fmtMinutes(g.week.minutes)} min |`);
+    p(`| \`${g.gate}\` | ${g.attempts} | ${lanesText(g.lanes)} | ${lanesText(g.mac)} | ${costText(g.superseded)} | ${costText(g.cancelled)} | ${reds}${extra ? ` | ${g.pending.length}` : ''} | ${plural(g.week.attempts, 'attempt')}, ${fmtMinutes(g.week.minutes)} min |`);
   }
   if (m.gates.length === 0) p('', 'No gate attempt in these four weeks.');
   p('');
@@ -265,11 +278,14 @@ export function renderReport(m) {
 
   p('## Nominations', '');
   p(`A gate is nominated only when its four weeks are covered (at least ${MIN_COVERED} of the 28 days covered, and at least ${MIN_ATTEMPTS} attempts), every red it had is \`infra\`, and no \`keep\` entry holds it. A person decides; nothing here removes a check.`, '');
+  if (!m.covered.enough) p(`These four weeks hold ${m.covered.count} covered days of the ${MIN_COVERED} a nomination needs: no gate can be nominated.`, '');
   if (m.nominations.length === 0) p('None.');
   for (const g of m.nominations) {
     const perWeek = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, v / WEEKS]));
     const lanes = { ...perWeek(g.lanes), ...perWeek(g.mac) };
-    p(`- \`${g.gate}\`: ${g.attempts} attempts, ${g.reds.infra?.length ?? 0} \`infra\` reds; ${fmtMinutes(g.minutes / WEEKS)} runner minutes a week (${lanesText(lanes)}), which removing or demoting it would free on those lanes; ${cancelledText(g.cancelled)}.`);
+    const infra = g.reds.infra?.length ?? 0;
+    const kind = infra ? `${infra} \`infra\` red${infra === 1 ? '' : 's'} in ${g.attempts} attempts, 0 other` : `0 reds in ${g.attempts} attempts`;
+    p(`- \`${g.gate}\`: ${kind}; ${fmtMinutes(g.minutes / WEEKS)} runner minutes a week (${lanesText(lanes)}), which removing or demoting it would free on those lanes; ${cancelledText(g.cancelled)}.`);
   }
   p('', '### Candidates to read', '');
   p('A covered gate whose reds are only `rerun-green` or `test-only-diff` (and `infra`). A rerun\'s pass does not rule out an intermittent product fault, and a test-only change may have weakened the test: nothing is proposed for these gates. A person who has read the reds below may.', '');
@@ -284,12 +300,12 @@ export function renderReport(m) {
   for (const g of m.tooLittle) p(`- \`${g.gate}\`: ${plural(g.attempts, 'attempt')}.`);
   if (m.kept.length) {
     p('', '### Kept', '');
-    for (const g of m.kept) p(`- \`${g.gate}\`: ${g.keep.id} (review by ${g.keep.review_by}): ${g.keep.reason}`);
+    for (const g of m.kept) p(`- \`${g.gate}\`: ${g.keep.id} (review by ${g.keep.review_by}): ${g.keep.reason}${g.thin ? ` Too little record: ${plural(g.attempts, 'attempt')}, ${m.covered.count} covered days.` : ''}`);
   }
   p('');
 
   p('## Landings', '');
-  if (!m.landings) p('This repository has no landing record (its activity listing is refused).', '');
+  if (!m.landings) p(m.landingRecord.state === 'refused' ? 'This repository has no landing record: its activity listing is refused.' : 'This repository has no landing record yet: its activity listing has not run.', '');
   else {
     const counts = (o) => Object.entries(o).sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1)).map(([k, v]) => `${k} ${v}`).join(', ') || 'none';
     const check = m.hasCheck ? `\`pr_check\` (what the required check saw): ${counts(m.landings.prCheck)}.` : 'The repository has no required check: no `pr_check`.';
@@ -313,7 +329,7 @@ export function renderReport(m) {
   else {
     for (const [title, list] of groups) {
       if (title === 'Not yet in force' && list.length === 0) continue;
-      p(`${title} on ${m.reportDay}:`, '', ...(list.length ? list.map(entry) : ['None.']), '');
+      p(`${title} on ${m.today}:`, '', ...(list.length ? list.map(entry) : ['None.']), '');
     }
   }
 
@@ -321,13 +337,17 @@ export function renderReport(m) {
   for (const c of [...RED_CAUSES, 'superseded']) p(`- ${CAUSE_TEXT[c]}`);
   p(`- Days not covered in the four weeks: ${m.covered.notCovered.length ? ranges(m.covered.notCovered) : 'none'}${m.covered.notEnded.length ? `; ${ranges(m.covered.notEnded)} not yet ended` : ''}.`);
   p(`- Lanes with lines in the four weeks and none this week: ${m.quietLanes.length ? m.quietLanes.join(', ') : 'none'}.`);
-  if (!m.landingRecord) p('- This repository has no landing record: its landings and the default branch\'s movement under rule 2 are unknown.');
+  const lr = m.landingRecord;
+  if (lr.state === 'refused') p('- This repository has no landing record (its activity listing is refused): its landings and the default branch\'s movement under rule 2 are unknown.');
+  else if (lr.state === 'never-listed') p('- This repository has no landing record yet (its activity listing has not run): its landings and the default branch\'s movement under rule 2 are unknown.');
+  else if (!lr.checked) p('- Landing record: chain breaks were not checked for these four weeks (the check reaches back 35 days from its pass).');
   else {
-    const n = m.landingRecord.breaks.length;
-    if (n === 0) p('- Landing record: no chain break in the four weeks.');
-    else p(`- Landing record: ${n} chain break${n === 1 ? '' : 's'} in the four weeks, a landing the activity listing lacks before each (before ${m.landingRecord.breaks.map((b) => time(b.at)).join(', ')}).`);
+    const n = lr.breaks.length;
+    const span = `${lr.checked[0]} to ${lr.checked[1]}, the part of these four weeks the derivation checked`;
+    if (n === 0) p(`- Landing record: no chain break from ${span}.`);
+    else p(`- Landing record: ${n} chain break${n === 1 ? '' : 's'} from ${span}, a landing the activity listing lacks before each (before ${lr.breaks.map((b) => time(b.at)).join(', ')}).`);
   }
-  if (m.uncaused) p(`- ${m.uncaused} failed attempts have no cause line: neither nominated nor candidates.`);
+  if (m.pending) p(`- ${m.pending} failed attempts await attribution (their causes not derived yet): their gates are neither nominated nor candidates until they are.`);
   if (m.comparesBase.length) p(`- Gates that compare with the default branch of the moment: ${m.comparesBase.map((g) => `\`${g}\``).join(', ')}. Two runs of one tree can differ, so their \`rerun-green\` says the base moved as often as it says anything about the test.`);
   return `${out.join('\n')}\n`;
 }
