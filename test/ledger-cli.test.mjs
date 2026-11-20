@@ -29,7 +29,7 @@ const KNOWN = "     known: maws-778 (review by 2026-11-26): #778: the banner ste
 test('the store is the sandbox\'s test-history branch unless CI_KIT_STORE names another', () => {
   assert.deepEqual(STORE, { repo: 'SSFSKIM/ci-kit-sandbox', branch: 'test-history' });
   assert.deepEqual(storeOf({}), STORE);
-  assert.deepEqual(storeOf({ CI_KIT_STORE: 'o/n@a6-copy' }), { repo: 'o/n', branch: 'a6-copy' });
+  assert.deepEqual(storeOf({ CI_KIT_STORE: 'o/n@ledger-a6-copy' }), { repo: 'o/n', branch: 'ledger-a6-copy' });
   assert.equal(storeOf({ CI_KIT_STORE: 'o/n' }), null);
   assert.equal(storeOf({ CI_KIT_STORE: 'nonsense@' }), null);
   // Set and empty is a mistake, not the live store.
@@ -167,6 +167,24 @@ test('a field of the record is printed as one line of printable text, and a base
   assert.deepEqual(base({ run: '44262593045' }), [BASE]);
 });
 
+test("a hand-run gate's standing names its run directory, in the base line and in status", () => {
+  const manual = { ...STATUS, known: [], gates: { 'e2e:panel': { result: 'failed', commit: '24952ff2f8a4c0ffee', at: '2026-11-19T05:53:33Z', run: '24952ff2f8a4-20261119T054617Z', attempt: 1 } } };
+  assert.deepEqual(contextLines(manual, 'e2e:panel', { now: NOW, branch: 'master' }), ['     base: e2e:panel last ran on master at 24952ff (2026-11-19T05:53Z) and failed, run 24952ff2f8a4-20261119T054617Z. The failures may differ: compare before rerunning.']);
+  assert.equal(statusReport({ status: manual, known: [], repo: 'SSFSKIM/MAWS', branch: 'master', now: NOW })[1], '  e2e:panel  failed  24952ff  2026-11-19T05:53Z  run 24952ff2f8a4-20261119T054617Z');
+  // Only that form: a directory name with anything else in it is no run.
+  for (const run of ['24952ff2f8a4-20261119T054617Z\nx', '24952ff2f8a4', 'x24952ff2f8a4-20261119T054617Z']) {
+    assert.deepEqual(contextLines({ ...manual, gates: { 'e2e:panel': { ...manual.gates['e2e:panel'], run } } }, 'e2e:panel', { now: NOW, branch: 'master' }), []);
+  }
+});
+
+test('a stored entry with an impossible date is skipped, without hiding the others or failing the list', () => {
+  const bad = { ...STATUS.known[0], id: 'bad', since: '2026-13-45' };
+  const status = { ...STATUS, gates: {}, known: [bad, STATUS.known[0]] };
+  assert.deepEqual(contextLines(status, 'test', { now: NOW, branch: 'main' }), [KNOWN]);
+  const listed = knownReport([bad, { ...bad, id: 'worse', review_by: '2026-02-30' }], '2026-11-20');
+  assert.deepEqual(listed.filter((l) => l.startsWith('  ') && !l.startsWith('    ')), ['  bad  test  dates unreadable, never in force  (by ux-wave, since 2026-13-45)', '  worse  test  dates unreadable, never in force  (by ux-wave, since 2026-13-45)']);
+});
+
 test('ci-gate status: the standing per gate with its age, then the known entries with their state', () => {
   const known = STATUS.known;
   assert.deepEqual(statusReport({ status: STATUS, known, repo: 'SSFSKIM/ci-kit', branch: 'main', now: NOW }), [
@@ -206,8 +224,8 @@ test('ci-gate known list: every entry, in force, keep, expired or not yet begun,
   assert.deepEqual(knownReport([], '2026-11-20'), ['Known entries: none.']);
 });
 
-const KNOWN_PATH = 'SSFSKIM/ci-kit-sandbox@a6-copy:SSFSKIM/ci-kit/known.json';
-const COPY = { repo: 'SSFSKIM/ci-kit-sandbox', branch: 'a6-copy' };
+const KNOWN_PATH = 'SSFSKIM/ci-kit-sandbox@ledger-a6-copy:SSFSKIM/ci-kit/known.json';
+const COPY = { repo: 'SSFSKIM/ci-kit-sandbox', branch: 'ledger-a6-copy' };
 
 test('known add writes the file on the store\'s branch, creating it when absent, as the store writes JSON', async () => {
   const s = fakeStore();
@@ -217,7 +235,7 @@ test('known add writes the file on the store\'s branch, creating it when absent,
   assert.equal(text, `${JSON.stringify([entry], null, 1)}\n`);
   assert.deepEqual(file.read && (await file.read()).entries, [entry]);
   const put = s.calls.find((c) => c[0] === 'PUT');
-  assert.deepEqual(put, ['PUT', 'SSFSKIM/ci-kit-sandbox', 'SSFSKIM/ci-kit/known.json', 'a6-copy']);
+  assert.deepEqual(put, ['PUT', 'SSFSKIM/ci-kit-sandbox', 'SSFSKIM/ci-kit/known.json', 'ledger-a6-copy']);
 });
 
 test('two adds whose reads raced both end in the file, through the contents API\'s refusal', async () => {
@@ -280,11 +298,23 @@ test('ci-gate known add with no reason or no review date is refused before the s
 test('ci-gate known add writes only to the private store\'s repository, and an empty CI_KIT_STORE is an error', async () => {
   const add = ['known', 'add', '--repo', 'SSFSKIM/ci-kit', '--gate', 'test', '--reason', 'r', '--review-by', '2026-11-27'];
   const elsewhere = await runWith(add, { env: { CI_KIT_STORE: 'SSFSKIM/ci-kit@main' } });
-  assert.deepEqual([elsewhere.code, elsewhere.out], [2, ['ERROR known add writes only to the private store, SSFSKIM/ci-kit-sandbox, not SSFSKIM/ci-kit']]);
+  assert.deepEqual([elsewhere.code, elsewhere.out], [2, ['ERROR known add writes only to the private store, SSFSKIM/ci-kit-sandbox, on test-history or a test copy named ledger-*, not SSFSKIM/ci-kit@main']]);
   assert.equal(elsewhere.calls.length, 0);
-  // Any branch of the store's repository will do: a test copy.
-  const copy = await runWith(add, { env: { CI_KIT_STORE: 'ssfskim/ci-kit-sandbox@a6-copy' } });
+  // The store's own repository, on its live branch or a test copy named ledger-*; its main or any other branch fails
+  // closed.
+  const copy = await runWith(add, { env: { CI_KIT_STORE: 'ssfskim/ci-kit-sandbox@ledger-a6-copy' } });
   assert.equal(copy.code, 0);
+  const live = await runWith(add, { env: { CI_KIT_STORE: 'SSFSKIM/ci-kit-sandbox@test-history' } });
+  assert.equal(live.code, 0);
+  assert.equal((await runWith(add)).code, 0); // unset: the live store
+  for (const branch of ['main', 'a6-copy', 'test-history-2', 'xledger-a']) {
+    const other = await runWith(add, { env: { CI_KIT_STORE: `SSFSKIM/ci-kit-sandbox@${branch}` } });
+    assert.deepEqual([other.code, other.out], [2, [`ERROR known add writes only to the private store, SSFSKIM/ci-kit-sandbox, on test-history or a test copy named ledger-*, not SSFSKIM/ci-kit-sandbox@${branch}`]]);
+    assert.equal(other.calls.length, 0);
+  }
+  // Reads keep any override.
+  const read = await runWith(['known', 'list', '--repo', 'SSFSKIM/ci-kit'], { env: { CI_KIT_STORE: 'SSFSKIM/ci-kit-sandbox@main' } });
+  assert.deepEqual([read.code, read.out], [0, ['Known entries: none.']]);
   for (const argv of [add, ['status', '--repo', 'SSFSKIM/ci-kit'], ['known', 'list', '--repo', 'SSFSKIM/ci-kit']]) {
     const empty = await runWith(argv, { env: { CI_KIT_STORE: '' } });
     assert.deepEqual([empty.code, empty.out], [2, ['ERROR CI_KIT_STORE is set and empty; it is OWNER/NAME@BRANCH, or unset for the live store']]);
@@ -293,13 +323,13 @@ test('ci-gate known add writes only to the private store\'s repository, and an e
 });
 
 test('ci-gate known add writes the entry and says so; list and status read it back', async () => {
-  const env = { CI_KIT_STORE: 'SSFSKIM/ci-kit-sandbox@a6-copy' };
+  const env = { CI_KIT_STORE: 'SSFSKIM/ci-kit-sandbox@ledger-a6-copy' };
   const added = await runWith(['known', 'add', '--repo', 'SSFSKIM/ci-kit', '--gate', 'test', '--reason', 'r', '--review-by', '2026-11-27'], { env });
   assert.equal(added.code, 0);
-  assert.deepEqual(added.out, ["added test-2026-11-20 to SSFSKIM/ci-kit's known entries (gate test, review by 2026-11-27) in SSFSKIM/ci-kit-sandbox@a6-copy"]);
+  assert.deepEqual(added.out, ["added test-2026-11-20 to SSFSKIM/ci-kit's known entries (gate test, review by 2026-11-27) in SSFSKIM/ci-kit-sandbox@ledger-a6-copy"]);
   const entry = JSON.parse(added.held.get(KNOWN_PATH).text)[0];
   assert.equal(entry.by, 'tester');
-  const files = { [KNOWN_PATH]: added.held.get(KNOWN_PATH).text, 'SSFSKIM/ci-kit-sandbox@a6-copy:SSFSKIM/ci-kit/status.json': JSON.stringify(STATUS) };
+  const files = { [KNOWN_PATH]: added.held.get(KNOWN_PATH).text, 'SSFSKIM/ci-kit-sandbox@ledger-a6-copy:SSFSKIM/ci-kit/status.json': JSON.stringify(STATUS) };
   const listed = await runWith(['known', 'list', '--repo', 'SSFSKIM/ci-kit'], { files, env });
   assert.deepEqual(listed.out, knownReport([entry], '2026-11-20'));
   const status = await runWith(['status', '--repo', 'SSFSKIM/ci-kit'], { files, env });

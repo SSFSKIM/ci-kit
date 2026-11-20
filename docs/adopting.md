@@ -458,8 +458,8 @@ FAIL test 2m10s log=/tmp/…
 recorded reason in force that names the gate (not the `keep` ones). They are context for the session's judgment,
 never a verdict: the other lines, the verdict, the exit code and the timing are unchanged, and with no status file, one
 that cannot be read or has not answered yet, or one 48 hours old or older, the output is exactly as without the ledger.
-The lookup has a client of its own (its answers never move `THROTTLE` or the `CI_GATE_DEBUG` log) and is skipped while
-the token's budget is below 500. Known entries reach `status.json` on the ledger's next daily pass.
+The lookup has a client of its own (its answers never move `THROTTLE` or the `CI_GATE_DEBUG` log) and runs only with
+at least 525 requests left in the token's budget, room for the failure's own calls and itself above `THROTTLE`'s 500. Known entries reach `status.json` on the ledger's next daily pass.
 
 ```
 ci-gate status [--repo OWNER/NAME]
@@ -475,8 +475,8 @@ every failure of the gate or the cases `--case` matches (`<file> › <title>`, t
 anything); with `--keep`, that the gate stays whatever it has caught, so the weekly report never nominates it. It
 writes through the contents API with the blob id it read and, when another writer got there first, reads again and
 reapplies its one entry. `CI_KIT_STORE=OWNER/NAME@BRANCH` points all three, and the context lines, at another copy of
-the store; `known add` writes only to `SSFSKIM/ci-kit-sandbox` (any branch), and a set but empty `CI_KIT_STORE` is an
-error. A value that starts with `-` is written `--reason=<value>`.
+the store; `known add` writes only to `SSFSKIM/ci-kit-sandbox`, on `test-history` or a test copy whose branch is named
+`ledger-*`, and a set but empty `CI_KIT_STORE` is an error. A value that starts with `-` is written `--reason=<value>`.
 
 **It is gentle with the shared token.** Every session on the account shares the gh login's 5,000 REST requests an
 hour, so `ci-gate` polls the run and its jobs with conditional requests (a `304 Not Modified` is not counted against

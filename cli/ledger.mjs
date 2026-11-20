@@ -12,6 +12,7 @@ import { createGitHub, ghToken, GitHubError } from '../lib/github.mjs';
 import { addKnown, inForce, isDay, KnownConflict, KnownError, validateKnown } from '../history/known.mjs';
 import { LEDGER_USAGE, parseKnownArgs, parseStatusArgs, UsageError } from './args.mjs';
 import { resolveRemote, TargetError } from './git.mjs';
+import { THROTTLE_BELOW } from './pace.mjs';
 
 export const STORE = { repo: 'SSFSKIM/ci-kit-sandbox', branch: 'test-history' };
 const STALE_MS = 48 * 3_600_000;
@@ -19,9 +20,18 @@ const STALE_MS = 48 * 3_600_000;
 const SKEW_MS = 5 * 60_000;
 const INDENT = '     '; // under the gate name of `FAIL <gate>`
 const HOUR = 3_600_000;
+// The lookup spends one call of the token every session shares, and the first failure's own path spends more before
+// the next poll reads the budget: the log (up to 6 tries), the artifacts listing, `gh run download` (a listing and a
+// download), then that poll (2). So it starts only with this much above the pacer's THROTTLE threshold: one failure
+// path, the lookup and the poll fit with room to spare, and the lookup is never the call that brings on a THROTTLE.
+export const CONTEXT_HEADROOM = 25;
+export const roomForContext = (remaining) => typeof remaining === 'number' && remaining >= THROTTLE_BELOW + CONTEXT_HEADROOM;
+// known add writes only here: the live branch, or a test copy whose name starts with the prefix.
+const WRITABLE = (branch) => branch === STORE.branch || branch.startsWith('ledger-');
 
 // CI_KIT_STORE=OWNER/NAME@BRANCH points every read at another copy of the store (a test branch; `known add` writes only
-// to the store's own repository); null when it is set and is not that, an empty value included.
+// to the store's repository, on test-history or a `ledger-*` branch); null when it is set and is not that, an empty
+// value included.
 export function storeOf(env = process.env) {
   const value = env.CI_KIT_STORE;
   if (value === undefined) return STORE;
@@ -59,7 +69,9 @@ const sentence = (s) => printable(s).replace(/\.+$/, '');
 const timeOf = (v) => (typeof v === 'string' && !Number.isNaN(Date.parse(v)) ? Date.parse(v) : null);
 const minute = (ms) => `${new Date(ms).toISOString().slice(0, 16)}Z`;
 const commitOf = (v) => (typeof v === 'string' && /^[0-9a-f]{7,40}$/i.test(v) ? v.slice(0, 7) : null);
-const runOf = (v) => ((Number.isSafeInteger(v) && v > 0) || (typeof v === 'string' && /^[1-9]\d{0,19}$/.test(v)) ? String(v) : null);
+// A run: an Actions run id, or a hand-run Mac gate's run directory (`<sha12>-<YYYYMMDD>T<HHMMSS>Z`, history/manual-gate.mjs).
+const MANUAL_RUN = /^[0-9a-f]{12}-\d{8}T\d{6}Z$/;
+const runOf = (v) => ((Number.isSafeInteger(v) && v > 0) || (typeof v === 'string' && (/^[1-9]\d{0,19}$/.test(v) || MANUAL_RUN.test(v))) ? String(v) : null);
 const dayOf = (ms) => new Date(ms).toISOString().slice(0, 10);
 
 // What the status's as_of says of the record: `none` (null: no pass has derived it), `invalid` (not a status, or a
@@ -238,9 +250,10 @@ export async function runLedger(argv, { gh = null, out, note, env = process.env,
     const store = storeOf(env);
     if (!store && env.CI_KIT_STORE === '') throw new LedgerError('CI_KIT_STORE is set and empty; it is OWNER/NAME@BRANCH, or unset for the live store');
     if (!store) throw new LedgerError(`CI_KIT_STORE is OWNER/NAME@BRANCH, not ${printable(env.CI_KIT_STORE)}`);
-    // A write goes only to the private store's repository (any branch: a test copy is one); reads may go anywhere.
-    if (opts.action === 'add' && store.repo.toLowerCase() !== STORE.repo.toLowerCase()) {
-      throw new LedgerError(`known add writes only to the private store, ${STORE.repo}, not ${store.repo}`);
+    // A write goes only to the private store's repository, on its live branch or a `ledger-*` test copy; reads may go
+    // anywhere.
+    if (opts.action === 'add' && (store.repo.toLowerCase() !== STORE.repo.toLowerCase() || !WRITABLE(store.branch))) {
+      throw new LedgerError(`known add writes only to the private store, ${STORE.repo}, on ${STORE.branch} or a test copy named ledger-*, not ${store.repo}@${printable(store.branch)}`);
     }
     const repo = opts.repo ?? resolveRemote('.', null).repo;
     let list;

@@ -390,3 +390,52 @@ test("the context's own client: a low budget in its answer prints no THROTTLE, a
   const low = await watchWith(contextReader({ gh: { contents: async () => (calls += 1, b64(FRESH)) }, repo: 'SSFSKIM/ci-kit', store: STORE, now: () => T0, lowBudget: () => true }));
   assert.deepEqual([low.lines, low.r, low.sleeps, calls], [plain.lines, plain.r, plain.sleeps, 0]);
 });
+
+// The token's quota is shared: the lookup's client and the watch's draw on one count. One poll, the first failure's own
+// path (its log's tries, the artifacts, the download: 11 calls here), then the poll the pacer gates.
+import { CONTEXT_HEADROOM, roomForContext } from '../cli/ledger.mjs';
+import { THROTTLE_BELOW } from '../cli/pace.mjs';
+
+async function sharedQuota(atFailure, withContext) {
+  const quota = { remaining: atFailure + 2, lookups: 0 }; // the first poll spends 2
+  const snapshots = redRun();
+  let i = 0;
+  const lines = [];
+  const sleeps = [];
+  let clock = T0;
+  const spend = (n) => { quota.remaining -= n; };
+  const gh = {
+    stats: () => ({ remaining: quota.remaining }),
+    getRun: async () => (spend(1), snapshots[Math.min(i, snapshots.length - 1)].run),
+    listJobs: async () => (spend(1), snapshots[Math.min(i++, snapshots.length - 1)].jobs),
+  };
+  const context = withContext
+    ? contextReader({ gh: { contents: async () => (spend(1), quota.lookups += 1, b64(FRESH)) }, repo: 'SSFSKIM/ci-kit', store: STORE, now: () => T0, lowBudget: () => !roomForContext(gh.stats().remaining) })
+    : null;
+  const r = await watchRun({
+    gh, repo: 'SSFSKIM/ci-kit', runId: 7, runUrl: URL, emit: (l) => lines.push(l),
+    onFail: async (j, gate) => { spend(11); await new Promise((res) => setImmediate(res)); return `/tmp/ci-gate/SSFSKIM-ci-kit/7/${gate}.log`; },
+    planError: async () => 'x', now: () => clock, sleep: async (ms) => { sleeps.push(ms); clock += ms; }, context,
+  });
+  return { lines, r, sleeps, lookups: quota.lookups };
+}
+
+test('the lookup starts only with headroom above the THROTTLE threshold, so it never brings one on', async () => {
+  assert.equal(CONTEXT_HEADROOM, 25);
+  const edge = THROTTLE_BELOW + CONTEXT_HEADROOM;
+  // At the edge: the lookup runs, its lines print, and the watch never throttles.
+  const at = await sharedQuota(edge, true);
+  assert.equal(at.lookups, 1);
+  assert.equal(at.lines.some((l) => l.startsWith('THROTTLE')), false);
+  assert.deepEqual(at.lines.filter((l) => !l.startsWith('     ')), (await sharedQuota(edge, false)).lines);
+  // One below it, and at the reviewer's case (a lookup there would leave the next poll one under 500): no lookup, and
+  // the output, verdict and poll schedule are the run's without a context.
+  for (const remaining of [edge - 1, THROTTLE_BELOW + 11]) {
+    const without = await sharedQuota(remaining, false);
+    const w = await sharedQuota(remaining, true);
+    assert.equal(w.lookups, 0, `at ${remaining}`);
+    assert.deepEqual([w.lines, w.r, w.sleeps], [without.lines, without.r, without.sleeps], `at ${remaining}`);
+  }
+  // A budget no response has reported yet is no headroom.
+  assert.equal(roomForContext(null), false);
+});

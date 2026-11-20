@@ -47,7 +47,11 @@ export class KnownError extends Error {}
 export class KnownConflict extends Error {}
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
-export const isDay = (s) => typeof s === 'string' && DAY_RE.test(s) && new Date(`${s}T00:00:00Z`).toISOString().startsWith(s);
+export const isDay = (s) => {
+  if (typeof s !== 'string' || !DAY_RE.test(s)) return false;
+  const d = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().startsWith(s); // 2026-13-45 is no date; 2026-02-30 rolls over
+};
 const given = (s) => typeof s === 'string' && s.trim() !== '';
 
 // An id or a gate is one word of printable text: it is printed inside a line of ci-gate's output.

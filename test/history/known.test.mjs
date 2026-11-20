@@ -57,7 +57,7 @@ test("the context names each entry in force without keep that names the gate, wi
 
 // Writing (M5): `ci-gate known add` validates an entry before anything is read, names it, and appends it to the file
 // it read; a write refused because the file changed since is read again and the one entry reapplied.
-import { addKnown, KnownConflict, KnownError, knownEntry, validateKnown } from '../../history/known.mjs';
+import { addKnown, isDay, KnownConflict, KnownError, knownEntry, validateKnown } from '../../history/known.mjs';
 
 const TODAY = '2026-11-20';
 
@@ -70,6 +70,11 @@ test('an entry with no reason, no review date, a date that is not one, or one al
   assert.throws(() => validateKnown({ ...ok, review_by: undefined }, TODAY), KnownError);
   assert.throws(() => validateKnown({ ...ok, review_by: '2026-11-31' }, TODAY), KnownError);
   assert.throws(() => validateKnown({ ...ok, review_by: '27.11.2026' }, TODAY), KnownError);
+  // A date no calendar has is refused, never a RangeError.
+  assert.throws(() => validateKnown({ ...ok, review_by: '2026-13-45' }, TODAY), KnownError);
+  assert.equal(isDay('2026-13-45'), false);
+  assert.equal(isDay('2026-02-30'), false);
+  assert.equal(isDay('2026-02-28'), true);
   assert.throws(() => validateKnown({ ...ok, review_by: '2026-11-19' }, TODAY), KnownError);
   assert.throws(() => validateKnown({ ...ok, gate: undefined }, TODAY), KnownError);
   // An id or a gate is printed inside a line: one word of printable text.

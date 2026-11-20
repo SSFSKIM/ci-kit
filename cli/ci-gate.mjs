@@ -11,8 +11,8 @@ import { parseArgs, UsageError, USAGE } from './args.mjs';
 import { assertCaller, deleteRef, nonceCommit, pushRef, resolveRemote, resolveTarget, TargetError } from './git.mjs';
 import { cleanLog, nonceMessage, pushFailure, refName, sanitizeLabel } from './naming.mjs';
 import { findRun } from './discover.mjs';
-import { contextReader, runLedger, storeOf } from './ledger.mjs';
-import { BudgetExhausted, createPacer, isLow } from './pace.mjs';
+import { contextReader, roomForContext, runLedger, storeOf } from './ledger.mjs';
+import { BudgetExhausted, createPacer } from './pace.mjs';
 import { watchRun } from './watch.mjs';
 
 const CALLER = '.github/workflows/ci.yml';
@@ -180,10 +180,10 @@ function failure(e) {
 }
 
 // The gate ledger's context lines (cli/ledger.mjs): a client of their own, so the lookup's answers never reach the
-// watch's pacer, its counts or the debug log, and no lookup while the shared budget is low.
+// watch's pacer, its counts or the debug log, and no lookup without headroom in the shared budget (CONTEXT_HEADROOM).
 const contextStop = new AbortController();
 const ledgerContext = (token, gh, repo) =>
-  contextReader({ gh: createGitHub(token, { signal: contextStop.signal }), repo, store: storeOf(), now: Date.now, lowBudget: () => isLow(gh.stats().remaining) });
+  contextReader({ gh: createGitHub(token, { signal: contextStop.signal }), repo, store: storeOf(), now: Date.now, lowBudget: () => !roomForContext(gh.stats().remaining) });
 
 // onRun(id): the run was found; onUnseen(): the budget hides it from discovery, so a run may exist all the same;
 // context: the ledger's lines after a FAIL.
