@@ -265,3 +265,16 @@ test("a step the repository's setup_steps name now is setup on lines written bef
   assert.deepEqual([causeOf(causes, 1).cause, causeOf(causes, 1).evidence.jobs[0].phase], ['infra', 'setup']);
   assert.deepEqual([causeOf(causes, 3).cause, causeOf(causes, 3).why], ['unattributed', 'setup-uncorroborated']);
 });
+
+test("a job that reached its time limit ended on its own: never superseded, never counted cancelled", () => {
+  const timedOut = { conclusion: 'cancelled', run_conclusion: 'cancelled', failed_step: 'Run pnpm test', phase: 'test', annotations: ['time-limit'] };
+  const lines = [
+    line({ run: 1, at: 0, ref: 'topic', change: 'branch:topic', ...timedOut }),
+    line({ run: 2, at: 4, ref: 'topic', change: 'branch:topic', tree: 'T2' }),
+    line({ run: 3, at: 40, tree: 'T3', change: 'maws-ci-gate:z', conclusion: 'cancelled', run_conclusion: 'cancelled', failed_step: 'Run pnpm test', phase: 'test', log_kinds: ['time-limit'] }),
+  ];
+  // Run 2 was created while run 1 ran: run 1's cancellation would read as superseded but for its time limit.
+  const causes = derive(lines, { created: { 1: iso(0), 2: iso(3), 3: iso(40) }, paths: () => ['src/a.ts'] });
+  assert.deepEqual([causeOf(causes, 1).cause, causeOf(causes, 1).cancelled], ['product-diff', false]);
+  assert.deepEqual([causeOf(causes, 3).cause, causeOf(causes, 3).cancelled], ['unattributed', false]);
+});

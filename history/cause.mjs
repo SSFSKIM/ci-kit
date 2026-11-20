@@ -2,8 +2,9 @@
 // lines of a window, with the mirror's path differences, the landings and the default branch's standing given by the
 // caller. A cause is named for what the record shows, never for a conclusion: where it shows nothing the answer is
 // `unattributed`, with the reason.
-//   - `superseded`: the cancelled jobs of a run that was itself cancelled while a later run existed for its ref or its
-//     change (MAWS's ci-gate makes a ref per commit; a later gate of the same change is its newer push). Not a red.
+//   - `superseded`: the cancelled jobs (none at its time limit) of a run that was itself cancelled while a later run
+//     existed for its ref or its change (MAWS's ci-gate makes a ref per commit; a later gate of the same change is its
+//     newer push). Not a red.
 //   - Every other failed attempt: each unsuccessful job read as lost or failed, then the first rule that holds:
 //     infra, rerun-green, test-only-diff, product-diff, unattributed.
 // A copied attempt (every job carried over by a rerun) is no execution: it has no cause and is never a later green.
@@ -53,7 +54,7 @@ export function analyze(lines, { created = {} } = {}) {
   for (const a of attempts) {
     a.superseded_by = null;
     if (a.result !== 'failed' || a.copied || a.run_conclusion !== 'cancelled' || typeof a.run !== 'number') continue;
-    if (!unsuccessful(a).every((l) => l.conclusion === 'cancelled')) continue;
+    if (!unsuccessful(a).every(cancelledFromOutside)) continue;
     const mine = runs.get(a.run);
     const later = [`ref:${a.ref}`, a.change ? `change:${a.change}` : null]
       .filter(Boolean)
@@ -64,6 +65,10 @@ export function analyze(lines, { created = {} } = {}) {
   }
   return { attempts, runs };
 }
+
+// A job cancelled from outside it (its run cancelled, by a newer run or by hand), apart from one that reached its time
+// limit: GitHub concludes that `cancelled` too, but it ended on its own, which a deadlock in the product does.
+const cancelledFromOutside = (l) => l.conclusion === 'cancelled' && !l.annotations.includes('time-limit') && !l.log_kinds.includes('time-limit');
 
 // The unsuccessful jobs that speak for an attempt: a summary job that failed beside a failed part is the part's.
 function unsuccessful(a) {
@@ -89,7 +94,7 @@ function sameTree(a, b, landings) {
 // cancelled, not lost. A time limit is an outcome, not a cause: a deadlock in the product reaches it too.
 function readJob(l, a, attempts, entry, landings) {
   const phase = phaseOfLine(l, entry);
-  const out = { job_id: l.job_id, job: l.job, conclusion: l.conclusion, phase, lost: null };
+  const out = { job_id: l.job_id, job: l.job, conclusion: l.conclusion, phase, lost: null, cancelled: cancelledFromOutside(l) };
   if (l.annotations.includes('runner-lost')) out.lost = 'annotation:runner-lost';
   else if (l.annotations.includes('not-started')) out.lost = 'annotation:not-started';
   else if (l.log_kinds.includes('not-started')) out.lost = 'log:not-started';
@@ -139,7 +144,7 @@ export function deriveCauses({ analysis, entry, landings, standing, known, cases
     }
     const followers = after(a);
     const jobs = unsuccessful(a).map((l) => readJob(l, a, followers, entry, landings));
-    const cancelled = jobs.every((j) => j.conclusion === 'cancelled');
+    const cancelled = jobs.every((j) => j.cancelled);
     const evidence = { jobs };
     let cause = null;
     let why = null;

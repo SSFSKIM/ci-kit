@@ -117,3 +117,19 @@ test("a listing stopped by the pass's budget is no error; another failure is, na
   const broken = await deriveRepo({ gh: ghWith(() => new Response('{"message":"secret body"}', { status: 500 })), repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger: w.ledger(), mirror: w.mirror, now: w.now });
   assert.deepEqual(broken.errors, ['activity: HTTP 500 GET /repos/o/r/activity']);
 });
+
+test("two pull request runs of one head are one tree only on a whole landing record: a listing cut short says nothing of the base", async (t) => {
+  const w = setup(t);
+  const ledger = w.ledger();
+  const pr = (run, attempt, at, o2) => line({ run, attempt, event: 'pull_request', basis: 'pr-merge', head: 'hpr', head_tree: 'x', tree: null, tree_key: null, ref: 'topic', change: 'branch:topic', started: iso(at), completed: iso(at + 60_000), ...o2 });
+  const at = w.now - 3 * DAY;
+  ledger.addJobLines([pr(50, 1, at, failed), pr(50, 2, at + 3600_000, {})]);
+  ledger.state.runs[50] = { day: iso(at).slice(0, 10), attempts: 2, closed: [1, 2], created: iso(at) };
+  ledger.flush();
+  const causeOf50 = () => Object.values(read(w.root, 'causes')).flat().find((c) => c.run === 50);
+  const spent = createGitHub('t', { fetchImpl: async () => page([])(), admit: () => false });
+  await deriveRepo({ gh: spent, repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger: w.ledger(), mirror: w.mirror, now: w.now });
+  assert.deepEqual([causeOf50().cause, causeOf50().why], ['unattributed', 'basis']);
+  await deriveRepo({ gh: ghWith(page(w.activity)), repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger: w.ledger(), mirror: w.mirror, now: w.now });
+  assert.equal(causeOf50().cause, 'rerun-green');
+});

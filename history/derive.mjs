@@ -113,6 +113,7 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
   const held = [...heldLandings.values()].flat();
   const events = new Map(held.map((l) => [l.id, { id: l.id, type: l.type, before: l.before, after: l.after, at: l.at }]));
   let landingsKnown = state.activity !== 'refused';
+  let listed = false; // the listing reached back to `since`: the record of the default branch's moves is whole
   if (landingsKnown) {
     const newest = held.map((l) => l.at).sort().at(-1);
     const since = asked || !newest ? `${recomputeFrom}T00:00:00Z` : newest;
@@ -121,6 +122,7 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
         counts.listed += 1;
         if (!events.has(e.id)) events.set(e.id, e);
       }
+      listed = true;
     } catch (err) {
       if (err instanceof BudgetSpent) paced = true; // the next pass lists
       else if ([403, 404].includes(err.status) && !isRateLimited(err)) {
@@ -154,8 +156,9 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
   const observations = observationsOf({ analysis, landings, entry });
   const headOfTree = new Map(analysis.attempts.filter((a) => a.basis === 'exact' && a.tree).map((a) => [a.tree, a.head]));
   const wanted = new Set();
+  // Whether the base moved between two pull request runs is read only from a whole record.
   const inputs = {
-    analysis, entry, landings, standing: observations.standing, known: readKnown(root, alias), casesOf: failedCases(dir, windowStart),
+    analysis, entry, landings: listed ? landings : null, standing: observations.standing, known: readKnown(root, alias), casesOf: failedCases(dir, windowStart),
     prOf: pullsByBranch(lines, pulls), from: windowStart,
   };
   deriveCauses({ ...inputs, paths: (a, b) => (wanted.add(a).add(b), null) });
