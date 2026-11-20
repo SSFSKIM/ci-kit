@@ -357,3 +357,11 @@ test('a gate attempt with summary parts: the parts carry the minutes and lanes, 
   assert.equal(a.tree_key, 't1');
   assert.equal(a.basis, 'exact');
 });
+
+test('a job with no conclusion (one the hand-run gate never ran, or that ran no tests) leaves its attempt incomplete, never green', () => {
+  const [unrun] = gateAttempts([lineOf({ conclusion: null, minutes: 0 })]);
+  assert.equal(unrun.result, 'incomplete');
+  // beside a job that succeeded it is still incomplete; beside one that failed the attempt failed
+  assert.equal(gateAttempts([lineOf({ conclusion: 'success' }), lineOf({ conclusion: null })])[0].result, 'incomplete');
+  assert.equal(gateAttempts([lineOf({ conclusion: 'failure' }), lineOf({ conclusion: null })])[0].result, 'failed');
+});

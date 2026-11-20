@@ -97,6 +97,8 @@ export function trailersOf(message) {
 }
 
 const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 16);
+// A scope key: the scope, the job's variant and what else decides what ran or where (`semantic`), hashed.
+export const scopeKey = (scope, variant, semantic) => hash({ scope, variant, semantic });
 
 // What a gate attempt exercised. `unknown` on an event whose inputs the record does not hold and which can change
 // what runs or where (MAWS's dispatch: runner, lane, live); `narrowed` on an event the repository lists as vacuous for
@@ -110,7 +112,7 @@ export function scopeOf(run, gate, variant, entry) {
   else if ((entry.vacuous[gate] ?? []).includes(run.event)) scope = 'narrowed';
   else if ((trailers.Selection ?? []).includes('affected')) scope = 'selected';
   const semantic = Object.fromEntries(entry.semantic_trailers.filter((t) => t in trailers).sort().map((t) => [t, trailers[t]]));
-  return { scope, scope_key: hash({ scope, variant, semantic }) };
+  return { scope, scope_key: scopeKey(scope, variant, semantic) };
 }
 
 // Two gate attempts that exercised the same thing in the same place.
@@ -233,8 +235,8 @@ export function jobLine(facts, job, { copied_from = null, annotations = [], log_
 const SHARED = ['run', 'attempt', 'gate', 'workflow', 'event', 'ref', 'producer', 'label', 'change', 'gates', 'scope', 'scope_key', 'basis', 'head', 'tested', 'tree', 'tree_key', 'head_tree', 'run_conclusion'];
 
 // Job lines → gate attempts: a gate's jobs of one (run, attempt) and scope key. It failed when any job did not succeed
-// (a summary job too); it succeeded only when every job succeeded, its jobs announce one shard count n (or none) and,
-// for n, every shard 1..n is there; otherwise it is incomplete. Copies count toward the result, not the minutes;
+// (a summary job too), a job with no conclusion aside; it succeeded only when every job succeeded, its jobs announce
+// one shard count n (or none) and, for n, every shard 1..n is there; otherwise it is incomplete. Copies count toward the result, not the minutes;
 // `copies` names the attempts they ran in, and `copied` says every job was a copy: no new execution, never an attempt
 // or a later green of its own. `available`: when the result was known (its latest fresh job's completion), apart from
 // the jobs' physical `started` and `completed`. A summary job adds no minutes or lane. Control jobs are not gates.
@@ -252,8 +254,10 @@ export function gateAttempts(lines) {
     const [n] = forms;
     const ks = new Set(jobs.filter((j) => j.shard).map((j) => j.shard[0]));
     const whole = forms.size === 1 && (n === null || Array.from({ length: n }, (_, i) => i + 1).every((k) => ks.has(k)));
-    const failed = jobs.some((j) => j.conclusion !== 'success');
-    const result = failed ? 'failed' : whole ? 'succeeded' : 'incomplete';
+    // A job with no conclusion (a hand-run gate's job that never ran, or ran no tests) neither fails nor completes it.
+    const failed = jobs.some((j) => j.conclusion !== null && j.conclusion !== 'success');
+    const ran = jobs.every((j) => j.conclusion !== null);
+    const result = failed ? 'failed' : whole && ran ? 'succeeded' : 'incomplete';
     const at = Object.fromEntries(SHARED.filter((k) => first[k] !== undefined).map((k) => [k, first[k]]));
     const times = (list, key) => list.map((j) => j[key]).filter(Boolean).sort();
     const fresh = jobs.filter((j) => !j.copy);

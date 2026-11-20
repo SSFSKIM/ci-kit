@@ -5,7 +5,8 @@
 // For each repo in history/repos.json (or the one named), one batch of two passes:
 //   - the gate ledger's (history/ledger.mjs): every gate job's line, by its attempt's job listing, fetched once;
 //   - for a repo with a reporting set (`jobs`), the per-test pass: every gate job's JUnit report into the store
-//     directory: one run line per (run, attempt, job), the day's base and durations. A job a matrix shards, `<job> <k>/<n>`
+//     directory: one run line per (run, attempt, job), kept small (counts, hashes and failed cases: record.mjs), the
+//     day's base and durations, from the last 35 days' lines. A job a matrix shards, `<job> <k>/<n>`
 //     uploading `test-results-<slug>-<k>of<n>-<attempt>`, makes one line of `<job>` from all n shards of the attempt.
 //     It is idempotent by (run, attempt, job), and takes its jobs from the ledger's fetch.
 // Authentication is per repo (`token`): the ci-kit GitHub App's when CI_KIT_APP_ID and CI_KIT_APP_KEY are set, the
@@ -24,9 +25,9 @@ import { parseJUnit } from './junit.mjs';
 import { previousRun, resolveTested, startedBefore } from './provenance.mjs';
 import { buildBase, buildDurations, buildRunLine, jobSlug, lineArtifacts, lineKey, reportWithinJob, summarize } from './record.mjs';
 import { describeError } from './errors.mjs';
-import { collectLedger, createPacer, formatLedger, LIMITS, retried } from './ledger.mjs';
+import { collectLedger, createPacer, formatLedger, LIMITS, retried, WINDOW_DAYS } from './ledger.mjs';
 import { openMirror } from './mirror.mjs';
-import { dayOf, openLedger, openStore } from './store.mjs';
+import { dayOf, openLedger, openStore, rewriteRecord } from './store.mjs';
 
 const DAY = 86_400_000;
 const ARTIFACT = /^test-results-(.+)-(\d+)$/;
@@ -139,7 +140,7 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
     limited ||= isRateLimited(err);
     errors.push(`${what}: ${describe(err)}`);
   };
-  const store = openStore(root, alias);
+  const store = openStore(root, alias, { now });
   const bySlug = new Map(jobs.map((j) => [jobSlug(j), j]));
   const reporting = new Set(jobs);
 
@@ -359,18 +360,15 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
     if (!read.every((r) => reportWithinJob(r.reports, r.job))) return buildRunLine(prov, artifact, 'rejected');
     const summary = summarize(read.flatMap((r) => r.reports));
     const day = dayOf(job.completed_at);
-    let base = store.base(day, name);
-    if (!base && prov.selection === null) {
-      base = own(buildBase(prov, summary));
-      store.setBase(day, name, base);
-    }
+    // The day's base: the record against whose hashes its lines say a case passed (record.mjs caseOutcome).
+    if (!store.base(day, name) && prov.selection === null) store.setBase(day, name, own(buildBase(prov, summary)));
     // Selected reports are not whole-suite snapshots, even when a fallback happened to run every test.
     if (job.conclusion === 'success' && prov.selection === null) {
       const held = store.durations(day, name);
       const later = !held || held.completed < prov.completed || (held.completed === prov.completed && (held.run < prov.run || (held.run === prov.run && held.attempt < prov.attempt)));
       if (later) store.setDurations(day, name, own(buildDurations(prov, summary)));
     }
-    return buildRunLine(prov, artifact, 'present', summary, base);
+    return buildRunLine(prov, artifact, 'present', summary);
   }
 
   // 5. Each new present line's previous run, from every line known: the store's and this pass's.
@@ -463,6 +461,9 @@ export function markSwept(state, offered) {
 export const formatCounts = (repo, c, errors) =>
   `${repo}: artifacts ${c.artifacts}, lines ${c.lines} (present ${c.present}, missing ${c.missing}, unparseable ${c.unparseable}, rejected ${c.rejected}), relinked ${c.relinked}, failures ${c.failures}, errors ${errors}, files written ${c.written}`;
 
+// The one-time rewrite's line (store.mjs rewriteRecord), counts only.
+export const formatRewrite = (repo, r) => `${repo}: the record rewritten small: ${r.rewritten} of ${r.lines} lines over ${r.days} days, ${r.unverified} without a hash`;
+
 // A repository's token: the ci-kit App's, scoped to it and read-only, when CI_KIT_APP_ID and CI_KIT_APP_KEY are set;
 // for a public repository the App is not installed on (`token: "actions"` in history/repos.json), the run's own
 // GITHUB_TOKEN, which reads public data and grants nothing; else gh's.
@@ -554,6 +555,7 @@ async function collectBoth({ entry, opts, pacer, now, ledger: opened, deps }) {
   }
   let more = result.more;
   let held = null;
+  let perTestClean = !entry.jobs;
   if (entry.jobs) {
     // The per-test pass starts with room for a few calls; held by the hour instead, it is work for a later batch.
     held = pacer.reason(kind, 10);
@@ -562,11 +564,15 @@ async function collectBoth({ entry, opts, pacer, now, ledger: opened, deps }) {
       const perTestStarted = Date.now();
       const offered = ledger ? recentRuns(ledger.state, now) : null;
       try {
+        // The run lines of the old shape are rewritten small once, before a per-test pass reads any.
+        const rewritten = rewriteRecord(opts.store, alias, now);
+        if (rewritten?.days) console.log(formatRewrite(repo, rewritten));
         const perTest = await collectRepo({ gh, repo, alias, jobs: entry.jobs, root: opts.store, now, limit: opts.limit, jobsOf, recentRuns: offered });
         errors.push(...perTest.errors);
         console.log(formatCounts(repo, perTest.counts, perTest.errors.length));
         more ||= perTest.more;
-        if (offered && perTest.errors.length === 0 && !perTest.more) markSwept(ledger.state, offered);
+        perTestClean = perTest.errors.length === 0 && !perTest.more;
+        if (offered && perTestClean) markSwept(ledger.state, offered);
       } catch (err) {
         if (err instanceof BudgetSpent) more = true; // stopped by the budget before its first line: a later batch's
         else errors.push(`per-test: ${describe(err)}`);
@@ -579,11 +585,28 @@ async function collectBoth({ entry, opts, pacer, now, ledger: opened, deps }) {
     pacer.settle(ledger.state);
     ledger.flush();
   }
-  // A pass whose calls are spent, or whose token GitHub refused, ends; one held by the hour waits.
+  // A pass whose calls are spent, or whose token GitHub refused, ends; one held by the hour waits. The repository's
+  // work is taken when its ledger's pass has nothing queued or pending and its per-test pass ended clean.
   const why = held === 'hour' ? 'hour' : pacer.reason(kind, 2);
-  if (why === 'pass' || why === 'rate-limited') return { errors, more: false, wait: null };
-  return { errors, more, wait: more && why === 'hour' ? pacer.waitSeconds(kind) : null };
+  const taken = ledger !== null && ledger.state.pass.queue.length === 0 && ledger.state.pass.pending.length === 0 && perTestClean && why !== 'rate-limited';
+  const covered = ledger && lastCovered(ledger, now);
+  if (why === 'pass' || why === 'rate-limited') return { errors, more: false, wait: null, taken, covered };
+  return { errors, more, wait: more && why === 'hour' ? pacer.waitSeconds(kind) : null, taken, covered };
 }
+
+// The latest day of the ledger's window that is covered (store.mjs covered), or null.
+const lastCovered = (ledger, now) => {
+  for (let t = now - DAY, i = 1; i < WINDOW_DAYS; t -= DAY, i += 1) {
+    const day = dayOf(new Date(t).toISOString());
+    if (ledger.covered(day)) return day;
+  }
+  return null;
+};
+
+// The collector's marker at the store's root (gate ledger spec, M2), which the sandbox's store guard reads: when a
+// pass last ended with every repository's work taken, and each repository's last covered day. Only a batch over every
+// repository writes it.
+export const writeMarker = (root, at, results) => writeFileSync(join(root, 'collected.json'), `${JSON.stringify({ v: 1, at, repos: Object.fromEntries(results.map(([alias, r]) => [alias, { covered: r.covered }])) })}\n`);
 
 // One batch over the chosen repositories, printing count lines, errors (naming runs, jobs and statuses only) and the
 // lines the workflow reads. → the exit code.
@@ -609,6 +632,7 @@ export async function collectBatch({ chosen, opts, now = Date.now(), deps = DEPS
   // The workflow reads these: `more` to run another batch, `wait` to sleep before it (every repository with work
   // left is held by an hour's limit), the peak resident memory (maxRSS is in KiB) to watch it.
   console.log(`history: peak rss ${Math.round(process.resourceUsage().maxRSS / 1024)} MB`);
+  if (!opts.repo && results.every((r) => r.taken)) writeMarker(opts.store, new Date(now + (Date.now() - started)).toISOString(), chosen.map((e, i) => [e.alias, results[i]]));
   const waiting = results.filter((r) => r.more);
   if (waiting.length > 0) {
     if (waiting.every((r) => r.wait !== null)) console.log(`history: wait ${Math.min(...waiting.map((r) => r.wait))}`);

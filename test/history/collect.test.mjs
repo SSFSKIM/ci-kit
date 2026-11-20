@@ -13,7 +13,7 @@ import { createGitHub } from '../../lib/github.mjs';
 import * as collector from '../../history/collect.mjs';
 import { ArchiveDefect, collectRepo, formatCounts, readArtifact } from '../../history/collect.mjs';
 import { parseJUnit } from '../../history/junit.mjs';
-import { membershipOf, skippedOf, summarize } from '../../history/record.mjs';
+import { caseOutcome, hashIds, summarize } from '../../history/record.mjs';
 import { fakeGitHub, vitestReport, zipOf } from './helpers.mjs';
 
 const REPO = 'o/r';
@@ -114,6 +114,10 @@ function scenario() {
   return { repo, reports };
 }
 
+// A present line holds its report's counts, the hashes of its ids and skipped ids, and its failed cases.
+const holdsCases = (line, summary) => assert.deepEqual([line.membership, line.skipped, line.failed], [
+  { count: summary.ids.length, hash: hashIds(summary.ids) }, { count: summary.skipped.length, hash: hashIds(summary.skipped) }, summary.failed,
+], `${line.run}/${line.attempt}/${line.job}`);
 const NOTHING = { artifacts: 0, lines: 0, present: 0, missing: 0, unparseable: 0, rejected: 0, relinked: 0, failures: 0, written: 0 };
 const readDir = (dir) => readdirSync(dir, { recursive: true }).filter((p) => /\.(jsonl|gz)$/.test(p)).sort();
 const linesOf = (root, day) => readFileSync(join(root, REPO, 'runs', `${day}.jsonl`), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
@@ -167,15 +171,13 @@ test('one pass records every job that ran its tests, and a second pass changes n
   // a fresh attempt of a run older than any window is found by its artifact, and filed by its job's day
   assert.deepEqual([byKey.get('108/2/unit').report, byKey.get('108/2/unit').started], ['present', '2026-10-21T10:50:00Z']);
 
-  // the day's base is its first report; every present line rebuilds its own report's cases from it exactly
+  // the day's base is its first report; every present line holds its own report's counts and hashes, never its cases
   const base = gz(root, 'base/2026-10-21/unit.json.gz');
   assert.deepEqual([base.run, base.attempt], [101, 1]);
-  for (const line of day.filter((l) => l.report === 'present' && l.job === 'unit')) {
-    const xml = reports.get(line.artifact.id);
-    assert.deepEqual(membershipOf(line, base), summarize([parseJUnit(xml)]).ids, `run ${line.run}`);
-  }
-  assert.deepEqual(byKey.get('108/2/unit').membership.removed, [['app', 'src/a.test.ts', 'a > two']]);
-  assert.deepEqual(byKey.get('103/1/unit').membership.added, [['app', 'src/c.test.ts', 'c > new']]);
+  for (const line of day.filter((l) => l.report === 'present' && l.job === 'unit')) holdsCases(line, summarize([parseJUnit(reports.get(line.artifact.id))]));
+  // a run that dropped a case says nothing of the base's other cases; one that ran the base's cases does
+  assert.equal(caseOutcome(byKey.get('108/2/unit'), base, ['app', 'src/a.test.ts', 'a > one']), 'unknown');
+  assert.equal(caseOutcome(byKey.get('101/1/unit'), base, ['app', 'src/a.test.ts', 'a > one']), 'passed');
   // durations come from the day's last green report
   const durations = gz(root, 'durations/2026-10-21/unit.json.gz');
   assert.deepEqual([durations.run, durations.attempt, durations.sampled], [108, 2, true]);
@@ -249,10 +251,7 @@ test('a day starting with selection has no base or durations until a full run, a
   assert.deepEqual(readDir(join(root, REPO)), ['runs/2026-10-21.jsonl']);
   const beforeBase = lineOf(root, '2026-10-21', '701/1/unit');
   assert.equal(beforeBase.selection, 'affected');
-  assert.deepEqual(beforeBase.membership.ids, selectedIds);
-  assert.deepEqual(beforeBase.skipped.ids, selectedIds);
-  assert.deepEqual(membershipOf(beforeBase), selectedIds);
-  assert.deepEqual(skippedOf(beforeBase), selectedIds);
+  assert.deepEqual([beforeBase.membership, beforeBase.skipped], [{ count: selectedIds.length, hash: hashIds(selectedIds) }, { count: selectedIds.length, hash: hashIds(selectedIds) }]);
 
   // A selected full-suite fallback is still ineligible for the base and the full-suite cost snapshot.
   add(702, 'b', '2026-10-21T08:30:00Z', suitesA(), 'affected');
@@ -269,17 +268,14 @@ test('a day starting with selection has no base or durations until a full run, a
   assert.equal(durations.run, 703);
   assert.equal(base.cases.length, 4);
   assert.equal(lineOf(root, '2026-10-21', '703/1/unit').selection, null);
-  assert.deepEqual(membershipOf(beforeBase, base), selectedIds);
-  assert.deepEqual(skippedOf(beforeBase, base), selectedIds);
+  assert.equal(caseOutcome(beforeBase, base, base.cases[0]), 'unknown', 'a selected run says nothing of the base');
 
   add(704, 'd', '2026-10-21T10:00:00Z', selectedSuites, 'affected');
   const later = await pass();
   assert.deepEqual([later.errors, later.counts.present], [[], 1]);
   const selected = lineOf(root, '2026-10-21', '704/1/unit');
   assert.equal(selected.selection, 'affected');
-  assert.deepEqual(selected.membership.ids, selectedIds);
-  assert.deepEqual(membershipOf(selected, base), selectedIds);
-  assert.deepEqual(skippedOf(selected, base), selectedIds);
+  assert.deepEqual(selected.membership, { count: selectedIds.length, hash: hashIds(selectedIds) });
   assert.deepEqual(gz(root, 'base/2026-10-21/unit.json.gz'), base);
   assert.deepEqual(gz(root, 'durations/2026-10-21/unit.json.gz'), durations);
   assert.deepEqual(lineOf(root, '2026-10-21', '701/1/unit'), beforeBase);
@@ -550,8 +546,7 @@ test("a sharded job's full set is one line of the job: the union of the shards' 
   const union = unionOf(red);
   const base = gz(root, 'base/2026-10-21/unit.json.gz');
   assert.deepEqual([base.run, base.job, base.files], [801, 'unit', union.files]);
-  assert.deepEqual(membershipOf(line, base), union.ids);
-  assert.deepEqual(skippedOf(line, base), union.skipped);
+  holdsCases(line, union);
   assert.deepEqual([line.failed, line.projects, line.ms], [union.failed, union.projects, union.ms]);
   assert.ok(union.ids.some((id) => id[3] === 2));
 
@@ -564,7 +559,7 @@ test("a sharded job's full set is one line of the job: the union of the shards' 
     ['unit 2/3', 'vm-2', 'failure', '2026-10-21T08:01:00Z', '2026-10-21T08:09:00Z', 'test-results-unit-2of3-1'],
     ['unit 3/3', 'vm-3', 'success', '2026-10-21T07:59:30Z', '2026-10-21T08:05:00Z', 'test-results-unit-3of3-1'],
   ]);
-  for (const l of linesOf(root, '2026-10-21')) assert.deepEqual(membershipOf(l, base), readBack(reports, l).ids);
+  for (const l of linesOf(root, '2026-10-21')) holdsCases(l, readBack(reports, l));
 
   // durations from the green set; the change's next run links to it
   const durations = gz(root, 'durations/2026-10-21/unit.json.gz');
@@ -661,8 +656,8 @@ test('a shard a re-run copied takes its report from the attempt it ran in: a sha
   assert.deepEqual(line.shards.map((s) => s.jobId), ran.map((j) => j.id));
   assert.deepEqual([line.started, line.completed, line.conclusion], ['2026-10-21T07:59:00Z', '2026-10-21T08:38:00Z', 'success']);
   const base = gz(root, 'base/2026-10-21/unit.json.gz');
-  assert.deepEqual(membershipOf(line, base), unionOf(suites).ids);
-  for (const l of linesOf(root, '2026-10-21')) assert.deepEqual(membershipOf(l, base), readBack(reports, l).ids, `${l.run}/${l.attempt}`);
+  holdsCases(line, unionOf(suites));
+  for (const l of linesOf(root, '2026-10-21')) holdsCases(l, readBack(reports, l));
   // the red attempt keeps its failure; the rerun's copied shard is the first attempt's own report
   assert.deepEqual(lineOf(root, '2026-10-21', '821/1/unit').failed.length, 1);
   assert.deepEqual(lineOf(root, '2026-10-21', '821/2/unit').shards.map((s) => [s.attempt, s.artifact.name]), [[1, 'test-results-unit-1of2-1'], [2, 'test-results-unit-2of2-2']]);
@@ -753,7 +748,7 @@ test('the job unsharded and sharded across runs in one store: one base, every li
   const base = gz(root, 'base/2026-10-21/unit.json.gz');
   assert.equal(base.run, 831);
   assert.equal(gz(root, 'durations/2026-10-21/unit.json.gz').run, 833);
-  for (const l of day) assert.deepEqual(membershipOf(l, l.job === 'unit' ? base : gz(root, 'base/2026-10-21/unit-darwin.json.gz')), readBack(reports, l).ids, `${l.run} ${l.job}`);
+  for (const l of day) holdsCases(l, readBack(reports, l));
   const link = (run, paths) => ({ run, attempt: 1, relation: 'descendant', paths, truncated: false });
   assert.deepEqual(day.filter((l) => l.job === 'unit').map((l) => l.previous), [null, null, link(831, ['src/b.ts']), link(832, ['src/c.ts'])]);
 });
@@ -1228,7 +1223,7 @@ test("a job listing GitHub answers 502 is asked again before it counts as the ba
 // A batch of the collector over MAWS-shaped repositories (a ledger and a per-test pass each) against a fake GitHub:
 // one run on 2026-10-20 per repository, `artifacts` recent artifacts that name no report, and `limitedOn`: the
 // repository whose first request is refused for the rate limit. → printed output, exit code, requests by repository.
-async function batchOf(t, { repos = ['o/a'], limits, artifacts = 0, limitedOn = null, root = null, pass = 'p1' } = {}) {
+async function batchOf(t, { repos = ['o/a'], limits, artifacts = 0, limitedOn = null, root = null, pass = 'p1', repo = null } = {}) {
   root ??= mkdtempSync(join(tmpdir(), 'history-batch-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const maws = JSON.parse(readFileSync(new URL('../../history/repos.json', import.meta.url), 'utf8')).find((r) => r.alias === 'SSFSKIM/MAWS');
@@ -1260,7 +1255,7 @@ async function batchOf(t, { repos = ['o/a'], limits, artifacts = 0, limitedOn = 
   console.error = (...a) => out.push(a.join(' '));
   let code;
   try {
-    code = await collector.collectBatch({ chosen: repos.map((r) => ({ ...maws, repo: r, alias: r })), opts: { store: root, mirrors: root, pass, attempts: 300, limit: 40, calls: null }, now: NOW, deps });
+    code = await collector.collectBatch({ chosen: repos.map((r) => ({ ...maws, repo: r, alias: r })), opts: { repo, store: root, mirrors: root, pass, attempts: 300, limit: 40, calls: null }, now: NOW, deps });
   } finally {
     Object.assign(console, saved);
   }
@@ -1310,6 +1305,24 @@ test("GitHub's rate limit on a token ends the pass on that token: no other repos
   // A later batch of the same pass keeps off the token.
   const again = await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 1500, hour: 2000 } }, root: first.root });
   assert.deepEqual(again.asked, {});
+});
+
+const marker = (root) => (existsSync(join(root, 'collected.json')) ? JSON.parse(readFileSync(join(root, 'collected.json'), 'utf8')) : null);
+
+test("a batch that ends the pass with every repository's work taken writes the marker: its time, each repository's last covered day", async (t) => {
+  const { out, code, root } = await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 1500, hour: 2000 } } });
+  assert.equal(code, 0, out);
+  assert.doesNotMatch(out, /^history: more$/m);
+  const m = marker(root);
+  assert.ok(m.at >= '2026-10-21T12:00:00' && m.at < '2026-10-21T12:10:00', m.at);
+  assert.deepEqual(m, { v: 1, at: m.at, repos: { 'o/a': { covered: '2026-10-20' }, 'o/b': { covered: '2026-10-20' } } });
+});
+
+test('no marker from a batch that leaves work, stops at a limit or a refusal, or names one repository', async (t) => {
+  assert.equal(marker((await batchOf(t, { limits: { app: { pass: 1500, hour: 40 } } })).root), null, 'held by the hour');
+  assert.equal(marker((await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 40, hour: 2000 } } })).root), null, "the pass's cap left o/b");
+  assert.equal(marker((await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 1500, hour: 2000 } }, limitedOn: 'o/b' })).root), null, 'rate limited');
+  assert.equal(marker((await batchOf(t, { limits: { app: { pass: 1500, hour: 2000 } }, repo: 'o/a' })).root), null, 'one repository');
 });
 
 test('the arguments: batch sizes, the pass and the mirrors', () => {
