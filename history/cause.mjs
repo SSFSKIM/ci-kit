@@ -118,6 +118,14 @@ const changeOf = (a, prOf) => {
 export function deriveCauses({ analysis, entry, landings, standing, known, casesOf, paths, prOf, from }) {
   const { attempts } = analysis;
   const executions = attempts.filter((a) => !a.copied).sort((x, y) => (x.start < y.start ? -1 : x.start > y.start ? 1 : x.key < y.key ? -1 : 1));
+  // Each gate's executions in that order, and each attempt's place among them: what followed it is the rest.
+  const byGate = new Map();
+  for (const a of executions) {
+    const list = byGate.get(a.gate) ?? byGate.set(a.gate, []).get(a.gate);
+    a.place = list.length;
+    list.push(a);
+  }
+  const after = (a) => byGate.get(a.gate).slice(a.place + 1);
   const out = [];
   for (const a of executions) {
     if (a.result !== 'failed' || !a.available || dayOf(a.available) < from) continue;
@@ -129,12 +137,12 @@ export function deriveCauses({ analysis, entry, landings, standing, known, cases
       out.push({ ...head, cause: 'superseded', why: null, cancelled: true, evidence: { by_run: a.superseded_by }, context: {} });
       continue;
     }
-    const jobs = unsuccessful(a).map((l) => readJob(l, a, executions, entry, landings));
+    const followers = after(a);
+    const jobs = unsuccessful(a).map((l) => readJob(l, a, followers, entry, landings));
     const cancelled = jobs.every((j) => j.conclusion === 'cancelled');
     const evidence = { jobs };
     let cause = null;
     let why = null;
-    const followers = executions.filter((b) => later(b, a) && b.gate === a.gate);
     if (jobs.every((j) => j.lost)) cause = 'infra';
     if (!cause) {
       const green = followers.find((b) => b.result === 'succeeded' && comparable(a, b) && sameTree(a, b, landings));

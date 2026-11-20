@@ -80,10 +80,11 @@ function prCheck(index, head, at, verdictJob) {
   return { result: 'unrun', ...where, inflight: true, eventual: verdict.conclusion };
 }
 
-// The pull request a tip's message names: a merge's `Merge pull request #n from …`, a squash's `… (#n)`.
+// The pull request a tip's message names: a merge's `Merge pull request #n from …` (or `#n: <title>`, a merge whose
+// subject was set), a squash's `… (#n)`.
 export function prOfMessage(message) {
   const subject = (message ?? '').split('\n')[0];
-  const m = /^Merge pull request #(\d+) from /.exec(subject) ?? /\(#(\d+)\)\s*$/.exec(subject);
+  const m = /^Merge pull request #(\d+)\b/.exec(subject) ?? /\(#(\d+)\)\s*$/.exec(subject);
   return m ? Number(m[1]) : null;
 }
 

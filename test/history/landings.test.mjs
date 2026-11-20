@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createGitHub } from '../../lib/github.mjs';
 import { analyze, deriveCauses } from '../../history/cause.mjs';
-import { landingIndex, landingLine, listActivity, observationsOf } from '../../history/landings.mjs';
+import { landingIndex, landingLine, listActivity, observationsOf, prOfMessage } from '../../history/landings.mjs';
 import { openMirror } from '../../history/mirror.mjs';
 import { gitOrigin } from './helpers.mjs';
 
@@ -220,4 +220,12 @@ test('the activity listing: the four types that move a branch, newest first, pag
   ]);
   assert.equal(asked.length, 3, 'the third page holds one older than since, and the listing stops there');
   assert.match(asked[0], /ref=refs%2Fheads%2Fmain/);
+});
+
+test("the pull request a tip's message names: a merge, a merge whose subject was set, a squash; none in another's text", () => {
+  assert.equal(prOfMessage('Merge pull request #532 from SSFSKIM/stable-charge\n\nbody'), 532);
+  assert.equal(prOfMessage('Merge pull request #509: sminos 1.48.0: the CLI on a session\'s PATH'), 509);
+  assert.equal(prOfMessage('macOS engine: a field keeps its handle (#398) (#430)'), 430);
+  assert.equal(prOfMessage('a direct push naming #12 in passing'), null);
+  assert.equal(prOfMessage('subject\n\nMerge pull request #7 from o/x'), null);
 });
