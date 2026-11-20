@@ -166,9 +166,14 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
     : new Map();
   const landings = landingsKnown ? [...landingDays.values()].flat().sort(byTime('at')) : null;
   counts.landings = landings?.length ?? 0;
-  // The chain: each landing moves the branch from where the one before it left it, or a landing is missing between.
+  // The chain: each landing moves the branch from where another left it. One whose `before` no landing of the record
+  // left the branch at starts a chain; past the first start (where the record begins), each start is a break: a
+  // landing is missing before it. Linked by commit, not by time: GitHub's times run out of order around the
+  // fall-back hour (MAWS's and cua's 2026-11-01 09:00-12:00Z), which is no gap.
   if (landings && typeof state.activity === 'object' && state.activity) {
-    state.activity.breaks = landings.filter((l, i) => i > 0 && l.before !== landings[i - 1].after && !ZERO.test(l.before ?? '')).map((l) => ({ at: l.at, id: l.id }));
+    const afters = new Set(landings.map((l) => l.after));
+    const starts = landings.filter((l) => !afters.has(l.before) && !ZERO.test(l.before ?? ''));
+    state.activity.breaks = starts.slice(landings.some((l) => ZERO.test(l.before ?? '')) ? 0 : 1).map((l) => ({ at: l.at, id: l.id }));
     counts.breaks = state.activity.breaks.length;
   }
 

@@ -196,4 +196,10 @@ test('the chain breaks of the window are counted where the report reads them', a
   assert.deepEqual(r.errors, []);
   assert.deepEqual(ledger.state.activity.breaks, [{ at: iso(w.now - 2 * DAY), id: 22 }]);
   assert.match(formatDerived('o/r', r.counts, 0), /\(listed 2, chain breaks 1\)/);
+  // Two landings whose times run out of order still link by commit: no break.
+  const v = setup(t);
+  const swapped = v.activity.map((e) => ({ ...e, timestamp: e.id === 22 ? iso(v.now - 21 * DAY) : e.timestamp }));
+  const again = v.ledger();
+  await deriveRepo({ gh: ghWith(page(swapped)), repo: 'o/r', alias: ALIAS, entry: KIT, root: v.root, ledger: again, mirror: v.mirror, now: v.now });
+  assert.deepEqual(again.state.activity.breaks, []);
 });
