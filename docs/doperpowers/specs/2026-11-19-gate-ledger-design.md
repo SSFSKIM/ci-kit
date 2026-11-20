@@ -275,6 +275,9 @@ only, a rerun keeps its run's creation date, and a filtered listing stops at 1,0
 - **`copied_from`** names the earlier attempt whose shard a failed-jobs rerun carried over; such a line has no
   minutes.
 - Skipped jobs are not written. Lines are idempotent by (run, attempt, job id).
+- Lines are filed by completion day, so one gate attempt can span two days' files (shards across midnight; a copy
+  is filed on its gate's `available` day). A reader of a window loads one day's margin on each side and attributes
+  each gate attempt to the window by its `available`.
 
 ### What a red gate attempt's record shows (M3)
 
@@ -655,6 +658,10 @@ inputs M0 added.
   cua 6,603; every repository covers each of the 29 days from 10-22. The retired Hetzner pool's runners appear in
   October (lane `pool-hetzner`); 877 MAWS jobs cancelled before any runner have no lane and 0 minutes.
   Evidence: M1's report, part 3; store commit 88f04d1.
+
+- Observation: around 2026-11-01 09:00Z (the US fall-back hour) GitHub stamped jobs completed before they were
+  created: 117 first-attempt lines. They are not copies (a first attempt has none); their raw stamps are kept and
+  their minutes may read 0. Left as is: one hour of the record. Evidence: M1's report, part 4.
 
 ## Decision Log
 
