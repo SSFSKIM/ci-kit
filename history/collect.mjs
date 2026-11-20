@@ -25,6 +25,7 @@ import { parseJUnit } from './junit.mjs';
 import { previousRun, resolveTested, startedBefore } from './provenance.mjs';
 import { buildBase, buildDurations, buildRunLine, jobSlug, lineArtifacts, lineKey, reportWithinJob, summarize } from './record.mjs';
 import { describeError } from './errors.mjs';
+import { deriveRepo, formatDerived } from './derive.mjs';
 import { collectLedger, createPacer, formatLedger, LIMITS, retried, WINDOW_DAYS } from './ledger.mjs';
 import { openMirror } from './mirror.mjs';
 import { dayOf, openLedger, openStore, rewriteRecord, writeAtomic } from './store.mjs';
@@ -481,7 +482,7 @@ export function tokenFor(repo, kind = 'app') {
   return token;
 }
 
-const USAGE = 'history: usage: collect.mjs [--repo <alias>] --store <dir> [--limit <lines>] [--attempts <n>] [--pass <id>] [--mirrors <dir>] [--calls <n>]';
+const USAGE = 'history: usage: collect.mjs [--repo <alias>] --store <dir> [--limit <lines>] [--attempts <n>] [--pass <id>] [--mirrors <dir>] [--calls <n>] [--derive-from <YYYY-MM-DD>]';
 const whole = (flag, value, what) => {
   const n = Number(value);
   if (!Number.isInteger(n) || n < 1) throw new Error(`history: ${flag} takes a whole number of ${what}, 1 or more`);
@@ -492,10 +493,15 @@ const whole = (flag, value, what) => {
 // batch belongs to (the workflow's run), so only its first batch lists; --mirrors: where the mirrors are kept. The
 // workflow gives the last two as HISTORY_PASS and HISTORY_MIRRORS, which a collector from before them ignores.
 // --calls (HISTORY_CALLS): the calls a pass may make with each kind of token, in place of the daily pass's (a
-// backfill, the same pass over a longer backlog, is then held by the hour's limits alone).
+// backfill, the same pass over a longer backlog, is then held by the hour's limits alone). --derive-from
+// (HISTORY_DERIVE_FROM): a day from which every landing and cause is computed again, final ones included.
+const isDay = (flag, value) => {
+  if (!/^\d{4}-\d\d-\d\d$/.test(value ?? '')) throw new Error(`history: ${flag} takes a day, YYYY-MM-DD`);
+  return value;
+};
 export function parseArgs(argv) {
   const env = process.env;
-  const opts = { repo: null, store: null, limit: Infinity, attempts: 300, pass: env.HISTORY_PASS || null, mirrors: env.HISTORY_MIRRORS || join(tmpdir(), 'ci-kit-mirrors'), calls: env.HISTORY_CALLS ? whole('HISTORY_CALLS', env.HISTORY_CALLS, 'calls') : null };
+  const opts = { repo: null, store: null, limit: Infinity, attempts: 300, pass: env.HISTORY_PASS || null, mirrors: env.HISTORY_MIRRORS || join(tmpdir(), 'ci-kit-mirrors'), calls: env.HISTORY_CALLS ? whole('HISTORY_CALLS', env.HISTORY_CALLS, 'calls') : null, deriveFrom: env.HISTORY_DERIVE_FROM ? isDay('HISTORY_DERIVE_FROM', env.HISTORY_DERIVE_FROM) : null };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--repo') opts.repo = argv[++i];
     else if (argv[i] === '--store') opts.store = argv[++i];
@@ -504,6 +510,7 @@ export function parseArgs(argv) {
     else if (argv[i] === '--pass') opts.pass = argv[++i];
     else if (argv[i] === '--mirrors') opts.mirrors = argv[++i];
     else if (argv[i] === '--calls') opts.calls = whole('--calls', argv[++i], 'calls');
+    else if (argv[i] === '--derive-from') opts.deriveFrom = isDay('--derive-from', argv[++i]);
     else throw new Error(`history: unknown argument ${argv[i]}`);
   }
   if (!opts.store || opts.pass === undefined || opts.mirrors === undefined) throw new Error(USAGE);
@@ -521,9 +528,10 @@ export function selectRepos(repos, alias) {
 // One repository's batch: the gate ledger's pass, then the per-test pass (for a repository with a reporting set),
 // which takes its jobs from the ledger's fetch. Every request of both goes through the pacer (`admit`). → { errors,
 // more, wait }. A job listing answered with a server error is asked again after each of `delays`, as a listing day
-// is: one 502 among a pass's hundreds of calls would otherwise fail the day's run. `deps`: the client, the mirror,
-// the token and the delays, replaced in tests.
-const DEPS = { createGitHub, openMirror, tokenFor, delays: [3000, 10000] };
+// is: one 502 among a pass's hundreds of calls would otherwise fail the day's run. Once a pass, when the ledger's job
+// lines are in, the landings and causes are derived from them (history/derive.mjs). `deps`: the client, the mirror,
+// the token, the delays and the derivation, replaced in tests.
+const DEPS = { createGitHub, openMirror, tokenFor, delays: [3000, 10000], derive: deriveRepo };
 async function collectBoth({ entry, opts, pacer, now, ledger: opened, deps }) {
   const { repo, alias } = entry;
   const kind = entry.token;
@@ -538,9 +546,10 @@ async function collectBoth({ entry, opts, pacer, now, ledger: opened, deps }) {
   };
   const errors = [];
   let ledger = null;
+  let mirror = null;
   let result = { more: false };
   try {
-    const mirror = deps.openMirror({ dir: join(opts.mirrors, `${alias}.git`), repo, token: typeof token === 'function' ? await token(repo) : token });
+    mirror = deps.openMirror({ dir: join(opts.mirrors, `${alias}.git`), repo, token: typeof token === 'function' ? await token(repo) : token });
     const cloneStarted = Date.now();
     mirror.ensure();
     console.error(`${repo}: mirror ready in ${Math.round((Date.now() - cloneStarted) / 1000)} s`);
@@ -580,7 +589,19 @@ async function collectBoth({ entry, opts, pacer, now, ledger: opened, deps }) {
       console.error(`${repo}: per-test pass in ${Math.round((Date.now() - perTestStarted) / 1000)} s`);
     }
   }
-  // The per-test pass's calls count toward the pass too.
+  // The derived lines, once a pass, from job lines with nothing of the pass queued or pending.
+  const drained = ledger && ledger.state.pass.queue.length === 0 && ledger.state.pass.pending.length === 0;
+  if (drained && !ledger.state.pass.derived && pacer.reason(kind, 1) !== 'rate-limited') {
+    try {
+      const d = await deps.derive({ gh, repo, alias, entry, root: opts.store, ledger, mirror, now, from: opts.deriveFrom ?? null });
+      errors.push(...d.errors);
+      console.log(formatDerived(repo, d.counts, d.errors.length));
+      if (!d.paced && d.errors.length === 0) ledger.state.pass.derived = true;
+    } catch (err) {
+      errors.push(`derive: ${describe(err)}`);
+    }
+  }
+  // The per-test pass's calls, and the derivation's, count toward the pass too.
   if (ledger) {
     pacer.settle(ledger.state);
     ledger.flush();

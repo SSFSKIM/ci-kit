@@ -21,8 +21,8 @@ export function openMirror({ dir, repo = null, url = `https://github.com/${repo}
       GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`,
     });
   }
-  const run = (args, { inDir = true } = {}) => {
-    const r = spawnSync('git', inDir ? ['-C', dir, ...args] : args, { env, encoding: 'utf8', maxBuffer: 1 << 28 });
+  const run = (args, { inDir = true, lazy = false } = {}) => {
+    const r = spawnSync('git', inDir ? ['-C', dir, ...args] : args, { env: lazy ? { ...env, GIT_NO_LAZY_FETCH: '0' } : env, encoding: 'utf8', maxBuffer: 1 << 28 });
     return { ok: r.status === 0, out: r.stdout ?? '', status: r.status ?? r.signal ?? r.error?.code ?? null };
   };
   const must = (args) => {
@@ -52,6 +52,37 @@ export function openMirror({ dir, repo = null, url = `https://github.com/${repo}
       };
       get(wanted.filter((s) => !mirror.has(s)));
       return new Set(wanted.filter((s) => mirror.has(s)));
+    },
+    // A commit's tree, parents and message, or null when the mirror lacks it.
+    commit(sha) {
+      if (!mirror.has(sha)) return null;
+      const text = must(['cat-file', 'commit', sha]);
+      const cut = text.indexOf('\n\n');
+      const head = (cut < 0 ? text : text.slice(0, cut)).split('\n');
+      return {
+        tree: head.find((l) => l.startsWith('tree '))?.slice(5) ?? null,
+        parents: head.filter((l) => l.startsWith('parent ')).map((l) => l.slice(7)),
+        message: cut < 0 ? '' : text.slice(cut + 2),
+      };
+    },
+    // Every pull request's head (`refs/pull/<n>/head`), fetched in one request: a pull request's head may be a commit
+    // no branch reaches any more. → whether the fetch succeeded.
+    fetchPulls: () => run(['fetch', '--quiet', '--no-tags', '--filter=blob:none', 'origin', '+refs/pull/*/head:refs/pull/*/head']).ok,
+    // Pull request number → its head commit, as last fetched.
+    pulls() {
+      const out = new Map();
+      for (const line of must(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/pull/']).split('\n')) {
+        const m = /^refs\/pull\/(\d+)\/head ([0-9a-f]{40})$/.exec(line);
+        if (m) out.set(Number(m[1]), m[2]);
+      }
+      return out;
+    },
+    // One file's text at a commit, or null when the commit or the path is not there. The one read that fetches a
+    // file's contents, its blob alone, on demand (the planner's config at a landing's `before`).
+    fileAt(sha, path) {
+      if (!mirror.has(sha)) return null;
+      const r = run(['cat-file', 'blob', `${sha}:${path}`], { lazy: true });
+      return r.ok ? r.out : null;
     },
     // A commit's one parent, or null (absent, a root, or a merge).
     parentOf(sha) {

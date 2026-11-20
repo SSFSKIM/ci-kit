@@ -77,3 +77,44 @@ test('the mirror: a nonce commit fetched by id brings its parent; tree keys, pat
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("the mirror: a commit's tree, parents and message; pull requests' heads; one file's text fetched on demand", () => {
+  const o = origin();
+  const root = mkdtempSync(join(tmpdir(), 'ci-kit-mirrors-'));
+  try {
+    const base = o.commit({ '.github/ci-kit.yml': 'version: 1\n', 'src/a.ts': '1' }, 'base');
+    o.git('checkout', '-q', '-b', 'topic');
+    const head = o.commit({ 'src/a.ts': '2' }, 'topic work');
+    o.git('checkout', '-q', 'main');
+    o.git('merge', '-q', '--no-ff', '-m', 'Merge pull request #7 from o/topic\n\nShip-with: known', 'topic');
+    const merge = o.git('rev-parse', 'HEAD');
+    // A pull request's head no branch reaches: GitHub keeps it under refs/pull/<n>/head.
+    o.git('checkout', '-q', '-b', 'gone');
+    const squashed = o.commit({ 'src/a.ts': '3' }, 'abandoned');
+    o.git('checkout', '-q', 'main');
+    o.git('branch', '-q', '-D', 'gone', 'topic');
+    o.git('update-ref', 'refs/pull/7/head', head);
+    o.git('update-ref', 'refs/pull/9/head', squashed);
+
+    const m = openMirror({ dir: join(root, 'o.git'), url: `file://${o.dir}`, token: null });
+    m.ensure();
+    const c = m.commit(merge);
+    assert.deepEqual(c.parents, [base, head]);
+    assert.equal(c.tree, o.git('rev-parse', `${merge}^{tree}`));
+    assert.equal(c.message, 'Merge pull request #7 from o/topic\n\nShip-with: known\n');
+    assert.equal(m.commit('e'.repeat(40)), null);
+
+    assert.equal(m.has(squashed), false);
+    assert.equal(m.fetchPulls(), true);
+    assert.deepEqual(m.pulls(), new Map([[7, head], [9, squashed]]));
+    assert.equal(m.has(squashed), true);
+
+    // Without contents in the clone, the file's blob is fetched for this read alone.
+    assert.equal(m.fileAt(base, '.github/ci-kit.yml'), 'version: 1\n');
+    assert.equal(m.fileAt(base, 'nowhere.yml'), null);
+    assert.equal(m.fileAt('e'.repeat(40), '.github/ci-kit.yml'), null);
+  } finally {
+    o.cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

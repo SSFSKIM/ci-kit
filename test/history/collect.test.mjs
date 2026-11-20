@@ -1184,6 +1184,10 @@ test("a run the ledger closed is offered to the sweep until a clean sweep covers
   assert.ok(!collector.recentRuns(state, NOW).some((r) => r.id === 953));
 });
 
+// The derivation of landings and causes, left out where a test is about the collection (history/derive.mjs has its
+// own).
+const noDerive = async () => ({ counts: { listed: 0, landings: 0, causes: {}, written: 0, seconds: 0 }, errors: [], paced: false });
+
 test("a job listing GitHub answers 502 is asked again before it counts as the batch's error", async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'history-batch-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -1204,7 +1208,7 @@ test("a job listing GitHub answers 502 is asked again before it counts as the ba
     }
     return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 });
   };
-  const deps = { tokenFor: () => 't', createGitHub: (token, o) => createGitHub(token, { ...o, fetchImpl }), openMirror: () => ({ ensure() {}, fetch: () => new Set(), parentOf: () => null, treeKey: () => null }), delays: [0, 0] };
+  const deps = { tokenFor: () => 't', createGitHub: (token, o) => createGitHub(token, { ...o, fetchImpl }), openMirror: () => ({ ensure() {}, fetch: () => new Set(), parentOf: () => null, treeKey: () => null }), delays: [0, 0], derive: noDerive };
   const out = [];
   const saved = { log: console.log, error: console.error };
   console.log = (...a) => out.push(a.join(' '));
@@ -1223,7 +1227,7 @@ test("a job listing GitHub answers 502 is asked again before it counts as the ba
 // A batch of the collector over MAWS-shaped repositories (a ledger and a per-test pass each) against a fake GitHub:
 // one run on 2026-10-20 per repository, `artifacts` recent artifacts that name no report, and `limitedOn`: the
 // repository whose first request is refused for the rate limit. → printed output, exit code, requests by repository.
-async function batchOf(t, { repos = ['o/a'], limits, artifacts = 0, limitedOn = null, root = null, pass = 'p1', repo = null } = {}) {
+async function batchOf(t, { repos = ['o/a'], limits, artifacts = 0, limitedOn = null, root = null, pass = 'p1', repo = null, derive = noDerive } = {}) {
   root ??= mkdtempSync(join(tmpdir(), 'history-batch-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const maws = JSON.parse(readFileSync(new URL('../../history/repos.json', import.meta.url), 'utf8')).find((r) => r.alias === 'SSFSKIM/MAWS');
@@ -1248,7 +1252,7 @@ async function batchOf(t, { repos = ['o/a'], limits, artifacts = 0, limitedOn = 
     }
     return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 });
   };
-  const deps = { tokenFor: () => 't', createGitHub: (token, o) => createGitHub(token, { ...o, fetchImpl }), openMirror: () => ({ ensure() {}, fetch: () => new Set(), parentOf: () => null, treeKey: () => null }), delays: [0, 0], limits };
+  const deps = { tokenFor: () => 't', createGitHub: (token, o) => createGitHub(token, { ...o, fetchImpl }), openMirror: () => ({ ensure() {}, fetch: () => new Set(), parentOf: () => null, treeKey: () => null }), delays: [0, 0], limits, derive };
   const out = [];
   const saved = { log: console.log, error: console.error };
   console.log = (...a) => out.push(a.join(' '));
@@ -1325,9 +1329,29 @@ test('no marker from a batch that leaves work, stops at a limit or a refusal, or
   assert.equal(marker((await batchOf(t, { limits: { app: { pass: 1500, hour: 2000 } }, repo: 'o/a' })).root), null, 'one repository');
 });
 
+test('the landings and causes are derived once a pass, by a batch that leaves the ledger nothing queued or pending', async (t) => {
+  const calls = [];
+  const derive = async (args) => (calls.push(args.from), noDerive());
+  const drained = await batchOf(t, { limits: { app: { pass: 1500, hour: 2000 } }, derive });
+  assert.equal(drained.code, 0, drained.out);
+  assert.match(drained.out, /^o\/a: derived: landings 0 \(listed 0\)/m);
+  assert.deepEqual(calls, [null]);
+  // The pass's next batch does not derive again; a new pass does.
+  await batchOf(t, { limits: { app: { pass: 1500, hour: 2000 } }, derive, root: drained.root });
+  assert.equal(calls.length, 1);
+  await batchOf(t, { limits: { app: { pass: 1500, hour: 2000 } }, derive, root: drained.root, pass: 'p2' });
+  assert.equal(calls.length, 2);
+  // A batch held by the hour with days still to list derives nothing.
+  const held = await batchOf(t, { limits: { app: { pass: 1500, hour: 20 } }, derive });
+  assert.match(held.out, /^history: more$/m);
+  assert.equal(calls.length, 2);
+});
+
 test('the arguments: batch sizes, the pass and the mirrors', () => {
   const opts = collector.parseArgs(['--store', 's', '--pass', '44500000000.1', '--mirrors', '/m', '--attempts', '50', '--limit', '40']);
-  assert.deepEqual(opts, { repo: null, store: 's', limit: 40, attempts: 50, pass: '44500000000.1', mirrors: '/m', calls: null });
+  assert.deepEqual(opts, { repo: null, store: 's', limit: 40, attempts: 50, pass: '44500000000.1', mirrors: '/m', calls: null, deriveFrom: null });
+  assert.equal(collector.parseArgs(['--store', 's', '--derive-from', '2026-10-22']).deriveFrom, '2026-10-22');
+  assert.throws(() => collector.parseArgs(['--store', 's', '--derive-from', '10-22']), /takes a day/);
   assert.equal(collector.parseArgs(['--store', 's', '--calls', '6000']).calls, 6000);
   assert.equal(collector.parseArgs(['--store', 's']).attempts, 300);
   process.env.HISTORY_PASS = '7.1';
