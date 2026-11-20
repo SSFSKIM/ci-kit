@@ -771,6 +771,17 @@ inputs M0 added.
   lines are read from MAWS's local clone, read only. The guard has its own issue title and runs at 12:00 UTC.
   Date/Author: 2026-11-20, the executing session.
 
+- Decision: M2's task review folded (2026-11-20). Every store file is written to a temporary file beside it and
+  renamed into place, and the workflow never commits `*.tmp` (the sandbox pushes even after a collector's exit 1, so
+  an in-place short write could have published a truncated file; this supersedes M1's recorded non-atomic writes).
+  The guard arms itself: it checks the marker only once ci-kit `main`'s `history/collect.mjs` writes
+  `collected.json`, so the merge arms it; a `force` dispatch checks either way; a marker time that does not parse or
+  lies ahead of the clock is unreadable. A bundled group's result comes only from its own `steps.tsv` slot and the
+  tests in its segment: none of its own is no conclusion, and only a shared setup failure before any group ran
+  applies to all; its minutes are its slot's, and the bundle's overhead is charged to no group. A re-import keeps a
+  line's tree key when it cannot compute one for the same tree, and replaces a job's line on whatever day it was filed.
+  Date/Author: 2026-11-20, the executing session.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
