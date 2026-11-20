@@ -205,6 +205,16 @@ test("two pull request runs of one head are one tree for rerun-green only while 
   assert.equal(causeOf(derive(lines, { entry: KIT, record: null }), 1).cause, 'unattributed');
 });
 
+test('a pull request run never corroborates a loss: a setup failure, then a green of the same head, is not infra', () => {
+  const pr = { event: 'pull_request', basis: 'pr-merge', tree: null, tree_key: null, head_tree: 'H1', head: 'h1', change: 'branch:topic', ref: 'topic' };
+  const lines = [setupRed({ run: 1, at: 0, failed_step: 'Install', ...pr }), line({ run: 1, attempt: 2, at: 30, ...pr })];
+  // The base held between them: the green is the same tree for rule 2, which is where it counts.
+  const record = { since: iso(-120), events: [{ at: iso(-60), before: 'b0', after: 'b1' }, { at: iso(90), before: 'b1', after: 'b2' }] };
+  const c = causeOf(derive(lines, { entry: KIT, record }), 1);
+  assert.deepEqual([c.cause, c.evidence.jobs[0].lost], ['rerun-green', null]);
+  assert.deepEqual([causeOf(derive(lines, { entry: KIT, record: null }), 1).cause, causeOf(derive(lines, { entry: KIT, record: null }), 1).why], ['unattributed', 'setup-uncorroborated']);
+});
+
 test('a follower began strictly after the red was known: a short green inside a slow red is no evidence about it', () => {
   const lines = [
     red({ run: 1, at: 0, tree: 'T1', completed: iso(60), minutes: 60 }),

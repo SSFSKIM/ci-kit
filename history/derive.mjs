@@ -135,7 +135,9 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
       let through = covered?.through ?? since;
       for (const e of await listActivity(gh, repo, entry.default_branch, { since })) {
         counts.listed += 1;
-        if (!events.has(e.id)) events.set(e.id, e);
+        // A landing before the input window was written while it was in it: the listing from the watermark can
+        // return it again, and its day is not loaded, so it stays out of what is written.
+        if (!events.has(e.id) && dayOf(e.at) >= inputFrom) events.set(e.id, e);
         if (e.at > through) through = e.at;
       }
       listed = true;

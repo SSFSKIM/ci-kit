@@ -241,3 +241,24 @@ test('the listing\'s coverage advances only once its landings are written: a fai
   assert.deepEqual(Object.keys(read(w.root, 'landings')), ['2026-10-31', '2026-11-18']);
   assert.equal(again.state.activity.through, iso(w.now - 2 * DAY));
 });
+
+test("a quiet repository keeps its archived landings: the watermark's day, aged out of the window, is not rewritten", async (t) => {
+  const w = setup(t);
+  // Two landings on one day 20 days back, then nothing.
+  const quiet = [
+    { ...w.activity[0], id: 23, timestamp: iso(w.now - 20 * DAY + 3600_000) },
+    w.activity[1],
+  ];
+  const ledger = w.ledger();
+  await deriveRepo({ gh: ghWith(page(quiet)), repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger, mirror: w.mirror, now: w.now });
+  ledger.flush();
+  const dayPath = join(w.root, ALIAS, 'landings', '2026-10-31.jsonl');
+  const before = readFileSync(dayPath, 'utf8');
+  assert.equal(before.split('\n').filter(Boolean).length, 2);
+  // Thirty days on the day is past the window; the listing from the watermark returns its last landing alone.
+  const later = w.ledger();
+  const r = await deriveRepo({ gh: ghWith(page(quiet)), repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger: later, mirror: w.mirror, now: w.now + 30 * DAY });
+  assert.deepEqual(r.errors, []);
+  assert.equal(r.counts.listed, 1);
+  assert.equal(readFileSync(dayPath, 'utf8'), before);
+});

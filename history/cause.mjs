@@ -118,8 +118,10 @@ const setupish = (l, phase) => SETUPISH.has(phase) && !(l.conclusion === 'cancel
 
 // A lost job's reason: the platform said its runner was lost or the job never started (an annotation, or its log's
 // runner line for a job that stopped with no step ended), or its stop is setup-ish and a later comparable attempt on
-// the same tree got that job past that phase. `followers`: the attempts that began after this one's result was known.
-function readJob(l, a, followers, entry, record) {
+// the same exact tree got that job past that phase. `infra` is the cause that nominates, so only exact trees
+// corroborate: two pull request runs of one head are one tree for rule 2 alone. `followers`: the attempts that began
+// after this one's result was known.
+function readJob(l, a, followers, entry) {
   const phase = phaseOfLine(l, entry);
   const out = { job_id: l.job_id, job: l.job, conclusion: l.conclusion, phase, lost: null, cancelled: cancelledFromOutside(l) };
   if (l.annotations.includes('runner-lost')) out.lost = 'annotation:runner-lost';
@@ -128,7 +130,7 @@ function readJob(l, a, followers, entry, record) {
   else if (l.log_kinds.includes('runner-lost') && phase === 'lost') out.lost = 'log:runner-lost';
   if (out.lost || !setupish(l, phase)) return out;
   for (const b of followers) {
-    if (!comparable(a, b) || !sameTree(a, b, record)) continue;
+    if (a.basis !== 'exact' || b.basis !== 'exact' || a.tree === null || a.tree !== b.tree || !comparable(a, b)) continue;
     const past = b.lines.find((x) => x.job === l.job && !x.copy && (x.conclusion === 'success' || ['test', 'post'].includes(phaseOfLine(x, entry))));
     if (past) return { ...out, lost: 'corroborated', by: { run: b.run, attempt: b.attempt } };
   }
@@ -171,7 +173,7 @@ export function deriveCauses({ analysis, entry, record, standing, known, casesOf
       continue;
     }
     const followers = after(a);
-    const jobs = unsuccessful(a).map((l) => readJob(l, a, followers, entry, record));
+    const jobs = unsuccessful(a).map((l) => readJob(l, a, followers, entry));
     const evidence = { jobs };
     let cause = null;
     let why = null;
