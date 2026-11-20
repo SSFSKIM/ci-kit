@@ -367,7 +367,8 @@ second parent and `pr_link: "message"` when the tip has one parent (a squash) an
   no part in this verdict.
 - **Override.** A landing whose tip message has a line `Ship-with: <reason>` carries the reason. This is how
   "ship with it" is said where a check is required: `gh pr merge --admin --body "Ship-with: <reason>"`, which
-  writes it into the merge commit. *Rejected for now:* a `known_red` attribute on a gate in `.github/ci-kit.yml`
+  writes it into the merge commit. It bypasses a required check, so a session asks the owner for each such merge
+  (the owner's ruling, 2026-11-20: asked each time, also when the base shows the same red and an issue records it). *Rejected for now:* a `known_red` attribute on a gate in `.github/ci-kit.yml`
   that would make `verdict` pass. It changes what a green verdict means for every consumer, for a case the record
   shows 4 times in 576 merges; the report counts overrides, and that count is the argument if it grows.
 - **Standing.** Each gate's observations on the default branch are the full, exact gate attempts on landings'
@@ -453,7 +454,8 @@ through this CLI (MAWS, whose `scripts/ci-gate.sh` is the architect's and is not
 
 The session-start hook's text (`hooks/session-start.sh`) gains one sentence on these lines and one on merging:
 where the default branch requires `ci / verdict`, `gh pr merge <n> --auto --merge --match-head-commit <sha>` merges
-when the gates pass, and a merge past a red gate is `--admin --body "Ship-with: <reason>"`.
+when the gates pass, and a merge past a red gate, which needs the owner's yes for that merge, is
+`--admin --body "Ship-with: <reason>"`.
 
 ### The per-test record, kept small (M2)
 
@@ -1024,6 +1026,14 @@ inputs M0 added.
   candidate and is listed apart with its last attempt's date, and a nomination's and a candidate's minutes are those
   7 covered days', the four weeks' total beside them. The qualification rule is unchanged. Date/Author: 2026-11-20,
   CI-opt's session.
+- Decision: a merge past a red gate is asked of the owner each time. The Override above stays the way the reason
+  is recorded, but a session does not use `--admin` on its own judgment, also when the base shows the same red,
+  an issue records it and every other gate is green. Rationale: the owner's answer to that question on
+  2026-11-20, after auto mode refused two such merges (cua #439, a flaky red, landed by a rerun; doperpowers #570,
+  a red the base shares, landed with their yes); the first wording here read as a standing waiver, which it never
+  was. Rejected: a standing rule for base-red gates (their choice was "ask each time").
+  Date/Author: 2026-11-20, CI-opt.
+
 
 ## Outcomes & Retrospective
 
