@@ -994,4 +994,43 @@ inputs M0 added.
 
 ## Outcomes & Retrospective
 
-Pending — written at finish.
+**2026-11-20, M1 to M5 (the executing session).** The ledger exists for all five repositories and the hand-run
+gate. In the store, from 2026-10-22:
+- one line per gate job;
+- a landing line per update of a default branch;
+- a cause line per red or stopped gate attempt;
+- four weekly reports and a `status.json` per repository.
+
+`ci-gate` prints the `base:` and `known:` context at a failure, and `ci-gate status` and `ci-gate known add|list`
+exist. Acceptance 1 to 9 were met on the real record, after the final collection 44695640449 (store 39b2ed7). The
+kit's full suite passed through `ci-gate` at 5edad76 (run 44700701400).
+
+**What the record says.**
+- Cancellations by hand were most of the reds. A gate attempt stopped from outside with no later run is now
+  `cancelled`, not a red. That took MAWS's reds from 3,835 to 2,084, and removed 193 catches credited to gates that
+  were only interrupted.
+- MAWS's sessions give each retry a new label, so 1,032 of its 1,100 failed reds have no later attempt in their
+  change. The attribution rules 3 and 4 seldom apply there: most MAWS reds stay `unattributed`, and that is what
+  the record shows.
+- doperpowers' sessions merge before the pull request's own check ends: 38 of 183 checks were still in flight at
+  the merge.
+- The first reports nominate 11 doperpowers gates (no red in four weeks) and 3 MAWS gates (`infra` reds only).
+  None of the gates the retrospective credits with a catch is nominated.
+
+**Against the plan.**
+- The preflight overturned four of the design's assumptions:
+  - a copied shard is read by time, not by attempt number;
+  - doperpowers and cua are read with the workflow's token, without installing the App on them;
+  - logs replace annotations where those are refused;
+  - a merge by the button is `pr_merge` activity.
+- The backfill took about six hours of collection, not five.
+- Every milestone's task review found real defects. Most were evidence that could be turned into a conclusion the
+  record does not support: a green before the red, a cancelled part masking a red summary, a log line read as a
+  platform message, a pending check read as an old green. Each review went to two or three fix rounds and stopped
+  on triage. What was left unfixed is recorded in the ledger, with its reason, and listed in the pull request.
+
+**For the next reader.**
+- Until the branch merges, the daily scheduled run uses ci-kit `main`, which writes per-test lines only.
+- The guard arms itself when `main` writes the marker, so the first armed guard run after the merge is worth a look.
+- The first daily pass after the merge sweeps about 500 MAWS job listings once, within the pass's cap.
+- M6 (the per-test condensation report) waits for 14 days of the slim per-test record, about 2026-12-03.
