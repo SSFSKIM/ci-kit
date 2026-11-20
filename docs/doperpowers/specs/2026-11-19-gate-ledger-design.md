@@ -900,6 +900,18 @@ inputs M0 added.
   1,410; no landing verdict moved but MAWS's one red, which came from a hand-cancelled attempt (green 207, red 1).
   Date/Author: 2026-11-20, the executing session; accepted by CI-opt.
 
+- Decision: M3's second review folded (2026-11-20, f0f2f86). A `timed_out` conclusion is a time limit everywhere,
+  and a summary's own time limit beside a lost part keeps the attempt from `infra`. The base held between two
+  `pr-merge` attempts only with activity on both sides of the interval (manim-master 39122208766 `runtime`, whose
+  run precedes the record's first landing, moved from `rerun-green` to `unattributed`/`basis`). Left as is: a pull
+  request to a branch other than the default can read `rerun-green` across a base change (rare here; never a
+  nomination). `pr_check` rejects a run whose recorded pull request contradicts the landing's, and matches a run
+  that records none by head; a jobless run with any other conclusion than success is a failure (red when it
+  completed before the landing, in flight otherwise), and a jobless success or one with no completion is `unknown`.
+  The activity watermark advances only once the landing files it covers are written; a late red on a final day is
+  added by key, existing lines kept. Store 9f069e6 (run 44686199797); acceptance 3, 4 and 8 recheck as before.
+  Date/Author: 2026-11-20, the executing session.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
