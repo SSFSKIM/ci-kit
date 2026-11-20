@@ -3,13 +3,13 @@
 // the hand-run gate's job lines have files of their own, read with the collector's.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { parseJUnit } from '../../history/junit.mjs';
 import { buildBase, buildRunLine, hashIds, isSlim, summarize } from '../../history/record.mjs';
-import { openLedger, openStore, rewriteRecord, writeManualLines } from '../../history/store.mjs';
+import { io, openLedger, openStore, rewriteRecord, writeManualLines } from '../../history/store.mjs';
 import { vitestReport } from './helpers.mjs';
 
 const ALIAS = 'o/r';
@@ -144,4 +144,75 @@ test("the hand-run gate's lines have their own files, idempotent by job, and are
     [44486328066, 135, 'success'],
   ]);
   assert.deepEqual(readFileSync(join(root, ALIAS, 'jobs-manual', '2026-11-19.jsonl'), 'utf8').trim().split('\n').length, 3);
+});
+
+// A write that puts down part of its bytes and then fails, as a full disk or an I/O error does, on the `n`th write.
+const failingWrite = (n) => {
+  let calls = 0;
+  return (path, data) => {
+    calls += 1;
+    if (calls !== n) return writeFileSync(path, data);
+    writeFileSync(path, String(data).slice(0, 5));
+    throw Object.assign(new Error('no space left'), { code: 'ENOSPC' });
+  };
+};
+const withWrite = (write, fn) => {
+  const saved = io.write;
+  io.write = write;
+  try {
+    return fn();
+  } finally {
+    io.write = saved;
+  }
+};
+const filesUnder = (dir) => readdirSync(dir, { recursive: true }).filter((p) => !statSync(join(dir, p)).isDirectory()).sort();
+
+test('a store file is replaced whole or not at all: a write that fails partway leaves the file it had and no temporary', (t) => {
+  const root = tempRoot(t);
+  // the gate ledger's files: two days of job lines, then attempts.json
+  const ledger = openLedger(root, ALIAS);
+  ledger.addJobLines([{ v: 1, run: 1, attempt: 1, job_id: 1, completed: '2026-11-18T01:00:00Z' }, { v: 1, run: 2, attempt: 1, job_id: 2, completed: '2026-11-19T01:00:00Z' }]);
+  ledger.flush();
+  const before = filesUnder(root).map((p) => [p, readFileSync(join(root, p), 'utf8')]);
+  const again = openLedger(root, ALIAS);
+  again.addJobLines([{ v: 1, run: 3, attempt: 1, job_id: 3, completed: '2026-11-18T02:00:00Z' }, { v: 1, run: 4, attempt: 1, job_id: 4, completed: '2026-11-19T02:00:00Z' }]);
+  again.state.listed['2026-11-18'] = '2026-11-19T00:00:00Z';
+  assert.throws(() => withWrite(failingWrite(2), () => again.flush()), /no space/);
+  const after = Object.fromEntries(filesUnder(root).map((p) => [p, readFileSync(join(root, p), 'utf8')]));
+  assert.deepEqual(Object.keys(after), before.map(([p]) => p), 'no temporary left behind');
+  assert.equal(after[join(ALIAS, 'jobs', '2026-11-19.jsonl')], Object.fromEntries(before)[join(ALIAS, 'jobs', '2026-11-19.jsonl')], 'the failed file is as it was');
+  assert.equal(after[join(ALIAS, 'jobs', '2026-11-18.jsonl')].trim().split('\n').length, 2, 'the file written before it is whole');
+  for (const text of Object.values(after).filter((x, i) => Object.keys(after)[i].endsWith('.jsonl'))) text.trim().split('\n').forEach((l) => JSON.parse(l));
+
+  // the per-test day files and the one-time rewrite: the mark is never written over a day left half done
+  const old = tempRoot(t);
+  oldStore(old);
+  const day = readFileSync(join(old, ALIAS, 'runs', '2026-11-18.jsonl'), 'utf8');
+  assert.throws(() => withWrite(failingWrite(2), () => rewriteRecord(old, ALIAS, NOW)), /no space/);
+  assert.equal(readFileSync(join(old, ALIAS, 'runs', '2026-11-18.jsonl'), 'utf8'), day);
+  assert.ok(!existsSync(join(old, ALIAS, 'record.json')));
+  assert.deepEqual(rewriteRecord(old, ALIAS, NOW), { days: 2, lines: 4, rewritten: 2, unverified: 0 }, 'the next pass finishes it');
+
+  // the hand-run gate's files
+  const manual = tempRoot(t);
+  const line = (job_id, completed) => ({ v: 1, run: 'r', attempt: 1, job_id, completed });
+  writeManualLines(manual, ALIAS, [{ day: '2026-11-19', line: line('a', '2026-11-19T01:00:00Z') }]);
+  const held = readFileSync(join(manual, ALIAS, 'jobs-manual', '2026-11-19.jsonl'), 'utf8');
+  assert.throws(() => withWrite(failingWrite(1), () => writeManualLines(manual, ALIAS, [{ day: '2026-11-19', line: line('b', '2026-11-19T02:00:00Z') }])), /no space/);
+  assert.equal(readFileSync(join(manual, ALIAS, 'jobs-manual', '2026-11-19.jsonl'), 'utf8'), held);
+  assert.deepEqual(filesUnder(manual), [join(ALIAS, 'jobs-manual', '2026-11-19.jsonl')]);
+});
+
+test("a hand-run line read again replaces its own wherever it was filed, and keeps a tree key it cannot compute again", (t) => {
+  const root = tempRoot(t);
+  const line = (over) => ({ v: 1, run: 'r1', attempt: 1, job_id: 'panel', tree: 'T', tree_key: 'K', completed: null, conclusion: null, ...over });
+  writeManualLines(root, ALIAS, [{ day: '2026-11-18', line: line({}) }]);
+  // the job completed past midnight: filed on the next day, and the old line goes
+  writeManualLines(root, ALIAS, [{ day: '2026-11-19', line: line({ completed: '2026-11-19T00:05:00Z', conclusion: 'success', tree_key: null }) }]);
+  const all = openLedger(root, ALIAS).jobLines('2026-11-01', '2026-11-30');
+  assert.deepEqual(all.map((l) => [l.job_id, l.conclusion, l.tree_key]), [['panel', 'success', 'K']], 'one line, its key kept for the same tree');
+  assert.ok(!existsSync(join(root, ALIAS, 'jobs-manual', '2026-11-18.jsonl')) || readFileSync(join(root, ALIAS, 'jobs-manual', '2026-11-18.jsonl'), 'utf8') === '');
+  // a new tree without a key has none: the old key named another tree
+  writeManualLines(root, ALIAS, [{ day: '2026-11-19', line: line({ completed: '2026-11-19T00:05:00Z', tree: 'U', tree_key: null }) }]);
+  assert.equal(openLedger(root, ALIAS).jobLines('2026-11-01', '2026-11-30')[0].tree_key, null);
 });

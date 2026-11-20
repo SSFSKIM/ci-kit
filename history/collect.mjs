@@ -27,7 +27,7 @@ import { buildBase, buildDurations, buildRunLine, jobSlug, lineArtifacts, lineKe
 import { describeError } from './errors.mjs';
 import { collectLedger, createPacer, formatLedger, LIMITS, retried, WINDOW_DAYS } from './ledger.mjs';
 import { openMirror } from './mirror.mjs';
-import { dayOf, openLedger, openStore, rewriteRecord } from './store.mjs';
+import { dayOf, openLedger, openStore, rewriteRecord, writeAtomic } from './store.mjs';
 
 const DAY = 86_400_000;
 const ARTIFACT = /^test-results-(.+)-(\d+)$/;
@@ -606,7 +606,7 @@ const lastCovered = (ledger, now) => {
 // The collector's marker at the store's root (gate ledger spec, M2), which the sandbox's store guard reads: when a
 // pass last ended with every repository's work taken, and each repository's last covered day. Only a batch over every
 // repository writes it.
-export const writeMarker = (root, at, results) => writeFileSync(join(root, 'collected.json'), `${JSON.stringify({ v: 1, at, repos: Object.fromEntries(results.map(([alias, r]) => [alias, { covered: r.covered }])) })}\n`);
+export const writeMarker = (root, at, results) => writeAtomic(join(root, 'collected.json'), `${JSON.stringify({ v: 1, at, repos: Object.fromEntries(results.map(([alias, r]) => [alias, { covered: r.covered }])) })}\n`);
 
 // One batch over the chosen repositories, printing count lines, errors (naming runs, jobs and statuses only) and the
 // lines the workflow reads. → the exit code.

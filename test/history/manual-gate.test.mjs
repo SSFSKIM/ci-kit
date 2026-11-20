@@ -62,9 +62,15 @@ function redRun(runs, id = RED) {
     log: { 'copy-panel-code': [
       '05:50:32Z manual-gate: ##[step] gate-copy.sh run 1 (e2e:panel)',
       '  ✘  1 [panel] › e2e/a.spec.ts:1:1 › a case (2s)',
+      '  1 failed',
+      '  33 passed (3.0m)',
       '05:53:33Z manual-gate: ##[step-end] gate-copy.sh run 1 (e2e:panel): exit 1',
       '05:53:35Z manual-gate: ##[step] gate-copy.sh run 2 (e2e:code)',
+      '  42 passed (4.4m)',
       '05:58:03Z manual-gate: ##[step-end] gate-copy.sh run 2 (e2e:code): exit 0',
+      "05:58:04Z manual-gate: ##[step] the copies' verdict",
+      'mini copy: e2e:panel failure in 3 min',
+      'mini copy: e2e:code success in 4 min',
     ] },
   });
 }
@@ -165,7 +171,7 @@ test('a refused run, a partial run and a run with no record: what never ran is i
   for (const a of gateAttempts(lines)) assert.equal(a.result, 'incomplete', `${a.run} ${a.gate}`);
 });
 
-test("a bundled copy whose log has no group's segment (it failed in setup): each group takes the job's end, its minutes on the first", async (t) => {
+test("a bundle that failed in its shared setup, before any group ran: each group takes that failure, the job's minutes on the first", async (t) => {
   const runs = temp(t);
   const store = temp(t);
   const id = '777777777777-20261117T230000Z';
@@ -187,10 +193,68 @@ test("a bundled copy whose log has no group's segment (it failed in setup): each
   const next = '888888888888-20261117T234500Z';
   runDir(runs, next, 'GREEN', [
     row('copy-a', 'e2e: mini copy (a)', 'e2e-copy', 'guest', 'PASS', 0, '2026-11-17T23:50:00Z', '2026-11-18T00:10:00Z'),
-  ], { env: { 'copy-a': { J_COPY_GROUPS: 'a' } }, log: { 'copy-a': ['23:58:00Z manual-gate: ##[step] gate-copy.sh run 1 (e2e:a)', '00:06:00Z manual-gate: ##[step-end] gate-copy.sh run 1 (e2e:a): exit 0'] } });
+  ], {
+    env: { 'copy-a': { J_COPY_GROUPS: 'a' } },
+    steps: { 'copy-a': [...STEPS, ['copy1', '0', '480', 'gate-copy.sh run 1 (e2e:a)'], ['verdict', '0', '0', "the copies' verdict"]] },
+    log: { 'copy-a': ['23:58:00Z manual-gate: ##[step] gate-copy.sh run 1 (e2e:a)', '  3 passed (7.9m)', '00:06:00Z manual-gate: ##[step-end] gate-copy.sh run 1 (e2e:a): exit 0'] },
+  });
   await quiet(() => importRuns({ runsDir: runs, root: store, alias: ALIAS }));
   const a = linesOf(store).find((l) => l.run === next);
   assert.deepEqual([a.started, a.completed, a.minutes, a.conclusion], ['2026-11-17T23:58:00Z', '2026-11-18T00:06:00Z', 8, 'success']);
+});
+
+test('a group of a bundle ends by its own evidence: one unstarted is incomplete, one that exited 0 and ran no tests has no conclusion', async (t) => {
+  const runs = temp(t);
+  const store = temp(t);
+  // the guest stopped while the second group ran: the first completed (its steps row, its counts), the second has a
+  // start marker and nothing else, the third never started
+  const id = '999999999999-20261118T100000Z';
+  runDir(runs, id, 'RED', [
+    row('copy-a-b-c', 'e2e: mini copy (a, b, c)', 'e2e-copy', 'guest', 'FAIL', 6, '2026-11-18T10:00:00Z', '2026-11-18T10:30:00Z'),
+  ], {
+    env: { 'copy-a-b-c': { J_COPY_GROUPS: 'a, b, c' } },
+    steps: { 'copy-a-b-c': [...STEPS, ['copy1', '0', '300', 'gate-copy.sh run 1 (e2e:a)']] },
+    log: { 'copy-a-b-c': [
+      '10:02:00Z manual-gate: ##[step] gate-copy.sh run 1 (e2e:a)', '  12 passed (4.8m)', '10:07:00Z manual-gate: ##[step-end] gate-copy.sh run 1 (e2e:a): exit 0',
+      '10:07:01Z manual-gate: ##[step] gate-copy.sh run 2 (e2e:b)', '  ✓  1 [b] › e2e/b.spec.ts:1:1 › one (2s)',
+    ] },
+  });
+  // a bundle of two whose second group exited 0 with no test run (a filter that matched nothing in it)
+  const id2 = 'aaaaaaaaaaaa-20261118T110000Z';
+  runDir(runs, id2, 'RED', [
+    row('copy-a-b', 'e2e: mini copy (a, b)', 'e2e-copy', 'guest', 'NO TESTS', 0, '2026-11-18T11:00:00Z', '2026-11-18T11:10:00Z'),
+  ], {
+    env: { 'copy-a-b': { J_COPY_GROUPS: 'a, b', J_E2E_ARGS: '$-g\\ x' } },
+    steps: { 'copy-a-b': [...STEPS, ['copy1', '0', '240', 'gate-copy.sh run 1 (e2e:a)'], ['copy2', '0', '60', 'gate-copy.sh run 2 (e2e:b)'], ['verdict', '0', '0', "the copies' verdict"]] },
+    log: { 'copy-a-b': [
+      '11:01:00Z manual-gate: ##[step] gate-copy.sh run 1 (e2e:a)', '  2 passed (3.5m)', '11:05:00Z manual-gate: ##[step-end] gate-copy.sh run 1 (e2e:a): exit 0',
+      '11:05:01Z manual-gate: ##[step] gate-copy.sh run 2 (e2e:b)', '11:06:01Z manual-gate: ##[step-end] gate-copy.sh run 2 (e2e:b): exit 0',
+    ] },
+  });
+  await quiet(() => importRuns({ runsDir: runs, root: store, alias: ALIAS }));
+  const lines = linesOf(store);
+  const of = (run, job) => lines.find((l) => l.run === run && l.job_id === job);
+  const pick = (l) => [l.conclusion, l.minutes, l.started, l.completed, l.lane];
+  assert.deepEqual(pick(of(id, 'copy-a-b-c:a')), ['success', 5, '2026-11-18T10:02:00Z', '2026-11-18T10:07:00Z', 'manual-guest']);
+  assert.deepEqual(pick(of(id, 'copy-a-b-c:b')), [null, 0, '2026-11-18T10:07:01Z', null, 'manual-guest'], 'started, never completed: incomplete, not the bundle\'s failure');
+  assert.deepEqual(pick(of(id, 'copy-a-b-c:c')), [null, 0, null, null, null], 'never started: no lane, as a job no runner took');
+  assert.deepEqual(pick(of(id2, 'copy-a-b:a')), ['success', 4, '2026-11-18T11:01:00Z', '2026-11-18T11:05:00Z', 'manual-guest']);
+  assert.deepEqual(pick(of(id2, 'copy-a-b:b')), [null, 1, '2026-11-18T11:05:01Z', '2026-11-18T11:06:01Z', 'manual-guest'], 'exit 0 and no tests: no conclusion, its minutes kept');
+  const results = Object.fromEntries(gateAttempts(lines).map((a) => [`${a.run} ${a.gate}`, a.result]));
+  assert.deepEqual([results[`${id} e2e:b`], results[`${id} e2e:c`], results[`${id2} e2e:b`]], ['incomplete', 'incomplete', 'incomplete']);
+});
+
+test('a re-import without the runs\' trees keeps the tree keys an import with them computed', async (t) => {
+  const runs = temp(t);
+  const store = temp(t);
+  redRun(runs);
+  const entry = { ...JSON.parse(readFileSync(new URL('../../history/repos.json', import.meta.url), 'utf8')).find((r) => r.alias === ALIAS) };
+  // an import that reads the trees (a clone stood in by its key function), then one that does not
+  await quiet(() => importRuns({ runsDir: runs, root: store, alias: ALIAS, entry, treeKey: () => 'KEY' }));
+  assert.ok(linesOf(store).every((l) => l.tree_key === 'KEY'));
+  const again = await quiet(() => importRuns({ runsDir: runs, root: store, alias: ALIAS, entry }));
+  assert.equal(again.result.written, 0);
+  assert.ok(linesOf(store).every((l) => l.tree_key === 'KEY'));
 });
 
 test("a job's environment file: the last assignment of a key, single quotes undone, any other value kept as written", () => {

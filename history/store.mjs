@@ -7,12 +7,28 @@
 // A pass reads the run lines of the last 35 days (the previous-run search reaches a re-run or a resumed change weeks
 // back; a line's memory is its counts and failed cases, not its membership); writes are staged and flushed at the
 // end, each file only when its bytes change.
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { isSlim, jobSlug, lineKey, mergeLines, slimLine } from './record.mjs';
 
 const DAY = /^(\d{4}-\d\d-\d\d)\.jsonl$/;
+
+// Every store file is written whole or not at all: to a temporary beside it, then renamed into place. The workflow
+// commits and pushes the store after a batch that ended with errors, so a write cut short (a full disk, an I/O error)
+// must never leave a truncated file to publish. `io.write` is the one write, replaced by tests.
+export const io = { write: writeFileSync };
+export function writeAtomic(path, data) {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = join(dirname(path), `.${basename(path)}.${process.pid}.tmp`);
+  try {
+    io.write(tmp, data);
+    renameSync(tmp, path);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
+}
 export const dayOf = (iso) => iso.slice(0, 10);
 export const RECENT_DAYS = 35; // the gate ledger's window: reruns are possible for 30 days
 
@@ -53,10 +69,9 @@ export function rewriteRecord(root, alias, now = Date.now()) {
     counts.days += 1;
     counts.lines += out.length;
     const text = jsonl(out);
-    if (readFileSync(path, 'utf8') !== text) writeFileSync(path, text);
+    if (readFileSync(path, 'utf8') !== text) writeAtomic(path, text);
   }
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(markPath, `${JSON.stringify({ v: 1, slim: new Date(now).toISOString() })}\n`);
+  writeAtomic(markPath, `${JSON.stringify({ v: 1, slim: new Date(now).toISOString() })}\n`);
   return counts;
 }
 
@@ -119,8 +134,7 @@ export function openStore(root, alias, { now = Date.now() } = {}) {
       let written = 0;
       const write = (path, bytes) => {
         if (existsSync(path) && Buffer.compare(readFileSync(path), bytes) === 0) return;
-        mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(path, bytes);
+        writeAtomic(path, bytes);
         written += 1;
       };
       const bases = [...dirty].filter((p) => p.startsWith(join(dir, 'base')));
@@ -201,8 +215,7 @@ export function openLedger(root, alias) {
       let written = 0;
       const write = (path, text) => {
         if (existsSync(path) && readFileSync(path, 'utf8') === text) return;
-        mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(path, text);
+        writeAtomic(path, text);
         written += 1;
       };
       for (const day of [...staged.keys()].sort()) {
@@ -218,21 +231,39 @@ export function openLedger(root, alias) {
   return ledger;
 }
 
-// The hand-run gate's job lines, each `{ day, line }` filed on its day, merged into jobs-manual/<day>.jsonl by (run,
-// attempt, job id): a line read again replaces its own. → files written.
+// The hand-run gate's job lines, each `{ day, line }` filed on its day, merged into jobs-manual/ by (run, attempt, job
+// id): a line read again replaces its own wherever it was filed (a job that completed past midnight moves to the next
+// day). A tree key the new line could not compute (an import without the runs' trees) is kept from the line it
+// replaces when both name the same tree, so a re-import never erases one. → files written.
 export function writeManualLines(root, alias, entries) {
   const dir = join(root, alias, 'jobs-manual');
-  const byDay = new Map();
-  for (const { day, line } of entries) byDay.set(day, [...(byDay.get(day) ?? []), line]);
+  const files = new Map(daysIn(dir).map((day) => [day, readDayIn(dir, day)]));
+  const filed = new Map(); // key → { day, line } as held
+  for (const [day, lines] of files) for (const l of lines) filed.set(jobKey(l), { day, line: l });
+  const changed = new Set();
+  for (const { day, line } of entries) {
+    const held = filed.get(jobKey(line));
+    const next = held && line.tree_key === null && held.line.tree_key !== null && held.line.tree === line.tree ? { ...line, tree_key: held.line.tree_key } : line;
+    if (held) {
+      files.set(held.day, files.get(held.day).filter((l) => jobKey(l) !== jobKey(line)));
+      changed.add(held.day);
+    }
+    files.set(day, [...(files.get(day) ?? []), next]);
+    changed.add(day);
+    filed.set(jobKey(line), { day, line: next });
+  }
   let written = 0;
-  for (const [day, lines] of [...byDay].sort(([a], [b]) => by(a, b))) {
-    const merged = new Map(readDayIn(dir, day).map((l) => [jobKey(l), l]));
-    for (const l of lines) merged.set(jobKey(l), l);
+  for (const day of [...changed].sort()) {
     const path = join(dir, `${day}.jsonl`);
-    const text = jsonl([...merged.values()].sort(jobOrder));
+    const lines = files.get(day);
+    if (lines.length === 0) {
+      rmSync(path, { force: true });
+      written += 1;
+      continue;
+    }
+    const text = jsonl([...lines].sort(jobOrder));
     if (existsSync(path) && readFileSync(path, 'utf8') === text) continue;
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(path, text);
+    writeAtomic(path, text);
     written += 1;
   }
   return written;

@@ -5,12 +5,14 @@
 // store's jobs-manual/<day>.jsonl, the collector's job line in shape:
 //   node history/manual-gate.mjs --runs <dir> --store <dir> [--repo <alias>] [--git-dir <dir>]
 // run on the MacBook, then pushed to the store (fetch and replay on a non-fast-forward). `--git-dir`: a clone holding
-// the runs' trees, for the tree key under the repository's path policy; without it a line has no tree key.
+// the runs' trees, for the tree key under the repository's path policy; without it a new line has no tree key, and a
+// line imported again keeps the one it had.
 //   - `workflow: "manual-gate"`, `run` the directory's name, attempt 1, `job_id` the summary row's id; the run's build
 //     is kind `control`.
-//   - A mini copy bundling several groups is one line per group, `job_id` `<row id>:<group>`, each with its own exit
-//     and its segment's minutes and times where the job's log has them (the runner's step markers, nothing else of
-//     the log), else the job's end and, on the first group only, its minutes.
+//   - A mini copy bundling several groups is one line per group, `job_id` `<row id>:<group>`, each ended by its own
+//     evidence only (its slot's steps.tsv row, the step markers and test counts of its segment): a group that never
+//     completed, or ran no tests, has no conclusion; only a failure in the bundle's shared setup, before any group
+//     ran, is every group's, with the job's minutes on the first.
 //   - Scope `narrowed` under a test filter (`--e2e-args`) or a command in the group script's place (`--e2e-script`),
 //     else `full`; the scope key holds the filter, the environment, the peer, the live flag, the place (host or
 //     guest) and whether the job is a mini copy, so a mini copy is an attempt of its own and never joins its direct job.
@@ -33,6 +35,7 @@ const NEVER_RAN = new Set([3, 8, 9]);
 const KINDS = { 4: 'runner-lost', 5: 'runner-lost', 6: 'runner-lost', 124: 'time-limit' };
 const SEGMENT = /^(\d\d:\d\d:\d\d)Z manual-gate: ##\[step(-end)?\] gate-copy\.sh run \d+ \(e2e:([^)]+)\)(?:: exit (\d+))?\r?$/;
 const NAME = /^(.+?)(?: \((mini copy|peer [0-9a-f]+)\))?$/;
+const COUNT = /^ +(\d+) (passed|failed|flaky|skipped|interrupted|did not run)\b/;
 
 // A job's environment file (`export K=v` lines): each key's last value, a single-quoted one unquoted ('\'' inside),
 // any other kept as written (printf %q's escapes), which is enough to compare and hash it; and how often each key was
@@ -64,18 +67,32 @@ export function readRun(dir) {
   const jobs = summary.rows.map((r) => {
     const logs = join(mac, 'mini-run', 'logs', r.id);
     const steps = read(join(logs, 'steps.tsv')).split('\n').filter(Boolean).map((l) => {
-      const [id, status, , name] = l.split('\t');
-      return { id, status, name };
+      const [id, status, seconds, name] = l.split('\t');
+      return { id, status, seconds, name };
     });
+    // A bundled copy's groups, each from the runner's step markers around its gate-copy.sh slot and the test runner's
+    // count lines between them (lib/summary.mjs's), nothing else of the log.
     const segments = new Map();
     if (r.kind === 'e2e-copy') {
-      for (const l of read(join(logs, 'job.log')).split('\n')) {
-        const m = SEGMENT.exec(l);
-        if (!m) continue;
-        const seg = segments.get(m[3]) ?? { start: null, end: null, exit: null };
-        if (m[2]) Object.assign(seg, { end: m[1], exit: m[4] ?? null });
-        else seg.start = m[1];
-        segments.set(m[3], seg);
+      let open = null;
+      for (const raw of read(join(logs, 'job.log')).split('\n')) {
+        const m = SEGMENT.exec(raw);
+        if (m) {
+          const seg = segments.get(m[3]) ?? { start: null, end: null, passed: 0, failed: 0 };
+          if (m[2]) {
+            seg.end = m[1];
+            open = null;
+          } else {
+            seg.start = m[1];
+            open = seg;
+          }
+          segments.set(m[3], seg);
+          continue;
+        }
+        const count = open && COUNT.exec(raw.replace(/^\S+ manual-gate: /, ''));
+        if (!count) continue;
+        if (count[2] === 'passed') open.passed += Number(count[1]);
+        if (count[2] === 'failed' || count[2] === 'interrupted') open.failed += 1;
       }
     }
     return { row: r, env: parseEnv(read(join(mac, 'mini-run', 'jobs', `${r.id}.env`))), steps, segments };
@@ -111,6 +128,27 @@ function endOf({ row, steps }) {
   if (good) return { conclusion: 'success', ...none, ran };
   if (row.status === 0) return { conclusion: null, ...none, ran }; // exited 0 and ran no tests
   return { conclusion: 'failure', ...stopOf(steps), annotations: KINDS[row.status] ? [KINDS[row.status]] : [], ran };
+}
+
+// One group of a bundled copy, by its own evidence only: its slot's row in steps.tsv (written before the log's end
+// marker) and the test runner's counts inside its segment. A slot that exited 0 with no test passed, or with one failed,
+// ran no tests (summary.mjs's NO TESTS): no conclusion. A group whose slot has no row never completed: no conclusion,
+// and a lane only when its slot started.
+function groupEnd(job, group) {
+  const { row, steps, segments } = job;
+  const seg = segments.get(group) ?? null;
+  const slot = steps.find((s) => /^copy\d+$/.test(s.id) && s.name.endsWith(`(e2e:${group})`));
+  const started = dated(seg?.start, row.start);
+  const unfinished = { conclusion: null, failed_step: null, phase: null, annotations: [], ran: started !== null };
+  if (!slot) return { end: unfinished, started, completed: null, minutes: 0 };
+  const seconds = Number(slot.seconds) || 0;
+  const completed = dated(seg?.end, row.start) ?? (started && new Date(Date.parse(started) + seconds * 1000).toISOString().replace('.000Z', 'Z'));
+  const status = Number(slot.status);
+  let own;
+  if (status !== 0) own = { conclusion: 'failure', failed_step: slot.name, phase: 'test', annotations: KINDS[status] ? [KINDS[status]] : [], ran: true };
+  else if (seg && seg.passed > 0 && seg.failed === 0) own = { conclusion: 'success', failed_step: null, phase: null, annotations: [], ran: true };
+  else own = { ...unfinished, ran: true };
+  return { end: own, started, completed, minutes: round(seconds / 60) };
 }
 
 // A run (readRun) → its job lines, each with the day it is filed on: { day, line }. `treeKey(tree)`: the tree's key
@@ -152,17 +190,13 @@ export function runLines(id, run, entry, treeKey = () => null) {
     if (row.kind === 'build') {
       add(job, { ...own, job_id: row.id, gate: null, variant: null });
     } else if (row.kind === 'e2e-copy') {
-      env.get('J_COPY_GROUPS').split(/,\s*/).filter(Boolean).forEach((group, i) => {
-        const seg = segments.get(group);
-        const step = job.steps.find((s) => /^copy/.test(s.id) && s.name.endsWith(`(e2e:${group})`));
-        const piece = seg?.exit != null
-          ? {
-              end: seg.exit === '0' ? { ...end, conclusion: 'success', failed_step: null, phase: null, annotations: [] } : { ...end, conclusion: 'failure', failed_step: step?.name ?? null, phase: 'test', annotations: [] },
-              started: dated(seg.start, row.start), completed: dated(seg.end, row.start),
-            }
-          : { end, started: own.started, completed: own.completed };
-        const minutes = seg?.exit != null ? minutesBetween(piece.started, piece.completed) : i === 0 ? own.minutes : 0;
-        add(job, { ...piece, minutes, job_id: `${row.id}:${group}`, gate: `e2e:${group}`, variant: 'mini-copy' });
+      const groups = env.get('J_COPY_GROUPS').split(/,\s*/).filter(Boolean);
+      const slots = job.steps.filter((s) => /^copy\d+$/.test(s.id));
+      // The one case a group takes the bundle's end: the job failed in its shared setup before any group's slot ran.
+      const shared = end.conclusion === 'failure' && end.phase === 'setup' && slots.length === 0;
+      groups.forEach((group, i) => {
+        const piece = shared ? { ...own, minutes: i === 0 ? own.minutes : 0 } : groupEnd(job, group);
+        add(job, { ...piece, job_id: `${row.id}:${group}`, gate: `e2e:${group}`, variant: 'mini-copy' });
       });
     } else {
       const [, gate, suffix] = NAME.exec(row.name);
@@ -173,11 +207,13 @@ export function runLines(id, run, entry, treeKey = () => null) {
 }
 
 // Every run under `runsDir` into the store. → { runs, unrecorded, lines, written }.
-export function importRuns({ runsDir, root, alias, gitDir = null, entry = null }) {
+// `treeKey(tree)`: the tree's key, read from `gitDir` by default (null without one, or for a tree it lacks); a line
+// imported again with no key keeps the key it had for the same tree (store.mjs writeManualLines).
+export function importRuns({ runsDir, root, alias, gitDir = null, entry = null, treeKey = null }) {
   entry ??= JSON.parse(readFileSync(new URL('./repos.json', import.meta.url), 'utf8')).find((r) => r.alias === alias);
   if (!entry) throw new Error(`history: ${alias} is not in history/repos.json`);
   const mirror = gitDir && openMirror({ dir: gitDir });
-  const treeKey = (tree) => {
+  treeKey ??= (tree) => {
     if (!mirror) return null;
     try {
       return mirror.treeKey(tree, entry.path_policy);
