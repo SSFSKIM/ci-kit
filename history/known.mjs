@@ -1,8 +1,8 @@
 // Known entries (gate ledger spec, "Known entries"): `<alias>/known.json` in the store, a list of recorded reasons.
-// Read and matched here, and written here for `ci-gate known add` (M5). An entry without `keep` records a failure someone decided
-// to ship with; one with `keep` records that a gate stays whatever it has caught, and is read only by the report's
-// nominations. An entry is in force from its `since` through its `review_by`, so an expired one is never shown as in
-// force.
+// Read and matched here, and written for `ci-gate known add` (M5). An entry without `keep` records a failure someone
+// decided to ship with; one with `keep` records that a gate stays whatever it has caught, and is read only by the
+// report's nominations. An entry is in force from its `since` through its `review_by`, so an expired one is never shown
+// as in force.
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
