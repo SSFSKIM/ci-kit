@@ -973,6 +973,17 @@ inputs M0 added.
   version; Claude Code versions it by main's commit (`docs/adopting.md`). Date/Author: 2026-11-20, the executing
   session.
 
+- Decision: M5's task review folded (2026-11-20, 6cb8c3f). The context never waits: the lookup starts at an
+  invocation's first failure, before that FAIL's log fetch, on a client of its own (aborted once the watch has its
+  result; its answers never reach the pacer, the stats or the debug log), is skipped when the pacer's budget is low,
+  and a FAIL line gets the context lines only if the lookup has settled when it prints (a later FAIL of the same call
+  gets them otherwise). Context-only setup sits inside the guarded lazy path; a throw or a rejection prints nothing.
+  Every record field a context line prints is validated and rendered as one printable line, and `base:` needs a
+  valid commit, time and run. `known add` writes only to SSFSKIM/ci-kit-sandbox (any branch), refuses an empty
+  `CI_KIT_STORE`, an option token in a value position, and an id or gate that is not one printable word; a 422 is
+  retried only for the create race. Invalid, future and stale dates are three diagnostics. Date/Author: 2026-11-20,
+  the executing session.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
