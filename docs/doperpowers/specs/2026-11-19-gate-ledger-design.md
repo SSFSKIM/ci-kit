@@ -721,6 +721,19 @@ inputs M0 added.
   closed in the batch. Until merge the sandbox passes the ledger's settings as environment, which `main`'s collector
   ignores. Date/Author: 2026-11-20, the executing session (M1's executor; folded by the controller).
 
+- Decision: M1's task review folded (2026-11-20). The call budget is checked before every REST request (pagination,
+  retries and the per-test pass included); reaching it is not an error but `more` with a wait, and a real
+  rate-limit answer stops the pass resumably. A gate attempt is `succeeded` only with one shard count n and every
+  shard 1..n. A gate attempt all of whose jobs are copies carries `copied: true` and is not an execution: no cause,
+  observation, attempt count or later green reads it. Every gate attempt carries `available`, the completion of its
+  latest fresh job; a copy line is filed on that day, so any window holding an attempt's fresh jobs folds it whole.
+  A job of a first attempt is never a copy (GitHub stamped jobs completed before created near the 2026-11-01
+  fall-back hour). A summary job's line carries `role: "summary"`: it counts toward the result, not toward minutes
+  or lanes. Platform kinds are matched on the platform's own messages only (exact annotation text; the runner's
+  `##[error]` lines in a log's tail), and an ambiguous line is left unclassified. Errors print the request's method
+  and path, never a response body, git's stderr or an exception's message. The per-test sweep marks a run swept
+  only after a batch that reached it cleanly. Date/Author: 2026-11-20, the executing session.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
