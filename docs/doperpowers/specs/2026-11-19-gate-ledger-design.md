@@ -131,7 +131,7 @@ token; a run made with `gh`'s token proves nothing about the daily run.
 
 1. **Job lines exist and are right.** After a collection the store holds `SSFSKIM/MAWS/jobs/2026-11-19.jsonl`
    with one line per job of run 44486328066: gates `static`, `unit` (four shards), `probes`, `e2e:desk-web`, lane
-   `pool-gce`, conclusion `success`, basis `exact`, and `e2e:desk-web` at 7.6 minutes (08:18:10Z to 08:25:45Z).
+   `pool-gce` for the gates' own jobs (`plan` and the `static` summary job run on `hosted-linux`), conclusion `success`, basis `exact`, and `e2e:desk-web` at 7.6 minutes (08:18:10Z to 08:25:45Z).
    All five repositories have job files for every day from 2026-10-22 on which they ran a gate.
 2. **A gate attempt is not greener than its worst shard.** MAWS run 39962530337, attempt 1: `unit 2/4` failed and
    the other three shards passed after it. The gate attempt `unit` is `failed`; nothing derived from it (cause,
@@ -645,6 +645,17 @@ inputs M0 added.
   runners (MAWS is public, so the billing lock does not stop them).
   Evidence: the runs' logs, saved under `~/.local/share/ci-kit/gate-ledger/`; M1's report.
 
+- Observation: M1's build and backfill. A `pull_request` run's listing almost never names its pull request (ci-kit:
+  275 such runs in 35 days, none with a `pull_requests` entry), so its change falls back to `branch:<head_branch>`.
+  The sandbox run's `GITHUB_TOKEN` reports 5,000 calls an hour on this account, not the documented 1,000; the
+  collector still paces it at 800. The backfill took about six hours of collection (about 1.8 calls an attempt in
+  MAWS, plus one relisting per dispatch), drained by run 44643104737; the daily-shaped run 44649983576 then made 199
+  App and 82 `GITHUB_TOKEN` calls. 29 transient failures (502s on job listings, two network errors) stayed queued
+  and closed on a later batch. Lines at the end: MAWS 38,419, manim-master 8,216, ci-kit 1,582, doperpowers 13,668,
+  cua 6,603; every repository covers each of the 29 days from 10-22. The retired Hetzner pool's runners appear in
+  October (lane `pool-hetzner`); 877 MAWS jobs cancelled before any runner have no lane and 0 minutes.
+  Evidence: M1's report, part 3; store commit 88f04d1.
+
 ## Decision Log
 
 - Decision: verification. The spec is reviewed by `doperpowers:adversarial-reviewer` for design and buildability
@@ -693,6 +704,22 @@ inputs M0 added.
   is any of the four activity types that move a branch. Until this branch merges, the daily scheduled run runs
   ci-kit `main`, so the ledger's collections in this execution are dispatched with `ci-kit-ref=gate-ledger`.
   Date/Author: 2026-11-19, the executing session.
+
+- Decision: M1's gaps, as built. The ledger's pass is `history/ledger.mjs`, called per repository by
+  `collect.mjs`; its store is `openLedger(root, alias)` in `store.mjs` (`jobLines(from, to)`, `covered(day)`), apart
+  from the per-test `openStore`, which loads every per-test line. A job line also carries `tree_key` (equal to
+  `tree` without a path policy; `null` on `pr-merge`), so `gateAttempts` stays pure over lines. Lanes come from the
+  runner's name, then a hosted label; a job that never got a runner has no lane and 0 minutes; `pool-hetzner` names
+  the retired pool. MAWS's names: `plan` and `e2e-build*` are `control`; `static` is its summary job and its parts
+  together; a `(mini copy)`, `(mini overflow)` or `(EC2 overflow)` job is its gate with the variant in the scope
+  key; Actions' bundled mini copy is one gate `e2e:a+b`; a name GitHub left unexpanded is `control`. A
+  `workflow_dispatch` run of MAWS is scope `unknown` (its inputs are not in the record: `opaque_events`). MAWS's
+  semantic trailers: `Runner`, `Class1a`, `Lane`, `Hosted-Route`, `Selection`, `Affected`, `DefaultBeside`, `Live`,
+  `Peer`, `MiniCopy`; the ci-kit repositories have none. Budget: per token kind, a pass cap (App 1,500, Actions 600)
+  and an hour cap (2,000, 800) counted in `attempts.json` across batches; a dispatch's `calls` input lifts the pass
+  cap for a backfill. The per-test pass takes its jobs from the ledger's shared fetch and sweeps the runs the ledger
+  closed in the batch. Until merge the sandbox passes the ledger's settings as environment, which `main`'s collector
+  ignores. Date/Author: 2026-11-20, the executing session (M1's executor; folded by the controller).
 
 ## Outcomes & Retrospective
 
