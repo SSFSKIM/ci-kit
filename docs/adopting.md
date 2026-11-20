@@ -523,7 +523,8 @@ claude plugin install ci-kit@doperpowers
 - **A note at session start.** In a worktree whose repo has `.github/ci-kit.yml`, the session (and every subagent) is
   told to verify commits with `ci-gate` rather than running the gates on the machine, what its output means (the
   context lines after a `FAIL` included), and how to merge where the default branch requires `ci / verdict`
-  (`gh pr merge <n> --auto --merge --match-head-commit <sha>`; past a red gate, `--admin --body "Ship-with: <reason>"`).
+  (`gh pr merge <n> --auto --merge --match-head-commit <sha>`; past a red gate, which bypasses a required check and
+  so needs the owner's yes for that merge, `--admin --body "Ship-with: <reason>"`).
   In any other repo the hook prints nothing. A repo needs no CLAUDE.md line for this.
 - **`ci-kit:adopt`**, the skill a session uses when asked to set up CI: `ci-gate init`, judging the draft, a GREEN
   `ci-gate`, the PR, and for a private repo the steps only the owner can take.

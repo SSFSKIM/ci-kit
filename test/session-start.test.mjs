@@ -55,7 +55,7 @@ test('in an adopted repo, its subdirectory and its worktree: the ci-gate note, n
     assert.match(r.stdout, /context for your judgment, not a verdict/);
     assert.match(r.stdout, /`ci-gate status`/);
     assert.match(r.stdout, /`gh pr merge <n> --auto --merge --match-head-commit <sha>`/);
-    assert.match(r.stdout, /`--admin --body "Ship-with: <reason>"`/);
+    assert.match(r.stdout, /needs the owner's yes for that merge; given it, `--admin --body "Ship-with: <reason>"` records the reason/);
   }
 });
 
