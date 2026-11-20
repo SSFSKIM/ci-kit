@@ -47,8 +47,9 @@ async function newestReadyAmi(ec2) {
     .sort((a, b) => Date.parse(b.CreationDate) - Date.parse(a.CreationDate))[0];
 }
 
-// true continues the same execution as a normal bake; false is a successful no-op. Every configured account is
-// checked, even one disabled for job placement: bakeProviders still bakes those accounts.
+// Returns the stale providers' names ('gce', 'ec2/<account>'): the same execution bakes exactly those, so one
+// provider's failing bake does not rebuild the other's current image every hour (#227). [] is a successful no-op.
+// Every configured account is checked, even one disabled for job placement: bakeProviders still bakes those.
 export async function checkStale({ cfg, gce, gh, accounts, token, execution, job,
   listExecutions = job => listBakeExecutions({ project: cfg.project, job, token }),
   awsFor = account => createAws({ roleArn: account.roles.bake, region: account.region, log }), log = console.log,
@@ -60,7 +61,7 @@ export async function checkStale({ cfg, gce, gh, accounts, token, execution, job
   const running = executions.filter(e => !e.name.endsWith(`/jobs/${self}`) && !finished(e));
   if (running.length) {
     log(`bake: skipped; ${running.map(e => e.name).join(', ')} still running`);
-    return false;
+    return [];
   }
   const repos = await resolveRepos({ gh, repos: cfg.repos });
   const gceImage = newestReadyImage(await gce.images('labels.ci-kit=gce-image'), cfg.image_family);
@@ -69,11 +70,11 @@ export async function checkStale({ cfg, gce, gh, accounts, token, execution, job
     const image = await newestReadyAmi(awsFor(account).ec2);
     images.push({ provider: `ec2/${account.account}`, image, hashes: image && tagsOf(image), key: repo => `ci-kit-setup:${repo}` });
   }
-  let stale = false;
+  const stale = new Set();
   for (const { provider, image, hashes, key } of images) {
     if (!image) {
       log(`bake: stale ${provider}: no ready image`);
-      stale = true;
+      stale.add(provider);
       continue;
     }
     for (const { repo } of cfg.repos) {
@@ -81,9 +82,9 @@ export async function checkStale({ cfg, gce, gh, accounts, token, execution, job
       const actual = hashes?.[key(repo)] ?? 'none';
       if (actual === expected) continue;
       log(`bake: stale ${repo} on ${provider}: ${actual} -> ${expected}`);
-      stale = true;
+      stale.add(provider);
     }
   }
-  if (!stale) log('bake: images current');
-  return stale;
+  if (!stale.size) log('bake: images current');
+  return [...stale];
 }

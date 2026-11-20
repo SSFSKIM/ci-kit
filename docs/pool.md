@@ -726,7 +726,7 @@ smoke, not a job's hash comparison: retain both the console and Actions evidence
 
 **Hourly declaration check (GCE and EC2).** `ci-kit-bake-check` runs the same source as the bake, with
 `CI_KIT_BAKE_IF_STALE=1`, as `ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com`. Its timeout is the bake's
-(180 minutes plus 150 per configured EC2 account). `ci-kit-bake-check-hourly` invokes it at minute 23 of every hour,
+(180 minutes plus 165 per configured EC2 account). `ci-kit-bake-check-hourly` invokes it at minute 23 of every hour,
 UTC. The weekly bake and manual `ci-kit-bake` executions remain unconditional; their job and weekly cadence are unchanged.
 
 Before comparing anything, the check lists **both** jobs' executions, excluding itself. A pending/running execution
@@ -743,8 +743,12 @@ configured EC2 account (disabled accounts still receive bakes). A missing ready 
 failures are errors, not missing declarations. All equal logs `bake: images current` and exits without resolving the
 full bake manifest or making a builder. Otherwise each changed repository is logged as
 `bake: stale <owner/repo> on <gce|ec2/account>: <image hash> -> <default-branch hash>` (a missing provider image logs
-`bake: stale <provider>: no ready image`), then this same execution continues through the ordinary bake. The bake
-resolves its inputs afresh, once for both providers; a declaration merged during the check is therefore included.
+`bake: stale <provider>: no ready image`), then this same execution continues through the ordinary bake **for the
+stale providers only** (`bake <run>: kit ..., only the stale ec2/<account>`): a provider whose image is current is
+not rebuilt, so one provider's failing bake neither rotates the other's good image every hour nor waits for it
+(#227). The two providers' images can then differ in kit commit and Node patch version until the weekly bake, as
+they already do after any bake in which one provider failed. The bake resolves its inputs afresh, once for the
+providers it bakes; a declaration merged during the check is therefore included.
 
 Deploy **from merged main**, by the coordinator; no `v1` move is needed for the scheduler path:
 
@@ -772,9 +776,10 @@ Proof, under the bake's own identity (the check runs in Cloud Run, never `node .
      --project=ssfskim-ci-kit --freshness=2h --order=asc --format='value(textPayload)'
    ```
    Expect `bake: stale SSFSKIM/ci-kit-sandbox on gce: <old> -> <new>` and the EC2 equivalent, then
-   `bake <run>: kit ...`, the normal smoke/real-job records, and
-   `done: every configured provider passed smoke and its real sandbox job`. Both newest ready images must carry
-   `<new>` (not just a successful execution):
+   `bake <run>: kit ..., only the stale gce, ec2/<account>`, the normal smoke/real-job records, and
+   `done: gce, ec2/<account> passed smoke and its real sandbox job` (the check names the providers it baked; a
+   provider it found current is absent from both lines and its newest image must be the one it had before). Both
+   newest ready images must carry `<new>` (not just a successful execution):
    ```
    gcloud compute images list --project=ssfskim-ci-kit \
      --filter='family=ci-kit-runner AND status=READY AND labels.ci-kit=gce-image AND labels.ci-kit-ready=true' \

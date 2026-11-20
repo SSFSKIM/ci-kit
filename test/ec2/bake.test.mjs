@@ -45,6 +45,21 @@ test('provider stages share one resolution, including after a provider fails', a
   assert.deepEqual(inputs, [pins, actual, actual]);
 });
 
+test('a stale check bakes only the providers it names; the others are not called', async () => {
+  for (const [only, called] of [[['ec2/b'], ['b']], [['gce'], ['gce']], [['gce', 'ec2/a'], ['gce', 'a']], [undefined, ['gce', 'a', 'b']]]) {
+    const calls = [], inputs = [];
+    const results = await manifestApi.bakeProviders({
+      resolve: async () => pins, only,
+      gce: async (m) => { calls.push('gce'); inputs.push(m); return { manifest: built }; },
+      accounts: [{ account: 'a' }, { account: 'b' }], ec2: async (account, m) => { calls.push(account.account); inputs.push(m); return { manifest: m }; },
+    });
+    assert.deepEqual(calls, called);
+    assert.equal(results.length, called.length);
+    // Without a GCE stage the EC2 builders take the resolved inputs directly.
+    assert.deepEqual(inputs[0], pins);
+  }
+});
+
 // Fake only the external SDK boundary; the bake performs its own polling, promotion and cleanup.
 async function ec2Fixture({ smoke = 'ok', job = 'success', applyOk = true, lostLaunch = false, refuseFirstSmoke = false, reportMissing = false, snapshotBytes = 12 * 2**30, promote = true, otherImages = [], lostSnapshot = false, lostRegistration = false, unseenReads = 0, refuse = () => undefined, builderReport = {} } = {}) {
   const api = await import('../../ec2/bake/bake.mjs');

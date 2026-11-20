@@ -43,7 +43,7 @@ function fixture({ config = declaration, script = Buffer.from('echo ok\n'), gceI
 
 test('current images skip, even when a newer image is unready; disabled EC2 accounts are still checked', async () => {
   const f = fixture({ gceImages: [image('old', { creationTimestamp: '2026-10-24T00:00:00Z' }), image(), image('bad', { labels: { 'ci-kit': 'gce-image', 'ci-kit-ready': 'false' }, creationTimestamp: '2026-10-26T00:00:00Z' })], amis: [ami('old', { CreationDate: '2026-10-24T00:00:00Z' }), ami(), ami('bad', { State: 'pending', CreationDate: '2026-10-26T00:00:00Z' })] });
-  assert.equal(await checkStale(f.options), false);
+  assert.deepEqual(await checkStale(f.options), []);
   assert.deepEqual(f.logs, ['bake: images current']);
   assert.deepEqual(f.calls.slice(0, 2), [['executions', 'ci-kit-bake'], ['executions', 'ci-kit-bake-check']]);
   const awsCall = f.calls.find(c => c[0] === 'aws');
@@ -58,13 +58,13 @@ test('current images skip, even when a newer image is unready; disabled EC2 acco
 for (const provider of ['gce', 'ec2']) {
   test(`${provider}: a different hash continues to the bake; an older matching image cannot hide it`, async () => {
     const f = fixture(provider === 'gce' ? { gceImages: [image(hash, { creationTimestamp: '2026-10-24T00:00:00Z' }), image('outdated')] } : { amis: [ami(hash, { CreationDate: '2026-10-24T00:00:00Z' }), ami('outdated')] });
-    assert.equal(await checkStale(f.options), true);
+    assert.deepEqual(await checkStale(f.options), [provider === 'gce' ? 'gce' : 'ec2/123'], 'only the stale provider is named');
     assert.match(f.logs.join('\n'), new RegExp(`bake: stale ${repo} .*outdated.*${hash}`));
     assert.doesNotMatch(f.logs.join('\n'), /images current/);
   });
   test(`${provider}: no ready image is stale, including when every repository has no declaration`, async () => {
     const f = fixture({ configError: 404, gceImages: [image('none')], amis: [ami('none')], ...(provider === 'gce' ? { gceImages: [] } : { amis: [] }) });
-    assert.equal(await checkStale(f.options), true);
+    assert.deepEqual(await checkStale(f.options), [provider === 'gce' ? 'gce' : 'ec2/123']);
     assert.match(f.logs.join('\n'), /no ready image/);
   });
 }
@@ -72,9 +72,9 @@ for (const provider of ['gce', 'ec2']) {
 test('removed and absent declarations match only an image without that repository hash', async () => {
   for (const config of [{ configError: 404 }, { config: 'version: 1\ngates:\n  - name: test\n    run: npm test\n' }]) {
     const current = fixture({ ...config, gceImages: [image('none')], amis: [ami('none')] });
-    assert.equal(await checkStale(current.options), false);
+    assert.deepEqual(await checkStale(current.options), []);
     const removed = fixture({ ...config });
-    assert.equal(await checkStale(removed.options), true);
+    assert.deepEqual(await checkStale(removed.options), ['gce', 'ec2/123']);
     assert.match(removed.logs.join('\n'), /-> none/);
   }
 });
@@ -92,14 +92,14 @@ test('script bytes, install, node and pnpm change freshness, but package order a
     [config.replace('pnpm: true', 'pnpm: false'), script, true],
   ]) {
     const f = fixture({ config: change, script: bytes, gceImages: [image(expected)], amis: [ami(expected)] });
-    assert.equal(await checkStale(f.options), stale);
+    assert.deepEqual(await checkStale(f.options), stale ? ['gce', 'ec2/123'] : []);
   }
 });
 
 for (const job of ['ci-kit-bake', 'ci-kit-bake-check']) {
   test(`another ${job} execution stops before reading declarations or images, including pending executions`, async () => {
     const f = fixture({ executions: [{ name: self }, { name: `${parent}/${job}/executions/other`, runningCount: 0, reconciling: true }] });
-    assert.equal(await checkStale(f.options), false);
+    assert.deepEqual(await checkStale(f.options), []);
     assert.ok(f.calls.every(c => c[0] === 'executions'));
     assert.match(f.logs.join('\n'), /bake: skipped; .*other.*still running/);
   });
@@ -111,7 +111,7 @@ test('finished successes, failures and cancellations do not block; our own runni
     completed(`${parent}/ci-kit-bake/executions/failed`, 'CONDITION_FAILED'),
     { ...completed(`${parent}/ci-kit-bake-check/executions/cancelled`, 'CONDITION_FAILED'), completionTime: undefined, cancelledCount: 1 },
   ] });
-  assert.equal(await checkStale(f.options), false);
+  assert.deepEqual(await checkStale(f.options), []);
   assert.deepEqual(f.logs, ['bake: images current']);
 });
 
@@ -148,7 +148,7 @@ test('execution listings page through both jobs using the service-account token;
 test('all EC2 accounts and image pages participate, with an account-specific stale log', async () => {
   const f = fixture({ accounts: [{ account: '123' }, { account: '456' }] });
   f.options.awsFor = account => ({ ec2: { send: async command => command.input.NextToken ? { Images: [ami(account.account === '456' ? 'outdated' : hash)] } : { Images: [ami(hash, { CreationDate: '2026-10-24T00:00:00Z' })], NextToken: 'next' } } });
-  assert.equal(await checkStale(f.options), true);
+  assert.deepEqual(await checkStale(f.options), ['ec2/456']);
   assert.match(f.logs.join('\n'), /ec2\/456.*outdated/);
   assert.doesNotMatch(f.logs.join('\n'), /ec2\/123/);
 });
