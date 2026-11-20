@@ -25,7 +25,7 @@ export async function listActivity(gh, repo, branch, { since }) {
 }
 
 // What a landing's verdicts read, from cause.mjs's analysis of the window and its job lines: the full, exact, executed
-// attempts by tree key (none superseded, none incomplete), and the pull request runs' lines by head commit.
+// attempts by tree key (none superseded or cancelled, none incomplete), and the pull request runs' lines by head commit.
 export function landingIndex(analysis, lines) {
   const exact = new Map();
   for (const a of analysis.attempts) {
@@ -43,7 +43,8 @@ export function landingIndex(analysis, lines) {
   return { exact, pr, runs: analysis.runs };
 }
 
-const observable = (a) => a.basis === 'exact' && a.scope === 'full' && !a.copied && a.superseded_by === null && a.tree_key && (a.result === 'succeeded' || a.result === 'failed');
+// A superseded or cancelled attempt was stopped, not judged: it is no observation and no verdict on a tree.
+const observable = (a) => a.basis === 'exact' && a.scope === 'full' && !a.copied && a.superseded_by === null && !a.cancelled && a.tree_key && (a.result === 'succeeded' || a.result === 'failed');
 
 // Each required gate's latest full, exact attempt on the tree key, completed before `at`: `green` when each succeeded,
 // `red` when one failed, `unrun` otherwise.

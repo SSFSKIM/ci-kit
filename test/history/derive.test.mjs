@@ -81,7 +81,7 @@ test('a first derivation writes every landing and red of the window by day; a la
   assert.deepEqual(landings['2026-10-31'].map((l) => [l.id, l.exact, l.required]), [[21, 'green', ['test']]]);
   const causes = read(w.root, 'causes');
   assert.deepEqual(Object.values(causes).flat().map((c) => [c.run, c.cause]), [[1, 'rerun-green'], [3, 'rerun-green']]);
-  assert.match(formatDerived('o/r', first.counts, 0), /^o\/r: derived: landings 2 \(listed 2\), causes superseded 0, infra 0, rerun-green 2,/);
+  assert.match(formatDerived('o/r', first.counts, 0), /^o\/r: derived: landings 2 \(listed 2\), causes superseded 0, cancelled 0, infra 0, rerun-green 2,/);
 
   // A line older than 14 days is final; a recent one is recomputed, and a new landing is listed since the newest held.
   const oldPath = join(w.root, ALIAS, 'causes', '2026-10-31.jsonl');

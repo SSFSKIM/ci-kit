@@ -130,6 +130,8 @@ test("exact: the latest full, exact attempt of each required gate on the landed 
   assert.deepEqual(landed([on({ run: 1, at: 0 })], ev, { mirror: m }).exact_gates, { test: { result: 'succeeded', run: 1, attempt: 1 } });
   assert.equal(landed([on({ run: 1, at: 0 }), on({ run: 2, at: 10, ...failed })], ev, { mirror: m }).exact, 'red', 'the latest, not any');
   assert.equal(landed([on({ run: 1, at: 0, ...failed }), on({ run: 2, at: 10 })], ev, { mirror: m }).exact, 'green');
+  const stopped = { conclusion: 'cancelled', run_conclusion: 'cancelled', failed_step: 'Run npm test', phase: 'test' };
+  assert.equal(landed([on({ run: 1, at: 0 }), on({ run: 2, at: 10, ...stopped })], ev, { mirror: m }).exact, 'green', 'a cancelled attempt is no verdict');
   assert.equal(landed([on({ run: 1, at: 58 })], ev, { mirror: m }).exact, 'unrun', 'still running at the landing');
   assert.equal(landed([on({ run: 1, at: 0, scope: 'selected', scope_key: 'k-sel' })], ev, { mirror: m }).exact, 'unrun', 'not full');
   assert.equal(landed([on({ run: 1, at: 0, basis: 'pr-merge', event: 'pull_request', tree: null, tree_key: null, head_tree: tree })], ev, { mirror: m }).exact, 'unrun', 'not exact');

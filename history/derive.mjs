@@ -180,6 +180,6 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
   return { counts, errors, paced };
 }
 
-const CAUSES = ['superseded', 'infra', 'rerun-green', 'test-only-diff', 'product-diff', 'unattributed'];
+const CAUSES = ['superseded', 'cancelled', 'infra', 'rerun-green', 'test-only-diff', 'product-diff', 'unattributed'];
 export const formatDerived = (repo, c, errors) =>
   `${repo}: derived: landings ${c.refused ? 'refused' : c.landings} (listed ${c.listed}), causes ${CAUSES.map((k) => `${k} ${c.causes[k] ?? 0}`).join(', ')}, files written ${c.written}, errors ${errors}, ${c.seconds} s`;

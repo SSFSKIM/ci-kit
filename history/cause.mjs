@@ -5,6 +5,8 @@
 //   - `superseded`: the cancelled jobs (none at its time limit) of a run that was itself cancelled while a later run
 //     existed for its ref or its change (MAWS's ci-gate makes a ref per commit; a later gate of the same change is its
 //     newer push). Not a red.
+//   - `cancelled`: an attempt whose every unsuccessful job was cancelled from outside (none failed, none reached its
+//     time limit) with no such later run: someone stopped it, which shows nothing of the product. Not a red.
 //   - Every other failed attempt: each unsuccessful job read as lost or failed, then the first rule that holds:
 //     infra, rerun-green, test-only-diff, product-diff, unattributed.
 // A copied attempt (every job carried over by a rerun) is no execution: it has no cause and is never a later green.
@@ -25,7 +27,8 @@ export function phaseOfLine(l, entry) {
 }
 
 // The window's gate attempts, each with its job lines (`lines`), its key and `start` (when its own jobs began: a copy
-// carries the earlier attempt's times), and `superseded_by` (the later run that superseded it, or null). `created`:
+// carries the earlier attempt's times), `superseded_by` (the later run that superseded it, or null) and `cancelled`
+// (stopped from outside with no such later run: neither is a red or an observation). `created`:
 // run id → its creation (attempts.json); a run without one is taken as created when its first job started.
 export function analyze(lines, { created = {} } = {}) {
   const attempts = gateAttempts(lines);
@@ -53,8 +56,10 @@ export function analyze(lines, { created = {} } = {}) {
   }
   for (const a of attempts) {
     a.superseded_by = null;
-    if (a.result !== 'failed' || a.copied || a.run_conclusion !== 'cancelled' || typeof a.run !== 'number') continue;
-    if (!unsuccessful(a).every(cancelledFromOutside)) continue;
+    a.cancelled = false;
+    if (a.result !== 'failed' || a.copied || !unsuccessful(a).every(cancelledFromOutside)) continue;
+    a.cancelled = true;
+    if (a.run_conclusion !== 'cancelled' || typeof a.run !== 'number') continue;
     const mine = runs.get(a.run);
     const later = [`ref:${a.ref}`, a.change ? `change:${a.change}` : null]
       .filter(Boolean)
@@ -62,6 +67,7 @@ export function analyze(lines, { created = {} } = {}) {
       .filter((r) => r.run !== a.run && r.created && mine.created && r.created > mine.created && r.created <= a.completed)
       .sort((x, y) => (x.created < y.created ? -1 : 1));
     a.superseded_by = later[0]?.run ?? null;
+    if (a.superseded_by !== null) a.cancelled = false;
   }
   return { attempts, runs };
 }
@@ -90,8 +96,9 @@ function sameTree(a, b, landings) {
 
 // A lost job's reason: the platform said its runner was lost or the job never started (an annotation, or its log's
 // runner line for a job that stopped with no step ended), or it stopped in setup or with no step ended and a later
-// comparable attempt on the same tree got that job past that phase. A job cancelled before any runner took it was
-// cancelled, not lost. A time limit is an outcome, not a cause: a deadlock in the product reaches it too.
+// comparable attempt on the same tree got that job past that phase. A job cancelled before any runner took it (beside
+// a job of its attempt that failed) was cancelled, not lost. A time limit is an outcome, not a cause: a deadlock in the
+// product reaches it too.
 function readJob(l, a, attempts, entry, landings) {
   const phase = phaseOfLine(l, entry);
   const out = { job_id: l.job_id, job: l.job, conclusion: l.conclusion, phase, lost: null, cancelled: cancelledFromOutside(l) };
@@ -139,12 +146,15 @@ export function deriveCauses({ analysis, entry, landings, standing, known, cases
       ref: a.ref, change: changeOf(a, prOf), basis: a.basis, tree: a.tree, head: a.head, available: a.available, minutes: a.minutes, lanes: a.lanes,
     };
     if (a.superseded_by !== null) {
-      out.push({ ...head, cause: 'superseded', why: null, cancelled: true, evidence: { by_run: a.superseded_by }, context: {} });
+      out.push({ ...head, cause: 'superseded', why: null, evidence: { by_run: a.superseded_by }, context: {} });
+      continue;
+    }
+    if (a.cancelled) {
+      out.push({ ...head, cause: 'cancelled', why: null, evidence: { jobs: unsuccessful(a).map((l) => ({ job_id: l.job_id, job: l.job, conclusion: l.conclusion, phase: phaseOfLine(l, entry), started: Boolean(l.runner) })) }, context: {} });
       continue;
     }
     const followers = after(a);
     const jobs = unsuccessful(a).map((l) => readJob(l, a, followers, entry, landings));
-    const cancelled = jobs.every((j) => j.cancelled);
     const evidence = { jobs };
     let cause = null;
     let why = null;
@@ -177,7 +187,7 @@ export function deriveCauses({ analysis, entry, landings, standing, known, cases
     if (base?.result === 'failed') context.base_also_failed = { commit: base.commit, at: base.at, run: base.run };
     const k = known.length ? knownContext(known, { gate: a.gate, day: dayOf(a.available), cases: casesOf(a.run, a.attempt, a.gate) }) : [];
     if (k.length) context.known = k;
-    out.push({ ...head, cause, why, cancelled, evidence, context });
+    out.push({ ...head, cause, why, evidence, context });
   }
   return out;
 }

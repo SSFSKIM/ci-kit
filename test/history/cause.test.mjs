@@ -201,7 +201,7 @@ test('superseded: the cancelled jobs of a run cancelled while a later run existe
     // MAWS's ci-gate makes a ref per commit: a later gate of the same change supersedes.
     cancelled({ run: 3, at: 20, ref: 'ci/w-aaaa', change: 'maws-ci-gate:w', tree: 'T3' }),
     line({ run: 4, at: 30, ref: 'ci/w-bbbb', change: 'maws-ci-gate:w', tree: 'T4' }),
-    // Cancelled with no later run for it (by hand): read by the rules, and marked cancelled.
+    // Cancelled with no later run for it (by hand).
     cancelled({ run: 5, at: 40, ref: 'ci/v-cccc', change: 'maws-ci-gate:v', tree: 'T5' }),
     // Cancelled, and a run for its ref only created after it ended: not superseded.
     cancelled({ run: 6, at: 50, ref: 'late', change: 'branch:late', tree: 'T6' }),
@@ -211,19 +211,42 @@ test('superseded: the cancelled jobs of a run cancelled while a later run existe
   const causes = derive(lines, { created, paths: () => ['src/a.ts'] });
   assert.deepEqual([causeOf(causes, 1).cause, causeOf(causes, 1).evidence.by_run], ['superseded', 2]);
   assert.equal(causeOf(causes, 3).cause, 'superseded');
-  assert.deepEqual([causeOf(causes, 5).cause, causeOf(causes, 5).why, causeOf(causes, 5).cancelled], ['unattributed', 'no-later-green', true]);
-  assert.equal(causeOf(causes, 6).cause, 'product-diff');
+  // Neither superseded nor followed by a run: cancelled, not a red.
+  assert.deepEqual([causeOf(causes, 5).cause, causeOf(causes, 5).why], ['cancelled', null]);
+  assert.equal(causeOf(causes, 6).cause, 'cancelled');
   // A red shard in a cancelled run is a red, whatever came later.
   const mixed = derive([red({ run: 1, at: 0, run_conclusion: 'cancelled', ref: 'topic', change: 'branch:topic' }), line({ run: 2, at: 10, ref: 'topic', change: 'branch:topic', tree: 'T2' })], { created: { 1: iso(0), 2: iso(3) }, paths: () => ['src/a.ts'] });
   assert.equal(causeOf(mixed, 1).cause, 'product-diff');
 });
 
-test("a job cancelled before any runner took it is not lost, whatever ran later on its tree", () => {
+test('cancelled: an interrupted attempt is never product-diff, whatever product change and green came after it in its change', () => {
+  const stopped = (o) => line({ conclusion: 'cancelled', run_conclusion: 'cancelled', failed_step: 'Run pnpm test', phase: 'test', ...o });
   const causes = derive([
-    line({ run: 1, at: 0, conclusion: 'cancelled', run_conclusion: 'cancelled', runner: null, lane: null, minutes: 0, phase: 'lost' }),
-    line({ run: 2, at: 30, change: 'other:o' }),
-  ]);
-  assert.deepEqual([causeOf(causes, 1).cause, causeOf(causes, 1).cancelled], ['rerun-green', true]);
+    stopped({ run: 1, at: 0, job: 'unit 1/2', shard: [1, 2] }),
+    stopped({ run: 1, at: 0, job: 'unit 2/2', shard: [2, 2], runner: null, lane: null, minutes: 0, phase: 'lost', failed_step: null }),
+    // The change's next push, created after run 1 ended, changes the product and passes.
+    line({ run: 2, at: 30, ref: 'ci/x-bbbb', tree: 'T2' }),
+  ], { created: { 1: iso(0), 2: iso(30) }, paths: () => ['src/a.ts'] });
+  const c = causeOf(causes, 1);
+  assert.deepEqual([c.cause, c.why], ['cancelled', null]);
+  assert.deepEqual(c.evidence.jobs.map((j) => [j.job, j.started]), [['unit 1/2', true], ['unit 2/2', false]]);
+});
+
+test('one shard failed and the others cancelled is a red: its cancelled shards are marked, and nothing is lost', () => {
+  const stopped = (o) => line({ conclusion: 'cancelled', run_conclusion: 'failure', failed_step: 'Run pnpm test', phase: 'test', ...o });
+  const lines = [
+    red({ run: 1, at: 0, job: 'unit 1/3', shard: [1, 3] }),
+    stopped({ run: 1, at: 0, job: 'unit 2/3', shard: [2, 3] }),
+    // Cancelled before any runner took it: cancelled, not lost, whatever ran later on its tree.
+    stopped({ run: 1, at: 0, job: 'unit 3/3', shard: [3, 3], runner: null, lane: null, minutes: 0, phase: 'lost', failed_step: null }),
+  ];
+  const alone = causeOf(derive(lines), 1);
+  assert.deepEqual([alone.cause, alone.why], ['unattributed', 'no-later-green']);
+  assert.deepEqual(alone.evidence.jobs.map((j) => [j.cancelled, j.lost]), [[false, null], [true, null], [true, null]]);
+  const green = [1, 2, 3].map((i) => line({ run: 2, at: 30, change: 'other:o', job: `unit ${i}/3`, shard: [i, 3] }));
+  const rerun = causeOf(derive([...lines, ...green]), 1);
+  assert.equal(rerun.cause, 'rerun-green');
+  assert.equal(rerun.evidence.jobs[2].lost, null);
 });
 
 test('a failure on the base and a known entry are context only: the cause is the rules\' alone', () => {
@@ -266,7 +289,7 @@ test("a step the repository's setup_steps name now is setup on lines written bef
   assert.deepEqual([causeOf(causes, 3).cause, causeOf(causes, 3).why], ['unattributed', 'setup-uncorroborated']);
 });
 
-test("a job that reached its time limit ended on its own: never superseded, never counted cancelled", () => {
+test("a job that reached its time limit ended on its own: it failed, never superseded and never cancelled", () => {
   const timedOut = { conclusion: 'cancelled', run_conclusion: 'cancelled', failed_step: 'Run pnpm test', phase: 'test', annotations: ['time-limit'] };
   const lines = [
     line({ run: 1, at: 0, ref: 'topic', change: 'branch:topic', ...timedOut }),
@@ -275,6 +298,6 @@ test("a job that reached its time limit ended on its own: never superseded, neve
   ];
   // Run 2 was created while run 1 ran: run 1's cancellation would read as superseded but for its time limit.
   const causes = derive(lines, { created: { 1: iso(0), 2: iso(3), 3: iso(40) }, paths: () => ['src/a.ts'] });
-  assert.deepEqual([causeOf(causes, 1).cause, causeOf(causes, 1).cancelled], ['product-diff', false]);
-  assert.deepEqual([causeOf(causes, 3).cause, causeOf(causes, 3).cancelled], ['unattributed', false]);
+  assert.equal(causeOf(causes, 1).cause, 'product-diff');
+  assert.deepEqual([causeOf(causes, 3).cause, causeOf(causes, 3).why], ['unattributed', 'no-later-green']);
 });
