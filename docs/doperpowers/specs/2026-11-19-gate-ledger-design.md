@@ -118,7 +118,8 @@ store, print a weekly report, and show `ci-gate` printing the context lines.
   Log). The review ends here; the counterexamples it gave are test pins and acceptance cases.
 - [x] (2026-11-20 02:2xZ) M1 — Job lines: 890528d..d78c85a, task review converged after two fix rounds; backfill
   from 10-22 in the store; acceptance 1, 2 and 8 met (M1's report).
-- [ ] M2 — The store kept small, watched, and fed by the hand-run gate.
+- [x] (2026-11-20 03:5xZ) M2 — The store kept small, watched, and fed by the hand-run gate: d5e07ae..9b4c438, task
+  review converged after two fix rounds; acceptance 7's first half and 9 met (M2's report); sandbox #95, #97.
 - [ ] M3 — Landings and causes.
 - [ ] M4 — The weekly report and the status file.
 - [ ] M5 — `ci-gate`'s context lines and known entries.
@@ -781,6 +782,13 @@ inputs M0 added.
   applies to all; its minutes are its slot's, and the bundle's overhead is charged to no group. A re-import keeps a
   line's tree key when it cannot compute one for the same tree, and replaces a job's line on whatever day it was filed.
   Date/Author: 2026-11-20, the executing session.
+
+- Decision: M2's second review folded (2026-11-20). A bundled slot's exit is its test's, whatever the value; only
+  the job's supervisor status gives `runner-lost` or `time-limit`. Without a `steps.tsv` row the group's own log
+  markers decide; an ended slot without log times takes the job's end; a slot that started and never ended is
+  charged to the job's end with no conclusion. Left as is: such an interrupted slot has no `available` (the record
+  holds none), and a re-import's cross-day move writes the source before the destination (a re-import with
+  `--git-dir` restores any key lost to a failed write). Date/Author: 2026-11-20, the executing session.
 
 ## Outcomes & Retrospective
 
