@@ -10,9 +10,10 @@
 //   - `workflow: "manual-gate"`, `run` the directory's name, attempt 1, `job_id` the summary row's id; the run's build
 //     is kind `control`.
 //   - A mini copy bundling several groups is one line per group, `job_id` `<row id>:<group>`, each ended by its own
-//     evidence only (its slot's steps.tsv row, the step markers and test counts of its segment): a group that never
-//     completed, or ran no tests, has no conclusion; only a failure in the bundle's shared setup, before any group
-//     ran, is every group's, with the job's minutes on the first.
+//     evidence only (its slot's steps.tsv row, else its end marker in the log; the test counts of its segment): a
+//     slot's nonzero exit is a test failure, never a platform kind; a group that never completed, or ran no tests, has
+//     no conclusion; only a failure in the bundle's shared setup, before any group ran, is every group's, with the
+//     job's minutes on the first.
 //   - Scope `narrowed` under a test filter (`--e2e-args`) or a command in the group script's place (`--e2e-script`),
 //     else `full`; the scope key holds the filter, the environment, the peer, the live flag, the place (host or
 //     guest) and whether the job is a mini copy, so a mini copy is an attempt of its own and never joins its direct job.
@@ -31,9 +32,10 @@ const RUN_ID = /^[0-9a-f]{12}-(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)Z$/;
 // The summary's statuses for a job that never ran its steps (lib/summary.mjs `codes`): refused by the start check,
 // not run for the run's failed build, not run for disk.
 const NEVER_RAN = new Set([3, 8, 9]);
-// Statuses the mini's run gives for its own failures: the guest's or its agent's loss, and the job's bound.
+// Statuses the mini's supervisor (run.sh, in result.tsv) gives a job for its own failures: the guest's or its agent's
+// loss, and the job's bound. A slot's exit in steps.tsv is its child's and never one of these.
 const KINDS = { 4: 'runner-lost', 5: 'runner-lost', 6: 'runner-lost', 124: 'time-limit' };
-const SEGMENT = /^(\d\d:\d\d:\d\d)Z manual-gate: ##\[step(-end)?\] gate-copy\.sh run \d+ \(e2e:([^)]+)\)(?:: exit (\d+))?\r?$/;
+const SEGMENT = /^(\d\d:\d\d:\d\d)Z manual-gate: ##\[step(-end)?\] (gate-copy\.sh run \d+ \(e2e:([^)]+)\))(?:: exit (\d+))?\r?$/;
 const NAME = /^(.+?)(?: \((mini copy|peer [0-9a-f]+)\))?$/;
 const COUNT = /^ +(\d+) (passed|failed|flaky|skipped|interrupted|did not run)\b/;
 
@@ -78,15 +80,15 @@ export function readRun(dir) {
       for (const raw of read(join(logs, 'job.log')).split('\n')) {
         const m = SEGMENT.exec(raw);
         if (m) {
-          const seg = segments.get(m[3]) ?? { start: null, end: null, passed: 0, failed: 0 };
+          const seg = segments.get(m[4]) ?? { name: m[3], start: null, end: null, exit: null, passed: 0, failed: 0 };
           if (m[2]) {
-            seg.end = m[1];
+            Object.assign(seg, { end: m[1], exit: m[5] ?? null });
             open = null;
           } else {
             seg.start = m[1];
             open = seg;
           }
-          segments.set(m[3], seg);
+          segments.set(m[4], seg);
           continue;
         }
         const count = open && COUNT.exec(raw.replace(/^\S+ manual-gate: /, ''));
@@ -131,24 +133,30 @@ function endOf({ row, steps }) {
 }
 
 // One group of a bundled copy, by its own evidence only: its slot's row in steps.tsv (written before the log's end
-// marker) and the test runner's counts inside its segment. A slot that exited 0 with no test passed, or with one failed,
-// ran no tests (summary.mjs's NO TESTS): no conclusion. A group whose slot has no row never completed: no conclusion,
-// and a lane only when its slot started.
+// marker), else the slot's end marker and exit in the log; and the test runner's counts inside its segment. A slot's
+// exit is its test command's (steps.sh forwards the child's status), never the supervisor's: whatever it is, a nonzero
+// exit is a test failure with no platform kind. A slot that exited 0 with no test passed, or with one failed, ran no
+// tests (summary.mjs's NO TESTS): no conclusion. A slot that ended takes the job's end as its completion when the log
+// has no time for it. A slot that started and never ended has no conclusion and is charged its time to the job's end;
+// one that never started has no lane and costs nothing.
 function groupEnd(job, group) {
   const { row, steps, segments } = job;
   const seg = segments.get(group) ?? null;
   const slot = steps.find((s) => /^copy\d+$/.test(s.id) && s.name.endsWith(`(e2e:${group})`));
   const started = dated(seg?.start, row.start);
-  const unfinished = { conclusion: null, failed_step: null, phase: null, annotations: [], ran: started !== null };
-  if (!slot) return { end: unfinished, started, completed: null, minutes: 0 };
-  const seconds = Number(slot.seconds) || 0;
-  const completed = dated(seg?.end, row.start) ?? (started && new Date(Date.parse(started) + seconds * 1000).toISOString().replace('.000Z', 'Z'));
-  const status = Number(slot.status);
+  const none = { conclusion: null, failed_step: null, phase: null, annotations: [] };
+  const exit = slot ? slot.status : seg?.exit ?? null;
+  if (exit === null) {
+    return { end: { ...none, ran: started !== null }, started, completed: null, minutes: started ? minutesBetween(started, row.end) : 0 };
+  }
+  const completed = dated(seg?.end, row.start) ?? row.end ?? null;
+  const seconds = Number(slot?.seconds);
+  const minutes = slot && Number.isFinite(seconds) ? round(seconds / 60) : minutesBetween(started, completed);
   let own;
-  if (status !== 0) own = { conclusion: 'failure', failed_step: slot.name, phase: 'test', annotations: KINDS[status] ? [KINDS[status]] : [], ran: true };
-  else if (seg && seg.passed > 0 && seg.failed === 0) own = { conclusion: 'success', failed_step: null, phase: null, annotations: [], ran: true };
-  else own = { ...unfinished, ran: true };
-  return { end: own, started, completed, minutes: round(seconds / 60) };
+  if (Number(exit) !== 0) own = { conclusion: 'failure', failed_step: slot?.name ?? seg.name, phase: 'test', annotations: [] };
+  else if (seg && seg.passed > 0 && seg.failed === 0) own = { ...none, conclusion: 'success' };
+  else own = none;
+  return { end: { ...own, ran: true }, started, completed, minutes };
 }
 
 // A run (readRun) → its job lines, each with the day it is filed on: { day, line }. `treeKey(tree)`: the tree's key

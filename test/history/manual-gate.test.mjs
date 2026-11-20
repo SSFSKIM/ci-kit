@@ -236,12 +236,66 @@ test('a group of a bundle ends by its own evidence: one unstarted is incomplete,
   const of = (run, job) => lines.find((l) => l.run === run && l.job_id === job);
   const pick = (l) => [l.conclusion, l.minutes, l.started, l.completed, l.lane];
   assert.deepEqual(pick(of(id, 'copy-a-b-c:a')), ['success', 5, '2026-11-18T10:02:00Z', '2026-11-18T10:07:00Z', 'manual-guest']);
-  assert.deepEqual(pick(of(id, 'copy-a-b-c:b')), [null, 0, '2026-11-18T10:07:01Z', null, 'manual-guest'], 'started, never completed: incomplete, not the bundle\'s failure');
+  assert.deepEqual(pick(of(id, 'copy-a-b-c:b')), [null, 23, '2026-11-18T10:07:01Z', null, 'manual-guest'], 'started, never completed: incomplete, not the bundle\'s failure, charged its time to the job\'s end');
   assert.deepEqual(pick(of(id, 'copy-a-b-c:c')), [null, 0, null, null, null], 'never started: no lane, as a job no runner took');
   assert.deepEqual(pick(of(id2, 'copy-a-b:a')), ['success', 4, '2026-11-18T11:01:00Z', '2026-11-18T11:05:00Z', 'manual-guest']);
   assert.deepEqual(pick(of(id2, 'copy-a-b:b')), [null, 1, '2026-11-18T11:05:01Z', '2026-11-18T11:06:01Z', 'manual-guest'], 'exit 0 and no tests: no conclusion, its minutes kept');
   const results = Object.fromEntries(gateAttempts(lines).map((a) => [`${a.run} ${a.gate}`, a.result]));
   assert.deepEqual([results[`${id} e2e:b`], results[`${id} e2e:c`], results[`${id2} e2e:b`]], ['incomplete', 'incomplete', 'incomplete']);
+});
+
+test("a slot's own exit is the test's, never the supervisor's: a slot exiting 6 or 124 is a plain failure", async (t) => {
+  const runs = temp(t);
+  const store = temp(t);
+  const id = 'bbbbbbbbbbbb-20261118T120000Z';
+  runDir(runs, id, 'RED', [
+    row('copy-a-b', 'e2e: mini copy (a, b)', 'e2e-copy', 'guest', 'FAIL', 1, '2026-11-18T12:00:00Z', '2026-11-18T12:20:00Z'),
+  ], {
+    env: { 'copy-a-b': { J_COPY_GROUPS: 'a, b' } },
+    steps: { 'copy-a-b': [...STEPS, ['copy1', '6', '300', 'gate-copy.sh run 1 (e2e:a)'], ['copy2', '124', '600', 'gate-copy.sh run 2 (e2e:b)'], ['verdict', '1', '0', "the copies' verdict"]] },
+    log: { 'copy-a-b': [
+      '12:01:00Z manual-gate: ##[step] gate-copy.sh run 1 (e2e:a)', '12:06:00Z manual-gate: ##[step-end] gate-copy.sh run 1 (e2e:a): exit 6',
+      '12:06:01Z manual-gate: ##[step] gate-copy.sh run 2 (e2e:b)', '12:16:01Z manual-gate: ##[step-end] gate-copy.sh run 2 (e2e:b): exit 124',
+    ] },
+  });
+  await quiet(() => importRuns({ runsDir: runs, root: store, alias: ALIAS }));
+  const lines = linesOf(store);
+  assert.deepEqual(lines.map((l) => [l.job_id, l.conclusion, l.phase, l.annotations, l.minutes]), [
+    ['copy-a-b:a', 'failure', 'test', [], 5],
+    ['copy-a-b:b', 'failure', 'test', [], 10],
+  ]);
+});
+
+test("a group's evidence where steps.tsv lacks its slot, or the log its times", async (t) => {
+  const runs = temp(t);
+  const store = temp(t);
+  // the log has the slots' end markers, steps.tsv none of the slots
+  const id = 'cccccccccccc-20261118T130000Z';
+  runDir(runs, id, 'RED', [
+    row('copy-a-b', 'e2e: mini copy (a, b)', 'e2e-copy', 'guest', 'FAIL', 1, '2026-11-18T13:00:00Z', '2026-11-18T13:20:00Z'),
+  ], {
+    env: { 'copy-a-b': { J_COPY_GROUPS: 'a, b' } },
+    steps: { 'copy-a-b': STEPS },
+    log: { 'copy-a-b': [
+      '13:01:00Z manual-gate: ##[step] gate-copy.sh run 1 (e2e:a)', '  1 failed', '  4 passed (2.0m)', '13:04:00Z manual-gate: ##[step-end] gate-copy.sh run 1 (e2e:a): exit 1',
+      '13:04:01Z manual-gate: ##[step] gate-copy.sh run 2 (e2e:b)', '  5 passed (5.0m)', '13:10:01Z manual-gate: ##[step-end] gate-copy.sh run 2 (e2e:b): exit 0',
+    ] },
+  });
+  // steps.tsv has the slot, the log no timestamps for it
+  const id2 = 'dddddddddddd-20261118T140000Z';
+  runDir(runs, id2, 'GREEN', [
+    row('copy-a', 'e2e: mini copy (a)', 'e2e-copy', 'guest', 'PASS', 0, '2026-11-18T14:00:00Z', '2026-11-18T14:12:00Z'),
+  ], {
+    env: { 'copy-a': { J_COPY_GROUPS: 'a' } },
+    steps: { 'copy-a': [...STEPS, ['copy1', '1', '420', 'gate-copy.sh run 1 (e2e:a)']] },
+  });
+  await quiet(() => importRuns({ runsDir: runs, root: store, alias: ALIAS }));
+  const lines = linesOf(store);
+  const of = (run, job) => lines.find((l) => l.run === run && l.job_id === job);
+  const pick = (l) => [l.conclusion, l.failed_step, l.minutes, l.started, l.completed];
+  assert.deepEqual(pick(of(id, 'copy-a-b:a')), ['failure', 'gate-copy.sh run 1 (e2e:a)', 3, '2026-11-18T13:01:00Z', '2026-11-18T13:04:00Z']);
+  assert.deepEqual(pick(of(id, 'copy-a-b:b')), ['success', null, 6, '2026-11-18T13:04:01Z', '2026-11-18T13:10:01Z']);
+  assert.deepEqual(pick(of(id2, 'copy-a:a')), ['failure', 'gate-copy.sh run 1 (e2e:a)', 7, null, '2026-11-18T14:12:00Z']);
 });
 
 test('a re-import without the runs\' trees keeps the tree keys an import with them computed', async (t) => {
