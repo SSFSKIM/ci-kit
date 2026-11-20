@@ -1040,9 +1040,12 @@ controller prints structured fields and the report's location (`ec2/vm/diagnosti
   `failed:<step>` is still sent.
 - The builder's packages come from the region's EC2 mirror, and from `archive.ubuntu.com` when that fails (it prints
   `the region's mirror failed; installing from archive.ubuntu.com`): on 2026-11-19 us-east-2's mirror answered 503 for
-  a universe package after eleven minutes, and four bakes that day ended `failed:apt`. The image keeps the region's
-  mirror in its sources either way. The controller waits 45 minutes for the builder, since a failing mirror is slow
-  before it fails.
+  a universe package after eleven minutes, and four bakes that day ended `failed:apt`. Only the network part is retried:
+  `apt-get update --error-on=any` (a failed pocket is otherwise a warning with exit 0) within 3 minutes and the
+  `--download-only` install within 6, each attempt. The install that runs dpkg follows once with `--no-download`, with
+  no time limit, so a failed transaction ends the bake `failed:apt` instead of being retried. The image keeps the
+  region's mirror in its sources either way. The controller waits 45 minutes for the builder: two cut-off attempts
+  (20 minutes with their kill grace) and a normal 16-minute build fit inside it.
 - `copy-root.sh` copies the frozen root with partclone. When partclone refuses it with `bitmap free count err` (the
   superblock's free count read as it was before the freeze; three bakes of six on 2026-11-19, cause unknown), it records
   read-only evidence while root is still frozen (kernel, the superblock free count through the loop alias buffered and

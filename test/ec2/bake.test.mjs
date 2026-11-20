@@ -375,15 +375,18 @@ test('builder finalizes only after cloud-final late writes, and the resulting di
   // Relocate the real shell's filesystem operations; cloud tools are stubbed, not its cleanup commands.
   const relocate = (s) => s.replace(/\/(etc|opt|var|root|run|tmp|snap)(?=\/|\s|$)/g,`${root}/$1`).replace('await checkImage();','await checkImage(process.env.TEST_ROOT);');
   const driver = `set -euo pipefail
-apt-get() { :; }; git() { :; }; docker() { :; }; journalctl() { :; }; fstrim() { :; }; sync() { :; }
+git() { :; }; docker() { :; }; journalctl() { :; }; fstrim() { :; }; sync() { :; }
 cloud-init() { :; }
 systemctl() { printf '%s\\n' "$*" >> "$TEST_ROOT/systemctl"; }
 poweroff() { cat "$TEST_ROOT/report.jsonl" > "$TEST_ROOT/report-at-poweroff" 2>/dev/null || :; echo poweroff >> "$TEST_ROOT/poweroff"; }
 curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat >> "$TEST_ROOT/report.jsonl"; else printf '%s\\n' "$*" >> "$TEST_ROOT/curl-calls"; fi; }
 . "$1"
 `;
-  const run = (file) => execFileSync('bash',['-c',driver,'fixture',file],{env:{...process.env,TEST_ROOT:root},encoding:'utf8'});
+  // apt-get runs under timeout, which finds programs on PATH only.
+  const run = (file) => execFileSync('bash',['-c',driver,'fixture',file],{env:{...process.env,PATH:`${join(root,'fakes')}:${process.env.PATH}`,TEST_ROOT:root},encoding:'utf8'});
   try {
+    await mkdir(join(root,'fakes'),{recursive:true});
+    await writeFile(join(root,'fakes/apt-get'),'#!/bin/sh\n',{mode:0o755});
     for (const p of ['etc/apt/preferences.d','etc/systemd/system','etc/netplan','etc/cloud','var/log','var/lib/ci-kit','opt/ci-kit/pool/bake','opt/ci-kit/ec2','run/systemd/system','tmp']) await mkdir(join(root,p),{recursive:true});
     await symlink(new URL('../../ec2/vm',import.meta.url).pathname,join(root,'opt/ci-kit/ec2/vm'));
     await writeFile(join(root,'opt/ci-kit/pool/bake/prepare.sh'),':\n');
@@ -535,7 +538,6 @@ test('a builder step failure reports a bounded, token-free tail of what it print
   const report = 'https://reports.invalid/builder.json?X-Amz-Signature=private-signature';
   const tokens = {ssfskim:'ghs_'+'A'.repeat(36), other:'ghs_'+'B'.repeat(36)};
   const driver = `set -euo pipefail
-apt-get() { echo "apt-get $*"; [ "$1" != update ] || return 100; }
 systemctl() { :; }; sync() { :; }; poweroff() { :; }
 curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat > "$TEST_ROOT/report.json"; else printf '%s\\n' "$*" > "$TEST_ROOT/curl-calls"; fi; }
 . "$1"
@@ -546,7 +548,11 @@ curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat > "$TEST_ROOT/report.js
     `PUT ${report}`, `token map ${JSON.stringify(tokens)}`,
     `+ printf %s ${Buffer.from(JSON.stringify(tokens)).toString('base64')}`, `+ printf %s ${Buffer.from(report).toString('base64')}`,
     'E: Could not get lock /var/lib/apt/lists/lock. It is held by process 1234 (apt-get)', ''].join('\n');
-  const run = async (path = process.env.PATH, log = output) => {
+  // timeout runs apt-get and python3 from PATH, so the fakes are files, not shell functions.
+  const fakes = join(root,'fakes');
+  const run = async (path = `${fakes}:${process.env.PATH}`, log = output) => {
+    await mkdir(fakes,{recursive:true});
+    await writeFile(join(fakes,'apt-get'),'#!/bin/sh\n[ "$1" != update ] || exit 100\n',{mode:0o755});
     for (const p of ['report.json','curl-calls']) await rm(join(root,p),{force:true});
     await mkdir(join(root,'var/log'),{recursive:true});
     await mkdir(join(root,'etc/apt/preferences.d'),{recursive:true});
@@ -576,10 +582,9 @@ curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat > "$TEST_ROOT/report.js
     const noLog = JSON.parse((await run(undefined, null)).report);
     assert.deepEqual(noLog, {value:'failed:apt', diagnostic:{reason:'builder-failed', exit_status:100}});
 
-    // timeout runs python3 from PATH, so the failing interpreter is a file, not a shell function.
     await mkdir(join(root,'bin'),{recursive:true});
     await writeFile(join(root,'bin/python3'),'#!/bin/sh\nexit 1\n',{mode:0o755});
-    const broken = await run(`${join(root,'bin')}:${process.env.PATH}`);
+    const broken = await run(`${join(root,'bin')}:${fakes}:${process.env.PATH}`);
     assert.equal(broken.report, undefined);
     assert.match(broken.plain, /\{"value":"failed:apt"\}/, 'a failure to build the tail still reports the step');
   } finally { await rm(root,{recursive:true,force:true}); }
@@ -596,41 +601,84 @@ test('the builder installs from the main archive when the region\'s mirror fails
   const relocate = (s) => s.replace(/\/(etc|opt|var|root|run|tmp|snap)(?=\/|\s|$)/g,`${root}/$1`);
   const sources = join(root,'etc/apt/sources.list.d/ubuntu.sources');
   const regional = 'Types: deb\nURIs: http://us-east-2.ec2.archive.ubuntu.com/ubuntu/\nSuites: noble noble-updates\n\nTypes: deb\nURIs: http://security.ubuntu.com/ubuntu/\nSuites: noble-security\n';
-  // The region's mirror fails the install; any other source serves it. Each call records the mirror it would use.
+  // apt-get records each call with the number of regional mirror lines it would read. TEST_FAIL names what fails while
+  // the sources carry TEST_MIRROR: an update that fails only when asked to error on any failed fetch, the downloads,
+  // a hang in update, or the dpkg transaction.
+  const aptGet = `#!/bin/bash
+[ "$1" = update ] || [ "$1" = install ] || exit 0
+regional=$(grep -c ec2.archive "$TEST_SOURCES" || true)
+echo "$regional $*" >> "$TEST_ROOT/apt-calls"
+grep -q "$TEST_MIRROR" "$TEST_SOURCES" || exit 0
+case "$TEST_FAIL $*" in
+  "update update --error-on=any") exit 100 ;;
+  "hang update "*) exec sleep 30 ;;
+  "download install "*--download-only*|"dpkg install "*--no-download*) exit 1 ;;
+esac
+`;
+  // The hang case's timeout records its limits and runs the real one with limits of a second, so the hang is cut off.
+  const realTimeout = execFileSync('bash',['-c','command -v timeout'],{encoding:'utf8'}).trim();
+  const fakeTimeout = `#!/bin/bash
+[ "$1" = -k ] || exec "${realTimeout}" "$@"
+echo "$*" >> "$TEST_ROOT/timeouts"
+shift 3
+exec "${realTimeout}" -k 1 1 "$@"
+`;
   const driver = `set -euo pipefail
-apt-get() {
-  [ "$1" = update ] || [ "$1" = install ] || return 0
-  echo "$1 $(grep -c ec2.archive "$TEST_SOURCES" || true)" >> "$TEST_ROOT/apt-calls"
-  [ "$1" != install ] || ! grep -q "$TEST_MIRROR" "$TEST_SOURCES"
-}
 systemctl() { :; }; sync() { :; }; poweroff() { :; }; git() { return 7; }
 curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat > "$TEST_ROOT/report.json"; else :; fi; }
 . "$1"
 `;
-  const run = async (mirror) => {
-    for (const p of ['report.json','apt-calls']) await rm(join(root,p),{force:true});
-    for (const d of ['var/log','etc/apt/preferences.d','etc/apt/sources.list.d','run']) await mkdir(join(root,d),{recursive:true});
+  const run = async (fail, mirror = 'ec2.archive.ubuntu.com') => {
+    for (const p of ['report.json','apt-calls','timeouts','fakes']) await rm(join(root,p),{force:true,recursive:true});
+    for (const d of ['var/log','etc/apt/preferences.d','etc/apt/sources.list.d','run','fakes/apt','fakes/timeout']) await mkdir(join(root,d),{recursive:true});
+    await writeFile(join(root,'fakes/apt/apt-get'),aptGet,{mode:0o755});
+    await writeFile(join(root,'fakes/timeout/timeout'),fakeTimeout,{mode:0o755});
     await writeFile(sources, regional);
     const template = await readFile(new URL('../../ec2/bake/builder.sh',import.meta.url),'utf8');
     await writeFile(join(root,'builder.sh'),relocate(fillEc2Builder(template,{manifest:built,token:'{}',report:'https://reports.invalid/builder.json'})));
-    let status = 0;
-    try { execFileSync('bash',['-c',driver,'fixture',join(root,'builder.sh')],{env:{...process.env,TEST_ROOT:root,TEST_SOURCES:sources,TEST_MIRROR:mirror},stdio:'pipe'}); } catch (error) { status = error.status; }
-    return {status, step: JSON.parse(await readFile(join(root,'report.json'),'utf8')).value,
-      calls: (await readFile(join(root,'apt-calls'),'utf8')).trim().split('\n'), sources: await readFile(sources,'utf8')};
+    const path = [join(root,'fakes/apt'), ...(fail === 'hang' ? [join(root,'fakes/timeout')] : []), process.env.PATH].join(':');
+    let status = 0, stdout = '';
+    try { execFileSync('bash',['-c',driver,'fixture',join(root,'builder.sh')],{env:{...process.env,PATH:path,TEST_ROOT:root,TEST_SOURCES:sources,TEST_MIRROR:mirror,TEST_FAIL:fail},stdio:'pipe'}); }
+    catch (error) { status = error.status; stdout = String(error.stdout); }
+    const optional = (p) => readFile(join(root,p),'utf8').then((s) => s.trim().split('\n'), () => []);
+    return {status, stdout, step: JSON.parse(await readFile(join(root,'report.json'),'utf8')).value,
+      calls: await optional('apt-calls'), timeouts: await optional('timeouts'), sources: await readFile(sources,'utf8')};
   };
+  const packages = 'docker.io git jq curl xz-utils ca-certificates iptables gdisk partclone dosfstools';
+  const update = (r) => `${r} update --error-on=any`;
+  const download = (r) => `${r} install -y --no-install-recommends --download-only ${packages}`;
+  const install = (r) => `${r} install -y --no-install-recommends --no-download ${packages}`;
   try {
-    const fellBack = await run('ec2.archive.ubuntu.com');
-    assert.deepEqual(fellBack.calls, ['update 1','install 1','update 0','install 0'], 'the second pass reads no regional mirror');
+    const fellBack = await run('download');
+    assert.deepEqual(fellBack.calls, [update(1), download(1), update(0), download(0), install(0)],
+      'only update and the downloads are retried, from no regional mirror; dpkg runs once, on what was fetched');
     assert.equal(fellBack.step, 'failed:kit', 'apt passed: the fixture stops at the next step');
+    assert.match(fellBack.stdout, /the region's mirror failed; installing from archive.ubuntu.com/);
     assert.equal(fellBack.sources, regional, 'the image keeps the region\'s mirror and the security archive as they were');
 
-    const healthy = await run('no-such-mirror');
-    assert.deepEqual(healthy.calls, ['update 1','install 1'], 'a healthy mirror is asked once');
+    const pocket = await run('update');
+    assert.deepEqual(pocket.calls, [update(1), update(0), download(0), install(0)], 'a failed fetch in update is a failure');
+    assert.equal(pocket.step, 'failed:kit');
+
+    const healthy = await run('download', 'no-such-mirror');
+    assert.deepEqual(healthy.calls, [update(1), download(1), install(1)], 'a healthy mirror is asked once');
     assert.equal(healthy.step, 'failed:kit');
 
-    const down = await run('ubuntu.com'); // both passes fail
+    const down = await run('download', 'ubuntu.com'); // both attempts fail
     assert.deepEqual([down.step, down.status], ['failed:apt', 1]);
-    assert.equal(down.calls.length, 4);
+    assert.deepEqual(down.calls, [update(1), download(1), update(0), download(0)]);
+
+    const dpkg = await run('dpkg', 'ubuntu.com');
+    assert.deepEqual([dpkg.step, dpkg.status], ['failed:apt', 1]);
+    assert.deepEqual(dpkg.calls, [update(1), download(1), install(1)], 'a failed transaction is not retried on another mirror');
+
+    const started = Date.now();
+    const hung = await run('hang');
+    assert.ok(Date.now() - started < 20000, 'the hung update was cut off');
+    assert.deepEqual(hung.calls, [update(1), update(0), download(0), install(0)]);
+    assert.equal(hung.step, 'failed:kit');
+    assert.deepEqual(hung.timeouts.map((t) => t.split(' ').slice(0, 4).join(' ')),
+      ['-k 30 180 apt-get', '-k 30 180 apt-get', '-k 30 360 apt-get'], 'every network command is limited; dpkg is not');
   } finally { await rm(root,{recursive:true,force:true}); }
 });
 
