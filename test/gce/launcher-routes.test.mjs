@@ -4,14 +4,14 @@
 // never after a fixed delay: a request can take any time to reach the handler on a loaded machine (ci-kit#77). A
 // fixed wait only backs a check that something has NOT happened yet, where a slow machine can miss a bug but never
 // fail correct code. delayMs holds every request back before the handler, to run those tests with requests arriving
-// late.
+// late. /guard is not a tick: it never reaches serve, and a tick in progress does not hold it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createHandler } from '../../gce/launcher/routes.mjs';
 import { createTicker, TICK_SPACING_MS } from '../../gce/launcher/ticker.mjs';
 
-async function launcher(serve, { delayMs = 0 } = {}) {
+async function launcher(serve, { delayMs = 0, guard = async () => ({}) } = {}) {
   const asked = [];
   const logs = [];
   const handle = createHandler({
@@ -19,6 +19,7 @@ async function launcher(serve, { delayMs = 0 } = {}) {
       asked.push(trigger);
       return serve(trigger);
     },
+    guard,
     say: (severity, message, extra) => logs.push({ severity, message, ...extra }),
   });
   const server = http.createServer((req, res) => (delayMs ? setTimeout(() => handle(req, res), delayMs) : handle(req, res)));
@@ -148,10 +149,32 @@ test('the scheduler waits for its tick: 200 with the outcome, or 500 when it fai
   assert.deepEqual(l.asked, ['scheduled', 'scheduled']);
 });
 
-test('only POST to /tick or /request is served', async (t) => {
+test('/guard answers while a tick runs, without asking the ticker for one: 200 with what it dispatched, or 500', async (t) => {
+  let end = null;
+  let guardFails = false;
+  const l = await launcher(() => new Promise((resolve) => { end = resolve; }), {
+    guard: async () => {
+      if (guardFails) throw new Error('dispatch: HTTP 404');
+      return { dispatched: 42 };
+    },
+  });
+  t.after(l.close);
+  const ticking = watch(l.call('/tick'));
+  await until(() => end !== null);
+  assert.deepEqual(await l.call('/guard'), { status: 200, body: { dispatched: 42 } });
+  guardFails = true;
+  assert.deepEqual(await l.call('/guard'), { status: 500, body: { error: 'dispatch: HTTP 404' } });
+  assert.deepEqual(l.asked, ['scheduled']); // only the tick's own request
+  assert.equal(ticking.done, false);
+  end({});
+  await until(() => ticking.done);
+});
+
+test('only POST to /tick, /request or /guard is served', async (t) => {
   const l = await launcher(async () => ({}));
   t.after(l.close);
   assert.equal((await l.call('/tick', { method: 'GET' })).status, 405);
+  assert.equal((await l.call('/guard', { method: 'GET' })).status, 405);
   assert.equal((await l.call('/')).status, 404);
   assert.deepEqual(l.asked, []);
 });

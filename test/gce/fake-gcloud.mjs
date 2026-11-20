@@ -4,6 +4,8 @@
 // call the script starts to make.
 // state: {exclusions: [{name, filter}] (the _Default sink's), network: bool, subnets: [{name, region, range, pga}], routers: [region], nats: [region], firewall: [line],
 //   metrics: [{name, description, filter}], channel: name or null, policies: [the policy files' JSON],
+//   metricPending?: n (the next n policy creates are refused as Monitoring refuses a metric it does not see yet),
+//   policyFails?: message (every policy create is refused with it),
 //   services: {<Cloud Run service>: {revisions: n, latestReady: name, traffic: [{revisionName, percent, latestRevision}],
 //   stuck?: true (update-traffic succeeds and changes nothing), trafficFails?: true (update-traffic exits 1)}}; the webhook part's secret, topic and subscription calls succeed}
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
@@ -91,6 +93,15 @@ function answer() {
     return 0;
   }
   if (call === 'alpha monitoring policies create') {
+    if (state.policyFails) {
+      console.error(`ERROR: (gcloud.alpha.monitoring.policies.create) ${state.policyFails}`);
+      return 1;
+    }
+    if (state.metricPending > 0) {
+      change(() => { state.metricPending -= 1; });
+      console.error('ERROR: (gcloud.alpha.monitoring.policies.create) INVALID_ARGUMENT: Cannot find metric(s) that match type = "logging.googleapis.com/user/m". If a metric was created recently, it could take up to 10 minutes to become available. Please try again soon.');
+      return 1;
+    }
     return change(() => state.policies.push(JSON.parse(readFileSync(flag('policy-from-file'), 'utf8'))));
   }
   // Cloud Run as it behaves: a deploy adds a revision, and traffic that follows the latest moves to it; traffic pinned

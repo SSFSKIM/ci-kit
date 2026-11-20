@@ -34,6 +34,23 @@ jobs:
 The workflow name `ci` and job id `ci` are what make the checks read `ci / <gate>`, and `ci-gate` looks for the run
 of `.github/workflows/ci.yml`. Keep both.
 
+`plan` and `verdict` run on GitHub-hosted runners. In a private repository those are billed minutes, and an account
+that cannot start hosted jobs has both refused (`The job was not started because recent account payments have
+failed or your spending limit needs to be increased`), which fails every run before a gate is planned, pool gates
+included. Such a repository puts the two jobs on its own runners:
+
+```yaml
+jobs:
+  ci:
+    uses: SSFSKIM/ci-kit/.github/workflows/gates.yml@v1
+    secrets: inherit
+    with:
+      control-runs-on: '["self-hosted","ci-kit-pool","cpus-2"]'
+```
+
+The value is JSON for `runs-on`. On the pool each of the two jobs waits for a VM (about a minute), so leave the
+default wherever hosted jobs start.
+
 ### 2. `.github/ci-kit.yml`
 
 The gates. For example:

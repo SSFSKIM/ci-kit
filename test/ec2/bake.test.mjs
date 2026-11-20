@@ -45,16 +45,34 @@ test('provider stages share one resolution, including after a provider fails', a
   assert.deepEqual(inputs, [pins, actual, actual]);
 });
 
+test('a stale check bakes only the providers it names; the others are not called', async () => {
+  for (const [only, called] of [[['ec2/b'], ['b']], [['gce'], ['gce']], [['gce', 'ec2/a'], ['gce', 'a']], [undefined, ['gce', 'a', 'b']]]) {
+    const calls = [], inputs = [];
+    const results = await manifestApi.bakeProviders({
+      resolve: async () => pins, only,
+      gce: async (m) => { calls.push('gce'); inputs.push(m); return { manifest: built }; },
+      accounts: [{ account: 'a' }, { account: 'b' }], ec2: async (account, m) => { calls.push(account.account); inputs.push(m); return { manifest: m }; },
+    });
+    assert.deepEqual(calls, called);
+    assert.equal(results.length, called.length);
+    // Without a GCE stage the EC2 builders take the resolved inputs directly.
+    assert.deepEqual(inputs[0], pins);
+  }
+});
+
 // Fake only the external SDK boundary; the bake performs its own polling, promotion and cleanup.
-async function ec2Fixture({ smoke = 'ok', job = 'success', applyOk = true, lostLaunch = false, refuseFirstSmoke = false, reportMissing = false, snapshotBytes = 12 * 2**30, promote = true, otherImages = [], lostSnapshot = false, lostRegistration = false, unseenReads = 0 } = {}) {
+async function ec2Fixture({ smoke = 'ok', job = 'success', applyOk = true, lostLaunch = false, refuseFirstSmoke = false, reportMissing = false, snapshotBytes = 12 * 2**30, promote = true, otherImages = [], lostSnapshot = false, lostRegistration = false, unseenReads = 0, refuse = () => undefined, builderReport = {} } = {}) {
   const api = await import('../../ec2/bake/bake.mjs');
-  const calls = [], instances = [], images = [], snapshots = [];
+  const calls = [], instances = [], images = [], snapshots = [], logs = [], sentAt = new Map();
   const tags = (x) => Object.fromEntries((x.Tags ?? []).map((t) => [t.Key,t.Value]));
   const send = async (command, role = 'bake') => {
     const name = command.constructor.name, input = command.input;
     calls.push([name, input, role]);
     if (name === 'GetParameterCommand') return { Parameter: { Value: 'ami-canonical' } };
     if (name === 'RunInstancesCommand') {
+      sentAt.set(input, time);
+      const refusal = refuse(input);
+      if (refusal) throw Object.assign(Error('refused'), { name: refusal });
       if (refuseFirstSmoke && input.ImageId !== 'ami-canonical' && input.NetworkInterfaces[0].SubnetId === 'subnet-c') throw Object.assign(Error('no capacity'),{name:'InsufficientInstanceCapacity'});
       const i = { InstanceId: `i-${instances.length}`, State: { Name: input.ImageId === 'ami-canonical' ? 'stopped' : 'terminated' }, Tags: input.TagSpecifications[0].Tags,
         BlockDeviceMappings: input.BlockDeviceMappings.map(d => ({ DeviceName: d.DeviceName, Ebs: { VolumeId: d.DeviceName === '/dev/sdf' ? 'vol-target' : 'vol-root', DeleteOnTermination: d.Ebs.DeleteOnTermination } })) };
@@ -82,7 +100,7 @@ async function ec2Fixture({ smoke = 'ok', job = 'success', applyOk = true, lostL
     if (name === 'GetObjectCommand') {
       if (reportMissing && input.Key.includes('smoke/exit')) throw Object.assign(Error('missing'),{name:'NoSuchKey'});
       let data;
-      if (input.Key.endsWith('/builder.json')) data = { value:'ok', manifest:{...built,repos:{'owner/project':{...built.repos['owner/project'],apply:{ok:applyOk,image_bytes:100}}}} };
+      if (input.Key.endsWith('/builder.json')) data = { value:'ok', manifest:{...built,repos:{'owner/project':{...built.repos['owner/project'],apply:{ok:applyOk,image_bytes:100}}}}, ...builderReport };
       else data = {kind:'terminal',value:'exit:0',smoke};
       return { Body: { transformToString: async () => JSON.stringify(data) } };
     }
@@ -99,8 +117,8 @@ async function ec2Fixture({ smoke = 'ok', job = 'success', applyOk = true, lostL
   };
   const cfg = {account:'123456789012',region:'us-east-2',disk_gb:50,initialization_mibps:200,security_group:'sg-pool',report_bucket:'reports',placements:[{zone:'us-east-2c',subnet:'subnet-c'},{zone:'us-east-2a',subnet:'subnet-a'},{zone:'us-east-2b',subnet:'subnet-b'}]};
   let time = 0;
-  const run = () => api.runEc2Bake(aws, { runtimeAws:{ec2:{send:(c)=>send(c,'launcher')}}, cfg, manifest:pins, promote, runId:'20261023-120000-abcd',token:'warm-token',gh,script:'#!/bin/bash\n__MANIFEST__\n__TOKEN__\n__REPORT__\n__KIT_SHA__',now:()=>time,sleep:async (ms)=>{time+=ms;} });
-  return {run,calls,images,tags};
+  const run = () => api.runEc2Bake(aws, { runtimeAws:{ec2:{send:(c)=>send(c,'launcher')}}, cfg, manifest:pins, promote, runId:'20261023-120000-abcd',token:'warm-token',gh,script:'#!/bin/bash\n__MANIFEST__\n__TOKEN__\n__REPORT__\n__KIT_SHA__',now:()=>time,sleep:async (ms)=>{time+=ms;},log:(line)=>logs.push(line) });
+  return {run,calls,images,tags,logs,sentAt};
 }
 
 test('EC2 bake stops an on-demand Canonical builder, proves smoke and real job, then promotes with full snapshot cost', async () => {
@@ -302,6 +320,47 @@ test('smoke and real check walk capacity-refused zones on spot with fresh zonal 
   assert.equal(new Set(launches.map((v)=>v.ClientToken)).size,4);
 });
 
+const smokeSends = (f) => f.calls.filter(([n,v]) => n === 'RunInstancesCommand' && v.ImageId !== 'ami-canonical').map(([,v]) => v);
+const labelOf = (input, key) => input.TagSpecifications[0].Tags.find((t) => t.Key === key)?.Value;
+
+// 2026-11-19 16:30Z: a three-second capacity gap in every zone discarded a 45-minute image.
+test('a smoke every zone refuses for capacity is tried again after a pause, with fresh tokens and deadlines', async () => {
+  let refused = 0;
+  const f = await ec2Fixture({ refuse: (input) => input.ImageId !== 'ami-canonical' && refused++ < 9 ? 'InsufficientInstanceCapacity' : undefined });
+  const result = await f.run();
+  assert.equal(result.image, 'ami-new');
+  const sends = smokeSends(f);
+  assert.equal(sends.length, 11, 'three refused rounds, the smoke, then the real check');
+  assert.equal(new Set(sends.map((v) => v.ClientToken)).size, sends.length, 'every send that may create an instance has its own token');
+  assert.ok(sends.every((v) => v.InstanceMarketOptions?.MarketType === 'spot'), 'job images never fall back to on-demand');
+  const smoke = sends[9], sent = f.sentAt.get(smoke);
+  assert.ok(sent - f.sentAt.get(sends[0]) >= 3 * 60_000, 'rounds are paused, not spun');
+  assert.equal(labelOf(smoke, 'ci-kit-deadline'), new Date(sent + 30 * 60_000).toISOString());
+  assert.equal(JSON.parse(Buffer.from(smoke.UserData, 'base64').toString()).deadline, new Date(sent + 20 * 60_000).toISOString(),
+    'the guest deadline counts from the send that launched it');
+  const refusals = f.logs.filter((line) => /smoke refused/.test(line));
+  assert.equal(refusals.length, 3, 'one line per refused round');
+  for (const zone of ['us-east-2c', 'us-east-2a', 'us-east-2b']) assert.match(refusals[0], new RegExp(`${zone}: InsufficientInstanceCapacity`));
+});
+
+test('a smoke refused for capacity past the bound gives up and removes the unproven image', async () => {
+  const f = await ec2Fixture({ refuse: (input) => input.ImageId !== 'ami-canonical' ? 'InsufficientInstanceCapacity' : undefined });
+  await assert.rejects(f.run(), /no zone took smoke/);
+  const sends = smokeSends(f), span = f.sentAt.get(sends.at(-1)) - f.sentAt.get(sends[0]);
+  assert.ok(span >= 14 * 60_000 && span <= 15 * 60_000, `retried for about fifteen minutes, not ${span} ms`);
+  assert.ok(f.logs.filter((line) => /smoke refused/.test(line)).length <= 16, 'refusals are not hundreds of lines');
+  assert.ok(f.calls.some(([n]) => n === 'DeregisterImageCommand'));
+});
+
+for (const [label, refuse] of [
+  ['a builder every zone refuses for capacity', (input) => input.ImageId === 'ami-canonical' ? 'InsufficientInstanceCapacity' : undefined],
+  ['a smoke every zone refuses for a non-capacity reason', (input) => input.ImageId !== 'ami-canonical' ? 'Unsupported' : undefined],
+]) test(`${label} is not tried again`, async () => {
+  const f = await ec2Fixture({ refuse });
+  await assert.rejects(f.run(), /no zone took (builder|smoke)/);
+  assert.equal(f.calls.filter(([n, v]) => n === 'RunInstancesCommand' && refuse(v)).length, 3);
+});
+
 test('a terminated smoke with no terminal object times out instead of becoming ready',async()=>{
   const f=await ec2Fixture({reportMissing:true});
   await assert.rejects(f.run(),/smoke: timeout/);
@@ -331,15 +390,18 @@ test('builder finalizes only after cloud-final late writes, and the resulting di
   // Relocate the real shell's filesystem operations; cloud tools are stubbed, not its cleanup commands.
   const relocate = (s) => s.replace(/\/(etc|opt|var|root|run|tmp|snap)(?=\/|\s|$)/g,`${root}/$1`).replace('await checkImage();','await checkImage(process.env.TEST_ROOT);');
   const driver = `set -euo pipefail
-apt-get() { :; }; git() { :; }; docker() { :; }; journalctl() { :; }; fstrim() { :; }; sync() { :; }
+git() { :; }; docker() { :; }; journalctl() { :; }; fstrim() { :; }; sync() { :; }
 cloud-init() { :; }
 systemctl() { printf '%s\\n' "$*" >> "$TEST_ROOT/systemctl"; }
 poweroff() { cat "$TEST_ROOT/report.jsonl" > "$TEST_ROOT/report-at-poweroff" 2>/dev/null || :; echo poweroff >> "$TEST_ROOT/poweroff"; }
 curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat >> "$TEST_ROOT/report.jsonl"; else printf '%s\\n' "$*" >> "$TEST_ROOT/curl-calls"; fi; }
 . "$1"
 `;
-  const run = (file) => execFileSync('bash',['-c',driver,'fixture',file],{env:{...process.env,TEST_ROOT:root},encoding:'utf8'});
+  // apt-get runs under timeout, which finds programs on PATH only.
+  const run = (file) => execFileSync('bash',['-c',driver,'fixture',file],{env:{...process.env,PATH:`${join(root,'fakes')}:${process.env.PATH}`,TEST_ROOT:root},encoding:'utf8'});
   try {
+    await mkdir(join(root,'fakes'),{recursive:true});
+    await writeFile(join(root,'fakes/apt-get'),'#!/bin/sh\n',{mode:0o755});
     for (const p of ['etc/apt/preferences.d','etc/systemd/system','etc/netplan','etc/cloud','var/log','var/lib/ci-kit','opt/ci-kit/pool/bake','opt/ci-kit/ec2','run/systemd/system','tmp']) await mkdir(join(root,p),{recursive:true});
     await symlink(new URL('../../ec2/vm',import.meta.url).pathname,join(root,'opt/ci-kit/ec2/vm'));
     await writeFile(join(root,'opt/ci-kit/pool/bake/prepare.sh'),':\n');
@@ -390,8 +452,8 @@ echo compact >> "$TEST_ROOT/compacted"
     await writeFile(join(root,'opt/ci-kit/pool/bake/prepare.sh'),'step=job-images; false\n');
     assert.throws(()=>run(builder));
     assert.equal(await present('poweroff'),true);
-    assert.equal(await present('report.jsonl'),false);
-    assert.match(await readFile(join(root,'curl-calls'),'utf8'),/failed:job-images/);
+    assert.deepEqual(JSON.parse(await readFile(join(root,'report.jsonl'),'utf8')),
+      {value:'failed:job-images',diagnostic:{reason:'builder-failed',exit_status:1}});
     assert.doesNotMatch(await readFile(join(root,'systemctl'),'utf8'),/start ci-kit-bake-finalize/);
 
     // The finalizer's self-check is authoritative: a bad manifest cannot produce ok, even with clean state.
@@ -460,6 +522,178 @@ echo compact >> "$TEST_ROOT/compacted"
       assert.equal(await present('poweroff'),true);
       assert.equal(await present('run/ci-kit-bake'),false,'failure removes its tmpfs handoff');
     }
+
+    // A root copied on its second attempt carries that attempt's evidence in the ok report, bounded like a failure tail.
+    for (const p of ['report.jsonl','poweroff','curl-calls']) await rm(join(root,p),{force:true});
+    await mkdir(join(root,'run/ci-kit-bake'),{recursive:true});
+    await writeFile(join(root,'run/ci-kit-bake/report-url'),'https://reports.invalid/builder');
+    await writeFile(compact, `#!/bin/bash
+printf '%s\\n' 'root-copy 3 1' 'root-copy-retry 202 0' 'compact 431 0' > "$CI_KIT_COMPACT_TRACE"
+for i in $(seq 1 50); do echo "compact: evidence line $i"; done > "$CI_KIT_COMPACT_RETRY"
+`);
+    run(finalizer);
+    const retried = JSON.parse(await readFile(join(root,'report.jsonl'),'utf8'));
+    assert.equal(retried.value,'ok');
+    assert.deepEqual(retried.compact.phases,{'root-copy':{elapsed_seconds:3,exit_status:1,bound_seconds:480},
+      'root-copy-retry':{elapsed_seconds:202,exit_status:0,bound_seconds:480}});
+    assert.equal(retried.root_copy_retry.log_tail,Array.from({length:40},(_,i)=>`compact: evidence line ${i+11}\n`).join(''));
+    assert.equal(await present('run/ci-kit-bake'),false);
+  } finally { await rm(root,{recursive:true,force:true}); }
+});
+
+// 2026-11-19: three bakes reported only failed:apt, and their builders were gone before anyone could ask why.
+test('a builder step failure reports a bounded, token-free tail of what it printed, and still reports without one', async () => {
+  const {readFile,writeFile,mkdtemp,mkdir,rm} = await import('node:fs/promises');
+  const {tmpdir} = await import('node:os');
+  const {join} = await import('node:path');
+  const {execFileSync} = await import('node:child_process');
+  const {fillEc2Builder} = await import('../../ec2/bake/bake.mjs');
+  const root = await mkdtemp(join(tmpdir(),'ci-kit-builder-failure-'));
+  const relocate = (s) => s.replace(/\/(etc|opt|var|root|run|tmp|snap)(?=\/|\s|$)/g,`${root}/$1`);
+  const report = 'https://reports.invalid/builder.json?X-Amz-Signature=private-signature';
+  const tokens = {ssfskim:'ghs_'+'A'.repeat(36), other:'ghs_'+'B'.repeat(36)};
+  const driver = `set -euo pipefail
+systemctl() { :; }; sync() { :; }; poweroff() { :; }
+curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat > "$TEST_ROOT/report.json"; else printf '%s\\n' "$*" > "$TEST_ROOT/curl-calls"; fi; }
+. "$1"
+`;
+  const output = [...Array.from({length:60}, (_, i) => `Get:${i} http://archive.ubuntu.com/ubuntu noble InRelease`),
+    `remote: https://x-access-token:${tokens.ssfskim}@github.com/SSFSKIM/MAWS`,
+    `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${tokens.other}`).toString('base64')}`,
+    `PUT ${report}`, `token map ${JSON.stringify(tokens)}`,
+    `+ printf %s ${Buffer.from(JSON.stringify(tokens)).toString('base64')}`, `+ printf %s ${Buffer.from(report).toString('base64')}`,
+    'E: Could not get lock /var/lib/apt/lists/lock. It is held by process 1234 (apt-get)', ''].join('\n');
+  // timeout runs apt-get and python3 from PATH, so the fakes are files, not shell functions.
+  const fakes = join(root,'fakes');
+  const run = async (path = `${fakes}:${process.env.PATH}`, log = output) => {
+    await mkdir(fakes,{recursive:true});
+    await writeFile(join(fakes,'apt-get'),'#!/bin/sh\n[ "$1" != update ] || exit 100\n',{mode:0o755});
+    for (const p of ['report.json','curl-calls']) await rm(join(root,p),{force:true});
+    await mkdir(join(root,'var/log'),{recursive:true});
+    await mkdir(join(root,'etc/apt/preferences.d'),{recursive:true});
+    await rm(join(root,'var/log/cloud-init-output.log'),{force:true});
+    if (log !== null) await writeFile(join(root,'var/log/cloud-init-output.log'),log);
+    const template = await readFile(new URL('../../ec2/bake/builder.sh',import.meta.url),'utf8');
+    await writeFile(join(root,'builder.sh'),relocate(fillEc2Builder(template,{manifest:built,token:JSON.stringify(tokens),report})));
+    assert.throws(() => execFileSync('bash',['-c',driver,'fixture',join(root,'builder.sh')],{env:{...process.env,PATH:path,TEST_ROOT:root},stdio:'pipe'}),
+      (error) => error.status === 100);
+    const present = async (p) => readFile(join(root,p),'utf8').catch(() => undefined);
+    return {report: await present('report.json'), plain: await present('curl-calls')};
+  };
+  try {
+    const failed = JSON.parse((await run()).report);
+    assert.deepEqual(Object.keys(failed), ['value','diagnostic']);
+    assert.equal(failed.value, 'failed:apt');
+    const {log_tail, ...fields} = failed.diagnostic;
+    assert.deepEqual(fields, {reason:'builder-failed', exit_status:100});
+    assert.equal(log_tail.split('\n').length, 41, 'forty whole lines and the final newline');
+    assert.ok(Buffer.byteLength(log_tail) <= 8192);
+    assert.match(log_tail, /E: Could not get lock .*\n$/, 'the tail ends with what the failing step printed');
+    for (const secret of [...Object.values(tokens), Buffer.from(`x-access-token:${tokens.other}`).toString('base64'), 'private-signature',
+      Buffer.from(JSON.stringify(tokens)).toString('base64'), Buffer.from(report).toString('base64')])
+      assert.ok(!log_tail.includes(secret), `the report must not carry ${secret.slice(0, 8)}`);
+    assert.match(log_tail, /x-access-token:\[redacted\]@github.com/);
+
+    const noLog = JSON.parse((await run(undefined, null)).report);
+    assert.deepEqual(noLog, {value:'failed:apt', diagnostic:{reason:'builder-failed', exit_status:100}});
+
+    await mkdir(join(root,'bin'),{recursive:true});
+    await writeFile(join(root,'bin/python3'),'#!/bin/sh\nexit 1\n',{mode:0o755});
+    const broken = await run(`${join(root,'bin')}:${fakes}:${process.env.PATH}`);
+    assert.equal(broken.report, undefined);
+    assert.match(broken.plain, /\{"value":"failed:apt"\}/, 'a failure to build the tail still reports the step');
+  } finally { await rm(root,{recursive:true,force:true}); }
+});
+
+// 2026-11-19, bake 20261119-232507-taub: us-east-2's EC2 mirror answered 503 for partclone after eleven minutes.
+test('the builder installs from the main archive when the region\'s mirror fails, and leaves the image on the region\'s mirror', async () => {
+  const {readFile,writeFile,mkdtemp,mkdir,rm} = await import('node:fs/promises');
+  const {tmpdir} = await import('node:os');
+  const {join} = await import('node:path');
+  const {execFileSync} = await import('node:child_process');
+  const {fillEc2Builder} = await import('../../ec2/bake/bake.mjs');
+  const root = await mkdtemp(join(tmpdir(),'ci-kit-builder-mirror-'));
+  const relocate = (s) => s.replace(/\/(etc|opt|var|root|run|tmp|snap)(?=\/|\s|$)/g,`${root}/$1`);
+  const sources = join(root,'etc/apt/sources.list.d/ubuntu.sources');
+  const regional = 'Types: deb\nURIs: http://us-east-2.ec2.archive.ubuntu.com/ubuntu/\nSuites: noble noble-updates\n\nTypes: deb\nURIs: http://security.ubuntu.com/ubuntu/\nSuites: noble-security\n';
+  // apt-get records each call with the number of regional mirror lines it would read. TEST_FAIL names what fails while
+  // the sources carry TEST_MIRROR: an update that fails only when asked to error on any failed fetch, the downloads,
+  // a hang in update, or the dpkg transaction.
+  const aptGet = `#!/bin/bash
+[ "$1" = update ] || [ "$1" = install ] || exit 0
+regional=$(grep -c ec2.archive "$TEST_SOURCES" || true)
+echo "$regional $*" >> "$TEST_ROOT/apt-calls"
+grep -q "$TEST_MIRROR" "$TEST_SOURCES" || exit 0
+case "$TEST_FAIL $*" in
+  "update update --error-on=any") exit 100 ;;
+  "hang update "*) exec sleep 30 ;;
+  "download install "*--download-only*|"dpkg install "*--no-download*) exit 1 ;;
+esac
+`;
+  // The hang case's timeout records its limits and runs the real one with limits of a second, so the hang is cut off.
+  const realTimeout = execFileSync('bash',['-c','command -v timeout'],{encoding:'utf8'}).trim();
+  const fakeTimeout = `#!/bin/bash
+[ "$1" = -k ] || exec "${realTimeout}" "$@"
+echo "$*" >> "$TEST_ROOT/timeouts"
+shift 3
+exec "${realTimeout}" -k 1 1 "$@"
+`;
+  const driver = `set -euo pipefail
+systemctl() { :; }; sync() { :; }; poweroff() { :; }; git() { return 7; }
+curl() { if [[ "$*" == *'--data-binary @-'* ]]; then cat > "$TEST_ROOT/report.json"; else :; fi; }
+. "$1"
+`;
+  const run = async (fail, mirror = 'ec2.archive.ubuntu.com') => {
+    for (const p of ['report.json','apt-calls','timeouts','fakes']) await rm(join(root,p),{force:true,recursive:true});
+    for (const d of ['var/log','etc/apt/preferences.d','etc/apt/sources.list.d','run','fakes/apt','fakes/timeout']) await mkdir(join(root,d),{recursive:true});
+    await writeFile(join(root,'fakes/apt/apt-get'),aptGet,{mode:0o755});
+    await writeFile(join(root,'fakes/timeout/timeout'),fakeTimeout,{mode:0o755});
+    await writeFile(sources, regional);
+    const template = await readFile(new URL('../../ec2/bake/builder.sh',import.meta.url),'utf8');
+    await writeFile(join(root,'builder.sh'),relocate(fillEc2Builder(template,{manifest:built,token:'{}',report:'https://reports.invalid/builder.json'})));
+    const path = [join(root,'fakes/apt'), ...(fail === 'hang' ? [join(root,'fakes/timeout')] : []), process.env.PATH].join(':');
+    let status = 0, stdout = '';
+    try { execFileSync('bash',['-c',driver,'fixture',join(root,'builder.sh')],{env:{...process.env,PATH:path,TEST_ROOT:root,TEST_SOURCES:sources,TEST_MIRROR:mirror,TEST_FAIL:fail},stdio:'pipe'}); }
+    catch (error) { status = error.status; stdout = String(error.stdout); }
+    const optional = (p) => readFile(join(root,p),'utf8').then((s) => s.trim().split('\n'), () => []);
+    return {status, stdout, step: JSON.parse(await readFile(join(root,'report.json'),'utf8')).value,
+      calls: await optional('apt-calls'), timeouts: await optional('timeouts'), sources: await readFile(sources,'utf8')};
+  };
+  const packages = 'docker.io git jq curl xz-utils ca-certificates iptables gdisk partclone dosfstools';
+  const update = (r) => `${r} update --error-on=any`;
+  const download = (r) => `${r} install -y --no-install-recommends --download-only ${packages}`;
+  const install = (r) => `${r} install -y --no-install-recommends --no-download ${packages}`;
+  try {
+    const fellBack = await run('download');
+    assert.deepEqual(fellBack.calls, [update(1), download(1), update(0), download(0), install(0)],
+      'only update and the downloads are retried, from no regional mirror; dpkg runs once, on what was fetched');
+    assert.equal(fellBack.step, 'failed:kit', 'apt passed: the fixture stops at the next step');
+    assert.match(fellBack.stdout, /the region's mirror failed; installing from archive.ubuntu.com/);
+    assert.equal(fellBack.sources, regional, 'the image keeps the region\'s mirror and the security archive as they were');
+
+    const pocket = await run('update');
+    assert.deepEqual(pocket.calls, [update(1), update(0), download(0), install(0)], 'a failed fetch in update is a failure');
+    assert.equal(pocket.step, 'failed:kit');
+
+    const healthy = await run('download', 'no-such-mirror');
+    assert.deepEqual(healthy.calls, [update(1), download(1), install(1)], 'a healthy mirror is asked once');
+    assert.equal(healthy.step, 'failed:kit');
+
+    const down = await run('download', 'ubuntu.com'); // both attempts fail
+    assert.deepEqual([down.step, down.status], ['failed:apt', 1]);
+    assert.deepEqual(down.calls, [update(1), download(1), update(0), download(0)]);
+
+    const dpkg = await run('dpkg', 'ubuntu.com');
+    assert.deepEqual([dpkg.step, dpkg.status], ['failed:apt', 1]);
+    assert.deepEqual(dpkg.calls, [update(1), download(1), install(1)], 'a failed transaction is not retried on another mirror');
+
+    const started = Date.now();
+    const hung = await run('hang');
+    assert.ok(Date.now() - started < 20000, 'the hung update was cut off');
+    assert.deepEqual(hung.calls, [update(1), update(0), download(0), install(0)]);
+    assert.equal(hung.step, 'failed:kit');
+    assert.deepEqual(hung.timeouts.map((t) => t.split(' ').slice(0, 4).join(' ')),
+      ['-k 30 180 apt-get', '-k 30 180 apt-get', '-k 30 360 apt-get'], 'every network command is limited; dpkg is not');
   } finally { await rm(root,{recursive:true,force:true}); }
 });
 
@@ -468,6 +702,20 @@ test('a just-launched builder that DescribeInstances does not know yet is read a
   const result = await f.run();
   assert.deepEqual(result.manifest, built);
   assert.equal(f.calls.filter(([n, v]) => n === 'DescribeInstancesCommand' && v.InstanceIds).length >= 3, true);
+});
+
+test('a builder whose root copy passed on its second attempt is named in the controller log, its evidence left in S3', async () => {
+  const evidence = 'compact: before flush: loop /dev/loop0 dio=1; superblock free blocks: loop 11915999';
+  const compact = { elapsed_seconds: 431, exit_status: 0, phases: { 'root-copy': { elapsed_seconds: 3, exit_status: 1, bound_seconds: 480 },
+    'root-copy-retry': { elapsed_seconds: 202, exit_status: 0, bound_seconds: 480 } } };
+  const f = await ec2Fixture({ builderReport: { compact, root_copy_retry: { log_tail: evidence } } });
+  await f.run();
+  const lines = f.logs.filter((line) => /second partclone attempt/.test(line));
+  assert.deepEqual(lines, ['123456789012: builder copied the root on a second partclone attempt (first exit 1); evidence in s3://reports/reports/bake-20261023-120000-abcd-123456789012/builder.json']);
+  assert.ok(!f.logs.some((line) => line.includes('11915999')), 'evidence text stays in the report');
+  const plain = await ec2Fixture({ builderReport: { compact: { ...compact, phases: { 'root-copy': { elapsed_seconds: 202, exit_status: 0 } } } } });
+  await plain.run();
+  assert.ok(!plain.logs.some((line) => /second partclone attempt/.test(line)));
 });
 
 test('an instance still unknown two minutes after its launch fails the bake', async () => {

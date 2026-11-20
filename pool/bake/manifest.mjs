@@ -100,14 +100,19 @@ export function manifestLabels(manifest) {
   };
 }
 
-// Isolate provider failures: a failed cloud keeps its previous ready image, while others still bake.
-export async function bakeProviders({ resolve, gce, accounts, ec2 }) {
+// Isolate provider failures: a failed cloud keeps its previous ready image, while others still bake. `only`, from
+// the hourly stale check, names the providers to bake ('gce', 'ec2/<account>'); the rest keep their image.
+export async function bakeProviders({ resolve, gce, accounts, ec2, only }) {
+  const wanted = name => !only || only.includes(name);
   const manifest = await resolve();
   const results = [], failures = [];
   let expected = manifest;
-  try { const result = await gce(manifest); expected = result.manifest; results.push(result); }
-  catch (error) { failures.push(error); }
+  if (wanted('gce')) {
+    try { const result = await gce(manifest); expected = result.manifest; results.push(result); }
+    catch (error) { failures.push(error); }
+  }
   for (const account of accounts) {
+    if (!wanted(`ec2/${account.account}`)) continue;
     try { const result = await ec2(account, expected); expected = result.manifest; results.push(result); }
     catch (error) { failures.push(error); }
   }

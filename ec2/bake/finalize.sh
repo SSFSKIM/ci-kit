@@ -24,9 +24,15 @@ compact_report() {
     } catch {}
     let compact = JSON.parse(formatCompactTrace(trace));
     if (compact.reason) compact = JSON.parse(formatCompactTrace(fallback));
+    // A root copied on its second partclone attempt: that attempt's evidence, in the report only.
+    let retry = {};
+    try {
+      const log_tail = boundCompactLogTail(await readFile('/run/ci-kit-bake/compact-retry.log', 'utf8'));
+      if (log_tail) retry = { root_copy_retry: { log_tail } };
+    } catch {}
     if (status === 0) {
       const manifest = JSON.parse(await readFile('/etc/ci-kit/bake-manifest.json', 'utf8'));
-      console.log(JSON.stringify({ value: 'ok', manifest, compact }));
+      console.log(JSON.stringify({ value: 'ok', manifest, compact, ...retry }));
     } else {
       let diagnostic = JSON.parse(formatDiagnostic({ reason: 'compact-failed', phase: 'compact', exit_status: status }));
       try {
@@ -39,7 +45,7 @@ compact_report() {
           } catch {}
         }
       } catch {}
-      console.log(JSON.stringify({ value: 'failed:compact', diagnostic, compact }));
+      console.log(JSON.stringify({ value: 'failed:compact', diagnostic, compact, ...retry }));
     }
   " "$1" "$((SECONDS-COMPACT_STARTED))"
 }
@@ -93,6 +99,7 @@ COMPACT_STARTED=$SECONDS
 install -d -m 0700 /run/ci-kit-bake
 export CI_KIT_COMPACT_DIAGNOSTIC=/run/ci-kit-bake/compact-diagnostic
 export CI_KIT_COMPACT_TRACE=/run/ci-kit-bake/compact-trace
+export CI_KIT_COMPACT_RETRY=/run/ci-kit-bake/compact-retry.log
 bash /opt/ci-kit/ec2/bake/compact.sh
 step=report
 compact_report 0 | curl -sf --max-time 30 -X PUT --data-binary @- "$REPORT" > /dev/null

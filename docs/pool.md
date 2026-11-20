@@ -14,7 +14,7 @@ launcher and bake, and [EC2 and credit preference](#ec2-and-credit-preference) f
 | alerts | `pool/lib/alerts.mjs` |
 | launcher, GCE bake, VM unit and deploy | `gce/`, `lib/gce.mjs` |
 | EC2 bake, VM unit and cloud setup | `ec2/`, `lib/aws.mjs` |
-| independent EC2 guard | `.github/workflows/pool-guard.yml`, `ec2/guard.mjs` |
+| independent EC2 guard | `.github/workflows/pool-guard.yml`, `ec2/guard.mjs`; its trigger `gce/launcher/guard.mjs` |
 | ledger | issues titled "pool ledger" or "pool ledger from …" in `SSFSKIM/ci-kit-sandbox` |
 
 ## Using the pool from a repo
@@ -128,7 +128,7 @@ each repo's configured GCE/EC2 provider preferences.
 
 | Piece | Where |
 |---|---|
-| launcher (Cloud Run service `ci-kit-launcher`) | `gce/launcher/`: `server.mjs` (the service), `routes.mjs` (its paths), `ticker.mjs` (when ticks run), `launcher.mjs` (one tick), decisions in `logic.mjs`, ledger rows in `ledger.mjs` and `ledger-store.mjs`, configs from main in `source.mjs` |
+| launcher (Cloud Run service `ci-kit-launcher`) | `gce/launcher/`: `server.mjs` (the service), `routes.mjs` (its paths), `ticker.mjs` (when ticks run), `guard.mjs` (the EC2 guard's trigger), `launcher.mjs` (one tick), decisions in `logic.mjs`, ledger rows in `ledger.mjs` and `ledger-store.mjs`, configs from main in `source.mjs` |
 | webhook receiver (Cloud Run service `ci-kit-webhook`) | `gce/webhook/`: `server.mjs` (the service), `receiver.mjs` (signature, filter, publish); the App's hook config: `gce/tools/app-hook.mjs` |
 | bake (orchestrator, decisions) | `gce/bake/bake.mjs`, `gce/bake/plan.mjs` |
 | builder (startup script) | `gce/bake/builder.sh`, sharing `pool/bake/prepare.sh` with the EC2 builder |
@@ -183,7 +183,9 @@ bake reads the `gce.json` bundled at its deploy, so a change to the placements r
 
 **The launcher.** Cloud Scheduler's `ci-kit-launcher-tick` POSTs to `ci-kit-launcher`'s `/tick` every minute with an
 OIDC token, and the webhook's Pub/Sub push POSTs to its `/request` when a job is queued in a served repo (The
-webhook, below).
+webhook, below). A third route is not a tick: Cloud Scheduler's `ci-kit-pool-guard` POSTs to `/guard` every 15
+minutes, and the launcher dispatches the EC2 guard's workflow (Independent EC2 guard, below) beside its ticks,
+neither waiting for one nor delaying one.
 The service has no public ingress (`--ingress=internal`, IAM-only: `ci-kit-launcher@` is its one invoker), runs one
 instance at a time and admits many requests at once, but runs one tick at a time (`ticker.mjs`). Every tick is the
 same full reconciliation, whoever asked, and nothing is kept between ticks: state is in GCE labels, the ledger and
@@ -489,9 +491,12 @@ once the run has completed, so the launcher reads each run owed one at most ever
 at most, the least recently read first; what is left waits for the next tick), and once it has completed it settles the rerun on the row. It reruns when the run
 failed in the attempt the lost job ran in, below its third attempt, in a repo still served and (for a public repo)
 for an event served, and the job failed because its runner was lost: GitHub never heard one of its steps end (a VM
-gone outright, as MAWS run 44468141412's), or the job ended at or after the VM's preemption (the guest's shutdown
-failing the running step). A job with a step that failed before its VM was preempted is a red, not a loss, even when
-the preemption cut a later step (an upload) short. It
+gone outright, as MAWS run 44468141412's), or the runner cancelled a step inside GCE's 30 s notice before its record
+of the preemption (what a GCE preemption looks like in production: the guest's shutdown stops the runner, and the job
+ends seconds before the record, as MAWS runs 44605433018's and 44635029958's did), or the job ended at or after that
+record. A job with a step that failed on its own first is a red, not a loss, even when the preemption cut a later
+step (an upload) short: a failure before the record, or before the notice when the runner was stopped inside it
+(inside the notice the shutdown itself can fail a step). It
 reruns the job (POST `actions/jobs/<id>/rerun`, which also reruns the jobs that need it), or the run's failed jobs
 when several of its jobs were lost (`rerun fired`); otherwise it reruns nothing (`rerun dropped`, with the reason in
 the row's JSON). Since a fired rerun moves the run to its next attempt, no attempt is rerun twice, and an attempt
@@ -721,7 +726,7 @@ smoke, not a job's hash comparison: retain both the console and Actions evidence
 
 **Hourly declaration check (GCE and EC2).** `ci-kit-bake-check` runs the same source as the bake, with
 `CI_KIT_BAKE_IF_STALE=1`, as `ci-kit-launcher@ssfskim-ci-kit.iam.gserviceaccount.com`. Its timeout is the bake's
-(180 minutes plus 120 per configured EC2 account). `ci-kit-bake-check-hourly` invokes it at minute 23 of every hour,
+(180 minutes plus 165 per configured EC2 account). `ci-kit-bake-check-hourly` invokes it at minute 23 of every hour,
 UTC. The weekly bake and manual `ci-kit-bake` executions remain unconditional; their job and weekly cadence are unchanged.
 
 Before comparing anything, the check lists **both** jobs' executions, excluding itself. A pending/running execution
@@ -738,8 +743,12 @@ configured EC2 account (disabled accounts still receive bakes). A missing ready 
 failures are errors, not missing declarations. All equal logs `bake: images current` and exits without resolving the
 full bake manifest or making a builder. Otherwise each changed repository is logged as
 `bake: stale <owner/repo> on <gce|ec2/account>: <image hash> -> <default-branch hash>` (a missing provider image logs
-`bake: stale <provider>: no ready image`), then this same execution continues through the ordinary bake. The bake
-resolves its inputs afresh, once for both providers; a declaration merged during the check is therefore included.
+`bake: stale <provider>: no ready image`), then this same execution continues through the ordinary bake **for the
+stale providers only** (`bake <run>: kit ..., only the stale ec2/<account>`): a provider whose image is current is
+not rebuilt, so one provider's failing bake neither rotates the other's good image every hour nor waits for it
+(#227). The two providers' images can then differ in kit commit and Node patch version until the weekly bake, as
+they already do after any bake in which one provider failed. The bake resolves its inputs afresh, once for the
+providers it bakes; a declaration merged during the check is therefore included.
 
 Deploy **from merged main**, by the coordinator; no `v1` move is needed for the scheduler path:
 
@@ -767,9 +776,10 @@ Proof, under the bake's own identity (the check runs in Cloud Run, never `node .
      --project=ssfskim-ci-kit --freshness=2h --order=asc --format='value(textPayload)'
    ```
    Expect `bake: stale SSFSKIM/ci-kit-sandbox on gce: <old> -> <new>` and the EC2 equivalent, then
-   `bake <run>: kit ...`, the normal smoke/real-job records, and
-   `done: every configured provider passed smoke and its real sandbox job`. Both newest ready images must carry
-   `<new>` (not just a successful execution):
+   `bake <run>: kit ..., only the stale gce, ec2/<account>`, the normal smoke/real-job records, and
+   `done: gce, ec2/<account> passed smoke and its real sandbox job` (the check names the providers it baked; a
+   provider it found current is absent from both lines and its newest image must be the one it had before). Both
+   newest ready images must carry `<new>` (not just a successful execution):
    ```
    gcloud compute images list --project=ssfskim-ci-kit \
      --filter='family=ci-kit-runner AND status=READY AND labels.ci-kit=gce-image AND labels.ci-kit-ready=true' \
@@ -1025,6 +1035,36 @@ four-hour STS federation, never stored AWS keys. Cost Explorer alone uses/signs 
 account requires its entry and its own `ec2/setup.sh` run; the bake, billing reader and guard then cover it.
 The builder uses on-demand only to stop for CreateImage; there are no on-demand EC2 job candidates.
 
+**The EC2 bake's evidence and second chances.** The builder (`ec2/bake/builder.sh`, then `finalize.sh`) PUTs a JSON
+report to `s3://<report_bucket>/reports/bake-<run>/builder.json`. Free text from the VM stays in that report: the
+controller prints structured fields and the report's location (`ec2/vm/diagnostics.mjs` is the vocabulary).
+
+- A failed builder step reports `failed:<step>` with `{"reason":"builder-failed","exit_status":N,"log_tail":…}`: the last
+  40 whole lines (8 KiB) of cloud-init's output log, with the GitHub token, its basic-auth form and the report URL
+  redacted. The controller's error names the report and the tail's line count. If building the tail fails, the plain
+  `failed:<step>` is still sent.
+- The builder's packages come from the region's EC2 mirror, and from `archive.ubuntu.com` when that fails (it prints
+  `the region's mirror failed; installing from archive.ubuntu.com`): on 2026-11-19 us-east-2's mirror answered 503 for
+  a universe package after eleven minutes, and four bakes that day ended `failed:apt`. Only the network part is retried:
+  `apt-get update --error-on=any` (a failed pocket is otherwise a warning with exit 0) within 3 minutes and the
+  `--download-only` install within 6, each attempt. The install that runs dpkg follows once with `--no-download`, with
+  no time limit, so a failed transaction ends the bake `failed:apt` instead of being retried. The image keeps the
+  region's mirror in its sources either way. The controller waits 45 minutes for the builder: two cut-off attempts
+  (20 minutes with their kill grace) and a normal 16-minute build fit inside it.
+- `copy-root.sh` copies the frozen root with partclone. When partclone refuses it with `bitmap free count err` (the
+  superblock's free count read as it was before the freeze; three bakes of six on 2026-11-19, cause unknown), it records
+  read-only evidence while root is still frozen (kernel, the superblock free count through the loop alias buffered and
+  direct and from the source partition direct and buffered, the alias's direct-I/O flag and openers), drops the alias's
+  cached blocks (`blockdev --flushbufs`) and runs partclone once more as phase `root-copy-retry`; the content
+  inventories and `e2fsck -fn` still judge the copy. A timeout or any other failure is not retried. If the second
+  attempt fails, the evidence and its error are the failure's log tail; if it passes, the evidence is the ok report's
+  `root_copy_retry.log_tail`, and the controller logs `builder copied the root on a second partclone attempt` with
+  the report's location.
+- A smoke or real-check spot launch that every zone refuses, at least one for `InsufficientInstanceCapacity`, is tried
+  again over all zones every minute for up to fifteen minutes (one log line per round) before the bake gives up and
+  removes its image. Each send has its own `ClientToken`, `ci-kit-deadline` and guest deadline. The builder's launch
+  makes one pass over the zones.
+
 ### Enabling, demoting and disabling
 
 Before first enabling credit preference, run the explicit `ec2/setup.sh --billing-proof` through the federated
@@ -1093,7 +1133,28 @@ preemption's is (Preemption, above).
 
 ### Independent EC2 guard
 
-`.github/workflows/pool-guard.yml` runs the independent EC2 guard every fifteen minutes. Each configured account, disabled ones included, gets an independent `ubuntu-latest` matrix leg;
+`.github/workflows/pool-guard.yml` runs the independent EC2 guard every fifteen minutes. Its own `*/15` schedule
+is not what keeps that cadence: GitHub started it only every 6 to 9 hours (ci-kit#222, 2026-11-17 to 19). Cloud
+Scheduler's `ci-kit-pool-guard` (`gce/deploy.sh launcher-schedule`) POSTs the launcher's `/guard` every 15 minutes,
+and the launcher dispatches the workflow on main with the App's token (`gce/launcher/guard.mjs`); the workflow's
+schedule stays as a second trigger. The guard depends on the launcher for this trigger only: it still runs on GitHub
+Actions under its own OIDC role. Its concurrency group (`pool-guard`, no cancel-in-progress) keeps one run going and
+at most one pending, so the two triggers never overlap or pile up: a newer pending run replaces an older one.
+Each `/guard` call costs the App two REST calls, the dispatch and one read of the newest successful run on main
+(`per_page=1`): eight an hour. The read runs whatever the dispatch did, since a guard that cannot be triggered is the
+one that goes silent. When that run completed over an hour ago, or there is none, the launcher logs an ERROR line with
+`jsonPayload.event="pool-guard-silent"`, which `gce/deploy.sh alert` mails the owner for (`ci-kit EC2 guard
+silent`). `/guard` answers 200 only when both the dispatch and the read worked. A refused dispatch (the App's
+installation lost `actions: write` on the kit, or the workflow was disabled) is an ERROR with
+`event="pool-guard-dispatch-failed"`, an unreadable run list one with `event="pool-guard-check-failed"`, and either
+answers 500: a failed execution of `ci-kit-pool-guard`, which has no retries (a retry after an accepted dispatch would
+dispatch again). Two failed executions in an hour mail the owner (`ci-kit EC2 guard trigger failing`), which also
+covers a launcher deployed without `/guard` and a call that times out (the job's deadline is 180 s, a cold call's
+bounded path 140 s).
+Pausing the launcher's tick does not pause this trigger: `gcloud scheduler jobs pause ci-kit-pool-guard
+--location=us-central1 --project=ssfskim-ci-kit` does.
+
+Each configured account, disabled ones included, gets an independent `ubuntu-latest` matrix leg;
 an absent file yields none, invalid config fails discovery, and one leg's failure does not cancel the others.
 Each leg exchanges GitHub OIDC for that account's guard role, trusted only for
 `repo:SSFSKIM/ci-kit:ref:refs/heads/main`, with temporary credentials kept in memory. It cannot launch resources.

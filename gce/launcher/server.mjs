@@ -8,6 +8,8 @@
 //                  served repo (gce/webhook): answered when the tick that serves it has ended, so the request keeps the
 //                  instance's CPU allocated (request-based billing) for that tick's whole run.
 // Both are the same full tick (launcher.mjs), run one at a time with at most one pending (ticker.mjs).
+//   POST /guard    Cloud Scheduler's ci-kit-pool-guard, every 15 minutes: dispatches the EC2 guard (pool-guard.yml)
+//                  and logs an ERROR when none of its runs succeeded in an hour (guard.mjs). Not a tick, and beside them.
 // It runs as ci-kit-launcher@: Compute Engine through the metadata server's token, the App's id and key from Secret
 // Manager, and the configs from the kit's main (source.mjs). Clients live as long as the instance, so their ETags
 // and installation token carry from tick to tick.
@@ -24,6 +26,7 @@ import { createLimits } from './providers/gce.mjs';
 import { createProviders } from './providers/index.mjs';
 import { createTicker } from './ticker.mjs';
 import { createHandler } from './routes.mjs';
+import { createGuardTrigger } from './guard.mjs';
 
 const bundled = (name) => readFile(new URL(`../../pool/config/${name}`, import.meta.url), 'utf8');
 const say = (severity, message, extra = {}) => console.log(JSON.stringify({ severity, message, ...extra }));
@@ -55,11 +58,14 @@ async function deps(preparation) {
   return { gce, gh, source, ledgers: new Map(), credits: new Map(), providerState: new Map(), stockouts: stockoutMemory(), rerunChecks: new Map(), limits: createLimits(gce, log) };
 }
 
+// The clients, set up once by whichever request comes first; a failed setup is retried by the next.
+const setUp = (preparation) => (setup ??= deps(preparation).catch((err) => {
+  setup = null;
+  throw err;
+}));
+
 async function reconcile(preparation) {
-  const d = await preparation.time('setup', () => (setup ??= deps(preparation).catch((err) => {
-    setup = null;
-    throw err;
-  })));
+  const d = await preparation.time('setup', () => setUp(preparation));
   const { cfg, config, ec2, repoProviders } = await preparation.time('config', () => d.source());
   const key = `${cfg.ledger.repo}#${cfg.ledger.issue_title}`;
   if (!d.ledgers.has(key)) d.ledgers.set(key, createGceLedger(d.gh, cfg.ledger, { log }));
@@ -97,5 +103,6 @@ function budgetLow() {
   return low;
 }
 
-http.createServer(createHandler({ serve: createTicker({ tick, budgetLow }), say }))
+const guard = createGuardTrigger({ github: async () => (await setUp(createPreparation())).gh, say });
+http.createServer(createHandler({ serve: createTicker({ tick, budgetLow }), guard, say }))
   .listen(Number(process.env.PORT) || 8080, () => log(`ci-kit-launcher listening, kit ${(process.env.CI_KIT_COMMIT || 'bundled').slice(0, 8)}`));
