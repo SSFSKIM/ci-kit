@@ -4,14 +4,26 @@
 import { createHash } from 'node:crypto';
 import { gatesOf, producerOf } from './provenance.mjs';
 
-// The platform's own messages about a job, by kind (spec, "A job line": `annotations`). A message is kept as its kind,
-// never as its text.
+// The platform's own messages about a job, by kind (spec, "A job line": `annotations`), as GitHub words them, whole
+// from their first word (its annotations, 2026-10/11): a test's output that quotes them is not them, and a message too
+// vague to name a cause (`The operation was canceled.`) is no kind, since a false `runner-lost` would call a real
+// failure infra. A message is kept as its kind, never as its text.
 const PLATFORM = [
-  ['not-started', /\bjob was not started because\b/i],
-  ['runner-lost', /\blost communication with the server\b|\breceived a shutdown signal\b/i],
-  ['time-limit', /\bexceeded the maximum execution time\b/i],
+  ['not-started', /^The job was not started because /],
+  ['runner-lost', /^The (?:self-hosted |hosted )?runner(?:: \S+)? lost communication with the server\./],
+  ['runner-lost', /^The runner has received a shutdown signal\./],
+  ['time-limit', /^The job has exceeded the maximum execution time of [0-9hms]+\.?$/],
+  ['time-limit', /^The job running on runner .+ has exceeded the maximum execution time of \d+ minutes\.$/],
 ];
 export const platformKind = (message) => PLATFORM.find(([, re]) => re.test(message ?? ''))?.[0] ?? null;
+
+// An annotation is the platform's when it is made at the workflow (`.github`), not at a file a step reported.
+export const annotationKind = (annotation) => (annotation?.path === '.github' ? platformKind(annotation.message) : null);
+
+// A job log's platform kinds: only from the runner's own error lines (`<time> ##[error]<message>`), never from what a
+// step printed.
+const RUNNER_ERROR = /^\uFEFF?(?:\d{4}-\d\d-\d\dT[\d:.]+Z )?##\[error\](.*?)\r?$/;
+export const logKinds = (text) => [...new Set((text ?? '').split('\n').map((line) => platformKind(RUNNER_ERROR.exec(line)?.[1])).filter(Boolean))];
 
 // A name pattern of history/repos.json (`control`, `parts`): the whole name, `*` matching anything.
 const globRe = (pattern) => new RegExp(`^${pattern.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\/]/g, '\\$&')).join('.*')}$`);
@@ -108,16 +120,24 @@ export const comparable = (a, b) => a.gate === b.gate && a.scope_key === b.scope
 // new id, and copies its times, runner and steps from the attempt that ran it, so it completed before it was created.
 export const isCopy = (job) => Boolean(job.created_at && job.completed_at && job.completed_at < job.created_at);
 
-// The attempt a copied job ran in: the latest earlier attempt whose job of that name is not itself a copy.
-// `listingOf(k)`: attempt k's jobs; attempt 1 needs no listing, since nothing there can be a copy.
+// The attempt a copied job ran in: the latest earlier attempt whose listing has a job of that name that is not itself
+// a copy; null when none has (the copy is still a copy, with no minutes). `listingOf(k)`: attempt k's jobs.
 export function copiedFrom(name, attempt, listingOf) {
-  for (let k = attempt - 1; k >= 2; k -= 1) {
+  for (let k = attempt - 1; k >= 1; k -= 1) {
     const jobs = listingOf(k);
     if (!jobs) throw new Error(`history: attempt ${k}'s jobs are needed to place a copied job`);
     const job = jobs.find((j) => j.name === name);
-    if (!job || !isCopy(job)) return k;
+    if (job && !isCopy(job)) return k;
   }
-  return 1;
+  return null;
+}
+
+// When one attempt's lines are filed: a line by its own completion, a copy by its attempt's latest fresh job (else the
+// latest copy), so the day that holds an attempt's last fresh job holds every copy beside it, whatever day the copied
+// shards ran. → the copies' filing time (ISO), from the attempt's lines.
+export function filingTime(lines) {
+  const latest = (list) => list.map((l) => l.completed).filter(Boolean).sort().at(-1) ?? null;
+  return latest(lines.filter((l) => !l.copy)) ?? latest(lines);
 }
 
 // One attempt of a run, as its job lines share it. `resolved`: the tested commit read from the mirror (a ci-gate
@@ -167,10 +187,19 @@ const minutesOf = (job) => {
   return Math.max(0, Math.round((Date.parse(job.completed_at) - Date.parse(job.started_at)) / 6000) / 10);
 };
 
-// A job's line. `copied_from`: the attempt a copy ran in (null for a job that ran here); a copy has no minutes.
-// `annotations`: the platform kinds read for an unsuccessful job.
+// A summary job: one whose name is its gate's where the repository names the gate's parts (MAWS's hosted `static`).
+// It decides the result with its parts; their minutes and lanes are the gate's.
+const roleOf = (name, gate, entry) => {
+  const raw = entry.job_prefix && name.startsWith(entry.job_prefix) ? name.slice(entry.job_prefix.length) : name;
+  return gate !== null && raw === gate && gate in (entry.parts ?? {}) ? 'summary' : null;
+};
+
+// A job's line. `copy`: carried over from an earlier attempt; `copied_from`: the attempt it ran in (null when it ran
+// here, or for a copy whose origin no earlier listing shows); a copy has no minutes. `annotations`: the platform
+// kinds read for an unsuccessful job.
 export function jobLine(facts, job, { copied_from = null, annotations = [] }, entry) {
   const { gate, shard, kind, variant } = gateOf(job.name, entry);
+  const copy = isCopy(job);
   const { scope, scope_key } = scopeOf(facts.source, gate, variant, entry);
   const { failed_step, phase } = phaseOf(job, entry);
   const head = {
@@ -182,10 +211,10 @@ export function jobLine(facts, job, { copied_from = null, annotations = [] }, en
   return {
     ...head,
     tree_key: facts.tree_key, basis: facts.basis,
-    job_id: job.id, job: job.name, gate, shard, kind, copied_from,
+    job_id: job.id, job: job.name, gate, shard, kind, role: roleOf(job.name, gate, entry), copy, copied_from,
     lane: laneOf(job), runner: job.runner_name || null,
     started: job.started_at ?? null, completed: job.completed_at ?? null,
-    minutes: copied_from === null ? minutesOf(job) : null,
+    minutes: copy ? null : minutesOf(job),
     conclusion: job.conclusion, run_conclusion: facts.run_conclusion,
     failed_step, phase, annotations,
   };
@@ -193,10 +222,12 @@ export function jobLine(facts, job, { copied_from = null, annotations = [] }, en
 
 const SHARED = ['run', 'attempt', 'gate', 'workflow', 'event', 'ref', 'producer', 'label', 'change', 'gates', 'scope', 'scope_key', 'basis', 'head', 'tested', 'tree', 'tree_key', 'head_tree', 'run_conclusion'];
 
-// Job lines → gate attempts: a gate's jobs of one (run, attempt) and scope key. It succeeded only when every job
-// succeeded and, for a sharded gate, every shard 1..n its names announce is there; it failed when any job did not
-// succeed; otherwise it is incomplete. Copies count toward the result, not the minutes; `copied` names the attempts
-// they ran in. Control jobs are not gates.
+// Job lines → gate attempts: a gate's jobs of one (run, attempt) and scope key. It failed when any job did not succeed
+// (a summary job too); it succeeded only when every job succeeded, its jobs announce one shard count n (or none) and,
+// for n, every shard 1..n is there; otherwise it is incomplete. Copies count toward the result, not the minutes;
+// `copies` names the attempts they ran in, and `copied` says every job was a copy: no new execution, never an attempt
+// or a later green of its own. `available`: when the result was known (its latest fresh job's completion), apart from
+// the jobs' physical `started` and `completed`. A summary job adds no minutes or lane. Control jobs are not gates.
 export function gateAttempts(lines) {
   const groups = new Map();
   for (const l of lines) {
@@ -207,22 +238,27 @@ export function gateAttempts(lines) {
   }
   return [...groups.values()].map((jobs) => {
     const first = jobs[0];
-    const n = Math.max(0, ...jobs.map((j) => j.shard?.[1] ?? 0));
+    const forms = new Set(jobs.map((j) => j.shard?.[1] ?? null));
+    const [n] = forms;
     const ks = new Set(jobs.filter((j) => j.shard).map((j) => j.shard[0]));
-    const whole = Array.from({ length: n }, (_, i) => i + 1).every((k) => ks.has(k));
+    const whole = forms.size === 1 && (n === null || Array.from({ length: n }, (_, i) => i + 1).every((k) => ks.has(k)));
     const failed = jobs.some((j) => j.conclusion !== 'success');
     const result = failed ? 'failed' : whole ? 'succeeded' : 'incomplete';
     const at = Object.fromEntries(SHARED.filter((k) => first[k] !== undefined).map((k) => [k, first[k]]));
-    const times = (key) => jobs.map((j) => j[key]).filter(Boolean).sort();
+    const times = (list, key) => list.map((j) => j[key]).filter(Boolean).sort();
+    const fresh = jobs.filter((j) => !j.copy);
+    const billed = fresh.filter((j) => j.role !== 'summary');
     return {
       ...at,
       result,
-      shards: n || null,
-      started: times('started')[0] ?? null,
-      completed: times('completed').at(-1) ?? null,
-      minutes: Math.round(jobs.reduce((t, j) => t + (j.minutes ?? 0), 0) * 10) / 10,
-      lanes: [...new Set(jobs.filter((j) => j.copied_from === null).map((j) => j.lane).filter(Boolean))].sort(),
-      copied: [...new Set(jobs.map((j) => j.copied_from).filter((c) => c !== null))].sort((a, b) => a - b),
+      shards: forms.size === 1 ? n : null,
+      started: times(jobs, 'started')[0] ?? null,
+      completed: times(jobs, 'completed').at(-1) ?? null,
+      available: times(fresh, 'completed').at(-1) ?? null,
+      minutes: Math.round(billed.reduce((t, j) => t + (j.minutes ?? 0), 0) * 10) / 10,
+      lanes: [...new Set(billed.map((j) => j.lane).filter(Boolean))].sort(),
+      copied: fresh.length === 0,
+      copies: [...new Set(jobs.map((j) => j.copied_from).filter((c) => c !== null))].sort((a, b) => a - b),
       jobs: jobs.map((j) => j.job_id),
     };
   });

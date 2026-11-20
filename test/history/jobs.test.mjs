@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { comparable, copiedFrom, gateAttempts, gateOf, isCopy, jobLine, laneOf, phaseOf, platformKind, runFacts, scopeOf, trailersOf } from '../../history/jobs.mjs';
+import { annotationKind, comparable, copiedFrom, filingTime, gateAttempts, gateOf, isCopy, jobLine, laneOf, logKinds, phaseOf, platformKind, runFacts, scopeOf, trailersOf } from '../../history/jobs.mjs';
 
 const repos = JSON.parse(readFileSync(new URL('../../history/repos.json', import.meta.url), 'utf8'));
 const entry = (alias) => repos.find((r) => r.alias === alias);
@@ -15,14 +15,42 @@ const DOPER = entry('SSFSKIM/doperpowers');
 const listings = JSON.parse(readFileSync(new URL('./fixtures/rerun-listings.json', import.meta.url), 'utf8'));
 const listing = (repo) => listings.find((l) => l.repo === repo);
 
-test('platform messages are named by kind, and nothing else is', () => {
+test("platform messages are named by kind only when they are the platform's own, whole", () => {
+  // GitHub's own texts, as its annotations give them (cua, doperpowers, MAWS, 2026-10/11).
+  assert.equal(platformKind('The job was not started because your account is locked due to a billing issue.'), 'not-started');
   assert.equal(platformKind('The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the \'Billing & plans\' section in your settings'), 'not-started');
   assert.equal(platformKind('The self-hosted runner: ci-kit-gce-a1 lost communication with the server. Verify the machine is running and has a healthy network connection.'), 'runner-lost');
+  assert.equal(platformKind('The hosted runner lost communication with the server. Anything in your workflow that terminates the runner process, starves it for CPU/Memory, or blocks its network access can cause this error.'), 'runner-lost');
   assert.equal(platformKind('The runner has received a shutdown signal. This can happen when the runner service is stopped, or a manually started runner is canceled.'), 'runner-lost');
+  assert.equal(platformKind('The job has exceeded the maximum execution time of 15m0s'), 'time-limit');
   assert.equal(platformKind('The job running on runner ci-kit-gce-a1 has exceeded the maximum execution time of 30 minutes.'), 'time-limit');
+  // Not the platform's: its words inside something else, or a message too vague to name a cause.
+  assert.equal(platformKind('AssertionError: expected "The runner has received a shutdown signal." to be logged'), null);
+  assert.equal(platformKind('test said: the job was not started because the fixture was missing'), null);
+  assert.equal(platformKind('The operation was canceled.'), null);
   assert.equal(platformKind('Process completed with exit code 1.'), null);
-  assert.equal(platformKind('expected 2 to equal 3'), null);
   assert.equal(platformKind(undefined), null);
+});
+
+test('an annotation is the platform\'s only at the workflow, not at a file a test reported', () => {
+  const lost = 'The hosted runner lost communication with the server. Anything in your workflow that terminates the runner process, starves it for CPU/Memory, or blocks its network access can cause this error.';
+  assert.equal(annotationKind({ path: '.github', annotation_level: 'failure', message: lost }), 'runner-lost');
+  assert.equal(annotationKind({ path: 'src/runner.test.ts', annotation_level: 'failure', message: lost }), null);
+  assert.equal(annotationKind({ path: '.github', annotation_level: 'failure', message: 'The operation was canceled.' }), null);
+});
+
+test("a log's kinds come from the runner's own error lines, never from a step's output", () => {
+  const log = [
+    '2026-11-12T10:00:00.0000000Z ##[group]Run pytest',
+    '2026-11-12T10:01:00.0000000Z E   AssertionError: The runner has received a shutdown signal. This can happen when the runner service is stopped',
+    '2026-11-12T10:01:01.0000000Z The job running on runner x has exceeded the maximum execution time of 30 minutes.',
+    '2026-11-12T10:02:00.0000000Z ##[error]Process completed with exit code 1.',
+    '2026-11-12T10:03:00.0000000Z ##[error]The operation was canceled.',
+  ].join('\n');
+  assert.deepEqual(logKinds(log), []);
+  // manim-master 42203224562's lost runner: the runner's own line, at the log's end.
+  assert.deepEqual(logKinds(`${log}\n2026-11-12T10:04:00.0000000Z ##[error]The runner has received a shutdown signal. This can happen when the runner service is stopped, or a manually started runner is canceled.\n`), ['runner-lost']);
+  assert.deepEqual(logKinds('2026-11-12T10:04:00.0000000Z ##[error]The job running on runner GitHub Actions 1 has exceeded the maximum execution time of 30 minutes.'), ['time-limit']);
 });
 
 test('every served repository has the fields the ledger reads', () => {
@@ -159,10 +187,13 @@ test('copied_from is the latest earlier attempt whose job of that name is not it
   assert.equal(copiedFrom('unit 2/4', 2, of('SSFSKIM/MAWS')), 1);
   // cua 43756962006: attempt 3's plan copies attempt 2's, itself a copy of attempt 1's.
   assert.equal(copiedFrom('ci / plan', 3, of('SSFSKIM/cua')), 1);
-  // The walk needs no listing of attempt 1: nothing there can be a copy.
-  assert.equal(copiedFrom('ci / plan', 2, () => null), 1);
-  // A job no earlier listing names copies nothing listed: the latest earlier attempt read stands.
-  assert.equal(copiedFrom('ci / test', 3, (k) => (k === 2 ? [] : null)), 2);
+  // An earlier listing that lacks the job is walked past, down to the attempt that ran it.
+  const ran = { id: 1, name: 'ci / test', created_at: '2026-11-01T10:00:00Z', completed_at: '2026-11-01T10:05:00Z' };
+  assert.equal(copiedFrom('ci / test', 3, (k) => ({ 2: [], 1: [ran] })[k]), 1);
+  // No earlier attempt ran it: the origin cannot be told.
+  assert.equal(copiedFrom('ci / test', 3, (k) => ({ 2: [], 1: [] })[k]), null);
+  // Every earlier listing is needed, attempt 1's too.
+  assert.throws(() => copiedFrom('ci / plan', 2, () => null), /attempt 1's jobs are needed/);
 });
 
 test('a job line: the fields, a copy without minutes, and the platform kinds only', () => {
@@ -178,16 +209,25 @@ test('a job line: the fields, a copy without minutes, and the platform kinds onl
   assert.equal(facts.basis, 'exact');
   const job = { id: 135000000001, name: 'e2e:desk-web', run_attempt: 1, status: 'completed', conclusion: 'success', created_at: '2026-11-19T08:17:40Z', started_at: '2026-11-19T08:18:10Z', completed_at: '2026-11-19T08:25:45Z', runner_name: 'ci-kit-gce-x1', labels: ['self-hosted', 'ci-kit-pool', 'cpus-4'], steps: [] };
   const line = jobLine(facts, job, { copied_from: null, annotations: [] }, MAWS);
-  assert.deepEqual(Object.keys(line), ['v', 'run', 'attempt', 'workflow', 'event', 'ref', 'producer', 'label', 'change', 'gates', 'scope', 'scope_key', 'head', 'tested', 'tree', 'tree_key', 'basis', 'job_id', 'job', 'gate', 'shard', 'kind', 'copied_from', 'lane', 'runner', 'started', 'completed', 'minutes', 'conclusion', 'run_conclusion', 'failed_step', 'phase', 'annotations']);
+  assert.deepEqual(Object.keys(line), ['v', 'run', 'attempt', 'workflow', 'event', 'ref', 'producer', 'label', 'change', 'gates', 'scope', 'scope_key', 'head', 'tested', 'tree', 'tree_key', 'basis', 'job_id', 'job', 'gate', 'shard', 'kind', 'role', 'copy', 'copied_from', 'lane', 'runner', 'started', 'completed', 'minutes', 'conclusion', 'run_conclusion', 'failed_step', 'phase', 'annotations']);
   assert.equal(line.minutes, 7.6);
   assert.equal(line.lane, 'pool-gce');
   assert.equal(line.gates, 'static,unit,probes,e2e:desk-web');
   assert.equal(line.tree, 't'.repeat(40));
   // A job cancelled while queued spans the queue, not a run: it has no runner and no minutes.
   assert.equal(jobLine(facts, { ...job, runner_name: null, conclusion: 'cancelled' }, { copied_from: null, annotations: [] }, MAWS).minutes, 0);
+  assert.equal(line.copy, false);
+  assert.equal(line.role, null);
   const copy = jobLine(facts, { ...job, id: 135000000002, created_at: '2026-11-19T09:00:00Z' }, { copied_from: 1, annotations: [] }, MAWS);
   assert.equal(copy.copied_from, 1);
+  assert.equal(copy.copy, true);
   assert.equal(copy.minutes, null);
+  // A copy whose origin cannot be told is still a copy, and bills nothing.
+  const orphan = jobLine(facts, { ...job, id: 135000000003, created_at: '2026-11-19T09:00:00Z' }, { copied_from: null, annotations: [] }, MAWS);
+  assert.deepEqual([orphan.copy, orphan.copied_from, orphan.minutes], [true, null, null]);
+  // MAWS's hosted static is its gate's summary; its parts are not.
+  assert.equal(jobLine(facts, { ...job, name: 'static' }, { copied_from: null, annotations: [] }, MAWS).role, 'summary');
+  assert.equal(jobLine(facts, { ...job, name: 'static-local' }, { copied_from: null, annotations: [] }, MAWS).role, null);
   // A pull request run tested GitHub's merge: the head's tree is known, the tested tree is not.
   const pr = runFacts({ ...run, event: 'pull_request', head_branch: 'feature', pull_requests: [{ number: 481 }] }, 1, { tested: null, treeKey: null }, DOPER);
   assert.equal(pr.basis, 'pr-merge');
@@ -210,7 +250,7 @@ test('a job line: the fields, a copy without minutes, and the platform kinds onl
 
 // Job lines of one attempt, shaped as the collector writes them.
 let nextId = 1;
-const lineOf = (over) => ({ run: 1, attempt: 1, gate: 'unit', kind: 'gate', shard: null, scope: 'full', scope_key: 'k', basis: 'exact', tree: 't1', tree_key: 't1', head: 'h', tested: 'h', change: 'c', event: 'push', ref: 'ci/x', workflow: 'gate', copied_from: null, conclusion: 'success', started: '2026-11-19T08:00:00Z', completed: '2026-11-19T08:05:00Z', minutes: 5, lane: 'pool-gce', run_conclusion: 'success', job_id: nextId++, ...over });
+const lineOf = (over) => ({ run: 1, attempt: 1, gate: 'unit', kind: 'gate', shard: null, role: null, scope: 'full', scope_key: 'k', basis: 'exact', tree: 't1', tree_key: 't1', head: 'h', tested: 'h', change: 'c', event: 'push', ref: 'ci/x', workflow: 'gate', copy: false, copied_from: null, conclusion: 'success', started: '2026-11-19T08:00:00Z', completed: '2026-11-19T08:05:00Z', minutes: 5, lane: 'pool-gce', run_conclusion: 'success', job_id: nextId++, ...over });
 
 test('a gate attempt folds its shards: four green, one missing, and one red beside three green', () => {
   const shards = (conclusions) => conclusions.map((c, i) => lineOf({ job: `unit ${i + 1}/4`, shard: [i + 1, 4], conclusion: c, job_id: i + 1 }));
@@ -229,9 +269,19 @@ test('a gate attempt folds its shards: four green, one missing, and one red besi
   assert.equal(gateAttempts(red.filter((l) => l.shard[0] !== 4))[0].result, 'failed');
 });
 
+test('a gate attempt whose shards announce more than one count is never succeeded', () => {
+  const mixed = [[1, 2], [2, 2], [3, 3]].map(([k, n]) => lineOf({ job: `unit ${k}/${n}`, shard: [k, n] }));
+  const [a] = gateAttempts(mixed);
+  assert.equal(a.result, 'incomplete');
+  assert.equal(a.shards, null);
+  // An unsharded job beside shards is two forms too; a red one is failed whatever else is wrong.
+  assert.equal(gateAttempts([lineOf({ job: 'unit' }), lineOf({ job: 'unit 1/1', shard: [1, 1] })])[0].result, 'incomplete');
+  assert.equal(gateAttempts([...mixed, lineOf({ job: 'unit 3/3', shard: [3, 3], conclusion: 'failure' })])[0].result, 'failed');
+});
+
 test('a gate attempt: copies count toward the result and not the minutes; control jobs and variants stay apart', () => {
   const lines = [
-    lineOf({ attempt: 2, job: 'unit 1/2', shard: [1, 2], copied_from: 1, minutes: null }),
+    lineOf({ attempt: 2, job: 'unit 1/2', shard: [1, 2], copy: true, copied_from: 1, minutes: null }),
     lineOf({ attempt: 2, job: 'unit 2/2', shard: [2, 2], minutes: 4 }),
     lineOf({ attempt: 2, job: 'plan', gate: null, kind: 'control', minutes: 0.2 }),
     lineOf({ attempt: 2, job: 'e2e:panel', gate: 'e2e:panel', scope_key: 'direct' }),
@@ -246,17 +296,41 @@ test('a gate attempt: copies count toward the result and not the minutes; contro
   assert.equal(attempts.find((a) => a.scope_key === 'direct').result, 'succeeded');
   assert.ok(!attempts.some((a) => a.gate === null));
   // A copied shard's success is its earlier attempt's, never a later pass of anything.
-  assert.deepEqual(unit.copied, [1]);
+  assert.deepEqual(unit.copies, [1]);
+  assert.equal(unit.copied, false, 'unit 2/2 ran in this attempt');
 });
 
-test('a gate attempt with summary parts: the parts carry the minutes and any failed part fails it', () => {
+test('a gate attempt made only of copies is no new execution, and its result is available when its fresh jobs completed', () => {
+  // A rerun whose fresh shard completed a day after the copies' own times.
   const lines = [
-    lineOf({ job: 'static-local', gate: 'static', conclusion: 'failure', minutes: 10 }),
-    lineOf({ job: 'static', gate: 'static', conclusion: 'failure', minutes: 0.1 }),
+    lineOf({ attempt: 2, job: 'unit 1/2', shard: [1, 2], copy: true, copied_from: 1, minutes: null, started: '2026-11-18T23:00:00Z', completed: '2026-11-18T23:10:00Z' }),
+    lineOf({ attempt: 2, job: 'unit 2/2', shard: [2, 2], minutes: 6, started: '2026-11-19T09:00:00Z', completed: '2026-11-19T09:06:00Z' }),
+    lineOf({ attempt: 2, job: 'probes', gate: 'probes', copy: true, copied_from: 1, minutes: null, completed: '2026-11-18T23:02:00Z' }),
+  ];
+  const attempts = gateAttempts(lines);
+  const unit = attempts.find((a) => a.gate === 'unit');
+  assert.equal(unit.copied, false);
+  assert.equal(unit.available, '2026-11-19T09:06:00Z');
+  assert.equal(unit.completed, '2026-11-19T09:06:00Z');
+  assert.equal(unit.started, '2026-11-18T23:00:00Z', "the shards' physical times stay");
+  const probes = attempts.find((a) => a.gate === 'probes');
+  assert.equal(probes.copied, true);
+  assert.equal(probes.available, null);
+  // A copy is filed with its attempt's latest fresh job, so a window that holds the fresh jobs holds the copies.
+  assert.equal(filingTime(lines), '2026-11-19T09:06:00Z');
+  // An attempt of copies only is filed by the copies' latest time.
+  assert.equal(filingTime(lines.filter((l) => l.copy)), '2026-11-18T23:10:00Z');
+});
+
+test('a gate attempt with summary parts: the parts carry the minutes and lanes, and a failed part or summary fails it', () => {
+  const lines = [
+    lineOf({ job: 'static-local', gate: 'static', conclusion: 'success', minutes: 10 }),
+    lineOf({ job: 'static', gate: 'static', role: 'summary', conclusion: 'failure', minutes: 0.1, lane: 'hosted-linux' }),
   ];
   const [a] = gateAttempts(lines);
   assert.equal(a.result, 'failed');
-  assert.equal(a.minutes, 10.1);
+  assert.equal(a.minutes, 10);
+  assert.deepEqual(a.lanes, ['pool-gce']);
   assert.equal(a.tree_key, 't1');
   assert.equal(a.basis, 'exact');
 });

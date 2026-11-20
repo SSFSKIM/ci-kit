@@ -10,7 +10,7 @@
 //   - the activity listing of the default branch;
 //   - the mirror clone (tree-only), and a fetch by id of a nonce commit whose ref is gone, with its parent.
 // It prints ids, names of jobs and runners, counts and statuses only: never a commit message, a path, an annotation's
-// text or a log line.
+// text, a log line, a response's body or git's stderr.
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,32 +18,35 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createGitHub } from '../lib/github.mjs';
 import { tokenFor } from './collect.mjs';
-import { platformKind } from './jobs.mjs';
+import { describeError } from './errors.mjs';
+import { annotationKind, logKinds } from './jobs.mjs';
 
 const say = (...parts) => console.log(parts.join(' '));
 
-// git with the token as an extra header (never on the command line), lazy fetches off.
+// git with the token as an extra header (never on the command line), lazy fetches off. `err`: its exit status, never
+// its stderr.
 function git(dir, args, token) {
   const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
   const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader', GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${basic}` };
   const r = spawnSync('git', dir ? ['-C', dir, ...args] : args, { env, encoding: 'utf8', maxBuffer: 1 << 28 });
-  const err = (r.stderr ?? '').trim().split('\n').at(-1)?.slice(0, 200) ?? '';
-  return { ok: r.status === 0, out: (r.stdout ?? '').trim(), err };
+  return { ok: r.status === 0, out: (r.stdout ?? '').trim(), err: `exit ${r.status ?? r.signal}` };
 }
 
 async function attempt(label, fn) {
   try {
     return await fn();
   } catch (err) {
-    say(`  ${label}: refused or failed: ${err.status ?? ''} ${(err.message ?? String(err)).slice(0, 200)}`);
+    say(`  ${label}: refused or failed: ${describeError(err)}`);
     return null;
   }
 }
 
-async function preflightRepo(entry) {
+// deps: the client and git, replaced in tests.
+export async function preflightRepo(entry, { gh: client = null, git: gitImpl = git } = {}) {
   const { repo, workflow, branch, reruns = [], nonce = [], failed = [], day = '2026-11-18', token: kind = 'app' } = entry;
-  const token = tokenFor(repo, kind);
-  const gh = createGitHub(token);
+  const token = client ? 't' : tokenFor(repo, kind);
+  const gh = client ?? createGitHub(token);
+  const git = gitImpl;
   say(`== ${repo} (token ${kind})`);
 
   // 1. The listing.
@@ -90,13 +93,12 @@ async function preflightRepo(entry) {
     say(`  unsuccessful job ${j.id} "${j.name}" ${j.conclusion}, steps ${(j.steps ?? []).map((s) => s.conclusion ?? s.status).join(',')}`);
     await attempt('annotations', async () => {
       const list = await gh.annotations(repo, j.id);
-      const kinds = list.map((a) => platformKind(a.message)).filter(Boolean);
+      const kinds = list.map(annotationKind).filter(Boolean);
       say(`  annotations: ${list.length}, at .github ${list.filter((a) => a.path === '.github').length}, levels ${[...new Set(list.map((a) => a.annotation_level))].join('/')}, platform kinds [${kinds.join(',')}]`);
     });
     await attempt('log', async () => {
       const text = await gh.jobLog(repo, j.id);
-      const kinds = text.split('\n').map(platformKind).filter(Boolean);
-      say(`  log: ${text.length} bytes, platform kinds [${[...new Set(kinds)].join(',')}]`);
+      say(`  log: ${text.length} bytes, platform kinds [${logKinds(text).join(',')}]`);
     });
   } else say('  no unsuccessful job among the candidates');
 
@@ -167,7 +169,7 @@ async function main(argv) {
       await preflightRepo(entry);
     } catch (err) {
       failed = true;
-      say(`  ${entry.repo}: stopped: ${err.status ?? ''} ${(err.message ?? String(err)).slice(0, 200)}`);
+      say(`  ${entry.repo}: stopped: ${describeError(err)}`);
     }
   }
   if (failed) process.exitCode = 1;
@@ -175,7 +177,7 @@ async function main(argv) {
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   main(process.argv.slice(2)).catch((err) => {
-    console.error(`preflight: ${err.name}: ${(err.message ?? '').slice(0, 200)}`);
+    console.error(`preflight: ${describeError(err)}`);
     process.exit(1);
   });
 }

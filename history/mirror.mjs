@@ -2,7 +2,8 @@
 // contents, made with the collection's token. Trees, ancestry and path differences are read from it; a commit no ref
 // reaches any more (a ci-gate's nonce commit, a pull request's head) is fetched into it by id. The token travels as
 // an extra header in the environment, never on a command line, and lazy fetches are off, so a read that would need a
-// file's contents fails instead of downloading it.
+// file's contents fails instead of downloading it. Its errors name the git command and its exit status, never git's
+// stderr, which can quote a path or a ref of a private repository.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
@@ -22,11 +23,11 @@ export function openMirror({ dir, repo = null, url = `https://github.com/${repo}
   }
   const run = (args, { inDir = true } = {}) => {
     const r = spawnSync('git', inDir ? ['-C', dir, ...args] : args, { env, encoding: 'utf8', maxBuffer: 1 << 28 });
-    return { ok: r.status === 0, out: r.stdout ?? '', err: (r.stderr ?? '').trim().split('\n').at(-1) ?? '' };
+    return { ok: r.status === 0, out: r.stdout ?? '', status: r.status ?? r.signal ?? r.error?.code ?? null };
   };
   const must = (args) => {
     const r = run(args);
-    if (!r.ok) throw new Error(`history: git ${args[0]} failed in the mirror: ${r.err.slice(0, 160)}`);
+    if (!r.ok) throw new Error(`history: git ${args[0]} failed in the mirror (exit ${r.status})`);
     return r.out;
   };
   const keys = new Map(); // tree:policy → key
@@ -37,7 +38,7 @@ export function openMirror({ dir, repo = null, url = `https://github.com/${repo}
       if (existsSync(dir)) return;
       mkdirSync(dirname(dir), { recursive: true });
       const r = run(['clone', '--quiet', '--bare', '--filter=blob:none', url, dir], { inDir: false });
-      if (!r.ok) throw new Error(`history: the mirror clone failed: ${r.err.slice(0, 160)}`);
+      if (!r.ok) throw new Error(`history: the mirror clone failed (exit ${r.status})`);
     },
     has: (sha) => SHA.test(sha ?? '') && run(['cat-file', '-e', `${sha}^{commit}`]).ok,
     // Fetches the commits it lacks in one request; a request refused because one id is gone is split in halves, so

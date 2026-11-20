@@ -22,13 +22,15 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), { status
 // A fake GitHub. world: { runs: [run], jobs: { 'id/attempt': [job] }, conclusions: { 'id/attempt': c },
 // annotations: { jobId: [message] } | 'refused', logs: { jobId: text }, overfull: [day] (a day whose whole-day
 // listing reports more than 1,000 runs), failing: ['id/attempt'] (job listings answered 502), flaky: { day: n } (a
-// day's whole-day listing answered 502 n times) }.
-function fakeGitHub(world) {
+// day's whole-day listing answered 502 n times), limitAfter: n (every request after the first n is answered 403 for
+// the rate limit), annotationsLimited: true (annotations answered 403 for the rate limit) }.
+function fakeGitHub(world, { admit } = {}) {
   const requests = [];
   const fetchImpl = async (href) => {
     const url = new URL(href);
     const path = url.pathname.replace(/^\/repos\/[^/]+\/[^/]+/, '');
     requests.push(`${path}${url.search}`);
+    if (world.limitAfter !== undefined && requests.length > world.limitAfter) return json({ message: 'API rate limit exceeded for installation ID 1.' }, 403);
     let m;
     if ((m = /^\/actions\/workflows\/([^/]+)\/runs$/.exec(path))) {
       const [from, to] = url.searchParams.get('created').split('..');
@@ -50,6 +52,7 @@ function fakeGitHub(world) {
     }
     if ((m = /^\/actions\/runs\/(\d+)\/attempts\/(\d+)$/.exec(path))) return json({ id: Number(m[1]), run_attempt: Number(m[2]), conclusion: world.conclusions?.[`${m[1]}/${m[2]}`] ?? 'failure' });
     if ((m = /^\/check-runs\/(\d+)\/annotations$/.exec(path))) {
+      if (world.annotationsLimited) return json({ message: 'API rate limit exceeded for installation ID 1.' }, 403);
       if (world.annotations === 'refused') return json({ message: 'Resource not accessible by integration' }, 403);
       return json((world.annotations?.[m[1]] ?? []).map((message) => ({ message, path: '.github', annotation_level: 'failure' })));
     }
@@ -59,7 +62,7 @@ function fakeGitHub(world) {
     }
     return json({ message: `fake: no route for ${path}` }, 404);
   };
-  return { gh: createGitHub('t', { fetchImpl }), requests };
+  return { gh: createGitHub('t', { fetchImpl, ...(admit ? { admit } : {}) }), requests };
 }
 
 // A mirror that holds the given heads, each with its one parent.
@@ -88,9 +91,10 @@ function store() {
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 const jobsOfFor = (gh) => (run, attempt) => gh.attemptJobs(REPO, run, attempt);
+// The client is admitted by the pacer, as the collector builds it.
 const pass = (world, root, { pacerFor = null, entry = MAWS, mirror = fakeMirror(Object.fromEntries(world.runs.map((r) => [r.head_sha, sha(r.id + 1)]))), passId = 'p1', limit = 300, limits, now = NOW, listDelays = [0, 0] } = {}) => {
-  const fake = fakeGitHub(world);
   const pacer = pacerFor ?? createPacer({ pass: passId, now: () => now, ...(limits ? { limits } : {}) });
+  const fake = fakeGitHub(world, { admit: () => pacer.allows(entry.token, 1) });
   return collectLedger({ gh: fake.gh, repo: REPO, alias: 'o/r', entry, root, mirror, jobsOf: jobsOfFor(fake.gh), pacer, pass: passId, now, limit, listDelays }).then((result) => ({ ...result, requests: fake.requests }));
 };
 const allLines = (root) => {
@@ -177,9 +181,13 @@ test('a rerun of a run created 20 days ago is found, and only its new attempt is
     world.jobs['500/2'] = [copy, { ...job(4, 'unit 1/2', '2026-11-19T09:00:00Z', 5), run_attempt: 2 }];
     const r = await pass(world, s.root, { passId: 'p2' });
     assert.deepEqual(r.errors, []);
-    assert.ok(!r.requests.some((q) => q.includes('/runs/500/attempts/1/jobs')));
+    // Attempt 1 is not collected again; its listing is read once, to place the copy.
+    assert.equal(r.requests.filter((q) => q.includes('/runs/500/attempts/1/jobs')).length, 1);
+    assert.equal(allLines(s.root).filter((l) => l.attempt === 1).length, 2);
     const second = allLines(s.root).filter((l) => l.attempt === 2);
-    assert.deepEqual(second.map((l) => [l.job, l.copied_from, l.minutes]), [['unit 2/2', 1, null], ['unit 1/2', null, 5]]);
+    // The copy is filed beside its attempt's fresh job (2026-11-19), not on the day its shard ran (10-30).
+    assert.deepEqual(openLedger(s.root, 'o/r').jobLines('2026-11-19', '2026-11-19').map((l) => l.job).sort(), ['unit 1/2', 'unit 2/2']);
+    assert.deepEqual(second.map((l) => [l.job, l.copy, l.copied_from, l.minutes]).sort(), [['unit 1/2', false, null, 5], ['unit 2/2', true, 1, null]]);
     assert.equal(second[0].run_conclusion, 'success');
     assert.equal(allLines(s.root).find((l) => l.attempt === 1).run_conclusion, 'success', 'the listing gave attempt 1 as the latest then');
     const attempts = gateAttempts(allLines(s.root));
@@ -212,8 +220,9 @@ test("a real failed-jobs rerun (MAWS 44468141412): copies carry their attempt, n
     assert.equal(first.find((l) => l.job === 'static-local').phase, 'lost');
     assert.equal(first.find((l) => l.job === 'e2e:cross-build').lane, 'hosted-macos');
     const byGate = (attempt) => Object.fromEntries(gateAttempts(lines).filter((a) => a.attempt === attempt).map((a) => [a.gate, [a.result, a.minutes]]));
-    assert.deepEqual(byGate(1), { static: ['failed', 10.1], unit: ['succeeded', 21.2], probes: ['succeeded', 0.6], 'e2e:cross-build': ['succeeded', 14.3] });
-    assert.deepEqual(byGate(2), { static: ['succeeded', 3.3], unit: ['succeeded', 0], probes: ['succeeded', 0], 'e2e:cross-build': ['succeeded', 0] });
+    assert.equal(first.find((l) => l.job === 'static').role, 'summary');
+    assert.deepEqual(byGate(1), { static: ['failed', 10], unit: ['succeeded', 21.2], probes: ['succeeded', 0.6], 'e2e:cross-build': ['succeeded', 14.3] });
+    assert.deepEqual(byGate(2), { static: ['succeeded', 3.2], unit: ['succeeded', 0], probes: ['succeeded', 0], 'e2e:cross-build': ['succeeded', 0] });
   } finally {
     s.cleanup();
   }
@@ -376,6 +385,109 @@ test("a batch counts every repository's calls of the pass from its start, not on
     const r = await pass(world, s.root, { pacerFor: pacer });
     assert.ok(r.requests.length <= 20, `${r.requests.length} calls`);
     assert.equal(r.more, false);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("a failure-heavy chunk never passes the hour's limit: the request past it is not made, and the attempt stays queued", async () => {
+  const s = store();
+  try {
+    // Each attempt has ten failed jobs, each an annotations call: far more than the two calls an attempt the chunk
+    // is admitted on.
+    const runs = Array.from({ length: 4 }, (_, i) => gateRun(1100 + i, `2026-11-18T0${i}:00:00Z`));
+    const world = { runs, jobs: {} };
+    runs.forEach((r, i) => { world.jobs[`${r.id}/1`] = Array.from({ length: 10 }, (_, k) => job(100 * i + k + 1, `e2e:g${k}`, r.created_at, 1, { conclusion: 'failure' })); });
+    const limits = { app: { pass: 1000, hour: 50 } };
+    const r = await pass(world, s.root, { limits });
+    assert.ok(r.requests.length <= 50, `${r.requests.length} calls, the hour allows 50`);
+    assert.deepEqual(r.errors, [], 'a budget stop is no error');
+    assert.equal(r.more, true);
+    assert.ok(r.wait >= 60, `wait ${r.wait}`);
+    const state = openLedger(s.root, 'o/r').state;
+    assert.equal(state.pass.calls, r.requests.length, 'every request is counted');
+    const closed = Object.values(state.runs).filter((x) => x.closed.length).length;
+    assert.equal(allLines(s.root).length, closed * 10, 'a cut attempt writes no line');
+    assert.equal(state.pass.queue.length, 4 - closed);
+    // An hour later the rest is taken, with no line doubled.
+    const later = await pass(world, s.root, { limits, now: NOW + 3_700_000 });
+    assert.ok(later.requests.length <= 50);
+    const again = await pass(world, s.root, { limits, now: NOW + 7_400_000 });
+    assert.ok(again.requests.length <= 50);
+    const lines = allLines(s.root);
+    assert.equal(new Set(lines.map((l) => l.job_id)).size, lines.length);
+    assert.equal(lines.length, 40);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('a paginated day with few calls left stays pending whole, and the next batch lists it in full', async () => {
+  const s = store();
+  try {
+    const runs = Array.from({ length: 150 }, (_, i) => gateRun(2000 + i, `2026-11-18T0${Math.floor(i / 60)}:${String(i % 60).padStart(2, '0')}:00Z`));
+    const world = { runs, jobs: Object.fromEntries(runs.map((r, i) => [`${r.id}/1`, [job(5000 + i, 'probes', r.created_at, 1)]])) };
+    // 33 days list in one call each; the 34th (11-18, two pages) is reached with one call left.
+    const limits = { app: { pass: 1000, hour: 34 } };
+    const r = await pass(world, s.root, { limits });
+    assert.equal(r.requests.length, 34);
+    let state = openLedger(s.root, 'o/r').state;
+    assert.ok(state.pass.pending.includes('2026-11-18'));
+    assert.ok(!('2026-11-18' in state.listed), 'a day half listed is not listed');
+    const next = await pass(world, s.root, { limits: { app: { pass: 1000, hour: 1000 } }, now: NOW + 3_700_000 });
+    assert.deepEqual(next.errors, []);
+    state = openLedger(s.root, 'o/r').state;
+    assert.deepEqual(state.pass.pending, []);
+    assert.equal(new Set(allLines(s.root).map((l) => l.run)).size, 150, 'no run missing');
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("GitHub's rate limit stops the pass at once and leaves its work for later", async () => {
+  const s = store();
+  try {
+    const world = { runs: [gateRun(3000, '2026-11-18T08:00:00Z')], jobs: { '3000/1': [job(1, 'probes', '2026-11-18T08:00:00Z', 1)] }, limitAfter: 3 };
+    const r = await pass(world, s.root);
+    assert.equal(r.requests.length, 4, 'nothing is asked after the first refusal');
+    assert.equal(r.more, false);
+    assert.equal(r.errors.length, 1);
+    assert.match(r.errors[0], /^listing \d{4}-\d\d-\d\d: HTTP 403 \(rate limited\)$/);
+    assert.equal(openLedger(s.root, 'o/r').state.pass.pending.length, 32);
+    // In the job loop too: an annotations call refused for the rate limit is no refusal of annotations.
+    const t = store();
+    try {
+      const w2 = { runs: [gateRun(3100, '2026-11-18T08:00:00Z'), gateRun(3101, '2026-11-18T09:00:00Z')], jobs: { '3100/1': [job(1, 'probes', '2026-11-18T08:00:00Z', 1, { conclusion: 'failure' })], '3101/1': [job(2, 'probes', '2026-11-18T09:00:00Z', 1, { conclusion: 'failure' })] }, annotationsLimited: true };
+      const r2 = await pass(w2, t.root);
+      const state = openLedger(t.root, 'o/r').state;
+      assert.notEqual(state.annotations, 'refused');
+      assert.equal(r2.requests.filter((q) => q.includes('/annotations')).length, 1);
+      assert.equal(r2.requests.filter((q) => q.includes('/logs')).length, 0);
+      assert.equal(state.pass.queue.length, 2, 'both attempts stay queued');
+      assert.equal(r2.more, false);
+    } finally {
+      t.cleanup();
+    }
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("a rerun's copies fold the same from any window that holds its fresh jobs", async () => {
+  const s = store();
+  try {
+    // The copied shards ran on 11-17; the rerun's fresh shard ran on 11-18.
+    const created = '2026-11-17T22:00:00Z';
+    const world = { runs: [gateRun(4000, created, { attempt: 2 })], jobs: {
+      '4000/1': [job(1, 'unit 1/3', created, 30), job(2, 'unit 2/3', created, 30), job(3, 'unit 3/3', created, 30, { conclusion: 'failure' })],
+      '4000/2': [{ ...job(11, 'unit 1/3', created, 30), created_at: '2026-11-18T09:00:00Z' }, { ...job(12, 'unit 2/3', created, 30), created_at: '2026-11-18T09:00:00Z' }, job(13, 'unit 3/3', '2026-11-18T09:00:00Z', 6)],
+    } };
+    const r = await pass(world, s.root);
+    assert.deepEqual(r.errors, []);
+    const ledger = openLedger(s.root, 'o/r');
+    const fold = (from, to) => gateAttempts(ledger.jobLines(from, to)).filter((a) => a.attempt === 2).map((a) => [a.gate, a.result, a.minutes, a.available, a.copied]);
+    assert.deepEqual(fold('2026-11-18', '2026-11-18'), [['unit', 'succeeded', 6, '2026-11-18T09:06:00Z', false]]);
+    assert.deepEqual(fold('2026-11-01', '2026-11-30'), fold('2026-11-18', '2026-11-18'));
   } finally {
     s.cleanup();
   }

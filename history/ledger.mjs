@@ -5,10 +5,13 @@
 //     1,000 runs is listed by the hour), and keeps the work it found, oldest first, in attempts.json; later batches of
 //     the pass take from it without listing again. A run still in progress leaves its latest attempt open.
 //   - Each attempt's jobs are fetched once, through `jobsOf`, which the per-test pass shares.
-//   - Calls are counted per token (`createPacer`): no new work is taken past a pass's or an hour's limit.
+//   - Calls are counted per token (`createPacer`), every request as it is made: the client asks the pacer before each
+//     one (`admit`), so no pass's or hour's count passes its limit; a request refused there, or GitHub's rate limit,
+//     stops the batch at once, and what it had not finished stays queued.
 // It never prints a commit message, a path or a log line: the counts and errors it returns name runs and jobs only.
-import { isRateLimited } from '../lib/github.mjs';
-import { copiedFrom, isCopy, jobLine, platformKind, runFacts } from './jobs.mjs';
+import { BudgetSpent, isRateLimited } from '../lib/github.mjs';
+import { describeError } from './errors.mjs';
+import { annotationKind, copiedFrom, filingTime, isCopy, jobLine, logKinds, runFacts } from './jobs.mjs';
 import { producerOf } from './provenance.mjs';
 import { dayOf, nextDay, openLedger } from './store.mjs';
 
@@ -122,14 +125,11 @@ export async function listDay(gh, repo, workflow, day, { delays = [3000, 10000] 
   return runs;
 }
 
-// What a pass's error may say in a public log: GitHub's status and path, or a message this kit wrote.
-const describe = (err) => (err?.status || /^(history|junit): /.test(err?.message ?? '') ? err.message : err?.name ?? 'Error');
-
 // One repository's batch of the pass. `ledger`: its store (openLedger), opened by the caller when the pacer must count
-// every repository's calls from the batch's start. `mirror`: the repository's mirror (history/mirror.mjs). `jobsOf(run, attempt)`:
-// the shared, cached job listing. → counts, `errors`, `more` (work left that this pass may still take), `wait` (seconds until the hour allows more, or null) and
-// `closed` (the runs whose attempts this batch closed, for the per-test pass's sweep) and the `ledger`, whose state
-// the caller settles and flushes again after the per-test pass's calls.
+// every repository's calls from the batch's start. `mirror`: the repository's mirror (history/mirror.mjs).
+// `jobsOf(run, attempt)`: the shared, cached job listing. `gh` is admitted by `pacer` (lib/github.mjs `admit`). →
+// counts, `errors`, `more` (work left that this pass may still take), `wait` (seconds until the hour allows more, or
+// null) and the `ledger`, whose state the caller settles and flushes again after the per-test pass's calls.
 export async function collectLedger({ gh, repo, alias = repo, entry, root, ledger = openLedger(root, alias), mirror, jobsOf, pacer, pass = null, now = Date.now(), limit = 300, listDelays = [3000, 10000], progress = () => {} }) {
   const started = Date.now();
   const { state } = ledger;
@@ -137,10 +137,18 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, ledge
   pacer.attach(kind, state, gh);
   const counts = { listed: 0, days: 0, closed: 0, lines: 0, queued: 0, pending: 0, open: 0 };
   const errors = [];
+  // `limited`: GitHub refused for its rate limit (another batch would only repeat it); `paced`: the pacer refused a
+  // request. Either stops the batch at once; only the first is an error.
   let limited = false;
+  let paced = false;
+  const stopped = () => limited || paced;
   const failed = (what, err) => {
+    if (err instanceof BudgetSpent) {
+      paced = true;
+      return;
+    }
     limited ||= isRateLimited(err);
-    errors.push(`${what}: ${describe(err)}`);
+    errors.push(`${what}: ${describeError(err)}`);
   };
   const key = (run, attempt) => `${run}/${attempt}`;
 
@@ -156,7 +164,7 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, ledge
     const queued = new Set(state.pass.queue.map((i) => key(i.run.id, i.attempt)));
     const still = [];
     for (const day of state.pass.pending) {
-      if (!pacer.allows(kind, entry.workflows.length)) {
+      if (stopped() || !pacer.allows(kind, entry.workflows.length)) {
         still.push(day);
         continue;
       }
@@ -165,6 +173,7 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, ledge
         for (const r of runs.map(slimRun)) {
           const held = (state.runs[r.id] ??= { day: dayOf(r.created_at), attempts: r.run_attempt, closed: [] });
           held.attempts = Math.max(held.attempts, r.run_attempt);
+          held.created ??= r.created_at; // the per-test pass's sweep reads the recent runs by it
           for (let attempt = 1; attempt <= r.run_attempt; attempt += 1) {
             if (held.closed.includes(attempt) || queued.has(key(r.id, attempt))) continue;
             if (attempt === r.run_attempt && r.status !== 'completed') continue; // open: read again next pass
@@ -220,29 +229,27 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, ledge
   const kindsOf = async (job) => {
     if (!refused) {
       try {
-        return [...new Set((await gh.annotations(repo, job.id)).map((a) => platformKind(a.message)).filter(Boolean))];
+        return [...new Set((await gh.annotations(repo, job.id)).map(annotationKind).filter(Boolean))];
       } catch (err) {
-        if (err.status !== 403) throw err;
+        if (err.status !== 403 || isRateLimited(err)) throw err;
         refused = true; // a private repository: the endpoint needs Checks read, which the App does not have
         state.annotations = 'refused';
       }
     }
     try {
-      // The platform's messages are in a log's last lines; nothing of the log is kept but the kinds matched.
-      const tail = (await gh.jobLog(repo, job.id)).slice(-20_000).split('\n');
-      return [...new Set(tail.map(platformKind).filter(Boolean))];
+      // The runner writes its own errors at a log's end; nothing of the log is kept but the kinds matched.
+      return logKinds((await gh.jobLog(repo, job.id)).slice(-20_000));
     } catch (err) {
       if (err.status === 404 || err.status === 410) return []; // a job with no log (a lost runner's, a refused one's)
       throw err;
     }
   };
 
-  const closed = new Map();
   const done = new Set();
   // Four attempts at a time, as many as the token's limits leave room for at two calls an attempt (its listing and,
   // now and then, its annotations or its earlier attempt's conclusion): their listings are fetched together.
   const take = async function* () {
-    for (let i = 0; i < batch.length; ) {
+    for (let i = 0; i < batch.length && !stopped(); ) {
       let k = 0;
       while (k < 4 && i + k < batch.length && pacer.allows(kind, 2 * (k + 1))) k += 1;
       if (k === 0) return;
@@ -253,6 +260,7 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, ledge
     }
   };
   for await (const item of take()) {
+    if (stopped()) break;
     const { run, attempt } = item;
     try {
       const jobs = await listingOf(run.id, attempt);
@@ -264,17 +272,17 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, ledge
         if (job.conclusion === 'skipped') continue;
         let copied = null;
         if (isCopy(job)) {
-          for (let k = attempt - 1; k >= 2; k -= 1) await listingOf(run.id, k);
+          for (let k = attempt - 1; k >= 1; k -= 1) await listingOf(run.id, k);
           copied = copiedFrom(job.name, attempt, (k) => listings.get(key(run.id, k)) ?? null);
         }
-        const unsuccessful = copied === null && !['success', 'neutral'].includes(job.conclusion);
+        const unsuccessful = !isCopy(job) && !['success', 'neutral'].includes(job.conclusion);
         lines.push(jobLine(facts, job, { copied_from: copied, annotations: unsuccessful ? await kindsOf(job) : [] }, entry));
       }
-      ledger.addJobLines(lines);
+      ledger.addJobLines(lines.filter((l) => !l.copy));
+      ledger.addJobLines(lines.filter((l) => l.copy), filingTime(lines));
       const held = (state.runs[run.id] ??= { day: dayOf(run.created_at), attempts: run.run_attempt, closed: [] });
       held.closed = [...new Set([...held.closed, attempt])].sort((a, b) => a - b);
       done.add(item);
-      closed.set(run.id, run);
       counts.closed += 1;
       counts.lines += lines.length;
     } catch (err) {
@@ -289,7 +297,7 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, ledge
   ledger.flush();
   counts.seconds = Math.round((Date.now() - started) / 1000);
   const more = state.pass.queue.length + state.pass.pending.length > 0 && !limited && !pacer.passSpent(kind);
-  return { counts, errors, more, wait: more && !pacer.allows(kind, 2) ? pacer.waitSeconds(kind) : null, closed: [...closed.values()], ledger };
+  return { counts, errors, more, wait: more && (paced || !pacer.allows(kind, 2)) ? pacer.waitSeconds(kind) : null, ledger };
 }
 
 export const formatLedger = (repo, c, errors) =>

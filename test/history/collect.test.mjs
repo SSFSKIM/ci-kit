@@ -306,7 +306,7 @@ test('an artifact a pass could not download is listed again by the next, however
   const { pass } = passes(repo, root);
 
   const first = await pass();
-  assert.deepEqual(first.errors, [`run 200 attempt 2 unit: HTTP 502 GET /repos/o/r/actions/artifacts/${late.id}/zip: Bad Gateway`]);
+  assert.deepEqual(first.errors, [`run 200 attempt 2 unit: HTTP 502 GET /repos/o/r/actions/artifacts/${late.id}/zip`]);
   assert.deepEqual([first.counts.lines, first.counts.present], [101, 101]);
   assert.equal(lineOf(root, '2026-10-21', '200/2/unit'), undefined);
 
@@ -414,7 +414,7 @@ test('a line held back leaves no link to it on disk; the pass that takes it link
   repo.artifacts.push(...reportsA);
   repo.failing = [`${c('b')}...${c('c')}`];
   const second = await pass();
-  assert.deepEqual(second.errors, [`run 404 attempt 1 unit: previous run: HTTP 503 GET /repos/o/r/compare/${c('b')}...${c('c')}?per_page=1: Service Unavailable`]);
+  assert.deepEqual(second.errors, [`run 404 attempt 1 unit: previous run: HTTP 503 GET /repos/o/r/compare/${c('b')}...${c('c')}`]);
   assert.deepEqual([second.counts.lines, second.counts.relinked], [0, 0]);
   assert.deepEqual(dangling(root), []);
   assert.deepEqual(['402/1/unit', '402/2/unit'].map((k) => lineOf(root, '2026-10-21', k).report), ['missing', 'missing']);
@@ -1141,6 +1141,52 @@ test("with the gate ledger's fetch, the sweep reads the runs that pass closed an
   assert.deepEqual([swept.errors, swept.counts.missing], [[], 1]);
   assert.deepEqual(asked, ['950/1']);
   assert.ok(!fake.requests.some((p) => p.startsWith('/actions/runs?')));
+});
+
+test("a run the ledger closed is offered to the sweep until a clean sweep covers it: a full batch or a failure keeps it", async (t) => {
+  const root = tempRoot(t);
+  const { repo, run } = builder();
+  // 950 ran its tests and uploaded nothing: only the sweep can find it. 951 has an artifact, which fills a batch of 1.
+  run({ id: 950, ref: 'ci/swept-aaaaaaa', tested: c('a'), tree: 'TA', created: '2026-10-21T07:50:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:06:00Z', suites: suitesA() }],
+  ] });
+  repo.artifacts = [];
+  run({ id: 951, ref: 'ci/filled-aaaaaaa', tested: c('b'), tree: 'TB', created: '2026-10-21T07:55:00Z', attempts: [
+    [{ name: 'unit', started: '2026-10-21T08:00:00Z', completed: '2026-10-21T08:07:00Z', suites: suitesA() }],
+  ] });
+  const { fake, pass } = passes(repo, root);
+  const client = createGitHub('t', { fetchImpl: fake.fetchImpl });
+  let failing = 0;
+  const jobsOf = (id, attempt) => (failing-- > 0 ? Promise.reject(Object.assign(new Error('history: a transient failure'), {})) : client.attemptJobs(REPO, id, attempt));
+  // The ledger's state: both runs closed in an earlier batch, created within the last 3 days.
+  const state = { runs: { 950: { day: '2026-10-21', attempts: 1, closed: [1], created: '2026-10-21T07:50:00Z' }, 951: { day: '2026-10-21', attempts: 1, closed: [1], created: '2026-10-21T07:55:00Z' } } };
+  const batch = async (over = {}) => {
+    const offered = collector.recentRuns(state, NOW);
+    const r = await pass({ jobsOf, recentRuns: offered, ...over });
+    if (r.errors.length === 0 && !r.more) collector.markSwept(state, offered);
+    return r;
+  };
+  // A full batch: 951's artifact takes the one line; the sweep does not run.
+  const full = await batch({ limit: 1 });
+  assert.deepEqual([full.counts.present, full.counts.missing, full.more], [1, 0, true]);
+  assert.deepEqual(collector.recentRuns(state, NOW).map((r) => r.id), [950, 951]);
+  // A failing sweep: nothing is marked.
+  failing = 1;
+  const broken = await batch();
+  assert.equal(broken.errors.length, 1);
+  assert.deepEqual(collector.recentRuns(state, NOW).map((r) => r.id), [950, 951]);
+  // The next clean sweep writes 950's missing line, and the runs are offered no more.
+  const clean = await batch();
+  assert.deepEqual([clean.errors, clean.counts.missing, clean.more], [[], 1, false]);
+  assert.equal(lineOf(root, '2026-10-21', '950/1/unit').report, 'missing');
+  assert.deepEqual(collector.recentRuns(state, NOW), []);
+  // An open attempt is offered, and stays offered after a clean sweep until it closes.
+  state.runs[952] = { day: '2026-10-21', attempts: 2, closed: [1], created: '2026-10-21T09:00:00Z' };
+  collector.markSwept(state, collector.recentRuns(state, NOW));
+  assert.deepEqual(collector.recentRuns(state, NOW).map((r) => [r.id, r.attempts]), [[952, [2]]]);
+  // A run created more than 3 days ago is never offered, as the sweep never read one.
+  state.runs[953] = { day: '2026-10-17', attempts: 1, closed: [1], created: '2026-10-17T09:00:00Z' };
+  assert.ok(!collector.recentRuns(state, NOW).some((r) => r.id === 953));
 });
 
 test('the arguments: batch sizes, the pass and the mirrors', () => {

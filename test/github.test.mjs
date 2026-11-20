@@ -1,7 +1,7 @@
 // The REST client against a fake fetch: conditional requests (ETag / If-None-Match) and the rate-limit reading.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createGitHub, GitHubError, isRateLimited } from '../lib/github.mjs';
+import { BudgetSpent, createGitHub, GitHubError, isRateLimited } from '../lib/github.mjs';
 
 // A fake fetch that answers from a script of responses, recording each request's headers.
 function fakeFetch(responses) {
@@ -165,4 +165,21 @@ test('rateLimit reads the core budget from /rate_limit (a read GitHub does not c
   const gh = createGitHub('t', { fetchImpl: f.impl });
   assert.deepEqual(await gh.rateLimit(), { limit: 5000, remaining: 0, reset: 1794309724, used: 5000 });
   assert.equal(f.requests[0].url, 'https://api.github.com/rate_limit');
+});
+
+test('a request the caller does not admit is never made, nor counted, and throws BudgetSpent', async () => {
+  const f = fakeFetch([{ status: 200, body: RUN }]);
+  let room = 1;
+  const gh = createGitHub('t', { fetchImpl: f.impl, admit: () => room > 0 });
+  assert.deepEqual(await gh.getRun('o/r', 7), RUN);
+  room = 0;
+  await assert.rejects(gh.getRun('o/r', 8), (err) => err instanceof BudgetSpent && !isRateLimited(err));
+  assert.equal(f.requests.length, 1);
+  assert.equal(gh.stats().requests, 1);
+});
+
+test("an error names its method, path and status apart from the body's message", async () => {
+  const f = fakeFetch([{ status: 502, body: { message: 'SENTINEL body text' } }]);
+  const gh = createGitHub('t', { fetchImpl: f.impl });
+  await assert.rejects(gh.getRun('o/r', 7), (err) => err.status === 502 && err.method === 'GET' && err.path === '/repos/o/r/actions/runs/7');
 });

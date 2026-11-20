@@ -18,11 +18,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
-import { createGitHub, ghToken, GitHubError, isRateLimited } from '../lib/github.mjs';
+import { BudgetSpent, createGitHub, ghToken, isRateLimited } from '../lib/github.mjs';
 import { createAppTokens } from '../lib/github-app.mjs';
 import { parseJUnit } from './junit.mjs';
 import { previousRun, resolveTested, startedBefore } from './provenance.mjs';
 import { buildBase, buildDurations, buildRunLine, jobSlug, lineArtifacts, lineKey, reportWithinJob, summarize } from './record.mjs';
+import { describeError } from './errors.mjs';
 import { collectLedger, createPacer, formatLedger, LIMITS } from './ledger.mjs';
 import { openMirror } from './mirror.mjs';
 import { dayOf, openLedger, openStore } from './store.mjs';
@@ -108,14 +109,8 @@ export function readArtifact(zip) {
   }
 }
 
-// What an error may say in a public log: GitHub's status and path, or a message this kit wrote (they name runs,
-// jobs and offsets only); any other error by its kind alone, and a system error's code (ENOSPC), since its message
-// can quote the text it failed on (a JSON parse error does) or a path (a file the artifact unpacked).
-const describe = (err) => {
-  if (err instanceof GitHubError || /^(history|junit): /.test(err?.message ?? '')) return err.message;
-  const kind = err?.name ?? 'Error';
-  return /^E[A-Z0-9]+$/.test(err?.code ?? '') ? `${kind} ${err.code}` : kind;
-};
+// What an error may say in a public log: history/errors.mjs.
+const describe = describeError;
 
 // A copy that shares no string with its source. A string sliced from a report (an id, a message) keeps the whole
 // report's text alive, so whatever outlives the report it came from is copied: a held line pinned its artifact's XML,
@@ -127,13 +122,20 @@ const own = (value) => JSON.parse(JSON.stringify(value));
 // naming runs and jobs only, and `more`: whether work was left for another pass (none is claimed after a rate-limit
 // error, which another pass would only repeat). A failed item writes nothing and is tried again by the next pass.
 // `jobsOf(run, attempt)`: an attempt's job listing shared with the gate ledger's pass, which fetches each attempt's
-// jobs once; `recentRuns`: the runs that pass closed attempts of in this batch, which the sweep (2.) reads instead of
-// listing the last 3 days again. Without them the pass lists and fetches for itself.
+// jobs once; `recentRuns`: the last 3 days' runs the ledger knows ({ id, run_attempt, created_at, attempts: the
+// attempts still to sweep }), which the sweep (2.) reads instead of listing them again. Without them the pass lists
+// and fetches for itself. A request the caller's budget refused (BudgetSpent) stops nothing else and is no error: the
+// pass claims more, as for a full batch.
 export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Date.now(), readZip = readArtifact, limit = Infinity, jobsOf: sharedJobsOf = null, recentRuns = null }) {
   const counts = { artifacts: 0, lines: 0, present: 0, missing: 0, unparseable: 0, rejected: 0, relinked: 0, failures: 0, written: 0 };
   const errors = [];
   let limited = false;
+  let paced = false;
   const failed = (what, err) => {
+    if (err instanceof BudgetSpent) {
+      paced = true;
+      return;
+    }
     limited ||= isRateLimited(err);
     errors.push(`${what}: ${describe(err)}`);
   };
@@ -199,7 +201,7 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
     const swept = new Map();
     const since = new Date(now - 3 * DAY).toISOString();
     for (const run of recentRuns ? recentRuns.filter((r) => r.created_at >= since) : await gh.runsCreatedSince(repo, since)) {
-      for (let attempt = 1; attempt <= run.run_attempt; attempt += 1) {
+      for (const attempt of run.attempts ?? Array.from({ length: run.run_attempt }, (_, i) => i + 1)) {
         let attemptJobs;
         try {
           attemptJobs = await jobsOf(run.id, attempt);
@@ -433,7 +435,29 @@ export async function collectRepo({ gh, repo, alias = repo, jobs, root, now = Da
   for (const line of replacing) store.replace(line);
   counts.relinked = replacing.length;
   counts.written = store.flush();
-  return { counts, errors, more: (left || !sweep) && !limited };
+  return { counts, errors, more: (left || !sweep || paced) && !limited };
+}
+
+// The sweep's work, kept in the ledger's attempts.json so a run the ledger closed is swept even when the batch that
+// closed it could not (its per-test batch full, paced, or failing): every run created in the last 3 days, with the
+// attempts no clean sweep has covered yet. An open attempt is offered too, as the sweep always read a running
+// attempt's finished jobs, and stays offered until it closes.
+export function recentRuns(state, now) {
+  const since = new Date(now - 3 * DAY).toISOString();
+  return Object.entries(state.runs)
+    .filter(([, r]) => r.created && r.created >= since)
+    .map(([id, r]) => ({ id: Number(id), run_attempt: r.attempts, created_at: r.created, attempts: Array.from({ length: r.attempts }, (_, i) => i + 1).filter((a) => !(r.swept ?? []).includes(a)) }))
+    .filter((r) => r.attempts.length > 0)
+    .sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id - b.id));
+}
+
+// After a clean sweep of `offered` (no error, nothing left for another batch): its closed attempts need no other.
+export function markSwept(state, offered) {
+  for (const r of offered) {
+    const held = state.runs[r.id];
+    const done = r.attempts.filter((a) => held?.closed.includes(a));
+    if (done.length) held.swept = [...new Set([...(held.swept ?? []), ...done])].sort((a, b) => a - b);
+  }
 }
 
 export const formatCounts = (repo, c, errors) =>
@@ -494,11 +518,14 @@ export function selectRepos(repos, alias) {
 }
 
 // One repository's batch: the gate ledger's pass, then the per-test pass (for a repository with a reporting set),
-// which takes its jobs from the ledger's fetch. → { errors, more, wait }.
-async function collectBoth({ entry, opts, pacer, now, ledger: opened }) {
+// which takes its jobs from the ledger's fetch. Every request of both goes through the pacer (`admit`). → { errors,
+// more, wait }. `deps`: the client, the mirror and the token, replaced in tests.
+const DEPS = { createGitHub, openMirror, tokenFor };
+async function collectBoth({ entry, opts, pacer, now, ledger: opened, deps }) {
   const { repo, alias } = entry;
-  const token = tokenFor(repo, entry.token);
-  const gh = createGitHub(token);
+  const token = deps.tokenFor(repo, entry.token);
+  const gh = deps.createGitHub(token, { admit: () => pacer.allows(entry.token, 1) });
+  pacer.attach(entry.token, opened.state, gh);
   const memo = new Map();
   const jobsOf = (run, attempt) => {
     const k = `${run}/${attempt}`;
@@ -507,9 +534,9 @@ async function collectBoth({ entry, opts, pacer, now, ledger: opened }) {
   };
   const errors = [];
   let ledger = null;
-  let result = { more: false, wait: null, closed: null };
+  let result = { more: false, wait: null };
   try {
-    const mirror = openMirror({ dir: join(opts.mirrors, `${alias}.git`), repo, token: typeof token === 'function' ? await token(repo) : token });
+    const mirror = deps.openMirror({ dir: join(opts.mirrors, `${alias}.git`), repo, token: typeof token === 'function' ? await token(repo) : token });
     const cloneStarted = Date.now();
     mirror.ensure();
     console.error(`${repo}: mirror ready in ${Math.round((Date.now() - cloneStarted) / 1000)} s`);
@@ -525,34 +552,39 @@ async function collectBoth({ entry, opts, pacer, now, ledger: opened }) {
   let more = result.more;
   if (entry.jobs && pacer.allows(entry.token, 10)) {
     const perTestStarted = Date.now();
-    const perTest = await collectRepo({ gh, repo, alias, jobs: entry.jobs, root: opts.store, now, limit: opts.limit, jobsOf, recentRuns: result.closed });
-    errors.push(...perTest.errors);
-    console.log(formatCounts(repo, perTest.counts, perTest.errors.length));
+    const offered = ledger ? recentRuns(ledger.state, now) : null;
+    try {
+      const perTest = await collectRepo({ gh, repo, alias, jobs: entry.jobs, root: opts.store, now, limit: opts.limit, jobsOf, recentRuns: offered });
+      errors.push(...perTest.errors);
+      console.log(formatCounts(repo, perTest.counts, perTest.errors.length));
+      more ||= perTest.more;
+      if (offered && perTest.errors.length === 0 && !perTest.more) markSwept(ledger.state, offered);
+    } catch (err) {
+      errors.push(`per-test: ${describe(err)}`);
+    }
     console.error(`${repo}: per-test pass in ${Math.round((Date.now() - perTestStarted) / 1000)} s`);
-    more ||= perTest.more;
   }
   // The per-test pass's calls count toward the pass too.
   if (ledger) {
     pacer.settle(ledger.state);
     ledger.flush();
   }
-  return { errors, more, wait: result.wait };
+  return { errors, more, wait: more && !pacer.allows(entry.token, 2) ? (result.wait ?? pacer.waitSeconds(entry.token)) : result.wait };
 }
 
-async function main(argv) {
-  const opts = parseArgs(argv);
-  const repos = JSON.parse(readFileSync(new URL('./repos.json', import.meta.url), 'utf8'));
-  const chosen = selectRepos(repos, opts.repo);
-  const now = Date.now();
+// One batch over the chosen repositories, printing count lines, errors (naming runs, jobs and statuses only) and the
+// lines the workflow reads. → the exit code.
+export async function collectBatch({ chosen, opts, now = Date.now(), deps = DEPS }) {
   const limits = opts.calls === null ? LIMITS : Object.fromEntries(Object.entries(LIMITS).map(([k, l]) => [k, { ...l, pass: opts.calls }]));
-  const pacer = createPacer({ pass: opts.pass, limits });
+  const started = Date.now();
+  const pacer = createPacer({ pass: opts.pass, limits, now: () => now + (Date.now() - started) }); // the clock runs on from `now`
   // Every repository's calls this pass and hour count from the start, whichever comes first.
   const ledgers = new Map(chosen.map((e) => [e.alias, openLedger(opts.store, e.alias)]));
   for (const e of chosen) pacer.add(e.token, ledgers.get(e.alias).state);
   let failed = false;
   const results = [];
   for (const entry of chosen) {
-    const r = await collectBoth({ entry, opts, pacer, now, ledger: ledgers.get(entry.alias) });
+    const r = await collectBoth({ entry, opts, pacer, now, ledger: ledgers.get(entry.alias), deps: { ...DEPS, ...deps } });
     for (const e of r.errors) console.error(`${entry.repo}: ${e}`);
     if (r.errors.length > 0) failed = true;
     results.push(r);
@@ -569,6 +601,12 @@ async function main(argv) {
     console.log('history: more');
   }
   return failed ? 1 : 0;
+}
+
+async function main(argv) {
+  const opts = parseArgs(argv);
+  const repos = JSON.parse(readFileSync(new URL('./repos.json', import.meta.url), 'utf8'));
+  return collectBatch({ chosen: selectRepos(repos, opts.repo), opts });
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
