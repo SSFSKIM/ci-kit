@@ -728,6 +728,14 @@ inputs M0 added.
   their change: rules 3 and 4 seldom apply there. doperpowers' sessions merge before the check ends, having gated the
   head by a `ci-gate` push (38 of 183 in flight). Evidence: M3's report, Discoveries.
 
+- Observation: M4's acceptance 5 on the record (store 9f069e6). doperpowers W47: 21 gates, 25 of the window's 25
+  ended days covered; 11 nominations, each with no red of any cause in four weeks; one candidate (`shell-lint`, one
+  `test-only-diff` red); one gate with too little record. MAWS W47: 103 gates; 3 nominations (`e2e:browser-import`,
+  `e2e:c7-utility`, `docs`), each with `infra` reds only; no candidate. The retrospective's product catches (its
+  classes "product bug in the change" and "already on master", 15 hand-run runs) failed in nine gates, none
+  nominated; each has 7 to 42 `unattributed` reds in the window. Writing all 20 reports and 5 status files takes
+  2.5 s at 417 MB peak. Evidence: M4's report; pool run 44690908797, store 93bce76.
+
 ## Decision Log
 
 - Decision: verification. The spec is reviewed by `doperpowers:adversarial-reviewer` for design and buildability
@@ -918,6 +926,19 @@ inputs M0 added.
   base is best effort. A listed landing whose day lies before the input window is not written again (an idle
   repository's watermark day would otherwise be rewritten with its last event alone). No stored line moved.
   Date/Author: 2026-11-20, the executing session.
+
+- Decision: M4's gaps, as built (2026-11-20, 0901ba1). Per-gate figures, nominations and candidates read the
+  four weeks; reds to read and landings the report's own week, with a count of the window's earlier reds (the daily
+  pass writes all four reports). Coverage is the repository's covered days among the window's 28 (a day not ended is
+  never covered), at least 21, and the gate needs 20 attempts. A covered gate with no red at all is nominated (it had
+  no red but `infra`'s). A failed attempt with no cause line, or an unknown cause, keeps a gate out of both lists.
+  Landings listed: red, `head_green`, or unrun with the check not in flight. The Mac's lanes are `mini-host`,
+  `mini-guest`, `manual-host`, `manual-guest`; minute totals include superseded and cancelled minutes. `status.json`'s
+  `as_of` is the record's freshness (the repository's last listing whose derivation completed, else the marker's
+  time), so a stalled collector ages it; each gate entry carries `attempt`, and `known` holds `keep` entries too.
+  `compares_base` in `repos.json` names the gates that compare with the default branch of the moment (doperpowers'
+  `version-bump`). The sandbox writes reports and status files after the batch loop, inside the collect step, and
+  reuses its push retries (sandbox #101). Date/Author: 2026-11-20, the executing session.
 
 ## Outcomes & Retrospective
 
