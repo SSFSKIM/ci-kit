@@ -52,9 +52,10 @@ function world(t) {
   return { o, mirror };
 }
 const event = (id, before, after, at, type = 'pr_merge') => ({ id, type, before, after, at: iso(at) });
-const landed = (lines, ev, { entry = KIT, mirror, landings = [] }) => {
+// `runs`: the ledger's run records (attempts.json's), where a test gives them.
+const landed = (lines, ev, { entry = KIT, mirror, runs = {} }) => {
   const analysis = analyze(lines);
-  return landingLine(ev, { entry, mirror, index: landingIndex(analysis, lines), pulls: mirror.pulls() });
+  return landingLine(ev, { entry, mirror, index: landingIndex(analysis, lines, runs), pulls: mirror.pulls() });
 };
 
 const KIT_CONFIG = 'version: 1\ngates:\n  - name: test\n    run: npm test\n    paths: ["src/**"]\n  - name: docs\n    run: npm run docs\n    paths: ["docs/**"]\n';
@@ -84,7 +85,7 @@ test("pr_check is the verdict job's own result; a later ci-gate push of the head
   assert.deepEqual(l.pr_check, { result: 'green', run: 100, attempt: 1 });
   assert.equal(l.exact, 'unrun', 'the push ran after the landing');
   assert.equal(l.head_green, false);
-  const causes = deriveCauses({ analysis: analyze(lines), entry: KIT, landings: [l], standing: () => null, known: [], casesOf: () => null, paths: () => null, prOf: () => null, from: '2026-01-01' });
+  const causes = deriveCauses({ analysis: analyze(lines), entry: KIT, record: { since: '2000-01-01T00:00:00Z', events: [l] }, standing: () => null, known: [], casesOf: () => null, paths: () => null, prOf: () => null, from: '2026-01-01' });
   assert.deepEqual(causes.map((c) => [c.run, c.cause]), [[101, 'unattributed']]);
 });
 
@@ -117,6 +118,42 @@ test('pr_check: a squash reads its head from refs/pull/<n>/head; in flight at th
   assert.deepEqual([nine.pr, nine.pr_check, nine.exact, nine.ship_with], [null, null, 'unrun', null]);
 });
 
+test("pr_check reads the ledger's run records: a run pending at the landing, one that failed before creating jobs, a rerun by its own start, a squash by its pull request", (t) => {
+  const { o, mirror } = world(t);
+  const base = o.commit({ '.github/ci-kit.yml': KIT_CONFIG, 'src/a.ts': '1' }, 'base');
+  const heads = {};
+  for (const n of [20, 21, 22]) {
+    o.git('checkout', '-q', '-b', `topic${n}`, base);
+    heads[n] = o.commit({ [`src/${n}.ts`]: 'x' }, `work ${n}`);
+    o.git('update-ref', `refs/pull/${n}/head`, heads[n]);
+  }
+  o.git('checkout', '-q', 'main');
+  const tips = [base];
+  for (const n of [20, 21, 22, 23, 24]) tips.push(o.commit({ [`src/${n}.ts`]: 'x' }, `change ${n} (#${n})`));
+  const m = mirror();
+  const pr = (head, n, o2) => ({ day: '2026-11-18', event: 'pull_request', head, pr: n, created: iso(0), ...o2 });
+  const runs = {
+    300: pr(heads[20], 20, { attempts: 1, closed: [] }),
+    301: pr(heads[21], 21, { attempts: 1, closed: [1], attempt_info: { 1: { started: iso(0), status: 'completed', conclusion: 'startup_failure', completed: iso(1) } } }),
+    302: pr(heads[22], 22, { attempts: 2, closed: [1, 2], attempt_info: { 2: { started: iso(20), status: 'completed', conclusion: 'success', completed: iso(46) } } }),
+    303: pr('d'.repeat(40), 23, { attempts: 1, closed: [1] }),
+  };
+  const lines = [
+    ...prRun(302, heads[22], { at: 0, conclusion: 'failure' }),
+    // The rerun began at 20; its jobs waited for a runner until 40.
+    ...prRun(302, heads[22], { at: 40, attempt: 2 }),
+    ...prRun(303, 'd'.repeat(40), { at: 0 }),
+  ];
+  const at = (i, minutes) => landed(lines, event(i, tips[i - 1], tips[i], minutes), { mirror: m, runs }).pr_check;
+  assert.deepEqual(at(1, 10), { result: 'unrun', run: 300, attempt: 1, inflight: true, eventual: null });
+  assert.deepEqual(at(2, 10), { result: 'red', run: 301, attempt: 1, read: 'run' });
+  assert.deepEqual(at(3, 30), { result: 'unrun', run: 302, attempt: 2, inflight: true, eventual: 'success' });
+  // #23's head is not in the mirror: its run is found by the pull request it records.
+  assert.deepEqual(at(4, 10), { result: 'green', run: 303, attempt: 1 });
+  // #24: no head and no run of it: not known, which is not `none`.
+  assert.deepEqual(at(5, 10), { result: 'unknown' });
+});
+
 test("exact: the latest full, exact attempt of each required gate on the landed tree, completed before the landing", (t) => {
   const { o, mirror } = world(t);
   const base = o.commit({ '.github/ci-kit.yml': KIT_CONFIG, 'src/a.ts': '1' }, 'base');
@@ -132,6 +169,11 @@ test("exact: the latest full, exact attempt of each required gate on the landed 
   assert.equal(landed([on({ run: 1, at: 0, ...failed }), on({ run: 2, at: 10 })], ev, { mirror: m }).exact, 'green');
   const stopped = { conclusion: 'cancelled', run_conclusion: 'cancelled', failed_step: 'Run npm test', phase: 'test' };
   assert.equal(landed([on({ run: 1, at: 0 }), on({ run: 2, at: 10, ...stopped })], ev, { mirror: m }).exact, 'green', 'a cancelled attempt is no verdict');
+  // A newer attempt that did not finish (a shard missing) is the tree's latest: unrun. It is no observation.
+  const incomplete = [on({ run: 1, at: 0 }), on({ run: 2, at: 10, job: 'ci / test 1/2', shard: [1, 2] })];
+  assert.equal(landed(incomplete, ev, { mirror: m }).exact, 'unrun');
+  const obs = observationsOf({ analysis: analyze(incomplete), landings: [{ at: iso(60), tree_key: tree, after: tip }], entry: KIT });
+  assert.deepEqual(obs.of('test').map((x) => x.run), [1]);
   assert.equal(landed([on({ run: 1, at: 58 })], ev, { mirror: m }).exact, 'unrun', 'still running at the landing');
   assert.equal(landed([on({ run: 1, at: 0, scope: 'selected', scope_key: 'k-sel' })], ev, { mirror: m }).exact, 'unrun', 'not full');
   assert.equal(landed([on({ run: 1, at: 0, basis: 'pr-merge', event: 'pull_request', tree: null, tree_key: null, head_tree: tree })], ev, { mirror: m }).exact, 'unrun', 'not exact');

@@ -9,7 +9,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
-import { createGitHub } from '../../lib/github.mjs';
+import { BudgetSpent, createGitHub } from '../../lib/github.mjs';
 import * as collector from '../../history/collect.mjs';
 import { ArchiveDefect, collectRepo, formatCounts, readArtifact } from '../../history/collect.mjs';
 import { parseJUnit } from '../../history/junit.mjs';
@@ -1329,12 +1329,45 @@ test('no marker from a batch that leaves work, stops at a limit or a refusal, or
   assert.equal(marker((await batchOf(t, { limits: { app: { pass: 1500, hour: 2000 } }, repo: 'o/a' })).root), null, 'one repository');
 });
 
+test("a derivation held by the hour's limit resumes in a later batch; only one that completed without error lets the marker be written", async (t) => {
+  const calls = [];
+  // A derivation that lists until the hour's limit refuses it, as derive.mjs's listing is held.
+  const paced = async ({ gh }) => {
+    calls.push('paced');
+    for (let i = 0; i < 100; i += 1) {
+      try {
+        await gh.activityPage('o/a', 'refs/heads/master', null);
+      } catch (err) {
+        if (err instanceof BudgetSpent) break;
+      }
+    }
+    return { ...(await noDerive()), paced: true };
+  };
+  // 37 calls for the ledger and the per-test pass leave the derivation 9 of the hour's 46.
+  const held = await batchOf(t, { repos: ['o/a'], limits: { app: { pass: 1500, hour: 46 } }, derive: paced });
+  assert.equal(held.code, 0, held.out);
+  assert.deepEqual([calls, held.asked['o/a']], [['paced'], 46]);
+  assert.match(held.out, /^history: wait \d+$/m);
+  assert.match(held.out, /^history: more$/m);
+  // A whole batch whose derivation was held, or failed, writes no marker; nor does it count as taken.
+  const failing = async () => ({ ...(await noDerive()), errors: ['activity: HTTP 500 GET /repos/o/a/activity'] });
+  assert.equal(marker((await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 1500, hour: 2000 } }, derive: paced })).root), null, 'held');
+  const failed = await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 1500, hour: 2000 } }, derive: failing });
+  assert.equal(failed.code, 1);
+  assert.equal(marker(failed.root), null, 'failed');
+  // The pass's next batch derives again, and with that done the marker is written.
+  const ok = async (args) => (calls.push('ok'), noDerive(args));
+  const resumed = await batchOf(t, { repos: ['o/a', 'o/b'], limits: { app: { pass: 1500, hour: 2000 } }, derive: ok, root: failed.root });
+  assert.equal(resumed.code, 0, resumed.out);
+  assert.notEqual(marker(resumed.root), null);
+});
+
 test('the landings and causes are derived once a pass, by a batch that leaves the ledger nothing queued or pending', async (t) => {
   const calls = [];
   const derive = async (args) => (calls.push(args.from), noDerive());
   const drained = await batchOf(t, { limits: { app: { pass: 1500, hour: 2000 } }, derive });
   assert.equal(drained.code, 0, drained.out);
-  assert.match(drained.out, /^o\/a: derived: landings 0 \(listed 0\)/m);
+  assert.match(drained.out, /^o\/a: derived: landings 0 \(listed 0, chain breaks 0\)/m);
   assert.deepEqual(calls, [null]);
   // The pass's next batch does not derive again; a new pass does.
   await batchOf(t, { limits: { app: { pass: 1500, hour: 2000 } }, derive, root: drained.root });

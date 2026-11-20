@@ -1,11 +1,17 @@
 // The gate ledger's derived lines (gate ledger spec, M3), written once a pass when a repository's job lines are in:
 //   landings/<YYYY-MM-DD>.jsonl   one line per update of the default branch, by its push day (landings.mjs)
 //   causes/<YYYY-MM-DD>.jsonl     one line per red gate attempt, by the day its result was known (cause.mjs)
-// Both are recomputed while younger than 14 days, then final: an older line is kept as it is, and only an attempt or
-// a landing with no line yet gets one. A first derivation (no lines held), or one asked from a day (`from`), computes
-// every line from that day on. New landings come from the activity listing, a page of 100 a call, back to the newest
-// landing held; a repository whose listing is refused has no landing record, said once in attempts.json
-// (`activity: "refused"`). It prints nothing of what it reads: its counts name causes and days only.
+// Both are recomputed while younger than 14 days, then final: an older day's file is left as it is, unread, and only a
+// day with no file yet gets one. A first derivation (no lines held), or one asked from a day (`from`), computes every
+// line from that day on. Files are chosen by their day's name before any is read: the job lines, landings and test
+// records of the 35-day window with a day's margin each side (a batch that crosses midnight sees the next day's
+// jobs), and the causes of the recompute window.
+// New landings come from the activity listing, a page of 100 a call. What it has covered is kept in attempts.json,
+// apart from the derived files: `activity: { since, through, breaks }`, the listing reaching back to `since` once and
+// on from the newest landing listed (`through`) after, so a first listing that failed is taken again from the start.
+// `breaks`: the window's landings whose `before` is not where the previous one left the branch (a landing the listing
+// lacks). A repository whose listing is refused has no landing record (`activity: "refused"`). It prints nothing of
+// what it reads: its counts name causes and days only.
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BudgetSpent, isRateLimited } from '../lib/github.mjs';
@@ -20,12 +26,14 @@ export const FINAL_DAYS = 14;
 export const WINDOW_DAYS = 35;
 
 const DAYFILE = /^(\d{4}-\d\d-\d\d)\.jsonl$/;
-const readDir = (dir) => {
+const ZERO = /^0{40}$/;
+// The days a directory has a file for, by name only.
+const dayFiles = (dir) => (existsSync(dir) ? readdirSync(dir).map((n) => DAYFILE.exec(n)?.[1]).filter(Boolean).sort() : []);
+// The lines of the days in [fromDay, toDay], chosen by name before any is read.
+const readDays = (dir, fromDay, toDay) => {
   const out = new Map();
-  if (!existsSync(dir)) return out;
-  for (const name of readdirSync(dir).sort()) {
-    const day = DAYFILE.exec(name)?.[1];
-    if (day) out.set(day, readFileSync(join(dir, name), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)));
+  for (const day of dayFiles(dir).filter((d) => d >= fromDay && d <= toDay)) {
+    out.set(day, readFileSync(join(dir, `${day}.jsonl`), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)));
   }
   return out;
 };
@@ -43,7 +51,8 @@ const writeDays = (dir, days) => {
 };
 
 // Held lines kept where final (their day before `from`), computed lines elsewhere and wherever none is held; by day.
-function merged(held, computed, { keyOf, dayOfLine, from, order }) {
+// `final`: the days before `from` that have a file left unread, which no computed line joins.
+function merged(held, computed, { keyOf, dayOfLine, from, final, order }) {
   const days = new Map();
   const heldKeys = new Set();
   for (const [day, lines] of held) {
@@ -53,7 +62,7 @@ function merged(held, computed, { keyOf, dayOfLine, from, order }) {
   }
   for (const l of computed) {
     const day = dayOfLine(l);
-    if (day < from && heldKeys.has(keyOf(l))) continue;
+    if (day < from && (heldKeys.has(keyOf(l)) || final.has(day))) continue;
     (days.get(day) ?? days.set(day, []).get(day)).push(l);
   }
   for (const lines of days.values()) lines.sort(order);
@@ -66,10 +75,9 @@ const causeKey = (c) => JSON.stringify([c.run, c.attempt, c.gate, c.scope_key]);
 const byTime = (key) => (a, b) => (a[key] < b[key] ? -1 : a[key] > b[key] ? 1 : String(a.run ?? a.id) < String(b.run ?? b.id) ? -1 : 1);
 
 // The failing cases the per-test record holds for an attempt's job (runs/<day>.jsonl, a present report's `failed`).
-function failedCases(dir, fromDay) {
+function failedCases(dir, fromDay, toDay) {
   const out = new Map();
-  for (const [day, lines] of readDir(join(dir, 'runs'))) {
-    if (day < fromDay) continue;
+  for (const lines of readDays(join(dir, 'runs'), fromDay, toDay).values()) {
     for (const l of lines) if (l.report === 'present') out.set(`${l.run}/${l.attempt}/${l.job}`, (l.failed ?? []).map((f) => f.id));
   }
   return (run, attempt, gate) => out.get(`${run}/${attempt}/${gate}`) ?? null;
@@ -96,33 +104,42 @@ function pullsByBranch(lines, pulls) {
 export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, mirror, now = Date.now(), from = null }) {
   const started = Date.now();
   const dir = join(root, alias);
-  const today = dayOf(new Date(now).toISOString());
-  const windowStart = dayOf(new Date(now - (WINDOW_DAYS - 1) * DAY).toISOString());
-  const heldLandings = readDir(join(dir, 'landings'));
-  const heldCauses = readDir(join(dir, 'causes'));
-  const first = heldLandings.size === 0 && heldCauses.size === 0;
+  const day = (ms) => dayOf(new Date(ms).toISOString());
+  const windowStart = day(now - (WINDOW_DAYS - 1) * DAY);
+  const [inputFrom, inputTo] = [day(now - WINDOW_DAYS * DAY), day(now + DAY)];
+  const [landingsDir, causesDir] = [join(dir, 'landings'), join(dir, 'causes')];
+  const first = dayFiles(landingsDir).length === 0 && dayFiles(causesDir).length === 0;
   // Never before the job lines' window: a day before it has nothing to compute from.
   const asked = from && from > windowStart ? from : from ? windowStart : null;
-  const recomputeFrom = asked ?? (first ? windowStart : dayOf(new Date(now - FINAL_DAYS * DAY).toISOString()));
+  const recomputeFrom = asked ?? (first ? windowStart : day(now - FINAL_DAYS * DAY));
+  const heldLandings = readDays(landingsDir, inputFrom, inputTo);
+  const heldCauses = readDays(causesDir, recomputeFrom, inputTo);
+  const finalDays = (dir2, before) => new Set(dayFiles(dir2).filter((d) => d < before));
   const errors = [];
   let paced = false;
-  const counts = { listed: 0, landings: 0, causes: {} };
+  const counts = { listed: 0, landings: 0, breaks: 0, causes: {} };
   const { state } = ledger;
 
-  // 1. New landings from the activity listing.
+  // 1. New landings from the activity listing: from the window's start until a listing has once reached it, then on
+  //    from the newest landing listed.
   const held = [...heldLandings.values()].flat();
   const events = new Map(held.map((l) => [l.id, { id: l.id, type: l.type, before: l.before, after: l.after, at: l.at }]));
   let landingsKnown = state.activity !== 'refused';
-  let listed = false; // the listing reached back to `since`: the record of the default branch's moves is whole
+  const covered = landingsKnown && state.activity ? state.activity : null;
+  const backfill = `${windowStart}T00:00:00Z`;
+  let listed = false; // this pass's listing reached back to where the record left off: the record is whole
   if (landingsKnown) {
-    const newest = held.map((l) => l.at).sort().at(-1);
-    const since = asked || !newest ? `${recomputeFrom}T00:00:00Z` : newest;
+    let since = covered && covered.since <= backfill ? covered.through : backfill;
+    if (asked && `${asked}T00:00:00Z` < since) since = `${asked}T00:00:00Z`;
     try {
+      let through = covered?.through ?? since;
       for (const e of await listActivity(gh, repo, entry.default_branch, { since })) {
         counts.listed += 1;
         if (!events.has(e.id)) events.set(e.id, e);
+        if (e.at > through) through = e.at;
       }
       listed = true;
+      state.activity = { since: covered && covered.since < since ? covered.since : since, through, breaks: covered?.breaks ?? [] };
     } catch (err) {
       if (err instanceof BudgetSpent) paced = true; // the next pass lists
       else if ([403, 404].includes(err.status) && !isRateLimited(err)) {
@@ -132,33 +149,38 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
     }
   }
 
-  // 2. The mirror: every pull request's head, and the commits landings name.
+  // 2. The mirror: every pull request's head, and the commits the landings to compute name.
+  const heldIds = new Set(held.map((l) => l.id));
+  const toCompute = [...events.values()].filter((e) => dayOf(e.at) >= recomputeFrom || !heldIds.has(e.id));
   const pulls = entry.verdict_job && mirror.fetchPulls() ? mirror.pulls() : new Map();
-  mirror.fetch([...events.values()].flatMap((e) => [e.before, e.after]));
+  mirror.fetch(toCompute.flatMap((e) => [e.before, e.after]));
 
   // 3. Landings.
-  const lines = ledger.jobLines(dayOf(new Date(now - WINDOW_DAYS * DAY).toISOString()), today);
+  const lines = ledger.jobLines(inputFrom, inputTo);
   const created = Object.fromEntries(Object.entries(state.runs ?? {}).filter(([, r]) => r.created).map(([id, r]) => [id, r.created]));
   const analysis = analyze(lines, { created });
-  const index = landingIndex(analysis, lines);
-  const heldIds = new Set(held.map((l) => l.id));
-  const computedLandings = [...events.values()]
-    .filter((e) => dayOf(e.at) >= recomputeFrom || !heldIds.has(e.id))
-    .map((e) => landingLine(e, { entry, mirror, index, pulls }));
+  const index = landingIndex(analysis, lines, state.runs ?? {});
+  const computedLandings = toCompute.map((e) => landingLine(e, { entry, mirror, index, pulls }));
   const landingDays = landingsKnown
-    ? merged(heldLandings, computedLandings, { keyOf: (l) => l.id, dayOfLine: (l) => dayOf(l.at), from: recomputeFrom, order: byTime('at') })
+    ? merged(heldLandings, computedLandings, { keyOf: (l) => l.id, dayOfLine: (l) => dayOf(l.at), from: recomputeFrom, final: finalDays(landingsDir, inputFrom), order: byTime('at') })
     : new Map();
-  const landings = landingsKnown ? [...landingDays.values()].flat() : null;
+  const landings = landingsKnown ? [...landingDays.values()].flat().sort(byTime('at')) : null;
   counts.landings = landings?.length ?? 0;
+  // The chain: each landing moves the branch from where the one before it left it, or a landing is missing between.
+  if (landings && typeof state.activity === 'object' && state.activity) {
+    state.activity.breaks = landings.filter((l, i) => i > 0 && l.before !== landings[i - 1].after && !ZERO.test(l.before ?? '')).map((l) => ({ at: l.at, id: l.id }));
+    counts.breaks = state.activity.breaks.length;
+  }
 
   // 4. Causes: a first pass learns which trees' differences are asked for, so the heads holding them are fetched in
   //    one request; the second reads them.
   const observations = observationsOf({ analysis, landings, entry });
   const headOfTree = new Map(analysis.attempts.filter((a) => a.basis === 'exact' && a.tree).map((a) => [a.tree, a.head]));
   const wanted = new Set();
-  // Whether the base moved between two pull request runs is read only from a whole record.
+  // Whether the base moved between two pull request runs is read only from a record this pass's listing made whole.
+  const record = listed ? { since: [state.activity.since, `${inputFrom}T00:00:00Z`].sort().at(-1), events: landings } : null;
   const inputs = {
-    analysis, entry, landings: listed ? landings : null, standing: observations.standing, known: readKnown(root, alias), casesOf: failedCases(dir, windowStart),
+    analysis, entry, record, standing: observations.standing, known: readKnown(root, alias), casesOf: failedCases(dir, inputFrom, inputTo),
     prOf: pullsByBranch(lines, pulls), from: windowStart,
   };
   deriveCauses({ ...inputs, paths: (a, b) => (wanted.add(a).add(b), null) });
@@ -171,10 +193,10 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
     }
   };
   const computedCauses = deriveCauses({ ...inputs, paths });
-  const causeDays = merged(heldCauses, computedCauses, { keyOf: causeKey, dayOfLine: (c) => dayOf(c.available), from: recomputeFrom, order: byTime('available') });
+  const causeDays = merged(heldCauses, computedCauses, { keyOf: causeKey, dayOfLine: (c) => dayOf(c.available), from: recomputeFrom, final: finalDays(causesDir, recomputeFrom), order: byTime('available') });
   for (const c of [...causeDays.values()].flat()) counts.causes[c.cause] = (counts.causes[c.cause] ?? 0) + 1;
 
-  counts.written = (landingsKnown ? writeDays(join(dir, 'landings'), landingDays) : 0) + writeDays(join(dir, 'causes'), causeDays);
+  counts.written = (landingsKnown ? writeDays(landingsDir, landingDays) : 0) + writeDays(causesDir, causeDays);
   counts.refused = !landingsKnown;
   counts.seconds = Math.round((Date.now() - started) / 1000);
   return { counts, errors, paced };
@@ -182,4 +204,4 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
 
 const CAUSES = ['superseded', 'cancelled', 'infra', 'rerun-green', 'test-only-diff', 'product-diff', 'unattributed'];
 export const formatDerived = (repo, c, errors) =>
-  `${repo}: derived: landings ${c.refused ? 'refused' : c.landings} (listed ${c.listed}), causes ${CAUSES.map((k) => `${k} ${c.causes[k] ?? 0}`).join(', ')}, files written ${c.written}, errors ${errors}, ${c.seconds} s`;
+  `${repo}: derived: landings ${c.refused ? 'refused' : c.landings} (listed ${c.listed}, chain breaks ${c.breaks ?? 0}), causes ${CAUSES.map((k) => `${k} ${c.causes[k] ?? 0}`).join(', ')}, files written ${c.written}, errors ${errors}, ${c.seconds} s`;

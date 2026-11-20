@@ -74,41 +74,58 @@ export function analyze(lines, { created = {} } = {}) {
 
 // A job cancelled from outside it (its run cancelled, by a newer run or by hand), apart from one that reached its time
 // limit: GitHub concludes that `cancelled` too, but it ended on its own, which a deadlock in the product does.
-const cancelledFromOutside = (l) => l.conclusion === 'cancelled' && !l.annotations.includes('time-limit') && !l.log_kinds.includes('time-limit');
+const timeLimited = (l) => l.annotations.includes('time-limit') || l.log_kinds.includes('time-limit');
+const cancelledFromOutside = (l) => l.conclusion === 'cancelled' && !timeLimited(l);
 
-// The unsuccessful jobs that speak for an attempt: a summary job that failed beside a failed part is the part's.
+// The unsuccessful jobs that speak for an attempt. A summary job's failure restates a part's only where a part failed:
+// beside parts that were only cancelled, a failed or timed-out summary is the attempt's own failure.
 function unsuccessful(a) {
   const bad = a.lines.filter((l) => l.conclusion !== null && l.conclusion !== 'success');
   const parts = bad.filter((l) => l.role !== 'summary');
-  return parts.length > 0 ? parts : bad;
+  return parts.some((l) => !cancelledFromOutside(l)) ? parts : bad;
 }
 
-const later = (b, a) => b.key !== a.key && (b.start > a.start || (b.start === a.start && b.key > a.key));
+// Whether the default branch held still from `from` to `to`, by its landing record (`{ since, events }`, events by
+// time): no landing in between, and the chain unbroken across it (the landing after the interval moved the branch
+// from where the one before left it). A record that starts later, or is null, or a break: not known, so false.
+export function baseHeld(record, from, to) {
+  if (!record || !from || !to || from < record.since) return false;
+  let prev = null;
+  for (const e of record.events) {
+    if (e.at <= from) prev = e;
+    else if (e.at <= to) return false;
+    else return !prev || e.before === prev.after;
+  }
+  return true;
+}
 
 // Whether two attempts tested the same tree: two exact attempts of one tree; two pull request runs of one head while
-// the default branch did not move between them (`landings` null: not known, so not the same).
-function sameTree(a, b, landings) {
+// the default branch held still between them.
+function sameTree(a, b, record) {
   if (a.basis === 'exact' && b.basis === 'exact') return a.tree !== null && a.tree === b.tree;
-  if (a.basis !== 'pr-merge' || b.basis !== 'pr-merge' || a.head !== b.head || landings === null) return false;
-  const [from, to] = [a.run_created, b.start];
-  return !landings.some((l) => l.at > from && l.at <= to);
+  if (a.basis !== 'pr-merge' || b.basis !== 'pr-merge' || a.head !== b.head) return false;
+  return baseHeld(record, a.run_created, b.start);
 }
 
+// Whether a job's stop could be the platform's, to be corroborated by a later attempt: it stopped in setup, or with no
+// step ended. Not a job cancelled before any runner took it (beside a job of its attempt that failed): that was
+// cancelled, not lost. Not a job at its time limit unless the step it stopped in is setup: a time limit is an outcome,
+// not a cause, and a deadlock in the product reaches it too.
+const setupish = (l, phase) => SETUPISH.has(phase) && !(l.conclusion === 'cancelled' && !l.runner) && !(timeLimited(l) && phase !== 'setup');
+
 // A lost job's reason: the platform said its runner was lost or the job never started (an annotation, or its log's
-// runner line for a job that stopped with no step ended), or it stopped in setup or with no step ended and a later
-// comparable attempt on the same tree got that job past that phase. A job cancelled before any runner took it (beside
-// a job of its attempt that failed) was cancelled, not lost. A time limit is an outcome, not a cause: a deadlock in the
-// product reaches it too.
-function readJob(l, a, attempts, entry, landings) {
+// runner line for a job that stopped with no step ended), or its stop is setup-ish and a later comparable attempt on
+// the same tree got that job past that phase. `followers`: the attempts that began after this one's result was known.
+function readJob(l, a, followers, entry, record) {
   const phase = phaseOfLine(l, entry);
   const out = { job_id: l.job_id, job: l.job, conclusion: l.conclusion, phase, lost: null, cancelled: cancelledFromOutside(l) };
   if (l.annotations.includes('runner-lost')) out.lost = 'annotation:runner-lost';
   else if (l.annotations.includes('not-started')) out.lost = 'annotation:not-started';
   else if (l.log_kinds.includes('not-started')) out.lost = 'log:not-started';
   else if (l.log_kinds.includes('runner-lost') && phase === 'lost') out.lost = 'log:runner-lost';
-  if (out.lost || !SETUPISH.has(phase) || (l.conclusion === 'cancelled' && !l.runner)) return out;
-  for (const b of attempts) {
-    if (b.copied || !later(b, a) || !comparable(a, b) || !sameTree(a, b, landings)) continue;
+  if (out.lost || !setupish(l, phase)) return out;
+  for (const b of followers) {
+    if (!comparable(a, b) || !sameTree(a, b, record)) continue;
     const past = b.lines.find((x) => x.job === l.job && !x.copy && (x.conclusion === 'success' || ['test', 'post'].includes(phaseOfLine(x, entry))));
     if (past) return { ...out, lost: 'corroborated', by: { run: b.run, attempt: b.attempt } };
   }
@@ -123,21 +140,18 @@ const changeOf = (a, prOf) => {
 };
 
 // The cause lines of every failed attempt available on `from` or later. `paths(treeA, treeB)` → the paths between
-// two trees (null when the mirror cannot read them); `landings`: the default branch's updates ({ at }), null when the
-// repository has no landing record; `standing(gate, at)`: the gate's latest observation on the default branch before
-// `at` (landings.mjs), or null; `known`: known.json's entries; `casesOf(run, attempt, gate)`: the attempt's failing
+// two trees (null when the mirror cannot read them); `record`: the default branch's landing record
+// ({ since, events: [{ at, before, after }] by time }), null when there is no whole one; `standing(gate, at)`: the
+// gate's latest observation on the default branch before `at` (landings.mjs), or null; `known`: known.json's entries; `casesOf(run, attempt, gate)`: the attempt's failing
 // cases in the per-test record, or null.
-export function deriveCauses({ analysis, entry, landings, standing, known, casesOf, paths, prOf, from }) {
+export function deriveCauses({ analysis, entry, record, standing, known, casesOf, paths, prOf, from }) {
   const { attempts } = analysis;
   const executions = attempts.filter((a) => !a.copied).sort((x, y) => (x.start < y.start ? -1 : x.start > y.start ? 1 : x.key < y.key ? -1 : 1));
-  // Each gate's executions in that order, and each attempt's place among them: what followed it is the rest.
+  // Each gate's executions by start. What followed an attempt is what began strictly after its result was known: an
+  // attempt that overlapped it is no evidence about it, whichever began first.
   const byGate = new Map();
-  for (const a of executions) {
-    const list = byGate.get(a.gate) ?? byGate.set(a.gate, []).get(a.gate);
-    a.place = list.length;
-    list.push(a);
-  }
-  const after = (a) => byGate.get(a.gate).slice(a.place + 1);
+  for (const a of executions) (byGate.get(a.gate) ?? byGate.set(a.gate, []).get(a.gate)).push(a);
+  const after = (a) => byGate.get(a.gate).filter((b) => b.start > a.available);
   const out = [];
   for (const a of executions) {
     if (a.result !== 'failed' || !a.available || dayOf(a.available) < from) continue;
@@ -150,17 +164,17 @@ export function deriveCauses({ analysis, entry, landings, standing, known, cases
       continue;
     }
     if (a.cancelled) {
-      out.push({ ...head, cause: 'cancelled', why: null, evidence: { jobs: unsuccessful(a).map((l) => ({ job_id: l.job_id, job: l.job, conclusion: l.conclusion, phase: phaseOfLine(l, entry), started: Boolean(l.runner) })) }, context: {} });
+      out.push({ ...head, cause: 'cancelled', why: null, evidence: { jobs: unsuccessful(a).map((l) => ({ job_id: l.job_id, job: l.job, conclusion: l.conclusion, phase: phaseOfLine(l, entry), started: Boolean(l.runner), minutes: l.minutes })) }, context: {} });
       continue;
     }
     const followers = after(a);
-    const jobs = unsuccessful(a).map((l) => readJob(l, a, followers, entry, landings));
+    const jobs = unsuccessful(a).map((l) => readJob(l, a, followers, entry, record));
     const evidence = { jobs };
     let cause = null;
     let why = null;
     if (jobs.every((j) => j.lost)) cause = 'infra';
     if (!cause) {
-      const green = followers.find((b) => b.result === 'succeeded' && comparable(a, b) && sameTree(a, b, landings));
+      const green = followers.find((b) => b.result === 'succeeded' && comparable(a, b) && sameTree(a, b, record));
       if (green) [cause, evidence.green] = ['rerun-green', { run: green.run, attempt: green.attempt }];
     }
     const inChange = a.change === null ? [] : followers.filter((b) => b.change === a.change);
@@ -175,7 +189,7 @@ export function deriveCauses({ analysis, entry, landings, standing, known, cases
     }
     if (!cause) {
       cause = 'unattributed';
-      if (jobs.every((j) => SETUPISH.has(j.phase) && !(j.conclusion === 'cancelled' && !jobById(a, j).runner))) why = 'setup-uncorroborated';
+      if (jobs.every((j) => setupish(jobById(a, j), j.phase))) why = 'setup-uncorroborated';
       else if (a.basis === 'pr-merge') why = 'basis';
       else if (a.scope === 'unknown') why = 'incomparable';
       else if (a.change === null) why = 'no-change';

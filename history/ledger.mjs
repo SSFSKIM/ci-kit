@@ -97,8 +97,19 @@ const slimRun = (r) => ({
   id: r.id, name: r.name, path: r.path, event: r.event, head_branch: r.head_branch, head_sha: r.head_sha,
   head_commit: r.head_commit ? { tree_id: r.head_commit.tree_id, message: slimMessage(r.head_commit.message) } : null,
   pull_requests: (r.pull_requests ?? []).map((p) => ({ number: p.number })),
-  status: r.status, conclusion: r.conclusion, run_attempt: r.run_attempt, created_at: r.created_at,
+  status: r.status, conclusion: r.conclusion, run_attempt: r.run_attempt, created_at: r.created_at, run_started_at: r.run_started_at ?? null, updated_at: r.updated_at ?? null,
 });
+
+// A pull request run's record holds what its required check is read from (landings.mjs): its head, the pull request it
+// names, and each attempt's own start and conclusion (`of`: the run as that attempt stood). Other runs keep none.
+const PR_EVENTS = ['pull_request', 'pull_request_target'];
+function recordPrRun(held, r, attempt = r.run_attempt, of = r) {
+  if (!PR_EVENTS.includes(r.event)) return;
+  held.event = r.event;
+  held.head = r.head_sha;
+  held.pr = r.pull_requests.length === 1 ? r.pull_requests[0].number : (held.pr ?? null);
+  (held.attempt_info ??= {})[attempt] = { started: of.run_started_at ?? null, status: of.status ?? null, conclusion: of.conclusion ?? null, completed: of.status === 'completed' ? (of.updated_at ?? null) : null };
+}
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // GitHub's listing answers a heavy filtered page with a 502 now and then (2026-11-19, MAWS): a server error or a
@@ -191,6 +202,7 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, ledge
           const held = (state.runs[r.id] ??= { day: dayOf(r.created_at), attempts: r.run_attempt, closed: [] });
           held.attempts = Math.max(held.attempts, r.run_attempt);
           held.created ??= r.created_at; // the per-test pass's sweep reads the recent runs by it
+          recordPrRun(held, r);
           for (let attempt = 1; attempt <= r.run_attempt; attempt += 1) {
             if (held.closed.includes(attempt) || queued.has(key(r.id, attempt))) continue;
             if (attempt === r.run_attempt && r.status !== 'completed') continue; // open: read again next pass
@@ -283,8 +295,8 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, ledge
     try {
       const jobs = await listingOf(run.id, attempt);
       if (jobs.some((j) => j.status !== 'completed')) continue; // the next pass takes it
-      const conclusion = attempt < run.run_attempt ? (await gh.attemptRun(repo, run.id, attempt)).conclusion : null;
-      const facts = runFacts(run, attempt, await resolve(run), entry, conclusion);
+      const prior = attempt < run.run_attempt ? await gh.attemptRun(repo, run.id, attempt) : null;
+      const facts = runFacts(run, attempt, await resolve(run), entry, prior?.conclusion ?? null);
       const lines = [];
       for (const job of jobs) {
         if (job.conclusion === 'skipped') continue;
@@ -300,6 +312,7 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, ledge
       for (const copy of lines.filter((l) => l.copy)) ledger.addJobLines([copy], filingTime(lines, copy));
       const held = (state.runs[run.id] ??= { day: dayOf(run.created_at), attempts: run.run_attempt, closed: [] });
       held.closed = [...new Set([...held.closed, attempt])].sort((a, b) => a - b);
+      if (prior) recordPrRun(held, run, attempt, prior);
       done.add(item);
       counts.closed += 1;
       counts.lines += lines.length;

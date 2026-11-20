@@ -197,6 +197,30 @@ test('a rerun of a run created 20 days ago is found, and only its new attempt is
   }
 });
 
+test("a pull request run's record holds its head, its pull request and each attempt's own start and conclusion; a push run's none of them", async () => {
+  const s = store();
+  try {
+    const created = '2026-11-18T08:00:00Z';
+    const pr = { ...gateRun(600, created, { attempt: 2 }), name: 'ci', path: '.github/workflows/ci.yml', event: 'pull_request', head_branch: 'topic', pull_requests: [{ number: 7 }], run_started_at: '2026-11-18T09:00:00Z', updated_at: '2026-11-18T09:20:00Z' };
+    const world = {
+      runs: [pr, gateRun(601, created)],
+      jobs: { '600/1': [job(1, 'ci / verdict', created, 1, { conclusion: 'failure' })], '600/2': [{ ...job(2, 'ci / verdict', '2026-11-18T09:01:00Z', 1), run_attempt: 2 }], '601/1': [job(3, 'unit', created, 2)] },
+      conclusions: { '600/1': 'failure' },
+    };
+    const r = await pass(world, s.root, { entry: KIT });
+    assert.deepEqual(r.errors, []);
+    const { runs } = openLedger(s.root, 'o/r').state;
+    assert.deepEqual([runs[600].event, runs[600].head, runs[600].pr], ['pull_request', sha(600), 7]);
+    assert.deepEqual(runs[600].attempt_info, {
+      1: { started: null, status: null, conclusion: 'failure', completed: null }, // the attempt's own record, as GitHub gave it
+      2: { started: '2026-11-18T09:00:00Z', status: 'completed', conclusion: 'success', completed: '2026-11-18T09:20:00Z' },
+    });
+    assert.deepEqual(Object.keys(runs[601]).sort(), ['attempts', 'closed', 'created', 'day']);
+  } finally {
+    s.cleanup();
+  }
+});
+
 test("a real failed-jobs rerun (MAWS 44468141412): copies carry their attempt, no minutes, and the earlier attempt's own conclusion", async () => {
   const s = store();
   try {

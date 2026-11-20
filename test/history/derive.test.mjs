@@ -3,7 +3,7 @@
 // landing record.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createGitHub } from '../../lib/github.mjs';
@@ -81,7 +81,7 @@ test('a first derivation writes every landing and red of the window by day; a la
   assert.deepEqual(landings['2026-10-31'].map((l) => [l.id, l.exact, l.required]), [[21, 'green', ['test']]]);
   const causes = read(w.root, 'causes');
   assert.deepEqual(Object.values(causes).flat().map((c) => [c.run, c.cause]), [[1, 'rerun-green'], [3, 'rerun-green']]);
-  assert.match(formatDerived('o/r', first.counts, 0), /^o\/r: derived: landings 2 \(listed 2\), causes superseded 0, cancelled 0, infra 0, rerun-green 2,/);
+  assert.match(formatDerived('o/r', first.counts, 0), /^o\/r: derived: landings 2 \(listed 2, chain breaks 0\), causes superseded 0, cancelled 0, infra 0, rerun-green 2,/);
 
   // A line older than 14 days is final; a recent one is recomputed, and a new landing is listed since the newest held.
   const oldPath = join(w.root, ALIAS, 'causes', '2026-10-31.jsonl');
@@ -132,4 +132,68 @@ test("two pull request runs of one head are one tree only on a whole landing rec
   assert.deepEqual([causeOf50().cause, causeOf50().why], ['unattributed', 'basis']);
   await deriveRepo({ gh: ghWith(page(w.activity)), repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger: w.ledger(), mirror: w.mirror, now: w.now });
   assert.equal(causeOf50().cause, 'rerun-green');
+});
+
+test('a first listing that failed is taken again from the window start: the older landing is written, and kept after', async (t) => {
+  const w = setup(t);
+  const broken = await deriveRepo({ gh: ghWith(() => new Response('{}', { status: 500 })), repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger: w.ledger(), mirror: w.mirror, now: w.now });
+  assert.deepEqual(broken.errors, ['activity: HTTP 500 GET /repos/o/r/activity']);
+  assert.equal(Object.values(read(w.root, 'causes')).flat().length, 2, 'causes are written all the same');
+  assert.equal(w.ledger().state.activity, undefined, 'nothing is covered');
+  // The next pass lists from the window's start, not from the 14 days a later derivation recomputes.
+  const ledger = w.ledger();
+  const r = await deriveRepo({ gh: ghWith(page(w.activity)), repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger, mirror: w.mirror, now: w.now });
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(Object.keys(read(w.root, 'landings')), ['2026-10-31', '2026-11-18']);
+  assert.deepEqual([ledger.state.activity.since, ledger.state.activity.through], ['2026-10-17T00:00:00Z', iso(w.now - 2 * DAY)]);
+  ledger.flush();
+  // A pass a day on lists from the newest landing; the older landing, now final, stays as it was.
+  const oldPath = join(w.root, ALIAS, 'landings', '2026-10-31.jsonl');
+  const before = readFileSync(oldPath, 'utf8');
+  const next = await deriveRepo({ gh: ghWith(page(w.activity)), repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger: w.ledger(), mirror: w.mirror, now: w.now + DAY });
+  assert.deepEqual(next.errors, []);
+  assert.equal(readFileSync(oldPath, 'utf8'), before);
+  assert.equal(next.counts.landings, 2);
+});
+
+test("files are chosen by day before any is read: final causes, landings and test records outside the window stay unread", async (t) => {
+  const w = setup(t);
+  await deriveRepo({ gh: ghWith(page(w.activity)), repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger: w.ledger(), mirror: w.mirror, now: w.now });
+  // Files no derivation may read: a final cause day, a landing day before the window, a test record day before it.
+  const unreadable = 'not a line\n';
+  const planted = [['causes', '2026-10-31'], ['landings', '2026-09-01'], ['runs', '2026-09-01']].map(([kind, day]) => {
+    mkdirSync(join(w.root, ALIAS, kind), { recursive: true });
+    const path = join(w.root, ALIAS, kind, `${day}.jsonl`);
+    writeFileSync(path, unreadable);
+    return path;
+  });
+  const r = await deriveRepo({ gh: ghWith(page(w.activity)), repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger: w.ledger(), mirror: w.mirror, now: w.now + DAY });
+  assert.deepEqual(r.errors, []);
+  for (const path of planted) assert.equal(readFileSync(path, 'utf8'), unreadable);
+  const recent = readFileSync(join(w.root, ALIAS, 'causes', '2026-11-18.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  assert.deepEqual(recent.map((c) => c.cause), ['rerun-green']);
+});
+
+test("a batch that crosses midnight sees the next day's job lines", async (t) => {
+  const w = setup(t);
+  const ledger = w.ledger();
+  const now = Date.parse('2026-11-20T23:58:00Z');
+  const at = Date.parse('2026-11-20T23:50:00Z');
+  ledger.addJobLines([line({ run: 70, head: 'h70', tree: 'T70', tree_key: 'T70', started: iso(at), completed: iso(at + 5 * 60_000), ...failed })]);
+  // Its rerun, on the same tree, completed after midnight: filed on the 21st.
+  ledger.addJobLines([line({ run: 70, attempt: 2, head: 'h70', tree: 'T70', tree_key: 'T70', started: iso(at + 6 * 60_000), completed: iso(at + 11 * 60_000) })]);
+  ledger.flush();
+  await deriveRepo({ gh: ghWith(page(w.activity)), repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger: w.ledger(), mirror: w.mirror, now });
+  assert.equal(Object.values(read(w.root, 'causes')).flat().find((c) => c.run === 70).cause, 'rerun-green');
+});
+
+test('the chain breaks of the window are counted where the report reads them', async (t) => {
+  const w = setup(t);
+  // A landing between the two is missing from the listing: the later one's `before` is not where the earlier left.
+  const gap = w.activity.map((e) => (e.id === 22 ? { ...e, before: 'f'.repeat(40) } : e));
+  const ledger = w.ledger();
+  const r = await deriveRepo({ gh: ghWith(page(gap)), repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger, mirror: w.mirror, now: w.now });
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(ledger.state.activity.breaks, [{ at: iso(w.now - 2 * DAY), id: 22 }]);
+  assert.match(formatDerived('o/r', r.counts, 0), /\(listed 2, chain breaks 1\)/);
 });

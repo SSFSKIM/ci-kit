@@ -589,14 +589,16 @@ async function collectBoth({ entry, opts, pacer, now, ledger: opened, deps }) {
       console.error(`${repo}: per-test pass in ${Math.round((Date.now() - perTestStarted) / 1000)} s`);
     }
   }
-  // The derived lines, once a pass, from job lines with nothing of the pass queued or pending.
+  // The derived lines, once a pass, from job lines with nothing of the pass queued or pending. One held by the hour's
+  // limit is work for a later batch of the pass, as a ledger's is.
   const drained = ledger && ledger.state.pass.queue.length === 0 && ledger.state.pass.pending.length === 0;
   if (drained && !ledger.state.pass.derived && pacer.reason(kind, 1) !== 'rate-limited') {
     try {
       const d = await deps.derive({ gh, repo, alias, entry, root: opts.store, ledger, mirror, now, from: opts.deriveFrom ?? null });
       errors.push(...d.errors);
       console.log(formatDerived(repo, d.counts, d.errors.length));
-      if (!d.paced && d.errors.length === 0) ledger.state.pass.derived = true;
+      if (d.paced) more = true;
+      else if (d.errors.length === 0) ledger.state.pass.derived = true;
     } catch (err) {
       errors.push(`derive: ${describe(err)}`);
     }
@@ -607,9 +609,10 @@ async function collectBoth({ entry, opts, pacer, now, ledger: opened, deps }) {
     ledger.flush();
   }
   // A pass whose calls are spent, or whose token GitHub refused, ends; one held by the hour waits. The repository's
-  // work is taken when its ledger's pass has nothing queued or pending and its per-test pass ended clean.
+  // work is taken when its ledger's pass has nothing queued or pending, its per-test pass ended clean, and its
+  // derivation completed without error.
   const why = held === 'hour' ? 'hour' : pacer.reason(kind, 2);
-  const taken = ledger !== null && ledger.state.pass.queue.length === 0 && ledger.state.pass.pending.length === 0 && perTestClean && why !== 'rate-limited';
+  const taken = ledger !== null && ledger.state.pass.queue.length === 0 && ledger.state.pass.pending.length === 0 && perTestClean && ledger.state.pass.derived === true && why !== 'rate-limited';
   const covered = ledger && lastCovered(ledger, now);
   if (why === 'pass' || why === 'rate-limited') return { errors, more: false, wait: null, taken, covered };
   return { errors, more, wait: more && why === 'hour' ? pacer.waitSeconds(kind) : null, taken, covered };
