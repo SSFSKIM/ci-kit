@@ -82,3 +82,36 @@ test('pushFailure names the reason, not git\'s closing line', () => {
   assert.match(pushFailure(warned).reason, /remote: error: File b\.bin/); // a warning never outranks the error
   assert.equal(pushFailure('').reason, 'no output from git');
 });
+
+// `ci-gate status` and `ci-gate known add|list` (gate ledger spec, M5).
+import { parseKnownArgs, parseStatusArgs } from '../cli/args.mjs';
+
+test('parseStatusArgs: --repo, or the repo origin pushes to', () => {
+  assert.deepEqual(parseStatusArgs([]), { repo: null });
+  assert.deepEqual(parseStatusArgs(['--repo', 'SSFSKIM/MAWS']), { repo: 'SSFSKIM/MAWS' });
+  assert.deepEqual(parseStatusArgs(['--repo=SSFSKIM/MAWS']), { repo: 'SSFSKIM/MAWS' });
+  assert.throws(() => parseStatusArgs(['--gates', 'a']), UsageError);
+  assert.throws(() => parseStatusArgs(['x']), UsageError);
+  assert.throws(() => parseStatusArgs(['--repo', 'nope']), UsageError);
+});
+
+test('parseKnownArgs: add with every option, and list', () => {
+  assert.deepEqual(
+    parseKnownArgs(['add', '--gate', 'e2e:panel', '--case', 'panel.spec.ts › a*', '--reason', '#778: x', '--review-by', '2026-11-26', '--repo', 'SSFSKIM/MAWS', '--id', 'maws-778', '--by', 'ux-wave']),
+    { action: 'add', gate: 'e2e:panel', case: 'panel.spec.ts › a*', reason: '#778: x', review_by: '2026-11-26', keep: false, repo: 'SSFSKIM/MAWS', id: 'maws-778', by: 'ux-wave' },
+  );
+  assert.equal(parseKnownArgs(['add', '--gate=t', '--keep', '--reason=r', '--review-by=2027-01-01']).keep, true);
+  assert.deepEqual(parseKnownArgs(['list']), { action: 'list', repo: null });
+  assert.deepEqual(parseKnownArgs(['list', '--repo', 'SSFSKIM/cua']), { action: 'list', repo: 'SSFSKIM/cua' });
+});
+
+test('parseKnownArgs: refuses what it does not know; what an entry needs is the entry\'s to refuse', () => {
+  assert.throws(() => parseKnownArgs([]), UsageError);
+  assert.throws(() => parseKnownArgs(['remove']), UsageError);
+  assert.throws(() => parseKnownArgs(['list', '--gate', 'x']), UsageError);
+  assert.throws(() => parseKnownArgs(['add', '--reason']), UsageError);
+  assert.throws(() => parseKnownArgs(['add', '--nope']), UsageError);
+  assert.throws(() => parseKnownArgs(['add', 'extra']), UsageError);
+  // Parsed, then refused by validateKnown before anything is read.
+  assert.equal(parseKnownArgs(['add', '--gate', 't']).reason, undefined);
+});

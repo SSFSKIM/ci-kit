@@ -295,3 +295,59 @@ test('a watch whose budget stays exhausted for 90 min is an ERROR naming the rat
   assert.equal(r.code, 2);
   assert.equal(r.line, 'ERROR run 7 cannot be read: the GitHub API rate limit stayed exhausted for 90 min (resets 2026-10-15T13:40:00Z)');
 });
+
+// The gate ledger's context (gate ledger spec, "`ci-gate` at a failure", M5): lines after a FAIL, and nothing else
+// changed. With no readable status, a stale one or an unreadable store, the output is exactly the output without it.
+import { contextReader, STORE } from '../cli/ledger.mjs';
+
+const redRun = () => [
+  { run: run('in_progress'), jobs: [plan(), job(2, 'ci / test', { conclusion: 'failure', completed: 65 }), job(3, 'ci / lint', { status: 'in_progress' })] },
+  { run: run('completed', 'failure'), jobs: [plan(), job(2, 'ci / test', { conclusion: 'failure', completed: 65 }), job(3, 'ci / lint', { conclusion: 'failure', completed: 80 }), job(4, 'ci / verdict', { conclusion: 'failure' })] },
+];
+
+test('the context lines follow their FAIL line; the other lines, the verdict and the exit code are as without them', async () => {
+  const plain = harness(redRun());
+  const without = await watchRun(plain.opts);
+  const asked = [];
+  const h = harness(redRun());
+  const r = await watchRun({ ...h.opts, context: async (gate) => (asked.push(gate), gate === 'test' ? ['     base: x', '     known: y'] : []) });
+  assert.deepEqual(h.lines, [plain.lines[0], '     base: x', '     known: y', plain.lines[1]]);
+  assert.deepEqual(asked, ['test', 'lint']);
+  assert.deepEqual(r, without);
+  assert.deepEqual(r, { line: `RED 2/2 ${URL}`, code: 1 });
+});
+
+test('no status, a stale status, an unreadable store or a context that throws: exactly the output without the ledger', async () => {
+  const plain = harness(redRun());
+  const without = await watchRun(plain.opts);
+  const b64 = (o) => ({ sha: 's', content: Buffer.from(JSON.stringify(o)).toString('base64') });
+  const stale = { v: 1, as_of: new Date(T0 - 49 * 3_600_000).toISOString(), gates: { test: { result: 'failed', commit: 'abcdef0', at: at(-100000), run: 1, attempt: 1 } }, known: [] };
+  const readers = {
+    'no status': { contents: async () => { throw new GitHubError(404, 'HTTP 404'); } },
+    'a stale status': { contents: async () => b64(stale) },
+    'an unreadable store': { contents: async () => { throw new TypeError('fetch failed'); } },
+    'a status that is not JSON': { contents: async () => ({ sha: 's', content: Buffer.from('{').toString('base64') }) },
+  };
+  for (const [name, gh] of Object.entries(readers)) {
+    const h = harness(redRun());
+    const r = await watchRun({ ...h.opts, context: contextReader({ gh, repo: 'SSFSKIM/ci-kit', store: STORE, now: h.opts.now }) });
+    assert.deepEqual(h.lines, plain.lines, name);
+    assert.deepEqual(r, without, name);
+  }
+  const h = harness(redRun());
+  const r = await watchRun({ ...h.opts, context: async () => { throw new Error('boom'); } });
+  assert.deepEqual([h.lines, r], [plain.lines, without]);
+});
+
+test('a fresh status whose gate last failed on the default branch prints the base line after the FAIL', async () => {
+  const status = { v: 1, as_of: at(-3600), gates: { test: { result: 'failed', commit: '3f2a91c0123', at: '2026-10-15T10:49:33Z', run: 44262593045, attempt: 1 } }, known: [] };
+  const gh = { contents: async () => ({ sha: 's', content: Buffer.from(JSON.stringify(status)).toString('base64') }) };
+  const h = harness(redRun());
+  const r = await watchRun({ ...h.opts, context: contextReader({ gh, repo: 'SSFSKIM/ci-kit', store: STORE, now: h.opts.now }) });
+  assert.deepEqual(h.lines, [
+    'FAIL test 1m00s log=/tmp/ci-gate/SSFSKIM-ci-kit/7/test.log',
+    '     base: test last ran on main at 3f2a91c (2026-10-15T10:49Z) and failed, run 44262593045. The failures may differ: compare before rerunning.',
+    'FAIL lint 1m15s log=/tmp/ci-gate/SSFSKIM-ci-kit/7/lint.log',
+  ]);
+  assert.equal(r.code, 1);
+});

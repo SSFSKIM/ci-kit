@@ -196,3 +196,18 @@ test('admission is decided after the token is in hand: concurrent requests canno
   assert.equal(f.requests.length, 1);
   assert.equal(gh.stats().requests, 1);
 });
+
+test('a store file is read and written on its branch through the contents API, each path segment encoded', async () => {
+  const requests = [];
+  const impl = async (url, init) => {
+    requests.push({ url, method: init.method, body: init.body });
+    return new Response(JSON.stringify(init.method === 'GET' ? { sha: 'b1', content: 'W10K' } : { content: {} }), { status: init.method === 'GET' ? 200 : 201 });
+  };
+  const gh = createGitHub('t', { fetchImpl: impl });
+  assert.deepEqual(await gh.contents('o/store', 'SSFSKIM/MAWS/known.json', 'test-history'), { sha: 'b1', content: 'W10K' });
+  await gh.putContents('o/store', 'SSFSKIM/MAWS/known.json', { message: 'm', content: 'W10K', branch: 'a b', sha: 'b1' });
+  assert.equal(requests[0].url, 'https://api.github.com/repos/o/store/contents/SSFSKIM/MAWS/known.json?ref=test-history');
+  assert.equal(requests[1].method, 'PUT');
+  assert.equal(requests[1].url, 'https://api.github.com/repos/o/store/contents/SSFSKIM/MAWS/known.json');
+  assert.deepEqual(JSON.parse(requests[1].body), { message: 'm', content: 'W10K', branch: 'a b', sha: 'b1' });
+});

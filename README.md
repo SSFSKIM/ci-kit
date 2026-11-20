@@ -27,7 +27,7 @@ The sandbox's scheduled collector checks out ci-kit main, so merged changes need
 |---|---|
 | `.github/workflows/gates.yml` | the reusable workflow: `plan`, one job per gate, `verdict` |
 | `plan/` | the planner: config validation (`config.mjs`), selection (`select.mjs`), globs, the CLI (`plan.mjs`) |
-| `bin/ci-gate`, `cli/` | `ci-gate`: arguments, git side, run watching; `ci-gate init` (`cli/init.mjs`) |
+| `bin/ci-gate`, `cli/` | `ci-gate`: arguments, git side, run watching; `ci-gate init` (`cli/init.mjs`); the gate ledger's context lines, `ci-gate status` and `ci-gate known` (`cli/ledger.mjs`) |
 | `.claude-plugin/`, `hooks/`, `skills/adopt/` | the Claude Code plugin: manifest, the session-start note for adopted repos, the adoption skill |
 | `vendor/yaml/` | the planner's YAML parser (yaml 2.9.1 from npm, its `dist/*.js`, `package.json` and `LICENSE`), vendored so the planner and `ci-gate init` run from a plain checkout or the plugin cache with no install |
 | `lib/github.mjs`, `lib/github-app.mjs` | the small GitHub REST client (gh's login or the App's tokens) |

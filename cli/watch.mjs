@@ -99,8 +99,10 @@ export function pollInterval(elapsedMs) {
 // other failures in a row (a run deleted, credentials revoked).
 //   gh: { getRun(repo, id), listJobs(repo, id), stats() → { remaining }, rateLimit() }; emit(line): one stdout line;
 //   onFail(job, gate) → the path of the failed gate's downloaded log; planError(job) → the plan's error message;
-//   pacer: the call's pacer, shared with discovery so THROTTLE is said once (one is made when none is given).
-export async function watchRun({ gh, repo, runId, runUrl, emit, onFail, planError, now, sleep, pacer = createPacer(gh, emit, { now, sleep }), maxUnreadable = 20 }) {
+//   pacer: the call's pacer, shared with discovery so THROTTLE is said once (one is made when none is given);
+//   context(gate) → lines printed after that gate's FAIL line (the gate ledger's base and known lines, cli/ledger.mjs):
+//   context only, so a context that fails prints nothing and changes nothing else.
+export async function watchRun({ gh, repo, runId, runUrl, emit, onFail, planError, now, sleep, pacer = createPacer(gh, emit, { now, sleep }), maxUnreadable = 20, context = async () => [] }) {
   const seen = new Map();
   const started = now();
   let unreadable = 0;
@@ -119,7 +121,10 @@ export async function watchRun({ gh, repo, runId, runUrl, emit, onFail, planErro
       await wait();
       continue;
     }
-    for (const event of jobEvents(jobs, seen, now())) emit(await eventLine(event, onFail));
+    for (const event of jobEvents(jobs, seen, now())) {
+      emit(await eventLine(event, onFail));
+      if (event.kind === 'FAIL') for (const line of await context(event.gate).catch(() => [])) emit(line);
+    }
 
     const planJob = jobs.find(isPlan);
     if (planJob?.status === 'completed' && planJob.conclusion !== 'success') {

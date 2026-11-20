@@ -11,6 +11,7 @@ import { parseArgs, UsageError, USAGE } from './args.mjs';
 import { assertCaller, deleteRef, nonceCommit, pushRef, resolveRemote, resolveTarget, TargetError } from './git.mjs';
 import { cleanLog, nonceMessage, pushFailure, refName, sanitizeLabel } from './naming.mjs';
 import { findRun } from './discover.mjs';
+import { contextReader, runLedger, storeOf } from './ledger.mjs';
 import { BudgetExhausted, createPacer } from './pace.mjs';
 import { watchRun } from './watch.mjs';
 
@@ -72,6 +73,8 @@ async function main(argv) {
     const { runInit } = await import('./init.mjs');
     return runInit(argv.slice(1), { out });
   }
+  // `ci-gate status`, `ci-gate known add|list`: the gate ledger's record of a repo (cli/ledger.mjs).
+  if (argv[0] === 'status' || argv[0] === 'known') return runLedger(argv, { out, note });
   if (argv.includes('-h') || argv.includes('--help')) {
     process.stdout.write(USAGE + '\n');
     return 0;
@@ -193,6 +196,7 @@ async function follow(gh, repo, commit, ref, onRun, onUnseen) {
     emit: out,
     onFail: failureSaver(gh, pacer, repo, run.id, join('/tmp/ci-gate', `${owner}-${name}`, String(run.id))),
     planError: planErrorReader(gh, repo),
+    context: contextReader({ gh, repo, store: storeOf(), now: Date.now }),
     now: Date.now,
     sleep,
     pacer,
