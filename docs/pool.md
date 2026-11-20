@@ -776,9 +776,10 @@ Proof, under the bake's own identity (the check runs in Cloud Run, never `node .
      --project=ssfskim-ci-kit --freshness=2h --order=asc --format='value(textPayload)'
    ```
    Expect `bake: stale SSFSKIM/ci-kit-sandbox on gce: <old> -> <new>` and the EC2 equivalent, then
-   `bake <run>: kit ...`, the normal smoke/real-job records, and
-   `done: every configured provider passed smoke and its real sandbox job`. Both newest ready images must carry
-   `<new>` (not just a successful execution):
+   `bake <run>: kit ..., only the stale gce, ec2/<account>`, the normal smoke/real-job records, and
+   `done: gce, ec2/<account> passed smoke and its real sandbox job` (the check names the providers it baked; a
+   provider it found current is absent from both lines and its newest image must be the one it had before). Both
+   newest ready images must carry `<new>` (not just a successful execution):
    ```
    gcloud compute images list --project=ssfskim-ci-kit \
      --filter='family=ci-kit-runner AND status=READY AND labels.ci-kit=gce-image AND labels.ci-kit-ready=true' \
