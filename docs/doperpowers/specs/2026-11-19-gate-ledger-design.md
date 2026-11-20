@@ -992,6 +992,14 @@ inputs M0 added.
   date is unreadable, never a throw. Left as is: any create answered 422 without a blob id is read as the create race.
   Date/Author: 2026-11-20, the executing session.
 
+- Decision: a derivation that could not read its inputs overwrites no stored line (2026-11-20, PR #229 review). A
+  listing that failed or stopped keeps the causes held and adds only new keys; a landing whose tip the mirror lacks
+  keeps its held line, and the pass names the unreadable tips as an error, so it is not a completed derivation and
+  `status.json` takes no new standing from it. Such a pass records `provisional` in attempts.json, the earliest day
+  of its recompute window or of a line it added; later passes recompute from that day, past the 14-day finality if
+  need be (never before the job lines' window), until one completes and clears it. Rejected: a per-line provisional
+  flag (a schema change readers would have to know). Date/Author: 2026-11-20, the executing session.
+
 ## Outcomes & Retrospective
 
 **2026-11-20, M1 to M5 (the executing session).** The ledger exists for all five repositories and the hand-run

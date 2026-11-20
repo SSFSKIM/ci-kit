@@ -262,3 +262,73 @@ test("a quiet repository keeps its archived landings: the watermark's day, aged 
   assert.equal(r.counts.listed, 1);
   assert.equal(readFileSync(dayPath, 'utf8'), before);
 });
+
+test("a listing that failed keeps the stored causes; what it left provisional is recomputed once a listing reads, even past 14 days", async (t) => {
+  const w = setup(t);
+  const ledger = w.ledger();
+  const pr = (run, attempt, at, o2) => line({ run, attempt, event: 'pull_request', basis: 'pr-merge', head: 'hpr', head_tree: 'x', tree: null, tree_key: null, ref: 'topic', change: 'branch:topic', started: iso(at), completed: iso(at + 60_000), ...o2 });
+  const at = w.now - 3 * DAY;
+  ledger.addJobLines([pr(50, 1, at, failed), pr(50, 2, at + 3600_000, {})]);
+  ledger.state.runs[50] = { day: iso(at).slice(0, 10), attempts: 2, closed: [1, 2], created: iso(at) };
+  ledger.flush();
+  const causeOf50 = () => Object.values(read(w.root, 'causes')).flat().find((c) => c.run === 50);
+  const pass = async (gh, now) => {
+    const l = w.ledger();
+    const r = await deriveRepo({ gh, repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger: l, mirror: w.mirror, now });
+    l.flush();
+    return r;
+  };
+  await pass(ghWith(page(w.activity)), w.now);
+  assert.equal(causeOf50().cause, 'rerun-green');
+  // The last day the line is recomputed, the listing fails: the stored line stays.
+  const broken = await pass(ghWith(() => new Response('{}', { status: 502 })), w.now + 11 * DAY);
+  assert.deepEqual(broken.errors, ['activity: HTTP 502 GET /repos/o/r/activity']);
+  assert.equal(causeOf50().cause, 'rerun-green');
+
+  // A line first written by a pass whose listing was cut short is recomputed by the next pass that lists, though its
+  // day is final by then.
+  const v = setup(t);
+  const vl = v.ledger();
+  vl.addJobLines([pr(50, 1, at, failed), pr(50, 2, at + 3600_000, {})]);
+  vl.state.runs[50] = { day: iso(at).slice(0, 10), attempts: 2, closed: [1, 2], created: iso(at) };
+  vl.flush();
+  const vPass = async (gh, now) => {
+    const l = v.ledger();
+    const r = await deriveRepo({ gh, repo: 'o/r', alias: ALIAS, entry: KIT, root: v.root, ledger: l, mirror: v.mirror, now });
+    l.flush();
+    return r;
+  };
+  const vCause = () => Object.values(read(v.root, 'causes')).flat().find((c) => c.run === 50);
+  const spent = createGitHub('t', { fetchImpl: async () => page([])(), admit: () => false });
+  assert.equal((await vPass(spent, v.now)).paced, true);
+  assert.deepEqual([vCause().cause, vCause().why], ['unattributed', 'basis']);
+  const r = await vPass(ghWith(page(v.activity)), v.now + 12 * DAY);
+  assert.deepEqual(r.errors, []);
+  assert.equal(vCause().cause, 'rerun-green');
+  assert.equal(v.ledger().state.provisional, undefined, 'a pass that completed leaves nothing provisional');
+});
+
+test("a landing whose tip the mirror could not read keeps its stored line, the pass is not complete, and a later pass recomputes it", async (t) => {
+  const w = setup(t);
+  const pass = async (mirror, now) => {
+    const l = w.ledger();
+    const r = await deriveRepo({ gh: ghWith(page(w.activity)), repo: 'o/r', alias: ALIAS, entry: KIT, root: w.root, ledger: l, mirror, now });
+    l.flush();
+    return r;
+  };
+  await pass(w.mirror, w.now);
+  const dayPath = join(w.root, ALIAS, 'landings', '2026-11-18.jsonl');
+  const stored = readFileSync(dayPath, 'utf8');
+  assert.notEqual(JSON.parse(stored).tree, null);
+  // The mirror gets none of the commits asked for (a failed fetch, an empty cache).
+  const blind = { ...w.mirror, fetch: () => new Set(), commit: () => null };
+  const r = await pass(blind, w.now + DAY);
+  assert.equal(readFileSync(dayPath, 'utf8'), stored);
+  assert.equal(r.errors.length, 1);
+  assert.match(r.errors[0], /^mirror: 1 landing tip unreadable$/);
+  // A pass that reads, once the day is final, still recomputes it.
+  writeFileSync(dayPath, stored.replace(/"exact":"[a-z]+"/, '"exact":"stale"'));
+  const again = await pass(w.mirror, w.now + 13 * DAY);
+  assert.deepEqual(again.errors, []);
+  assert.equal(readFileSync(dayPath, 'utf8'), stored);
+});

@@ -7,6 +7,11 @@
 // are chosen by their day's name before any is read: the job lines, landings and test records of the 35-day window
 // with a day's margin each side (a batch that crosses midnight sees the next day's jobs), and the causes of the
 // recompute window.
+// A pass that could not read its inputs (a listing failed or stopped, a landing's tip the mirror lacks) overwrites no
+// stored line: the causes held stay and only new keys join them, a landing whose tip is unreadable keeps its held
+// line. Such a pass is incomplete (an error, or `paced`), and leaves `provisional` in attempts.json: the earliest day
+// of its recompute window or of a line it added. The next passes recompute from that day, final or not (never before
+// the job lines' window), until one completes and clears it.
 // New landings come from the activity listing, a page of 100 a call. What it has covered is kept in attempts.json,
 // apart from the derived files: `activity: { since, through, breaks }`, the listing reaching back to `since` once and
 // on from the newest landing listed (`through`) after, so a first listing that failed is taken again from the start;
@@ -112,12 +117,14 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
   const first = dayFiles(landingsDir).length === 0 && dayFiles(causesDir).length === 0;
   // Never before the job lines' window: a day before it has nothing to compute from.
   const asked = from && from > windowStart ? from : from ? windowStart : null;
-  const recomputeFrom = asked ?? (first ? windowStart : day(now - FINAL_DAYS * DAY));
+  const { state } = ledger;
+  const usual = asked ?? (first ? windowStart : day(now - FINAL_DAYS * DAY));
+  const pending = state.provisional && state.provisional < windowStart ? windowStart : state.provisional;
+  const recomputeFrom = pending && pending < usual ? pending : usual;
   const heldLandings = readDays(landingsDir, inputFrom, inputTo);
   const errors = [];
   let paced = false;
   const counts = { listed: 0, landings: 0, breaks: 0, causes: {} };
-  const { state } = ledger;
 
   // 1. New landings from the activity listing: from the window's start until a listing has once reached it, then on
   //    from the newest landing listed.
@@ -155,14 +162,19 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
   const heldIds = new Set(held.map((l) => l.id));
   const toCompute = [...events.values()].filter((e) => dayOf(e.at) >= recomputeFrom || !heldIds.has(e.id));
   const pulls = entry.verdict_job && mirror.fetchPulls() ? mirror.pulls() : new Map();
-  mirror.fetch(toCompute.flatMap((e) => [e.before, e.after]));
+  const present = mirror.fetch(toCompute.flatMap((e) => [e.before, e.after]));
 
   // 3. Landings.
   const lines = ledger.jobLines(inputFrom, inputTo);
   const created = Object.fromEntries(Object.entries(state.runs ?? {}).filter(([, r]) => r.created).map(([id, r]) => [id, r.created]));
   const analysis = analyze(lines, { created });
   const index = landingIndex(analysis, lines, state.runs ?? {});
-  const computedLandings = toCompute.map((e) => landingLine(e, { entry, mirror, index, pulls }));
+  // A landing whose tip the mirror lacks would be a stub: its held line stays, a new one is written provisional.
+  const heldById = new Map(held.map((l) => [l.id, l]));
+  const unread = toCompute.filter((e) => !present.has(e.after));
+  if (unread.length > 0) errors.push(`mirror: ${unread.length} landing tip${unread.length === 1 ? '' : 's'} unreadable`);
+  const computedLandings = toCompute.map((e) => (unread.includes(e) && heldById.has(e.id) ? heldById.get(e.id) : landingLine(e, { entry, mirror, index, pulls })));
+  const added = unread.filter((e) => !heldById.has(e.id)).map((e) => dayOf(e.at));
   const landingDays = landingsKnown
     ? merged(heldLandings, computedLandings, { keyOf: (l) => l.id, dayOfLine: (l) => dayOf(l.at), from: recomputeFrom, order: byTime('at') })
     : new Map();
@@ -204,12 +216,22 @@ export async function deriveRepo({ gh, repo, alias = repo, entry, root, ledger, 
   const finalDays = new Set(dayFiles(causesDir).filter((d) => d < recomputeFrom));
   const lateDays = [...new Set(computedCauses.map((c) => dayOf(c.available)))].filter((d) => finalDays.has(d));
   const heldCauses = new Map([...readDays(causesDir, recomputeFrom, inputTo), ...lateDays.map((d) => [d, readDays(causesDir, d, d).get(d)])]);
-  const causeDays = merged(heldCauses, computedCauses, { keyOf: causeKey, dayOfLine: (c) => dayOf(c.available), from: recomputeFrom, order: byTime('available') });
+  // A listing that failed or stopped says nothing of the base: the causes held stay, and only new keys join them.
+  const partial = landingsKnown && !listed;
+  if (partial) {
+    const heldKeys = new Set([...heldCauses.values()].flat().map(causeKey));
+    added.push(...computedCauses.filter((c) => !heldKeys.has(causeKey(c))).map((c) => dayOf(c.available)));
+  }
+  const causeDays = merged(heldCauses, computedCauses, { keyOf: causeKey, dayOfLine: (c) => dayOf(c.available), from: partial ? '\uffff' : recomputeFrom, order: byTime('available') });
   for (const c of [...causeDays.values()].flat()) counts.causes[c.cause] = (counts.causes[c.cause] ?? 0) + 1;
 
+  // Marked before the lines are written, cleared only once a complete pass has written them.
+  const complete = errors.length === 0 && !paced;
+  if (!complete) state.provisional = [recomputeFrom, ...added].sort()[0];
   counts.written = (landingsKnown ? writeDays(landingsDir, landingDays) : 0) + writeDays(causesDir, causeDays);
   // The listing's coverage advances only once the landings it covers are written.
   if (activity) state.activity = activity;
+  if (complete) delete state.provisional;
   counts.refused = !landingsKnown;
   counts.seconds = Math.round((Date.now() - started) / 1000);
   return { counts, errors, paced };
