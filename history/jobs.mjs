@@ -118,7 +118,9 @@ export const comparable = (a, b) => a.gate === b.gate && a.scope_key === b.scope
 
 // A job a failed-jobs rerun carried over from an earlier attempt: GitHub lists it with the new attempt's number and a
 // new id, and copies its times, runner and steps from the attempt that ran it, so it completed before it was created.
-export const isCopy = (job) => Boolean(job.created_at && job.completed_at && job.completed_at < job.created_at);
+// A first attempt has nothing to copy: one of its jobs that seems to have completed first carries GitHub's misread
+// clock (2026-11-01 09:00Z, the hour US clocks fell back).
+export const isCopy = (job, attempt) => attempt > 1 && Boolean(job.created_at && job.completed_at && job.completed_at < job.created_at);
 
 // The attempt a copied job ran in: the latest earlier attempt whose listing has a job of that name that is not itself
 // a copy; null when none has (the copy is still a copy, with no minutes). `listingOf(k)`: attempt k's jobs.
@@ -127,7 +129,7 @@ export function copiedFrom(name, attempt, listingOf) {
     const jobs = listingOf(k);
     if (!jobs) throw new Error(`history: attempt ${k}'s jobs are needed to place a copied job`);
     const job = jobs.find((j) => j.name === name);
-    if (job && !isCopy(job)) return k;
+    if (job && !isCopy(job, k)) return k;
   }
   return null;
 }
@@ -199,7 +201,7 @@ const roleOf = (name, gate, entry) => {
 // kinds read for an unsuccessful job.
 export function jobLine(facts, job, { copied_from = null, annotations = [] }, entry) {
   const { gate, shard, kind, variant } = gateOf(job.name, entry);
-  const copy = isCopy(job);
+  const copy = isCopy(job, facts.attempt);
   const { scope, scope_key } = scopeOf(facts.source, gate, variant, entry);
   const { failed_step, phase } = phaseOf(job, entry);
   const head = {

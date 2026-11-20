@@ -271,11 +271,11 @@ export async function collectLedger({ gh, repo, alias = repo, entry, root, ledge
       for (const job of jobs) {
         if (job.conclusion === 'skipped') continue;
         let copied = null;
-        if (isCopy(job)) {
+        if (isCopy(job, attempt)) {
           for (let k = attempt - 1; k >= 1; k -= 1) await listingOf(run.id, k);
           copied = copiedFrom(job.name, attempt, (k) => listings.get(key(run.id, k)) ?? null);
         }
-        const unsuccessful = !isCopy(job) && !['success', 'neutral'].includes(job.conclusion);
+        const unsuccessful = !isCopy(job, attempt) && !['success', 'neutral'].includes(job.conclusion);
         lines.push(jobLine(facts, job, { copied_from: copied, annotations: unsuccessful ? await kindsOf(job) : [] }, entry));
       }
       ledger.addJobLines(lines.filter((l) => !l.copy));

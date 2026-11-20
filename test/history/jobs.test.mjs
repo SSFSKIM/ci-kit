@@ -173,13 +173,18 @@ test('a copy is a job that completed before it was created, in every real rerun 
       assert.ok(!ids.has(j.id), `${l.repo} ${j.name} has a new id`);
     }
   }
-  const copies = (repo, attempt) => listing(repo).attempts[attempt].filter((j) => j.conclusion !== 'skipped' && isCopy(j)).map((j) => j.name).sort();
+  const copies = (repo, attempt) => listing(repo).attempts[attempt].filter((j) => j.conclusion !== 'skipped' && isCopy(j, attempt)).map((j) => j.name).sort();
   assert.deepEqual(copies('SSFSKIM/MAWS', 2), ['e2e:cross-build', 'plan', 'probes', 'unit 1/4', 'unit 2/4', 'unit 3/4', 'unit 4/4']);
   assert.deepEqual(copies('SSFSKIM/MAWS', 1), []);
   assert.deepEqual(copies('SSFSKIM/manim-master', 2), ['ci / forge', 'ci / forge-arachne', 'ci / pipeline', 'ci / plan']);
   assert.deepEqual(copies('SSFSKIM/ci-kit', 2), ['ci / plan']);
   assert.deepEqual(copies('SSFSKIM/cua', 3), ['ci / plan']);
   assert.deepEqual(copies('SSFSKIM/cua', 2), ['ci / plan']);
+  // Nothing in a first attempt is a copy, whatever its times say: GitHub stamped jobs of 2026-11-01 09:00Z (the hour
+  // US clocks fell back) as completed before they were created or started (MAWS 41290983632's unit shards).
+  const dst = { created_at: '2026-11-01T09:57:40Z', started_at: '2026-11-01T09:57:50Z', completed_at: '2026-11-01T09:00:53Z' };
+  assert.equal(isCopy(dst, 1), false);
+  assert.equal(isCopy({ ...dst, created_at: '2026-11-01T09:58:00Z' }, 2), true);
 });
 
 test('copied_from is the latest earlier attempt whose job of that name is not itself a copy', () => {
@@ -218,12 +223,13 @@ test('a job line: the fields, a copy without minutes, and the platform kinds onl
   assert.equal(jobLine(facts, { ...job, runner_name: null, conclusion: 'cancelled' }, { copied_from: null, annotations: [] }, MAWS).minutes, 0);
   assert.equal(line.copy, false);
   assert.equal(line.role, null);
-  const copy = jobLine(facts, { ...job, id: 135000000002, created_at: '2026-11-19T09:00:00Z' }, { copied_from: 1, annotations: [] }, MAWS);
+  const rerun = runFacts({ ...run, run_attempt: 2 }, 2, { tested: '55f4887d'.padEnd(40, '0'), treeKey: 't'.repeat(40) }, MAWS);
+  const copy = jobLine(rerun, { ...job, id: 135000000002, created_at: '2026-11-19T09:00:00Z' }, { copied_from: 1, annotations: [] }, MAWS);
   assert.equal(copy.copied_from, 1);
   assert.equal(copy.copy, true);
   assert.equal(copy.minutes, null);
   // A copy whose origin cannot be told is still a copy, and bills nothing.
-  const orphan = jobLine(facts, { ...job, id: 135000000003, created_at: '2026-11-19T09:00:00Z' }, { copied_from: null, annotations: [] }, MAWS);
+  const orphan = jobLine(rerun, { ...job, id: 135000000003, created_at: '2026-11-19T09:00:00Z' }, { copied_from: null, annotations: [] }, MAWS);
   assert.deepEqual([orphan.copy, orphan.copied_from, orphan.minutes], [true, null, null]);
   // MAWS's hosted static is its gate's summary; its parts are not.
   assert.equal(jobLine(facts, { ...job, name: 'static' }, { copied_from: null, annotations: [] }, MAWS).role, 'summary');
