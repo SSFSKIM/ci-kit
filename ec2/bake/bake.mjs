@@ -164,7 +164,8 @@ export async function runEc2Bake(aws, { runtimeAws, cfg, manifest, runId, token,
     if (!baseImage) throw new Error('Canonical image attributes unavailable');
     const builderScript = fillEc2Builder(script, {manifest,token,report:await url('builder')});
     const builder = await launch('builder',base.Parameter.Value,builderScript,true);
-    const built = await wait('builder',30*MINUTE,async () => {
+    // 45 min: a build is about 16, and a failing regional mirror can hold apt for 11 before the builder turns to the main archive.
+    const built = await wait('builder',45*MINUTE,async () => {
       const i = await instance(builder), r = await report('builder');
       if (!i || !owned(i,run)) throw new Error('builder missing or no longer owned');
       if (r && r.value !== 'ok') {

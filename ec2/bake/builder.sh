@@ -60,8 +60,27 @@ systemctl stop snapd.socket snapd.service snapd.seeded.service || true
 apt-get purge -y snapd
 rm -rf /snap /var/snap /var/lib/snapd /var/cache/snapd
 printf 'Package: snapd\nPin: release *\nPin-Priority: -10\n' > /etc/apt/preferences.d/ci-kit-no-snapd
-apt-get update
-apt-get install -y --no-install-recommends docker.io git jq curl xz-utils ca-certificates iptables gdisk partclone dosfstools
+# From the region's EC2 mirror, and from the main archive when that fails: us-east-2's answered 503 for a universe
+# package after eleven minutes (bake 20261119-232507-taub, partclone), and three earlier bakes that day ended at this
+# step. Only the network part is retried and time-limited, so two attempts (20 min at most) and a 16-min build stay
+# inside the controller's 45; dpkg runs once after it. --error-on=any: a failed pocket is otherwise only a warning.
+packages=(docker.io git jq curl xz-utils ca-certificates iptables gdisk partclone dosfstools)
+sources=/etc/apt/sources.list.d/ubuntu.sources
+apt_fetch() {
+  timeout -k 30 180 apt-get update --error-on=any &&
+    timeout -k 30 360 apt-get install -y --no-install-recommends --download-only "${packages[@]}"
+}
+if ! apt_fetch; then
+  if [ -f "$sources" ]; then
+    cp -p "$sources" /run/ci-kit-region.sources
+    sed -E 's#https?://[a-z0-9.-]+\.ec2\.archive\.ubuntu\.com/ubuntu/?#http://archive.ubuntu.com/ubuntu/#' /run/ci-kit-region.sources > "$sources"
+  fi
+  echo "ci-kit bake: the region's mirror failed; installing from archive.ubuntu.com"
+  apt_fetch
+fi
+apt-get install -y --no-install-recommends --no-download "${packages[@]}"
+# The image keeps the region's mirror; the install above needed the lists of the sources they were fetched from.
+if [ -f /run/ci-kit-region.sources ]; then mv /run/ci-kit-region.sources "$sources"; fi
 systemctl enable docker
 step=kit
 git clone --quiet https://github.com/SSFSKIM/ci-kit.git /opt/ci-kit
