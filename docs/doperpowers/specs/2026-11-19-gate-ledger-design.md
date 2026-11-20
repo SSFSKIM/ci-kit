@@ -590,7 +590,7 @@ section is written into this spec when it starts.
 From a ci-kit worktree, with a local clone of the store kept outside the repository (`git clone -b test-history
 https://github.com/SSFSKIM/ci-kit-sandbox ~/.local/share/ci-kit/store`):
 
-    node --test test/history/                                        # every milestone's focused tests
+    node --test test/history/*.test.mjs                              # every milestone's focused tests
     node history/collect.mjs --store ~/.local/share/ci-kit/store --repo SSFSKIM/ci-kit --limit 40   # one small repository, gh's token
     node history/report.mjs --store ~/.local/share/ci-kit/store --repo SSFSKIM/doperpowers --week 2026-W47
     gh workflow run test-history.yml -R SSFSKIM/ci-kit-sandbox -f ci-kit-ref=gate-ledger   # the real pass, on the pool
@@ -663,6 +663,14 @@ inputs M0 added.
 - Observation: around 2026-11-01 09:00Z (the US fall-back hour) GitHub stamped jobs completed before they were
   created: 117 first-attempt lines. They are not copies (a first attempt has none); their raw stamps are kept and
   their minutes may read 0. Left as is: one hour of the record. Evidence: M1's report, part 4.
+
+- Observation: M2. The per-test record went from 75 MB (392 lines over 9 days) to 1.0 MB; 390 lines rewritten, none
+  failing its hash; the rewrite took 334 MB peak in the pool's batch (run 44663851867). ci-kit `main`'s collector
+  never reads a held line's membership, so it runs on the small store unchanged (proved by running main's own
+  `store.mjs`, `record.mjs` and `provenance.mjs` against a rewritten copy). The hand-run record: 360 run directories,
+  211 with a summary, 752 lines; 149 directories were planned and never sent to the mini and write no lines.
+  `node --test test/history/` fails to resolve a directory on this Node 22; `node --test test/history/*.test.mjs`
+  runs the files. Evidence: M2's report.
 
 ## Decision Log
 
@@ -748,6 +756,20 @@ inputs M0 added.
   `available` day. After a real rate-limit answer the token is not used again in that pass, in any repository or
   phase (`pass.rate_limited` in `attempts.json`). A stop at the hour's cap is `more` with a wait; at the pass's cap,
   a clean end. Date/Author: 2026-11-20, the executing session.
+
+- Decision: M2's gaps, as built (2026-11-20). The live store was made small now, not at merge (main's collector is
+  indifferent to it); until merge the daily run writes old-shape lines, which the branch's collector makes small when
+  it loads them. A one-time rewrite is marked by `<alias>/record.json` and runs before the per-test pass. A small
+  line answers `failed`, `passed` or `unknown`; one that does not rebuild to its hash keeps counts with `hash: null`.
+  The marker is written only by a batch over every repository that leaves none queued, pending, unclean or
+  rate-limited. Hand-run lines: `run` the directory's name, `event: "manual"`, `change: null` (no change is followed
+  across hand-run runs), a job never run or with no tests has `conclusion: null`, and `gateAttempts` reads a null
+  conclusion as incomplete unless another job failed. The hand-run scope key also holds the place (host or guest), the
+  live flag and a script override: they decide where or what ran (the Glossary's rule), and the safe direction is
+  fewer comparable pairs. The mini's statuses 4, 5, 6 are `runner-lost`, 124 `time-limit`, 7 (memory) unclassified.
+  A bundle's groups take their times and exits from the runner's step markers in the job's log. Tree keys of hand-run
+  lines are read from MAWS's local clone, read only. The guard has its own issue title and runs at 12:00 UTC.
+  Date/Author: 2026-11-20, the executing session.
 
 ## Outcomes & Retrospective
 
