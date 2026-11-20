@@ -690,7 +690,7 @@ inputs M0 added.
   Read on GitHub, none contradicting its label: `rerun-green` doperpowers 44479636843 → 44482863597 and cua
   44499632695 → 44502837065 (same trees); `test-only-diff` doperpowers 44508395215 → 44511346953 (a test script)
   and ci-kit 40844185287 → 40845071091 (a test file); `product-diff` doperpowers 44517481738 → 44520503188 (a
-  product script and a test script) and ci-kit 40012863651 → 40013078049 (the launcher and a spec doc).
+  product script and a test script) and ci-kit 40012863651 → 40013726300 (after M3's first review; the launcher).
   The pool's preemption record is not read: it is comments on the sandbox's pool-ledger issues, hundreds a day, not
   one call a pass. A GCE preemption fails its running step ("The operation was canceled."), so it stays `failed` and
   usually reads `rerun-green` after the launcher's rerun.
@@ -880,6 +880,25 @@ inputs M0 added.
   flag is gone. Re-derived on the pool (run 44678294456, store d8b2e59): MAWS superseded 247, cancelled 1,751, infra
   130, rerun-green 224, test-only-diff 105, product-diff 229, unattributed 1,396 (reds 3,835 to 2,084).
   Date/Author: 2026-11-20, the executing session.
+
+- Decision: M3's task review folded (2026-11-20, 66b64b8 and 5e79a16). A summary's failure is dropped only where it
+  restates a part's; beside a cancelled part it is a red. A time limit with no recorded step is never corroborated
+  into `infra` nor `setup-uncorroborated`. A follower is strictly later: it starts after the red's `available`. Two
+  `pr-merge` attempts of one head share a base only over an unbroken activity chain with no event moving it; a chain
+  break is a landing whose `before` no landing left the branch at, linked by commit, not time (`activity.breaks` in
+  `attempts.json`: doperpowers 1, the merge of pull request 370; ci-kit 2, on 10-21); inside an interval the base
+  check still goes by time, so a pair spanning the 11-01 fall-back hour reads unattributed. `pr_check` reads runs
+  from the ledger's run records, by head when known and by the recorded pull request number only when the head is
+  unreadable; a pending run is in flight, a closed attempt with no jobs reads its run conclusion (`read: "run"`), and a
+  squash with neither head nor number is `{ result: "unknown" }`; run records keep each attempt's start for
+  `pull_request` runs from 66b64b8 on, older reruns falling back to their first fresh job's start. A newer closed
+  incomplete attempt on a landed tree makes it `unrun`. Activity coverage is kept apart from the cause files. A paced
+  or errored derivation resumes and leaves the marker unchanged. Day files are selected by name before parsing:
+  inputs over the 35-day window with a day's margin each side (standing looks back no further), outputs over the
+  14-day recompute window; a final day is never read again. Re-derived (run 44684010086, store 3d18136): MAWS
+  superseded 247, cancelled 1,751, infra 129, rerun-green 213, test-only-diff 103, product-diff 229, unattributed
+  1,410; no landing verdict moved but MAWS's one red, which came from a hand-cancelled attempt (green 207, red 1).
+  Date/Author: 2026-11-20, the executing session; accepted by CI-opt.
 
 ## Outcomes & Retrospective
 
