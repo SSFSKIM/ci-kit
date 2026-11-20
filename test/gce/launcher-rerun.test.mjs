@@ -65,6 +65,15 @@ async function lose(w, launcher, { name = 'ci / unit', run, ending = 'lost' } = 
   w.sim.preempt(vm);
   w.sim.runner(SBX, vm).status = 'offline';
   if (ending === 'shutdown') Object.assign(job, { completed_at: iso(w.now() + 5_000), steps: steps({ status: 'completed', conclusion: 'failure', completed_at: iso(w.now() + 5_000) }) });
+  // The guest's shutdown as production shows it: the running step cancelled 12 s before GCE's record, and the job ended
+  // then; `cancelled-red`: the same, after a gate that failed on its own 36 s before the record.
+  if (ending === 'cancelled' || ending === 'cancelled-red') {
+    Object.assign(job, { completed_at: iso(w.now() - 11_000), steps: [
+      { name: 'Set up job', status: 'completed', conclusion: 'success' },
+      ...(ending === 'cancelled-red' ? [{ name: 'gate', status: 'completed', conclusion: 'failure', completed_at: iso(w.now() - 36_000) }] : []),
+      { name: 'test', status: 'completed', conclusion: 'cancelled', completed_at: iso(w.now() - 12_000) },
+    ] });
+  }
   if (ending === 'upload') { // the gate step failed, then the VM went during the artifact upload after it
     Object.assign(job, { completed_at: iso(w.now() + 10 * MIN), steps: [
       ...steps({ status: 'completed', conclusion: 'failure', completed_at: iso(w.now() - 20_000) }),
@@ -303,6 +312,22 @@ test('no rerun for a repo the pool no longer serves, or a public repo\'s run for
   assert.deepEqual([rowOf(pub.w, b.vm).rerun.state, rowOf(pub.w, b.vm).rerun.reason], ['dropped', 'not served']);
 });
 
+test('a job whose running step the shutdown cancelled before GCE recorded the preemption is rerun; not after a gate that failed before the notice', async () => {
+  const lostJob = setup();
+  const a = await lose(lostJob.w, lostJob.launcher, { ending: 'cancelled' });
+  assert.ok(Date.parse(a.job.completed_at) < Date.parse(rowOf(lostJob.w, a.vm).deleted), 'the job ended before the record the row carries');
+  complete(a.run);
+  await ticks(lostJob.w, lostJob.launcher, 6);
+  assert.deepEqual(reruns(lostJob.w), [`rerun job ${a.job.id}`]);
+
+  const red = setup();
+  const b = await lose(red.w, red.launcher, { ending: 'cancelled-red' });
+  complete(b.run);
+  await ticks(red.w, red.launcher, 6);
+  assert.deepEqual(reruns(red.w), []);
+  assert.deepEqual([rowOf(red.w, b.vm).rerun.state, rowOf(red.w, b.vm).rerun.reason], ['dropped', 'not a lost runner']);
+});
+
 test('a job whose gate step failed before the preemption is not rerun, though the preemption cut a later step short', async () => {
   const { w, launcher } = setup();
   const { vm, run } = await lose(w, launcher, { ending: 'upload' });
@@ -330,22 +355,22 @@ test('the sweep stops starting calls once its time budget is spent; what it left
   assert.equal(reruns(w).length, 5, 'the three left are read on the next tick');
 });
 
-// The two GCE preemptions of 2026-11-19 as GitHub reported them: the runner is told to stop inside the 30 s notice, so
-// the running step ends `cancelled` and the job ends seconds before GCE records the preemption, and well before the
-// launcher sees the VM gone (the time the row carries).
-test('lostRunner: a step the shutdown cancelled is a loss, though the job ended before the launcher saw the VM gone', () => {
+// The two GCE preemptions of 2026-11-19 as GitHub reported them, against GCE's record of each (the operation's
+// insertTime, which the row carries): the runner is told to stop inside the 30 s notice, so the running step ends
+// `cancelled` and the job ends seconds before the record.
+test('lostRunner: a step cancelled inside the notice before GCE\'s record is a loss; a failure before the notice is still a red', () => {
   const step = (conclusion, completed_at) => ({ name: 's', status: 'completed', conclusion, completed_at });
-  const seen = Date.parse('2026-11-19T20:12:40Z'); // the launcher's tick after GCE's record at 20:11:50
   // MAWS run 44605433018, unit 3/4: the running step cancelled, nothing failed.
-  assert.equal(lostRunner({ completed_at: '2026-11-19T20:11:39Z', steps: [step('success', '2026-11-19T20:09:25Z'), step('cancelled', '2026-11-19T20:11:37Z'), step('skipped', '2026-11-19T20:11:37Z')] }, seen), true);
+  assert.equal(lostRunner({ completed_at: '2026-11-19T20:11:39Z', steps: [step('success', '2026-11-19T20:09:25Z'), step('cancelled', '2026-11-19T20:11:37Z'), step('skipped', '2026-11-19T20:11:37Z')] }, Date.parse('2026-11-19T20:11:50.803Z')), true);
   // MAWS run 44635029958, static-local: the shutdown killed setup-go's tar 13 s before the runner heard of it.
-  const at = Date.parse('2026-11-19T23:11:00Z');
-  const staticLocal = [step('success', '2026-11-19T23:09:35Z'), step('failure', '2026-11-19T23:09:39Z'), step('cancelled', '2026-11-19T23:09:52Z'), step('skipped', '2026-11-19T23:09:52Z')];
-  assert.equal(lostRunner({ completed_at: '2026-11-19T23:09:53Z', steps: staticLocal }, at), true, 'a failure inside the notice before the cancel');
-  // A gate that failed on its own, then an upload the shutdown cancelled minutes later: a red.
-  const red = [step('failure', '2026-11-19T23:05:00Z'), step('cancelled', '2026-11-19T23:09:52Z')];
-  assert.equal(lostRunner({ completed_at: '2026-11-19T23:09:53Z', steps: red }, at), false, 'a failure well before the cancel');
-  assert.equal(lostRunner({ completed_at: '2026-11-19T23:09:53Z', steps: [step('failure', '2026-11-19T23:09:21Z'), step('cancelled', '2026-11-19T23:09:52Z')] }, at), false, '31 s before: outside the notice');
+  const at = Date.parse('2026-11-19T23:10:03.944Z');
+  const job = (...list) => ({ completed_at: '2026-11-19T23:09:53Z', steps: list });
+  assert.equal(lostRunner(job(step('success', '2026-11-19T23:09:35Z'), step('failure', '2026-11-19T23:09:39Z'), step('cancelled', '2026-11-19T23:09:52Z'), step('skipped', '2026-11-19T23:09:52Z')), at), true, 'a failure inside the notice');
+  // A gate that failed on its own, then an upload the shutdown cancelled: a red, however close the cancel followed.
+  assert.equal(lostRunner(job(step('failure', '2026-11-19T23:09:27Z'), step('cancelled', '2026-11-19T23:09:50Z')), at), false, 'failed 36 s before the record, 23 s before the cancel');
+  assert.equal(lostRunner(job(step('failure', '2026-11-19T23:05:00Z'), step('cancelled', '2026-11-19T23:09:52Z')), at), false, 'failed minutes before');
+  // A step cancelled long before the record was not this preemption's: the old rule decides.
+  assert.equal(lostRunner({ completed_at: '2026-11-19T23:05:01Z', steps: [step('cancelled', '2026-11-19T23:05:00Z')] }, at), false, 'cancelled five minutes before');
 });
 
 test('lostRunner: only a failed step timed before the preemption vetoes; one with no time leaves the loss signals to decide', () => {
