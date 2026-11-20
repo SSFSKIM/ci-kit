@@ -95,7 +95,7 @@ function world(t) {
   causes.push(causeOf(red(unknown[4]), 'a-cause-from-a-later-collector'));
   const superseded = gate('busy');
   causes.push(causeOf(red(superseded[2]), 'superseded'));
-  for (let i = 0; i < 3; i += 1) lines.push(job({ run: (runs += 1), gate: 'sparse', end: Date.parse('2026-11-10T12:00:00Z') + i * DAY }));
+  for (let i = 0; i < 3; i += 1) lines.push(job({ run: (runs += 1), gate: 'sparse', end: Date.parse('2026-11-15T12:00:00Z') + i * DAY }));
   // MAWS-shaped static: two parts and the summary job, which decides the result and carries no minutes.
   for (const l of daily('static', { job: 'static-local', minutes: 4 })) {
     lines.push(l, { ...l, job_id: (ids += 1), job: 'static / lint', minutes: 2 }, { ...l, job_id: (ids += 1), job: 'static', role: 'summary', lane: 'hosted-linux', minutes: 7 });
@@ -135,11 +135,51 @@ test('nominations: a covered gate with no red but infra; candidates: rerun-green
   assert.ok(line.includes(`https://github.com/${ALIAS}/actions/runs/${flaky.run}/attempts/1`), line);
   assert.match(line, /cancelled 1 \(3 min\)/);
   assert.match(text, /a rerun's pass does not rule out an intermittent product fault/i);
-  // A nomination gives its runner minutes a week and the lanes it would free: 24 attempts of 2 minutes over 4 weeks.
   // Each nomination states its kind in figures.
-  assert.match(text.split('\n').find((l) => l.startsWith('- `steady`')), /: 1 `infra` red in 24 attempts, 0 other; 12 runner minutes a week \(pool-gce 12\)/);
+  // A nomination gives the runner minutes of the last 7 covered days (11-13 to 11-19: 7 attempts of 2 minutes) and the
+  // lanes they would free, the four weeks' total beside them.
+  assert.match(text.split('\n').find((l) => l.startsWith('- `steady`')), /: 1 `infra` red in 24 attempts, 0 other; 14 runner minutes in the last 7 covered days \(pool-gce 14\), which removing or demoting it would free on those lanes, of 48 in the four weeks;/);
+  assert.match(text, /most recent 7 covered days \(2026-11-13 to 2026-11-19\)/);
   assert.match(text.split('\n').find((l) => l.startsWith('- `busy`')), /: 0 reds in 24 attempts; /);
   assert.match(text.split('\n').find((l) => l.startsWith('- `sparse`')), /3 attempts/);
+});
+
+test('a nomination describes what the gate costs now: a gate with no attempt in the last 7 covered days is neither nominated nor a candidate, but listed with its last attempt; minutes are the last 7 covered days\'', (t) => {
+  const lines = [...daily('steady')];
+  // A gate that ran twice a day until 11-12 and was then retired or renamed (MAWS's e2e:c7-utility).
+  for (let i = 0; i < 17; i += 1) {
+    for (const h of ['09', '15']) lines.push(job({ run: (runs += 1), gate: 'retired', end: Date.parse(`2026-10-27T${h}:00:00Z`) + i * DAY, minutes: 5 }));
+  }
+  // A retired gate with a red that would have made it a candidate is no candidate either.
+  const gone = Array.from({ length: 22 }, (_, i) => job({ run: (runs += 1), gate: 'gone', end: Date.parse('2026-10-27T12:00:00Z') + i * 0.7 * DAY }));
+  lines.push(...gone);
+  const causes = [causeOf(red(gone[3]), 'rerun-green')];
+  // A gate whose cadence fell: 20 runs of 30 minutes, then two of 1.05 this week (MAWS's e2e:browser-import).
+  for (let i = 0; i < 20; i += 1) lines.push(job({ run: (runs += 1), gate: 'slowed', end: Date.parse('2026-10-27T12:00:00Z') + i * 0.8 * DAY, minutes: 30, lane: 'pool-ec2' }));
+  for (const d of ['17', '18']) lines.push(job({ run: (runs += 1), gate: 'slowed', end: Date.parse(`2026-11-${d}T12:00:00Z`), minutes: 1.05, lane: 'pool-ec2' }));
+  const known = [{ id: 'keep-retired', gate: 'retired', keep: true, reason: 'guards a costly miss.', since: '2026-11-01', review_by: '2027-02-01', by: 'x' }];
+  const { model, text } = weekReport({ root: makeStore(t, { lines, causes, known }), alias: ALIAS, entry: ENTRY, week: '2026-W47', now: NOW });
+  assert.deepEqual(model.recentDays, ['2026-11-13', '2026-11-19']);
+  assert.deepEqual(model.idle.map((g) => [g.gate, g.last]), [['retired', '2026-11-12'], ['gone', '2026-11-11']]);
+  for (const g of ['retired', 'gone']) {
+    assert.ok(![...model.nominations, ...model.candidates, ...model.tooLittle].some((n) => n.gate === g), g);
+  }
+  assert.deepEqual(model.kept.map((g) => g.gate), ['retired']); // a keep entry still shows, and the section says it has no recent attempt
+  const section = text.slice(text.indexOf('### No attempts in the last week'), text.indexOf('### Too little record'));
+  assert.match(section, /- `retired`: last attempt 2026-11-12, 34 attempts in the four weeks; held by keep-retired\./);
+  assert.match(section, /- `gone`: last attempt 2026-11-11, 22 attempts in the four weeks\./);
+  assert.match(section, /retired or renamed/);
+  const slowed = text.split('\n').find((l) => l.startsWith('- `slowed`'));
+  assert.match(slowed, /; 2\.1 runner minutes in the last 7 covered days \(pool-ec2 2\.1\), which removing or demoting it would free on those lanes, of 602\.1 in the four weeks;/);
+  assert.doesNotMatch(slowed, /a week/);
+  assert.ok(model.nominations.some((g) => g.gate === 'slowed'));
+});
+
+test('a candidate\'s minutes are the last 7 covered days\', with the four weeks\' total beside them', (t) => {
+  const w = world(t);
+  const { text } = weekReport({ root: makeStore(t, w), alias: ALIAS, entry: ENTRY, week: '2026-W47', now: NOW });
+  assert.match(text.split('\n').find((l) => l.startsWith('- `flaky`')), /: 24 attempts, 21 runner minutes in the last 7 covered days \(mini-host 21\), of 72 in the four weeks; cancelled 1 \(3 min\)/);
+  assert.match(text.slice(text.indexOf('### No attempts in the last week')), /^None\.$/m);
 });
 
 test('reds to read: the week\'s unattributed reds, newest first, with their why and run links; the earlier ones counted', (t) => {
