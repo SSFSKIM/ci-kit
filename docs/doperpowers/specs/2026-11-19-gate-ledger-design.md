@@ -869,6 +869,11 @@ inputs M0 added.
   <title>` names its pull request. A dispatch's `derive-from` recomputes from a day. Date/Author: 2026-11-20, the
   executing session.
 
+- Decision: the report shows a gate's `cancelled` attempts and minutes beside its reds and on each candidate to read,
+  with no rule and no duration heuristic: a person may cancel a hanging job before its time limit, and whoever reads a
+  nominated gate should see how many of its attempts were stopped by hand. Date/Author: 2026-11-20, CI-opt (the
+  dispatching session), on the `cancelled` ruling.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
