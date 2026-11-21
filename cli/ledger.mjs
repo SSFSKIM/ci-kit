@@ -1,5 +1,5 @@
 // ci-gate's side of the gate ledger (gate ledger spec, "`ci-gate` at a failure" and "Known entries", M5): the context
-// lines printed after a FAIL, `ci-gate status`, and `ci-gate known add|list`. Everything is read and written through the
+// lines printed after a FAIL, `ci-gate status`, and `ci-gate known add|end|list`. Everything is read and written through the
 // contents API on the store's branch with gh's token; the store is the private sandbox's `test-history` branch, laid out
 // by `<alias>/status.json` and `<alias>/known.json` (history/status.mjs, history/known.mjs).
 //
@@ -9,7 +9,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createGitHub, ghToken, GitHubError } from '../lib/github.mjs';
-import { addKnown, inForce, isDay, KnownConflict, KnownError, validateKnown } from '../history/known.mjs';
+import { addKnown, endKnown, inForce, isDay, KnownConflict, KnownError, validateKnown } from '../history/known.mjs';
 import { LEDGER_USAGE, parseKnownArgs, parseStatusArgs, UsageError } from './args.mjs';
 import { resolveRemote, TargetError } from './git.mjs';
 import { THROTTLE_BELOW } from './pace.mjs';
@@ -26,10 +26,10 @@ const HOUR = 3_600_000;
 // path, the lookup and the poll fit with room to spare, and the lookup is never the call that brings on a THROTTLE.
 export const CONTEXT_HEADROOM = 25;
 export const roomForContext = (remaining) => typeof remaining === 'number' && remaining >= THROTTLE_BELOW + CONTEXT_HEADROOM;
-// known add writes only here: the live branch, or a test copy whose name starts with the prefix.
+// known add and end write only here: the live branch, or a test copy whose name starts with the prefix.
 const WRITABLE = (branch) => branch === STORE.branch || branch.startsWith('ledger-');
 
-// CI_KIT_STORE=OWNER/NAME@BRANCH points every read at another copy of the store (a test branch; `known add` writes only
+// CI_KIT_STORE=OWNER/NAME@BRANCH points every read at another copy of the store (a test branch; `known add` and `known end` write only
 // to the store's repository, on test-history or a `ledger-*` branch); null when it is set and is not that, an empty
 // value included.
 export function storeOf(env = process.env) {
@@ -209,10 +209,10 @@ export function knownFile({ gh, store, alias }) {
       const f = await readStoreFile(gh, store, path);
       return f ? { entries: JSON.parse(f.text), sha: f.sha } : { entries: [], sha: null };
     },
-    write: async (entries, sha) => {
-      const added = entries.at(-1);
+    write: async (entries, sha, change) => {
+      const { action, entry } = change;
       const body = {
-        message: `known: add ${added.id} (${added.gate}) to ${alias}`,
+        message: `known: ${action} ${printable(entry.id)} (${printable(entry.gate)}) ${action === 'add' ? 'to' : 'in'} ${alias}`,
         content: Buffer.from(`${JSON.stringify(entries, null, 1)}\n`).toString('base64'),
         branch: store.branch,
         ...(sha ? { sha } : {}),
@@ -237,7 +237,7 @@ const gitUser = () => {
 
 class LedgerError extends Error {}
 
-// `ci-gate status` and `ci-gate known add|list` (argv from the subcommand's name on). Prints its result on stdout, or
+// `ci-gate status` and `ci-gate known add|end|list` (argv from the subcommand's name on). Prints its result on stdout, or
 // ERROR <message> as the last line; returns the exit code: 0 done, 2 refused or unreadable.
 //   gh: a client (made from gh's login when absent); out/note: stdout and stderr lines; user(): who records an entry.
 export async function runLedger(argv, { gh = null, out, note, env = process.env, now = Date.now, user = gitUser } = {}) {
@@ -252,8 +252,8 @@ export async function runLedger(argv, { gh = null, out, note, env = process.env,
     if (!store) throw new LedgerError(`CI_KIT_STORE is OWNER/NAME@BRANCH, not ${printable(env.CI_KIT_STORE)}`);
     // A write goes only to the private store's repository, on its live branch or a `ledger-*` test copy; reads may go
     // anywhere.
-    if (opts.action === 'add' && (store.repo.toLowerCase() !== STORE.repo.toLowerCase() || !WRITABLE(store.branch))) {
-      throw new LedgerError(`known add writes only to the private store, ${STORE.repo}, on ${STORE.branch} or a test copy named ledger-*, not ${store.repo}@${printable(store.branch)}`);
+    if ((opts.action === 'add' || opts.action === 'end') && (store.repo.toLowerCase() !== STORE.repo.toLowerCase() || !WRITABLE(store.branch))) {
+      throw new LedgerError(`known ${opts.action} writes only to the private store, ${STORE.repo}, on ${STORE.branch} or a test copy named ledger-*, not ${store.repo}@${printable(store.branch)}`);
     }
     const repo = opts.repo ?? resolveRemote('.', null).repo;
     let list;
@@ -289,6 +289,9 @@ export async function runLedger(argv, { gh = null, out, note, env = process.env,
     } else if (opts.action === 'list') {
       const { entries } = await read(file.read);
       for (const line of knownReport(entries, today)) out(line);
+    } else if (opts.action === 'end') {
+      const ended = await endKnown({ ...file, id: opts.id, reason: opts.reason, today, onRetry: () => note('known.json changed since it was read; read it again and reapplied the ending') });
+      out(`ended ${printable(ended.id)} in ${entry.alias}'s known entries (gate ${printable(ended.gate)}, in force through ${ended.review_by}) in ${where}`);
     } else {
       const fields = { ...opts, case: opts.case ?? null, id: opts.id ?? null };
       const added = await addKnown({ ...file, fields, today, by: opts.by ?? user() ?? 'unknown', onRetry: () => note('known.json changed since it was read; read it again and reapplied the entry') });

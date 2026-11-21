@@ -1,5 +1,5 @@
 // Known entries (gate ledger spec, "Known entries"): `<alias>/known.json` in the store, a list of recorded reasons.
-// Read and matched here, and written for `ci-gate known add` (M5). An entry without `keep` records a failure someone
+// Read and matched here, and written for `ci-gate known add` (M5) and `known end`. An entry without `keep` records a failure someone
 // decided to ship with; one with `keep` records that a gate stays whatever it has caught, and is read only by the
 // report's nominations. An entry is in force from its `since` through its `review_by`, so an expired one is never shown
 // as in force.
@@ -90,7 +90,7 @@ export function knownEntry(fields, existing, { today, by }) {
   return entry;
 }
 
-// Appends one entry. read() → { entries, sha }; write(entries, sha) replaces the file only while it is still the one
+// Appends one entry. read() → { entries, sha }; write(entries, sha, { action, entry }) replaces the file only while it is still the one
 // read (else throws KnownConflict). A refused write reads again and reapplies the entry, so two adds whose reads
 // raced both end in the file. onRetry(): told of each conflict.
 export async function addKnown({ read, write, fields, today, by, attempts = 5, onRetry = () => {} }) {
@@ -99,7 +99,7 @@ export async function addKnown({ read, write, fields, today, by, attempts = 5, o
     const { entries, sha } = await read();
     const entry = knownEntry(fields, entries, { today, by });
     try {
-      await write([...entries, entry], sha);
+      await write([...entries, entry], sha, { action: 'add', entry });
       return entry;
     } catch (e) {
       if (!(e instanceof KnownConflict)) throw e;
@@ -107,4 +107,43 @@ export async function addKnown({ read, write, fields, today, by, attempts = 5, o
     }
   }
   throw new Error(`known.json changed ${attempts} times while this entry was being written; nothing was written`);
+}
+
+// Ending an entry before its review date, because what it names is fixed: its `review_by` becomes today (in force
+// today, out of force tomorrow) and its reason gains the closing text, dated, on the same line. A `keep` entry ends
+// the same way. Refused, the file untouched: an id that is not on exactly one row, an entry whose dates do not read
+// as days, one that is not in force today (not begun, or past its review date). Returns the index of the row and
+// its replacement.
+export function endedEntry({ id, reason }, existing, { today }) {
+  const closing = typeof reason === 'string' ? reason.replace(/\s+/g, ' ').trim() : '';
+  if (!closing) throw new KnownError('ending an entry needs a reason (--reason)');
+  const rows = existing.flatMap((e, i) => (e && e.id === id ? [i] : []));
+  if (rows.length === 0) throw new KnownError(`no entry ${id} in the known entries`);
+  if (rows.length > 1) throw new KnownError(`${rows.length} entries have the id ${id}; known.json needs repair by hand before one can be ended`);
+  const index = rows[0];
+  const entry = existing[index];
+  if (!isDay(entry.since)) throw new KnownError(`entry ${id} has no start date (since) that reads as a day, so it is not ended here`);
+  if (!isDay(entry.review_by)) throw new KnownError(`entry ${id} has no review date (review_by) that reads as a day, so it is not ended here`);
+  if (entry.review_by < today) throw new KnownError(`entry ${id} is out of force already (review by ${entry.review_by}, today is ${today})`);
+  if (!inForce(entry, today)) throw new KnownError(`entry ${id} is not in force yet (since ${entry.since}, today is ${today}), so it is not ended here`);
+  return { index, entry: { ...entry, reason: `${typeof entry.reason === 'string' ? entry.reason.trim() : ''} (ended ${today}: ${closing})`.trim(), review_by: today } };
+}
+
+// Ends one entry, as addKnown adds one: a write refused because the file moved on reads again and reapplies the
+// ending to the entry as it now is. Returns the entry as written.
+export async function endKnown({ read, write, id, reason, today, attempts = 5, onRetry = () => {} }) {
+  if (!(typeof id === 'string' && WORD_RE.test(id))) throw new KnownError('ending an entry names its id (--id)');
+  if (!given(reason)) throw new KnownError('ending an entry needs a reason (--reason)');
+  for (let i = 1; i <= attempts; i += 1) {
+    const { entries, sha } = await read();
+    const { index, entry: ended } = endedEntry({ id, reason }, entries, { today });
+    try {
+      await write(entries.map((e, i) => (i === index ? ended : e)), sha, { action: 'end', entry: ended });
+      return ended;
+    } catch (e) {
+      if (!(e instanceof KnownConflict)) throw e;
+      if (i < attempts) onRetry();
+    }
+  }
+  throw new Error(`known.json changed ${attempts} times while this entry was being ended; nothing was written`);
 }

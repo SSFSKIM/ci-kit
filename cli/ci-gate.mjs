@@ -73,7 +73,7 @@ async function main(argv) {
     const { runInit } = await import('./init.mjs');
     return runInit(argv.slice(1), { out });
   }
-  // `ci-gate status`, `ci-gate known add|list`: the gate ledger's record of a repo (cli/ledger.mjs).
+  // `ci-gate status`, `ci-gate known add|end|list`: the gate ledger's record of a repo (cli/ledger.mjs).
   if (argv[0] === 'status' || argv[0] === 'known') return runLedger(argv, { out, note });
   if (argv.includes('-h') || argv.includes('--help')) {
     process.stdout.write(USAGE + '\n');
