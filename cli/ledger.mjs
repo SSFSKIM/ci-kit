@@ -212,7 +212,7 @@ export function knownFile({ gh, store, alias }) {
     write: async (entries, sha, change) => {
       const { action, entry } = change;
       const body = {
-        message: `known: ${action} ${entry.id} (${entry.gate}) ${action === 'add' ? 'to' : 'in'} ${alias}`,
+        message: `known: ${action} ${printable(entry.id)} (${printable(entry.gate)}) ${action === 'add' ? 'to' : 'in'} ${alias}`,
         content: Buffer.from(`${JSON.stringify(entries, null, 1)}\n`).toString('base64'),
         branch: store.branch,
         ...(sha ? { sha } : {}),
@@ -291,7 +291,7 @@ export async function runLedger(argv, { gh = null, out, note, env = process.env,
       for (const line of knownReport(entries, today)) out(line);
     } else if (opts.action === 'end') {
       const ended = await endKnown({ ...file, id: opts.id, reason: opts.reason, today, onRetry: () => note('known.json changed since it was read; read it again and reapplied the ending') });
-      out(`ended ${ended.id} in ${entry.alias}'s known entries (gate ${ended.gate}, in force through ${ended.review_by}) in ${where}`);
+      out(`ended ${printable(ended.id)} in ${entry.alias}'s known entries (gate ${printable(ended.gate)}, in force through ${ended.review_by}) in ${where}`);
     } else {
       const fields = { ...opts, case: opts.case ?? null, id: opts.id ?? null };
       const added = await addKnown({ ...file, fields, today, by: opts.by ?? user() ?? 'unknown', onRetry: () => note('known.json changed since it was read; read it again and reapplied the entry') });

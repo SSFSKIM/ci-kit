@@ -378,6 +378,24 @@ test('ci-gate known end refuses an unknown id, an entry out of force, a missing 
   assert.deepEqual([live.code, live.out, live.calls.length], [2, ['ERROR known end writes only to the private store, SSFSKIM/ci-kit-sandbox, on test-history or a test copy named ledger-*, not SSFSKIM/ci-kit@main'], 0]);
 });
 
+test('ci-gate known end prints a stored gate as one line, in its output and in the store commit message, leaving the row\'s value', async () => {
+  const env = { CI_KIT_STORE: 'SSFSKIM/ci-kit-sandbox@ledger-a6-copy' };
+  const gate = 'te\nst\u001b[31m';
+  const files = { [KNOWN_PATH]: JSON.stringify([{ id: 'x', gate, reason: 'r', since: '2026-11-19', review_by: '2026-11-26', by: 'x' }]) };
+  const messages = [];
+  const s = fakeStore(files);
+  const put = s.gh.putContents;
+  s.gh.putContents = async (repo, path, body) => { messages.push(body.message); return put(repo, path, body); };
+  const out = [];
+  const code = await runLedger(['known', 'end', '--repo', 'SSFSKIM/ci-kit', '--id', 'x', '--reason', 'r'], { gh: s.gh, out: (l) => out.push(l), note: () => {}, env, now: () => NOW, user: () => 't' });
+  assert.equal(code, 0);
+  assert.equal(out.length, 1);
+  assert.doesNotMatch(out[0], /[\n\u001b]/);
+  assert.match(out[0], /\(gate te st \[31m,/);
+  assert.deepEqual(messages, ['known: end x (te st [31m) in SSFSKIM/ci-kit']);
+  assert.equal(JSON.parse(s.held.get(KNOWN_PATH).text)[0].gate, gate);
+});
+
 test('ci-gate known end: an end and an add whose reads raced both end in the file, the refused one reading again and reapplying', async () => {
   const live = { id: 'maws-778', gate: 'test', reason: 'r', since: '2026-11-19', review_by: '2026-11-26', by: 'x' };
   const s = fakeStore({ [KNOWN_PATH]: `${JSON.stringify([live], null, 1)}\n` });

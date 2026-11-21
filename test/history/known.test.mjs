@@ -192,7 +192,7 @@ test('an end of an unknown id, an entry out of force, or one with unreadable dat
   const f = fakeFile(JSON.stringify([LIVE, expired, { ...LIVE, id: 'bad', review_by: 'soon' }]));
   await assert.rejects(endKnown({ read: f.read, write: f.write, id: 'nope', reason: 'r', today: TODAY }), /no entry nope/);
   await assert.rejects(endKnown({ read: f.read, write: f.write, id: 'old', reason: 'r', today: TODAY }), /out of force already \(review by 2026-11-19/);
-  await assert.rejects(endKnown({ read: f.read, write: f.write, id: 'bad', reason: 'r', today: TODAY }), /no review date that reads as a day/);
+  await assert.rejects(endKnown({ read: f.read, write: f.write, id: 'bad', reason: 'r', today: TODAY }), /no review date \(review_by\) that reads as a day/);
   assert.equal(f.file.writes, 0);
   // Refused before the file is read.
   const reads = f.file.reads;
@@ -224,4 +224,34 @@ test('an end refused because the file moved on reads again and reapplies to the 
   // Refused every time: gives up having written nothing.
   const g = fakeFile(JSON.stringify([LIVE]));
   await assert.rejects(endKnown({ read: g.read, write: async () => { throw new KnownConflict(); }, id: 'maws-778', reason: 'r', today: TODAY, attempts: 2 }), /changed 2 times/);
+});
+
+test('an end of an id on more than one row, or of an entry not in force today for its start date, is refused with the file untouched', async () => {
+  const twin = { ...LIVE, gate: 'lint', keep: true, by: 'someone' };
+  const f = fakeFile(JSON.stringify([LIVE, twin]));
+  await assert.rejects(endKnown({ read: f.read, write: f.write, id: 'maws-778', reason: 'r', today: TODAY }), /2 entries have the id maws-778/);
+  assert.equal(f.file.writes, 0);
+  // With the id once, only its own row changes, wherever it stands in the file.
+  const front = [{ ...twin, id: 'first' }, { ...LIVE, id: 'other' }];
+  const g = fakeFile(JSON.stringify([...front, LIVE]));
+  await endKnown({ read: g.read, write: g.write, id: 'maws-778', reason: 'r', today: TODAY });
+  const rows = JSON.parse(g.file.text);
+  assert.deepEqual(rows.slice(0, 2), front);
+  assert.equal(rows[2].review_by, TODAY);
+  // A duplicate that appears on a retry's read is refused too, nothing written.
+  const h = fakeFile(JSON.stringify([LIVE]));
+  let first = true;
+  const read = async () => {
+    const r = await h.read();
+    if (first) { first = false; h.file.text = JSON.stringify([LIVE, twin]); h.file.sha = 'v-other'; }
+    return r;
+  };
+  await assert.rejects(endKnown({ read, write: h.write, id: 'maws-778', reason: 'r', today: TODAY }), /2 entries have the id/);
+  assert.equal(h.file.writes, 0);
+  // Not begun, or a start date that does not read, is not ended: it would get a review date before its start.
+  for (const [since, message] of [['2026-11-21', /not in force yet \(since 2026-11-21, today is 2026-11-20\)/], ['soon', /no start date \(since\) that reads as a day/], [undefined, /no start date \(since\)/]]) {
+    const k = fakeFile(JSON.stringify([{ ...LIVE, since }]));
+    await assert.rejects(endKnown({ read: k.read, write: k.write, id: 'maws-778', reason: 'r', today: TODAY }), message);
+    assert.equal(k.file.writes, 0);
+  }
 });

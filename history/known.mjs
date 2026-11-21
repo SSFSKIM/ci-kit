@@ -111,16 +111,22 @@ export async function addKnown({ read, write, fields, today, by, attempts = 5, o
 
 // Ending an entry before its review date, because what it names is fixed: its `review_by` becomes today (in force
 // today, out of force tomorrow) and its reason gains the closing text, dated, on the same line. A `keep` entry ends
-// the same way. An unknown id, an entry already out of force and an entry whose dates cannot be read are refused,
-// the file untouched.
+// the same way. Refused, the file untouched: an id that is not on exactly one row, an entry whose dates do not read
+// as days, one that is not in force today (not begun, or past its review date). Returns the index of the row and
+// its replacement.
 export function endedEntry({ id, reason }, existing, { today }) {
   const closing = typeof reason === 'string' ? reason.replace(/\s+/g, ' ').trim() : '';
   if (!closing) throw new KnownError('ending an entry needs a reason (--reason)');
-  const entry = existing.find((e) => e && e.id === id);
-  if (!entry) throw new KnownError(`no entry ${id} in the known entries`);
-  if (!isDay(entry.review_by)) throw new KnownError(`entry ${id} has no review date that reads as a day, so it is not ended here`);
+  const rows = existing.flatMap((e, i) => (e && e.id === id ? [i] : []));
+  if (rows.length === 0) throw new KnownError(`no entry ${id} in the known entries`);
+  if (rows.length > 1) throw new KnownError(`${rows.length} entries have the id ${id}; known.json needs repair by hand before one can be ended`);
+  const index = rows[0];
+  const entry = existing[index];
+  if (!isDay(entry.since)) throw new KnownError(`entry ${id} has no start date (since) that reads as a day, so it is not ended here`);
+  if (!isDay(entry.review_by)) throw new KnownError(`entry ${id} has no review date (review_by) that reads as a day, so it is not ended here`);
   if (entry.review_by < today) throw new KnownError(`entry ${id} is out of force already (review by ${entry.review_by}, today is ${today})`);
-  return { ...entry, reason: `${typeof entry.reason === 'string' ? entry.reason.trim() : ''} (ended ${today}: ${closing})`.trim(), review_by: today };
+  if (!inForce(entry, today)) throw new KnownError(`entry ${id} is not in force yet (since ${entry.since}, today is ${today}), so it is not ended here`);
+  return { index, entry: { ...entry, reason: `${typeof entry.reason === 'string' ? entry.reason.trim() : ''} (ended ${today}: ${closing})`.trim(), review_by: today } };
 }
 
 // Ends one entry, as addKnown adds one: a write refused because the file moved on reads again and reapplies the
@@ -130,9 +136,9 @@ export async function endKnown({ read, write, id, reason, today, attempts = 5, o
   if (!given(reason)) throw new KnownError('ending an entry needs a reason (--reason)');
   for (let i = 1; i <= attempts; i += 1) {
     const { entries, sha } = await read();
-    const ended = endedEntry({ id, reason }, entries, { today });
+    const { index, entry: ended } = endedEntry({ id, reason }, entries, { today });
     try {
-      await write(entries.map((e) => (e && e.id === id ? ended : e)), sha, { action: 'end', entry: ended });
+      await write(entries.map((e, i) => (i === index ? ended : e)), sha, { action: 'end', entry: ended });
       return ended;
     } catch (e) {
       if (!(e instanceof KnownConflict)) throw e;

@@ -401,8 +401,9 @@ second parent and `pr_link: "message"` when the tip has one parent (a squash) an
 - `ci-gate known end --id <id> --reason <text> [--repo <r>]` ends an entry before its `review_by` when what it names
   is fixed: its `review_by` becomes today and its reason gains ` (ended <today>: <text>)`, on one line, so
   `known list` says why. It writes the same way as `add`, with the same serialisation, and reapplies on a conflict.
-  An unknown id, an entry out of force and an entry whose dates do not read are refused with the file untouched; a
-  `keep` entry ends the same way.
+  An unknown id, an id on more than one row, and an entry not in force today (past its `review_by`, not yet begun, or
+  with a `since` or `review_by` that does not read as a day) are refused with the file untouched; a `keep` entry ends
+  the same way.
 
 ### The report and the status file (M4)
 
@@ -1042,10 +1043,11 @@ inputs M0 added.
   edit through the contents API once reformatted the whole file and needed a second commit. `end` sets `review_by`
   to today (an entry is in force through its `review_by`, so it is in force today and out tomorrow) and appends
   ` (ended <today>: <text>)` to the reason rather than adding a field, so every reader of the file, `known list`
-  and the context lines included, keeps working unchanged. Refused: an unknown id, an entry already out of force
-  (nothing to end, and it would rewrite its reason), unreadable dates. Allowed: a `keep` entry, and an entry whose
+  and the context lines included, keeps working unchanged. Refused: an unknown id, an id on more than one row (checked on every read, retries
+  included), and an entry not in force today by `inForce` with both dates readable (nothing to end; a `since` after
+  today would get a review date before its start). Allowed: a `keep` entry, and an entry whose
   `review_by` is today. The id and the reason are required; the reason is collapsed to one line. A write names its
-  change, so the commit message reads `known: end <id> (<gate>) in <alias>`. Rejected: deleting the entry (the
+  change, so the commit message reads `known: end <id> (<gate>) in <alias>`, the stored gate printed as one line there and in the success line. Rejected: deleting the entry (the
   record of why is the point) and a separate `ended` field (a new shape for every reader). Date/Author: 2026-11-21,
   CI-opt.
 

@@ -494,8 +494,9 @@ anything); with `--keep`, that the gate stays whatever it has caught, so the wee
 writes through the contents API with the blob id it read and, when another writer got there first, reads again and
 reapplies its one entry. `ci-gate known end` ends an entry before its review date, when what it names is fixed: it
 sets the entry's review date to today (still in force today, out of force tomorrow) and appends ` (ended <today>:
-<--reason>)` to its reason, so `known list` says why; a `keep` entry ends the same way, and an unknown id or an entry
-already out of force is refused with nothing written. It writes as `add` does, in the store's own format; do not edit
+<--reason>)` to its reason, so `known list` says why; a `keep` entry ends the same way, and an unknown id, an id on more than
+one row, or an entry not in force today (past its review date, not yet begun, or with a date that does not read) is
+refused with nothing written. It writes as `add` does, in the store's own format; do not edit
 `known.json` by hand. `CI_KIT_STORE=OWNER/NAME@BRANCH` points all of them, and the context lines, at another copy of
 the store; `known add` and `known end` write only to `SSFSKIM/ci-kit-sandbox`, on `test-history` or a test copy whose branch is named
 `ledger-*`, and a set but empty `CI_KIT_STORE` is an error. A value that starts with `-` is written `--reason=<value>`.
