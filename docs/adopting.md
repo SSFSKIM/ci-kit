@@ -482,6 +482,7 @@ at least 525 requests left in the token's budget, room for the failure's own cal
 ci-gate status [--repo OWNER/NAME]
 ci-gate known list [--repo OWNER/NAME]
 ci-gate known add --gate G [--case PATTERN] --reason TEXT --review-by YYYY-MM-DD [--keep] [--repo OWNER/NAME] [--id ID] [--by NAME]
+ci-gate known end --id ID --reason TEXT [--repo OWNER/NAME]
 ```
 
 `ci-gate status` prints each gate's latest result on the default branch, with its commit, time and run, how old the
@@ -491,8 +492,12 @@ through `--review-by` (required, as is `--reason`): without `--keep`, a failure 
 every failure of the gate or the cases `--case` matches (`<file> › <title>`, the file whole or by name, `*` for
 anything); with `--keep`, that the gate stays whatever it has caught, so the weekly report never nominates it. It
 writes through the contents API with the blob id it read and, when another writer got there first, reads again and
-reapplies its one entry. `CI_KIT_STORE=OWNER/NAME@BRANCH` points all three, and the context lines, at another copy of
-the store; `known add` writes only to `SSFSKIM/ci-kit-sandbox`, on `test-history` or a test copy whose branch is named
+reapplies its one entry. `ci-gate known end` ends an entry before its review date, when what it names is fixed: it
+sets the entry's review date to today (still in force today, out of force tomorrow) and appends ` (ended <today>:
+<--reason>)` to its reason, so `known list` says why; a `keep` entry ends the same way, and an unknown id or an entry
+already out of force is refused with nothing written. It writes as `add` does, in the store's own format; do not edit
+`known.json` by hand. `CI_KIT_STORE=OWNER/NAME@BRANCH` points all of them, and the context lines, at another copy of
+the store; `known add` and `known end` write only to `SSFSKIM/ci-kit-sandbox`, on `test-history` or a test copy whose branch is named
 `ledger-*`, and a set but empty `CI_KIT_STORE` is an error. A value that starts with `-` is written `--reason=<value>`.
 
 **It is gentle with the shared token.** Every session on the account shares the gh login's 5,000 REST requests an

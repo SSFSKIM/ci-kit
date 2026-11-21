@@ -1,9 +1,9 @@
 // ci-gate's reads of the gate ledger (gate ledger spec, "`ci-gate` at a failure", M5): the context lines after a FAIL,
-// `ci-gate status`, and `ci-gate known add|list`, against a fake contents API.
+// `ci-gate status`, and `ci-gate known add|end|list`, against a fake contents API.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GitHubError } from '../lib/github.mjs';
-import { addKnown } from '../history/known.mjs';
+import { addKnown, endKnown } from '../history/known.mjs';
 import { contextLines, contextReader, knownFile, knownReport, ledgerEntry, STORE, statusReport, storeOf } from '../cli/ledger.mjs';
 
 const NOW = Date.parse('2026-11-20T08:00:00Z');
@@ -335,6 +335,63 @@ test('ci-gate known add writes the entry and says so; list and status read it ba
   const status = await runWith(['status', '--repo', 'SSFSKIM/ci-kit'], { files, env });
   assert.equal(status.code, 0);
   assert.deepEqual(status.out, statusReport({ status: STATUS, known: [entry], repo: 'SSFSKIM/ci-kit', branch: 'main', now: NOW }));
+});
+
+test('ci-gate known end ends the entry in the store\'s own format, through the same write, and list reads it back', async () => {
+  const env = { CI_KIT_STORE: 'SSFSKIM/ci-kit-sandbox@ledger-a6-copy' };
+  const live = { id: 'maws-778', gate: 'test', reason: '#778: the banner', since: '2026-11-19', review_by: '2026-11-26', by: 'ux-wave' };
+  const keep = { id: 'keep-test', gate: 'test', keep: true, reason: 'the only check', since: '2026-11-19', review_by: '2027-02-19', by: 'CI-opt' };
+  const files = { [KNOWN_PATH]: `${JSON.stringify([live, keep], null, 1)}\n` };
+  const ended = await runWith(['known', 'end', '--repo', 'SSFSKIM/ci-kit', '--id', 'maws-778', '--reason', 'fixed in #790'], { files, env });
+  assert.equal(ended.code, 0);
+  assert.deepEqual(ended.out, ["ended maws-778 in SSFSKIM/ci-kit's known entries (gate test, in force through 2026-11-20) in SSFSKIM/ci-kit-sandbox@ledger-a6-copy"]);
+  const after = [{ ...live, reason: '#778: the banner (ended 2026-11-20: fixed in #790)', review_by: '2026-11-20' }, keep];
+  assert.equal(ended.held.get(KNOWN_PATH).text, `${JSON.stringify(after, null, 1)}\n`); // only the one entry changed
+  // A keep entry ends the same way.
+  const k = await runWith(['known', 'end', '--repo', 'SSFSKIM/ci-kit', '--id', 'keep-test', '--reason', 'retired'], { files, env });
+  assert.equal(k.code, 0);
+  assert.equal(JSON.parse(k.held.get(KNOWN_PATH).text)[1].review_by, '2026-11-20');
+  const listed = await runWith(['known', 'list', '--repo', 'SSFSKIM/ci-kit'], { files: { [KNOWN_PATH]: ended.held.get(KNOWN_PATH).text }, env });
+  assert.deepEqual(listed.out, knownReport(after, '2026-11-20'));
+  assert.equal(listed.out.filter((l) => l.includes('reason: #778: the banner (ended 2026-11-20: fixed in #790)')).length, 1);
+});
+
+test('ci-gate known end refuses an unknown id, an entry out of force, a missing id or reason, and a store it may not write, changing nothing', async () => {
+  const env = { CI_KIT_STORE: 'SSFSKIM/ci-kit-sandbox@ledger-a6-copy' };
+  const text = `${JSON.stringify([{ id: 'old', gate: 'test', reason: 'r', since: '2026-11-01', review_by: '2026-11-19', by: 'x' }], null, 1)}\n`;
+  const files = { [KNOWN_PATH]: text };
+  const base = ['known', 'end', '--repo', 'SSFSKIM/ci-kit'];
+  for (const [argv, message, reads] of [
+    [[...base, '--id', 'nope', '--reason', 'r'], /^ERROR no entry nope/, 1],
+    [[...base, '--id', 'old', '--reason', 'r'], /^ERROR entry old is out of force already \(review by 2026-11-19, today is 2026-11-20\)/, 1],
+    [[...base, '--reason', 'r'], /^ERROR ending an entry names its id/, 0],
+    [[...base, '--id', 'old'], /^ERROR ending an entry needs a reason/, 0],
+  ]) {
+    const r = await runWith(argv, { files, env });
+    assert.equal(r.code, 2);
+    assert.match(r.out.at(-1), message);
+    assert.equal(r.calls.filter((c) => c[0] === 'PUT').length, 0);
+    assert.equal(r.calls.length, reads);
+    assert.equal(r.held.get(KNOWN_PATH).text, text);
+  }
+  const live = await runWith([...base, '--id', 'old', '--reason', 'r'], { files, env: { CI_KIT_STORE: 'SSFSKIM/ci-kit@main' } });
+  assert.deepEqual([live.code, live.out, live.calls.length], [2, ['ERROR known end writes only to the private store, SSFSKIM/ci-kit-sandbox, on test-history or a test copy named ledger-*, not SSFSKIM/ci-kit@main'], 0]);
+});
+
+test('ci-gate known end: an end and an add whose reads raced both end in the file, the refused one reading again and reapplying', async () => {
+  const live = { id: 'maws-778', gate: 'test', reason: 'r', since: '2026-11-19', review_by: '2026-11-26', by: 'x' };
+  const s = fakeStore({ [KNOWN_PATH]: `${JSON.stringify([live], null, 1)}\n` });
+  const file = knownFile({ gh: s.gh, store: COPY, alias: 'SSFSKIM/ci-kit' });
+  let retried = 0;
+  const [a] = await Promise.all([
+    endKnown({ ...file, id: 'maws-778', reason: 'fixed', today: '2026-11-20', onRetry: () => { retried += 1; } }),
+    addKnown({ ...file, fields: { gate: 'lint', reason: 'r', review_by: '2026-11-27' }, today: '2026-11-20', by: 'x', onRetry: () => { retried += 1; } }),
+  ]); // both read the same blob before either writes
+  const stored = JSON.parse(s.held.get(KNOWN_PATH).text);
+  assert.deepEqual(stored.map((e) => e.id).sort(), ['lint-2026-11-20', 'maws-778']);
+  assert.equal(stored.find((e) => e.id === 'maws-778').review_by, '2026-11-20');
+  assert.equal(a.review_by, '2026-11-20');
+  assert.equal(retried, 1);
 });
 
 test('ci-gate status: no status file, a repository outside the ledger, or a bad CI_KIT_STORE is an ERROR, exit 2', async () => {

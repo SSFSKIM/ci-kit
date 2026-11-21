@@ -1,11 +1,11 @@
 // ci-gate [<worktree-or-sha>] [--gates a,b] [--repo OWNER/NAME] [--label NAME] [--keep]   (spec I5)
 // ci-gate init [<dir>] [--force] [--repo OWNER/NAME]                                       (plugin spec)
-// ci-gate status [--repo OWNER/NAME]; ci-gate known add|list …                               (gate ledger spec, M5)
+// ci-gate status [--repo OWNER/NAME]; ci-gate known add|end|list …                            (gate ledger spec, M5)
 
 export const USAGE = `usage: ci-gate [<worktree-or-sha>] [--gates a,b] [--repo OWNER/NAME] [--label NAME] [--keep]
        ci-gate init [<dir>] [--force] [--repo OWNER/NAME]   (adopt ci-kit: ci-gate init --help)
        ci-gate status [--repo OWNER/NAME]                   (the gate ledger: ci-gate known --help)
-       ci-gate known add|list …
+       ci-gate known add|end|list …
 
 Runs the repo's ci-kit gates for one commit on GitHub Actions and reports each gate as it finishes.
   <worktree-or-sha>  a worktree (its HEAD is tested) or a commit; default: the current directory
@@ -26,6 +26,7 @@ export const LEDGER_USAGE = `usage: ci-gate status [--repo OWNER/NAME]
        ci-gate known list [--repo OWNER/NAME]
        ci-gate known add --gate G [--case PATTERN] --reason TEXT --review-by YYYY-MM-DD [--keep] [--repo OWNER/NAME]
                          [--id ID] [--by NAME]
+       ci-gate known end --id ID --reason TEXT [--repo OWNER/NAME]
 
 The gate ledger's record of a repo (default: the one origin pushes to), in the store (the private ci-kit-sandbox's
 test-history branch, or CI_KIT_STORE=OWNER/NAME@BRANCH), read and written with gh's login.
@@ -40,6 +41,11 @@ test-history branch, or CI_KIT_STORE=OWNER/NAME@BRANCH), read and written with g
     --keep            the gate stays whatever it has caught: the weekly report never nominates it for removal
     --id ID           the entry's id; default keep-<gate> or <gate>-<today>
     --by NAME         who records it; default git's user.name
+  known end    ends an entry before its review date, because what it names is fixed: its review date becomes today
+               (in force today, out of force tomorrow) and --reason is added to its reason, dated; a keep entry ends
+               the same way; an unknown id or an entry already out of force is refused and nothing is written:
+    --id ID           the entry (ci-gate known list shows the ids)
+    --reason TEXT     why it ends (required)
 Exit: 0 done, 2 refused or the store unreadable.`;
 
 export const INIT_USAGE = `usage: ci-gate init [<dir>] [--force] [--repo OWNER/NAME]
@@ -168,7 +174,11 @@ export function parseStatusArgs(argv) {
 export function parseKnownArgs(argv) {
   const [action, ...rest] = argv;
   if (action === 'list') return { action, repo: parseOptions(rest, ['repo'], 'known list').repo ?? null };
-  if (action !== 'add') throw new UsageError(`ci-gate known add|list, not ${action ?? 'nothing'}`);
+  if (action === 'end') {
+    const o = parseOptions(rest, ['id', 'reason', 'repo'], 'known end');
+    return { action, id: o.id, reason: o.reason, repo: o.repo ?? null };
+  }
+  if (action !== 'add') throw new UsageError(`ci-gate known add|end|list, not ${action ?? 'nothing'}`);
   const o = parseOptions(rest, ['gate', 'case', 'reason', 'review-by', 'keep', 'repo', 'id', 'by'], 'known add');
   return { action, gate: o.gate, case: o.case, reason: o.reason, review_by: o['review-by'], keep: o.keep === true, repo: o.repo ?? null, id: o.id, by: o.by };
 }

@@ -398,6 +398,11 @@ second parent and `pr_link: "message"` when the tip has one parent (a squash) an
   `ci-gate known list` edit and read the file through the contents API on the store's branch with `gh`'s token.
   A write sends the blob id it read and, on a conflict, reads again and reapplies its one entry. One place, as the
   owner asked.
+- `ci-gate known end --id <id> --reason <text> [--repo <r>]` ends an entry before its `review_by` when what it names
+  is fixed: its `review_by` becomes today and its reason gains ` (ended <today>: <text>)`, on one line, so
+  `known list` says why. It writes the same way as `add`, with the same serialisation, and reapplies on a conflict.
+  An unknown id, an entry out of force and an entry whose dates do not read are refused with the file untouched; a
+  `keep` entry ends the same way.
 
 ### The report and the status file (M4)
 
@@ -1033,6 +1038,16 @@ inputs M0 added.
   a red the base shares, landed with their yes); the first wording here read as a standing waiver, which it never
   was. Rejected: a standing rule for base-red gates (their choice was "ask each time").
   Date/Author: 2026-11-20, CI-opt.
+- Decision: `ci-gate known end` ends an entry; no one edits `known.json` by hand (2026-11-21, ci-kit issue 232). A hand
+  edit through the contents API once reformatted the whole file and needed a second commit. `end` sets `review_by`
+  to today (an entry is in force through its `review_by`, so it is in force today and out tomorrow) and appends
+  ` (ended <today>: <text>)` to the reason rather than adding a field, so every reader of the file, `known list`
+  and the context lines included, keeps working unchanged. Refused: an unknown id, an entry already out of force
+  (nothing to end, and it would rewrite its reason), unreadable dates. Allowed: a `keep` entry, and an entry whose
+  `review_by` is today. The id and the reason are required; the reason is collapsed to one line. A write names its
+  change, so the commit message reads `known: end <id> (<gate>) in <alias>`. Rejected: deleting the entry (the
+  record of why is the point) and a separate `ended` field (a new shape for every reader). Date/Author: 2026-11-21,
+  CI-opt.
 
 
 ## Outcomes & Retrospective

@@ -83,7 +83,7 @@ test('pushFailure names the reason, not git\'s closing line', () => {
   assert.equal(pushFailure('').reason, 'no output from git');
 });
 
-// `ci-gate status` and `ci-gate known add|list` (gate ledger spec, M5).
+// `ci-gate status` and `ci-gate known add|end|list` (gate ledger spec, M5).
 import { parseKnownArgs, parseStatusArgs } from '../cli/args.mjs';
 
 test('parseStatusArgs: --repo, or the repo origin pushes to', () => {
@@ -103,6 +103,12 @@ test('parseKnownArgs: add with every option, and list', () => {
   assert.equal(parseKnownArgs(['add', '--gate=t', '--keep', '--reason=r', '--review-by=2027-01-01']).keep, true);
   assert.deepEqual(parseKnownArgs(['list']), { action: 'list', repo: null });
   assert.deepEqual(parseKnownArgs(['list', '--repo', 'SSFSKIM/cua']), { action: 'list', repo: 'SSFSKIM/cua' });
+  assert.deepEqual(parseKnownArgs(['end', '--id', 'maws-778', '--reason', 'fixed in #790', '--repo', 'SSFSKIM/MAWS']), { action: 'end', id: 'maws-778', reason: 'fixed in #790', repo: 'SSFSKIM/MAWS' });
+  assert.deepEqual(parseKnownArgs(['end', '--id=a', '--reason=b']), { action: 'end', id: 'a', reason: 'b', repo: null });
+  // An end names nothing but its id and reason; what it lacks is the end's to refuse.
+  assert.throws(() => parseKnownArgs(['end', '--id', 'a', '--review-by', '2026-11-27']), UsageError);
+  assert.throws(() => parseKnownArgs(['end', '--id', 'a', '--reason', '--keep']), UsageError);
+  assert.equal(parseKnownArgs(['end', '--reason', 'r']).id, undefined);
 });
 
 test('parseKnownArgs: refuses what it does not know; what an entry needs is the entry\'s to refuse', () => {
