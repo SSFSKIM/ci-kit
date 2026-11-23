@@ -14,7 +14,7 @@ export const LANES = ['hosted', 'hosted-macos', 'pool', 'mac'];
 export const PRIVATE_LANES = ['pool', 'mac'];
 // A hosted-macos gate's `image:`: GitHub's standard macOS labels. The pattern admits no larger runner (-large,
 // -xlarge: billed on a public repo too) and no label a self-hosted machine could carry.
-const MACOS_IMAGE_RE = /^(macos-(latest|\d+)(-intel)?|xcode-\d+)$/;
+const MACOS_IMAGE_RE = /^(macos-latest|macos-\d+(-intel)?|xcode-\d+)$/;
 export const EVENTS = ['pr', 'ci-ref', 'dispatch'];
 export const POOL_SIZES = [2, 4, 8, 16];
 // What a gate's build_cache may name: the cache backend its job is given a builder and the runtime for.

@@ -112,6 +112,7 @@ const rejected = [
   ['an unknown gate key', 'version: 1\ngates:\n  - {name: a, run: x, cmd: y}\n', /^gate "a": unknown key "cmd"/],
   ['image on another lane', 'version: 1\ngates:\n  - {name: a, run: x, image: xcode-27}\n', /^gate "a": image: only for lane hosted-macos/],
   ['a larger runner as image', 'version: 1\ngates:\n  - {name: a, run: x, lane: hosted-macos, image: macos-26-xlarge}\n', /^gate "a": image: must be macos-latest/],
+  ['-intel on macos-latest', 'version: 1\ngates:\n  - {name: a, run: x, lane: hosted-macos, image: macos-latest-intel}\n', /^gate "a": image: must be macos-latest/],
   ['a self-hosted label as image', 'version: 1\ngates:\n  - {name: a, run: x, lane: hosted-macos, image: self-hosted}\n', /^gate "a": image: must be macos-latest/],
   ['a list as image', 'version: 1\ngates:\n  - {name: a, run: x, lane: hosted-macos, image: [xcode-27, self-hosted]}\n', /^gate "a": image: must be macos-latest/],
   ['an unknown lane', 'version: 1\ngates:\n  - {name: a, run: x, lane: cloud}\n', /^gate "a": lane: must be one of hosted, hosted-macos, pool, mac/],
