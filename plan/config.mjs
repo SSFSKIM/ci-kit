@@ -12,6 +12,9 @@ export class ConfigError extends Error {
 
 export const LANES = ['hosted', 'hosted-macos', 'pool', 'mac'];
 export const PRIVATE_LANES = ['pool', 'mac'];
+// A hosted-macos gate's `image:`: GitHub's standard macOS labels. The pattern admits no larger runner (-large,
+// -xlarge: billed on a public repo too) and no label a self-hosted machine could carry.
+const MACOS_IMAGE_RE = /^(macos-latest|macos-\d+(-intel)?|xcode-\d+)$/;
 export const EVENTS = ['pr', 'ci-ref', 'dispatch'];
 export const POOL_SIZES = [2, 4, 8, 16];
 // What a gate's build_cache may name: the cache backend its job is given a builder and the runtime for.
@@ -29,7 +32,7 @@ const PACKAGE_RE = {
 export const hasDeclaration = (setup) => Boolean(setup.script || setup.apt?.length || setup.brew?.length || setup.cask?.length);
 // actions/checkout's depth when setup does not say: the tested commit alone.
 export const DEFAULT_FETCH_DEPTH = 1;
-const GATE_KEYS = ['name', 'run', 'lane', 'cpus', 'timeout', 'paths', 'on', 'artifacts', 'setup', 'env', 'build_cache'];
+const GATE_KEYS = ['name', 'run', 'lane', 'image', 'cpus', 'timeout', 'paths', 'on', 'artifacts', 'setup', 'env', 'build_cache'];
 const NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 // The kit sets CI_KIT_BASE, CI_KIT_HEAD, CI_KIT_RUN... in gate steps; a gate's env must not shadow or be shadowed by them.
@@ -118,6 +121,13 @@ function readGate(raw, index, seen, isPrivate, errors) {
     else err(`cpus: must be one of ${POOL_SIZES.join(', ')}`);
   }
 
+  let image = null;
+  if (raw.image !== undefined) {
+    if (lane !== 'hosted-macos') err('image: only for lane hosted-macos');
+    else if (typeof raw.image === 'string' && MACOS_IMAGE_RE.test(raw.image)) image = raw.image;
+    else err('image: must be macos-latest, macos-<N>, macos-<N>-intel or xcode-<N>');
+  }
+
   let timeout = 30;
   if (raw.timeout !== undefined) {
     if (Number.isInteger(raw.timeout) && raw.timeout >= 1 && raw.timeout <= 360) timeout = raw.timeout;
@@ -181,7 +191,7 @@ function readGate(raw, index, seen, isPrivate, errors) {
     }
   }
 
-  return { name: raw.name, run: raw.run, lane, cpus, timeout, paths, on, artifacts, setup, env, build_cache: buildCache };
+  return { name: raw.name, run: raw.run, lane, image, cpus, timeout, paths, on, artifacts, setup, env, build_cache: buildCache };
 }
 
 // `isPrivate` is the repo's visibility (the event payload's repository.private): pool and mac lanes are private-only.

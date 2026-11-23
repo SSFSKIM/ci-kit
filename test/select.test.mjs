@@ -100,9 +100,10 @@ setup: {node: "22", fetch_depth: 0}
 gates:
   - {name: m, run: x, lane: hosted-macos}
   - {name: e, run: y, lane: mac, setup: false}
+  - {name: s, run: z, lane: hosted-macos, image: xcode-27}
 `, { isPrivate: true });
   const out = planOutput(c, c.gates);
-  assert.deepEqual(out.gates.map((g) => g.runs_on), [['macos-latest'], ['self-hosted', 'macOS', 'ARM64', 'ci-kit-mac']]);
+  assert.deepEqual(out.gates.map((g) => g.runs_on), [['macos-latest'], ['self-hosted', 'macOS', 'ARM64', 'ci-kit-mac'], ['xcode-27']]);
   assert.deepEqual(out.gates[0].setup, { node: '22', pnpm: false, install: '', fetch_depth: 0, apt: [], brew: [], cask: [], script: '' });
   // setup: false skips the whole shared setup, fetch_depth with it (I1): the gate checks out at the default depth.
   assert.deepEqual(out.gates[1].setup, { node: '', pnpm: false, install: '', fetch_depth: 1, apt: [], brew: [], cask: [], script: '' });

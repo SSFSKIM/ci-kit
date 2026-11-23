@@ -87,6 +87,7 @@ gates:                      # non-empty, unless setup declares packages or a scr
   - name: unit              # required; [a-z0-9][a-z0-9-]*; unique; not "plan" or "verdict"
     run: npm test           # required; run with bash -eo pipefail at the repo root
     lane: hosted            # hosted | hosted-macos | pool | mac ; default hosted
+    image: xcode-27         # hosted-macos only; macos-latest | macos-<N> | macos-<N>-intel | xcode-<N>; default macos-latest
     cpus: 4                 # pool only; one of 2 4 8 16; default 4
     timeout: 15             # minutes; default 30; max 360
     paths: ["src/**"]       # optional; selection filter for pr and ci-ref
@@ -195,13 +196,20 @@ node setup/apply.mjs --mode bake --root /path/to/clone [--install]
 | Lane | Runs on | Who may use it |
 |---|---|---|
 | `hosted` | GitHub's `ubuntu-latest` | any repo |
-| `hosted-macos` | GitHub's `macos-latest` (free on public repos) | any repo |
+| `hosted-macos` | GitHub's `macos-latest`, or the standard macOS image the gate's `image:` names (free on public repos) | any repo |
 | `pool` | a GCE or EC2 VM per job for repos in `pool/config/gce.json`, `[self-hosted, ci-kit-pool, cpus-<N>]` | private repos only |
 | `mac` | the mac lane's runners (the Mac mini and a second Mac), `[self-hosted, macOS, ARM64, ci-kit-mac]` | private repos only |
 
 A public repo whose config puts any gate on `pool` or `mac` fails its plan with
 `ci-kit: lane "pool" is for private repos only (gate "<name>")`: a stranger's fork PR must never reach a self-hosted
 machine.
+
+A `hosted-macos` gate may name another of GitHub's standard macOS images with `image:`: a pinned `macos-<N>`, an
+Intel `macos-<N>-intel`, or `xcode-<N>`. `xcode-27` is macOS 27 with Xcode 27 only, where `macos-latest` is macOS 26
+with Xcode 26 only (2026-11), so a compiler fault that only the newer Xcode has stays green on `macos-latest`. The
+larger runners (`-large`, `-xlarge`) are refused: GitHub bills them on a public repo too. A label GitHub does not
+serve is not refused by GitHub: the job stays queued (`macos-27` waited 13 minutes before it was cancelled,
+2026-11), so check a new label against GitHub's list of hosted runners first.
 
 A `pool` gate needs the repo served by the launcher and the `ci-kit-runners` App installed; no cloud token is
 needed in the caller. See [pool.md](pool.md#using-the-pool-from-a-repo). The launcher provisions a VM for the
