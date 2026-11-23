@@ -68,7 +68,7 @@ export function laneOf(job) {
   if (/^ci-kit-pool-\d+-\d+$/.test(name)) return 'pool-hetzner'; // the pool's first backend, retired 2026-10 (ci-kit #167)
   if (name.startsWith('ci-kit-mac-')) return name.includes('-maws-vm-') ? 'mini-guest' : 'mini-host';
   if (name === '' || name.startsWith('GitHub Actions ')) {
-    if (labels.some((l) => l.startsWith('macos-'))) return 'hosted-macos';
+    if (labels.some((l) => l.startsWith('macos-') || l.startsWith('xcode-'))) return 'hosted-macos';
     if (labels.some((l) => l.startsWith('ubuntu-'))) return 'hosted-linux';
   }
   return null;

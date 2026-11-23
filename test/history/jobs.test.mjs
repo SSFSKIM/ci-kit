@@ -103,6 +103,7 @@ test('a lane is read from the runner and the labels, and never guessed', () => {
   assert.equal(laneOf(job('GitHub Actions 1000061510', ['ubuntu-24.04'])), 'hosted-linux');
   assert.equal(laneOf(job('GitHub Actions 1000061506', ['macos-26'])), 'hosted-macos');
   assert.equal(laneOf(job('GitHub Actions 1000056399', ['macos-latest'])), 'hosted-macos');
+  assert.equal(laneOf(job('GitHub Actions 1000070001', ['xcode-27'])), 'hosted-macos');
   // A job that never started has no runner: its labels say where it was asked to run, when they say it.
   assert.equal(laneOf(job(null, ['ubuntu-latest'])), 'hosted-linux');
   assert.equal(laneOf(job(null, ['macos-latest'])), 'hosted-macos');

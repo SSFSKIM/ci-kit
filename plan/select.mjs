@@ -5,7 +5,7 @@ import { aptCacheKey } from '../setup/hash.mjs';
 
 const RUNS_ON = {
   hosted: () => ['ubuntu-latest'],
-  'hosted-macos': () => ['macos-latest'],
+  'hosted-macos': (gate) => [gate.image ?? 'macos-latest'],
   pool: (gate) => ['self-hosted', 'ci-kit-pool', `cpus-${gate.cpus}`],
   mac: () => ['self-hosted', 'macOS', 'ARM64', 'ci-kit-mac'],
 };

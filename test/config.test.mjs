@@ -20,7 +20,7 @@ test('a minimal config gets every default', () => {
   assert.deepEqual(c.setup, { node: '', pnpm: false, install: '', fetch_depth: 1, apt: [], brew: [], cask: [], script: '' });
   assert.deepEqual(c.gates, [
     {
-      name: 'unit', run: 'npm test', lane: 'hosted', cpus: null, timeout: 30, paths: [],
+      name: 'unit', run: 'npm test', lane: 'hosted', image: null, cpus: null, timeout: 30, paths: [],
       on: ['pr', 'ci-ref', 'dispatch'], artifacts: [], setup: true, env: {}, build_cache: null,
     },
   ]);
@@ -48,7 +48,7 @@ gates:
 `, priv);
   assert.deepEqual(c.setup, { node: '24', pnpm: true, install: 'pnpm install --frozen-lockfile', fetch_depth: 0, apt: [], brew: [], cask: [], script: '' });
   assert.deepEqual(c.gates[0], {
-    name: 'unit', run: 'npm test', lane: 'pool', cpus: 8, timeout: 15, paths: ['src/**'],
+    name: 'unit', run: 'npm test', lane: 'pool', image: null, cpus: 8, timeout: 15, paths: ['src/**'],
     on: ['pr', 'ci-ref'], artifacts: ['test-results/**'], setup: false, env: { FOO: 'bar' }, build_cache: null,
   });
 });
@@ -82,6 +82,13 @@ test('hosted-macos is allowed in a public repo', () => {
   assert.equal(c.gates[0].lane, 'hosted-macos');
 });
 
+test('image: a hosted-macos gate names a standard GitHub macOS image', () => {
+  for (const image of ['xcode-27', 'macos-26', 'macos-15-intel', 'macos-latest']) {
+    const c = parseConfig(`version: 1\ngates:\n  - {name: m, run: x, lane: hosted-macos, image: ${image}}\n`, pub);
+    assert.equal(c.gates[0].image, image);
+  }
+});
+
 const rejected = [
   ['an unparseable file', 'version: 1\ngates: [\n', /^\.github\/ci-kit\.yml is not valid YAML/],
   ['a non-mapping file', '- a\n', /^the config must be a mapping/],
@@ -103,6 +110,10 @@ const rejected = [
   ['a duplicate gate name', 'version: 1\ngates:\n  - {name: a, run: x}\n  - {name: a, run: y}\n', /^gate "a": name: duplicate/],
   ['a gate without run', 'version: 1\ngates:\n  - {name: a}\n', /^gate "a": run: required/],
   ['an unknown gate key', 'version: 1\ngates:\n  - {name: a, run: x, cmd: y}\n', /^gate "a": unknown key "cmd"/],
+  ['image on another lane', 'version: 1\ngates:\n  - {name: a, run: x, image: xcode-27}\n', /^gate "a": image: only for lane hosted-macos/],
+  ['a larger runner as image', 'version: 1\ngates:\n  - {name: a, run: x, lane: hosted-macos, image: macos-26-xlarge}\n', /^gate "a": image: must be macos-latest/],
+  ['a self-hosted label as image', 'version: 1\ngates:\n  - {name: a, run: x, lane: hosted-macos, image: self-hosted}\n', /^gate "a": image: must be macos-latest/],
+  ['a list as image', 'version: 1\ngates:\n  - {name: a, run: x, lane: hosted-macos, image: [xcode-27, self-hosted]}\n', /^gate "a": image: must be macos-latest/],
   ['an unknown lane', 'version: 1\ngates:\n  - {name: a, run: x, lane: cloud}\n', /^gate "a": lane: must be one of hosted, hosted-macos, pool, mac/],
   ['cpus off the pool', 'version: 1\ngates:\n  - {name: a, run: x, cpus: 4}\n', /^gate "a": cpus: only for lane pool/],
   ['cpus not a size', 'version: 1\ngates:\n  - {name: a, run: x, lane: pool, cpus: 3}\n', /^gate "a": cpus: must be one of 2, 4, 8, 16/],
