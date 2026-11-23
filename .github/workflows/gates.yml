@@ -31,6 +31,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       gates: ${{ steps.plan.outputs.gates }}
+      names: ${{ steps.plan.outputs.names }}
       count: ${{ steps.plan.outputs.count }}
       pool: ${{ steps.plan.outputs.pool }}
       note: ${{ steps.plan.outputs.note }}
@@ -132,6 +133,8 @@ jobs:
           jq . "$RUNNER_TEMP/plan.json"
           {
             echo "gates=$(jq -c .gates "$RUNNER_TEMP/plan.json")"
+            # The gates' CI_KIT_GATES: the names of the very list the matrix is built from, in its order.
+            echo "names=$(jq -r '[.gates[].name] | join(",")' "$RUNNER_TEMP/plan.json")"
             echo "count=$(jq '.gates | length' "$RUNNER_TEMP/plan.json")"
             echo "pool=$(jq .pool "$RUNNER_TEMP/plan.json")"
             echo "note=$(jq -r .note "$RUNNER_TEMP/plan.json")"
@@ -340,6 +343,7 @@ jobs:
         env:
           CI_KIT_BASE: ${{ needs.plan.outputs.base }}
           CI_KIT_HEAD: ${{ github.sha }}
+          CI_KIT_GATES: ${{ needs.plan.outputs.names }}
           CI_KIT_INSTALL: ${{ matrix.gate.setup.install }}
         # Retried once after 30 s, as the setup action retries it (setup/apply.mjs): an install's downloads fail for a
         # minute at a time.
@@ -354,6 +358,7 @@ jobs:
         env:
           CI_KIT_BASE: ${{ needs.plan.outputs.base }}
           CI_KIT_HEAD: ${{ github.sha }}
+          CI_KIT_GATES: ${{ needs.plan.outputs.names }}
           CI_KIT_RUN: ${{ matrix.gate.run }}
         run: bash -eo pipefail -c "$CI_KIT_RUN"
 
