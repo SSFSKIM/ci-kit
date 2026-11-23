@@ -340,6 +340,7 @@ jobs:
         env:
           CI_KIT_BASE: ${{ needs.plan.outputs.base }}
           CI_KIT_HEAD: ${{ github.sha }}
+          CI_KIT_GATES: ${{ join(fromJSON(needs.plan.outputs.gates).*.name, ',') }}
           CI_KIT_INSTALL: ${{ matrix.gate.setup.install }}
         # Retried once after 30 s, as the setup action retries it (setup/apply.mjs): an install's downloads fail for a
         # minute at a time.
@@ -354,6 +355,7 @@ jobs:
         env:
           CI_KIT_BASE: ${{ needs.plan.outputs.base }}
           CI_KIT_HEAD: ${{ github.sha }}
+          CI_KIT_GATES: ${{ join(fromJSON(needs.plan.outputs.gates).*.name, ',') }}
           CI_KIT_RUN: ${{ matrix.gate.run }}
         run: bash -eo pipefail -c "$CI_KIT_RUN"
 

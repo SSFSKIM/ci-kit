@@ -249,12 +249,13 @@ with `setup: false`, which checks out at depth 1.
 
 #### The change, in the gate's environment
 
-`install` and `run` see two variables:
+`install` and `run` see three variables:
 
 | Variable | Holds |
 |---|---|
 | `CI_KIT_HEAD` | the commit the gate checked out (`HEAD`): a PR's merge commit, or `ci-gate`'s nonce commit, whose tree is the tested commit's |
 | `CI_KIT_BASE` | where that commit left the base: for a PR, the base it merges into; for a `ci/**` push, its merge-base with the default branch; for a push to the default branch, the branch's tip before it. **Empty on a dispatch or a schedule**, which have no change basis, and on a default-branch push with no earlier tip to diff against |
+| `CI_KIT_GATES` | the gates this run selected, comma-separated in the config's order (`test,plugin,engine-swift`): the list the plan built the run's jobs from, so every gate named here has a job in this run, and its result counts toward the verdict. Like the two above, `install` and `run` see it; the setup script sees none of the three |
 
 So `git diff $CI_KIT_BASE $CI_KIT_HEAD` (two dots) is the change the gate is testing. The base commit is fetched into
 the checkout whatever `fetch_depth` is, so this works at the default depth. Lint only what changed, for example (on
@@ -271,6 +272,13 @@ the checkout whatever `fetch_depth` is, so this works at the default depth. Lint
 
 `--diff-filter=d` leaves out deleted files. With depth 1 the history between the two commits is absent, so use the
 two-dot form above: `git log`, `git merge-base` and three-dot ranges need `fetch_depth: 0`.
+
+A check that two gates run can be left to the gate that owns it whenever that gate is in the run, for example a test
+that repeats the `plugin` gate's suite:
+
+```sh
+case ",$CI_KIT_GATES," in *,plugin,*) echo "the plugin gate runs this suite"; exit 0 ;; esac
+```
 
 A gate's `env` cannot set a `CI_KIT_*` name; the plan refuses it.
 
