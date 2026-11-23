@@ -255,7 +255,7 @@ with `setup: false`, which checks out at depth 1.
 |---|---|
 | `CI_KIT_HEAD` | the commit the gate checked out (`HEAD`): a PR's merge commit, or `ci-gate`'s nonce commit, whose tree is the tested commit's |
 | `CI_KIT_BASE` | where that commit left the base: for a PR, the base it merges into; for a `ci/**` push, its merge-base with the default branch; for a push to the default branch, the branch's tip before it. **Empty on a dispatch or a schedule**, which have no change basis, and on a default-branch push with no earlier tip to diff against |
-| `CI_KIT_GATES` | the gates this run selected, comma-separated in the config's order (`test,plugin,engine-swift`): the list the plan built the run's jobs from, so every gate named here has a job in this run, and its result counts toward the verdict |
+| `CI_KIT_GATES` | the gates this run selected, comma-separated in the config's order (`test,plugin,engine-swift`): the list the plan built the run's jobs from, so every gate named here has a job in this run, and its result counts toward the verdict. Like the two above, `install` and `run` see it; the setup script sees none of the three |
 
 So `git diff $CI_KIT_BASE $CI_KIT_HEAD` (two dots) is the change the gate is testing. The base commit is fetched into
 the checkout whatever `fetch_depth` is, so this works at the default depth. Lint only what changed, for example (on
