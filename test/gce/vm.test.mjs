@@ -2,7 +2,7 @@
 // keeps DNS, what it does with and without a JIT config, and how it reads the smoke check's verdict.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync, chmodSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -140,4 +140,14 @@ test('the job-started hook names the VM in the job log and its summary, and stil
   assert.equal(readFileSync(summary, 'utf8'), line);
   // An older guest passes no placement, and a runner may give the hook no summary file.
   assert.match(execFileSync('bash', ['-e', hook], { env: { PATH: process.env.PATH }, encoding: 'utf8' }), /^ci-kit pool: runner \? on \? \(\?, \?\), cores \?/);
+});
+
+test('the job-started hook prints ? for the count and still succeeds when nproc fails or is absent', () => {
+  const hook = new URL('../../pool/image/job-started.sh', import.meta.url).pathname;
+  const bin = mkdtempSync(join(tmpdir(), 'ci-kit-hook-bin-'));
+  for (const [name, body] of [['nproc', '#!/bin/sh\nexit 1\n']]) { writeFileSync(join(bin, name), body); chmodSync(join(bin, name), 0o755); }
+  const bash = execFileSync('/bin/sh', ['-c', 'command -v bash'], { encoding: 'utf8' }).trim();
+  assert.match(execFileSync(bash, ['-e', hook], { env: { PATH: bin }, encoding: 'utf8' }), /cores \? \(nproc \?\)\n$/); // nproc fails
+  const empty = mkdtempSync(join(tmpdir(), 'ci-kit-hook-empty-'));
+  assert.match(execFileSync(bash, ['-e', hook], { env: { PATH: empty }, encoding: 'utf8' }), /cores \? \(nproc \?\)\n$/); // no nproc at all
 });

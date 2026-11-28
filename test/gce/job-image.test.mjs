@@ -81,12 +81,13 @@ test('GCE tells the job container its machine type, zone and provisioning from t
   for (const e of ['CI_KIT_MACHINE=c3d-highcpu-4', 'CI_KIT_ZONE=us-central1-a', 'CI_KIT_PROVISIONING=spot']) assert.ok(args.includes(e), e);
 });
 
-test('GCE runs the job when the metadata cannot say its placement (a VM from an older launcher)', async () => {
+test('GCE starts the job container without waiting for placement metadata that never answers or fails', async () => {
   const f = fixture({ repo: 'SSFSKIM/MAWS' });
   const meta = f.deps.meta;
-  f.deps.meta = async key => {
-    if (key === 'machine-type') throw new Error('metadata machine-type: HTTP 503');
-    return key === 'attributes/ci-kit-provisioning' ? null : meta(key);
+  f.deps.meta = key => {
+    if (key === 'machine-type') return new Promise(() => {}); // a stalled metadata endpoint
+    if (key === 'attributes/ci-kit-provisioning') return Promise.reject(new Error('metadata: HTTP 503'));
+    return meta(key);
   };
   await runGuest(f.deps);
   const args = f.calls.find(c => c[0] === 'run')[1];
