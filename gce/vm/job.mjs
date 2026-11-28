@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
 import { prepareContainer, docker, selectJobImage } from '../../pool/vm/container.mjs';
-import { jobRunArgs, vmMode, smokeVerdict } from './run.mjs';
+import { jobRunArgs, arrivingPlacement, vmMode, smokeVerdict } from './run.mjs';
 import { smokeJobImages } from '../../pool/bake/job-images.mjs';
 import { watchGitTransfers } from '../../pool/vm/git-watchdog.mjs';
 
@@ -36,6 +36,15 @@ async function report(key, value) {
   }
 }
 
+// The VM's machine type and zone (the last segment of metadata's machine-type and zone paths) and its provisioning
+// (the launcher's ci-kit-provisioning attribute), for the job's log and summary, as they arrive (arrivingPlacement).
+export function placementOf(meta) {
+  const last = (v) => v?.trim().split('/').at(-1);
+  return arrivingPlacement({
+    machine: meta('machine-type').then(last), zone: meta('zone').then(last), provisioning: meta('attributes/ci-kit-provisioning').then((v) => v?.trim()),
+  });
+}
+
 export async function runGuest({ meta, log, report, prepareContainer, docker, smokeJobImages, selectJobImage, watchGitTransfers, cpus }) {
   const name = await meta('name');
   const mode = vmMode({ jit: await meta('attributes/ci-kit-jit'), smoke: await meta('attributes/ci-kit-smoke') });
@@ -45,6 +54,7 @@ export async function runGuest({ meta, log, report, prepareContainer, docker, sm
     process.exitCode = 1;
     return;
   }
+  const placement = mode.kind === 'job' ? placementOf(meta) : {};
   await prepareContainer(name);
 
   if (mode.kind === 'smoke') {
@@ -63,7 +73,7 @@ export async function runGuest({ meta, log, report, prepareContainer, docker, sm
   const jit = await meta('attributes/ci-kit-jit');
   const image = await selectJobImage(await meta('attributes/ci-kit-repo'), { log });
   const stopWatching = watchGitTransfers(name, { log });
-  const { code } = await docker(jobRunArgs({ name, cpus, image }), { env: { CI_KIT_JIT: jit } }).finally(stopWatching);
+  const { code } = await docker(jobRunArgs({ name, cpus, image, placement }), { env: { CI_KIT_JIT: jit } }).finally(stopWatching);
   log(`job container exited ${code}`);
   await report('job', `exit:${code}`);
 }

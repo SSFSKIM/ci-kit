@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { runGuest, imdsClient, armDeadline, putReport, finalizeGuest } from '../../ec2/vm/job.mjs';
 import * as guest from '../../ec2/vm/job.mjs';
 import { prepareContainer, runContainer } from '../../pool/vm/container.mjs';
+import { arrivingPlacement } from '../../pool/vm/run.mjs';
 import { mkdtemp, mkdir, writeFile, rm, chmod, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -437,4 +438,13 @@ test('the deadline finalizer reports the records the guest saved', async () => {
   });
   assert.equal(reports.at(-1).value, 'failed:deadline');
   assert.deepEqual(reports.at(-1).git_watchdog, [RECORD.join('\n')]);
+});
+
+test('a guest tells its job container what of its placement has arrived, and never waits for the rest', async () => {
+  const f = fixture({ readPlacement: () => arrivingPlacement({
+    machine: Promise.resolve('c7a.xlarge'), zone: new Promise(() => {}), provisioning: Promise.reject(new Error('IMDS HTTP 500')),
+  }) });
+  await runGuest(f.deps);
+  assert.deepEqual({ ...f.calls.find(([op]) => op === 'run')[1].placement }, { machine: 'c7a.xlarge' });
+  assert.ok(f.calls.some(([op]) => op === 'poweroff'));
 });

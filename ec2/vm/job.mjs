@@ -6,7 +6,7 @@ import { readFile, writeFile, rename, mkdir, lstat, readdir } from 'node:fs/prom
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { prepareContainer, runContainer } from '../../pool/vm/container.mjs';
-import { smokeVerdict } from '../../pool/vm/run.mjs';
+import { arrivingPlacement, smokeVerdict } from '../../pool/vm/run.mjs';
 import { formatDiagnostic } from './diagnostics.mjs';
 import { verifyRepoResults } from '../../pool/bake/manifest.mjs';
 import { smokeJobImages } from '../../pool/bake/job-images.mjs';
@@ -120,6 +120,8 @@ export async function runGuest(deps) {
     await deps.armDeadline(data.deadline);
     // An absolute calendar event that passed while systemd was starting must not become a timer that never fires.
     if (Date.parse(data.deadline) <= deps.now().getTime()) throw new Error('deadline elapsed');
+    // Read beside the boot work; the container takes what has arrived when it starts (arrivingPlacement).
+    const placement = deps.readPlacement?.() ?? {};
     stage = 'prepare';
     await deps.prepareContainer(`ci-kit-ec2-${data.alloc}`);
     if (data.smoke) {
@@ -128,7 +130,7 @@ export async function runGuest(deps) {
     }
     stopNotice = deps.watchNotice(notice => upload(deps, state, 'notice', { notice }));
     stage = 'container';
-    const result = await deps.runContainer({ name: `ci-kit-ec2-${data.alloc}`, repo: data.repo, jit: data.jit, log: deps.log,
+    const result = await deps.runContainer({ name: `ci-kit-ec2-${data.alloc}`, repo: data.repo, jit: data.jit, log: deps.log, placement,
       ...(data.smoke ? { smoke: { expectCpus: data.smoke } } : {}),
       onGitRecord: async record => {
         if (gitRecords.length >= REPORT_RECORDS) return;
@@ -237,6 +239,14 @@ function runtime() {
   return {
     now: () => new Date(), log,
     readUserData: () => md.read('user-data'), putReport, armDeadline, runContainer,
+    // The job's log and summary name the VM's type and zone, each field as it arrives; the pool's EC2 VMs are spot only.
+    readPlacement: () => {
+      const read = (k) => md.read(`meta-data/${k}`).then((v) => v?.trim());
+      return arrivingPlacement({
+        machine: read('instance-type'), zone: read('placement/availability-zone'),
+        provisioning: read('instance-life-cycle').then((v) => (v === 'spot' ? 'spot' : v ? 'standard' : undefined)),
+      });
+    },
     checkImage: async () => { await checkImage(); await smokeJobImages(); },
     prepareContainer: name => prepareContainer(name, { blockIpv6: true }),
     watchNotice: callback => watchNotice(md, callback),

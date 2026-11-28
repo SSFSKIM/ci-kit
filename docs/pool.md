@@ -256,10 +256,17 @@ run; a launch it cuts off (the summary's `cut`) gets a follow-up tick 10 s after
 request (at most 3 in a row, none starting 3 min past the first), rather than waiting for the minute tick. An insert
 whose outcome is unknown is settled through its zone operation before any other zone is tried, and if it stays
 unknown the walk stops and the cleanup rules settle it. The VM: no service account, its placement's subnetwork with
-the egress `gce.json` names (an ephemeral external address by default; The network, below), the JIT config in metadata `ci-kit-jit`, `maxRunDuration` = `max_run_minutes` with a `DELETE` action, a boot disk of the
+the egress `gce.json` names (an ephemeral external address by default; The network, below), the JIT config in metadata `ci-kit-jit` and its provisioning in `ci-kit-provisioning` (so the guest can name it), `maxRunDuration` = `max_run_minutes` with a `DELETE` action, a boot disk of the
 placement's `disk_type` and `disk_gb` that goes with it, labels `ci-kit=gce`, `ci-kit-alloc`,
 `ci-kit-repo=<owner>--<repo>`, `ci-kit-cpus`, `ci-kit-provisioning=spot|standard`, `ci-kit-disk=<disk type>` and
 `ci-kit-config=<gce.json commit, 8>`.
+
+**A job's page names its VM.** The guest passes the machine type and zone from its metadata (GCE `machine-type` and
+`zone`, EC2 `instance-type` and `placement/availability-zone`) and the provisioning (GCE `ci-kit-provisioning`, EC2
+`instance-life-cycle`) into the job container, and the job-started hook prints them as its first log line and in the
+job's summary: `ci-kit pool: runner <name> on c4d-highcpu-4 (spot, us-west4-a), cores 0-3 (nproc 4)`. A field the VM
+cannot read prints `?`, and the job runs regardless. The pool ledger's row already carries the same machine, zone and
+provisioning per allocation, joined to the job by its id and runner name.
 
 Allocation ids are the launch minute in base36 (5 characters) and 5 random ones (about 60 million a minute), so a
 runner's age is read from its name, never more than the real one: the runners API gives no creation time. Admission

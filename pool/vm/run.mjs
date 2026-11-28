@@ -6,10 +6,26 @@ export const SMOKE_SCRIPT = '/opt/ci-kit/gce/vm/smoke.sh';
 // EC2 additionally requires IMDSv2 with hop limit 1 and disables metadata IPv6 at launch.
 export const METADATA_BLOCK = ['tcp', 'udp'].map((proto) => ['DOCKER-USER', '-d', '169.254.169.254/32', '-p', proto, '!', '--dport', '53', '-j', 'DROP']);
 
-export function jobRunArgs({ name, cpus, smoke, image = IMAGE }) {
+// The VM's placement as its metadata reads arrive: {field: promise of a value} → an object each read fills in when it
+// resolves to a value; one that fails or never settles leaves its field out. Started beside the boot work, read when the
+// container starts, so a slow metadata endpoint costs the job nothing.
+export function arrivingPlacement(reads) {
+  const placement = {};
+  for (const [field, value] of Object.entries(reads)) {
+    Promise.resolve(value).then((v) => { if (v) placement[field] = v; }, () => {});
+  }
+  return placement;
+}
+
+// placement: the VM's {machine, provisioning ('spot'|'standard'), zone}, as its cloud's metadata says; the job-started
+// hook prints it in the job's log and summary, so a job's page says what it ran on. A field the VM could not read is
+// left out.
+export function jobRunArgs({ name, cpus, smoke, image = IMAGE, placement = {} }) {
+  const said = { CI_KIT_MACHINE: placement.machine, CI_KIT_PROVISIONING: placement.provisioning, CI_KIT_ZONE: placement.zone };
   return [
     'run', '--rm', '--name', name,
     '-e', `CI_KIT_CORES=0-${cpus - 1}`,
+    ...Object.entries(said).filter(([, v]) => /^[a-z0-9.-]+$/.test(v ?? '')).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
     ...jobEnvironmentArgs(),
     ...(smoke
       ? ['-e', `CI_KIT_EXPECT_CPUS=${smoke.expectCpus}`, '-e', `CI_KIT_WORK=${workDir(name)}`,
