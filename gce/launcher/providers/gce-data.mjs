@@ -6,7 +6,8 @@ import { providerRunnerLabels } from './contracts.mjs';
 export const MEMORY_GIB = { e2: { 2: 2, 4: 4, 8: 8, 16: 16 }, c3d: { 4: 8, 8: 16, 16: 32 }, c4d: { 2: 3, 4: 7, 8: 15, 16: 30 } };
 // Source dates of ledger.mjs's existing catalog rates, not a new quote or a pricing-policy input.
 const gcePrice = (family, region) => ({ source: 'gce-catalog',
-  at: region === 'us-central1' && ['e2', 'c3d'].includes(family) ? '2026-10-16T00:00:00Z' : '2026-10-21T00:00:00Z' });
+  at: region === 'us-central1' && ['e2', 'c3d'].includes(family) ? '2026-10-16T00:00:00Z'
+    : region === 'us-west3' ? '2026-11-28T00:00:00Z' : '2026-10-21T00:00:00Z' });
 const last = (path) => path?.split('/').pop();
 
 /** @returns {import('./contracts.mjs').Candidate} */

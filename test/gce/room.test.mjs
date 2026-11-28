@@ -42,6 +42,20 @@ test('each family\'s vCPUs in a region: its own entry, else the quota\'s default
   assert.deepEqual(familyLimits(unlimited, [['us-west4', 'c4d'], ['us-east1', 'c4d']]), {}, 'no default entry either');
 });
 
+// The shape Cloud Quotas returns since (read 2026-11-28, trimmed): a region with no entry of its own for C4D (us-west1)
+// has a region-only entry without a value, the family's default is an entry naming the family alone, and the entry with
+// no dimensions carries no value.
+test('a region without its own entry takes the family\'s default before the quota\'s', () => {
+  const info = { dimensionsInfos: [
+    { dimensions: { region: 'us-west4', vm_family: 'C4D' }, details: { value: '50' }, applicableLocations: ['us-west4'] },
+    { dimensions: { region: 'us-west1', vm_family: 'C4A' }, details: { value: '24' }, applicableLocations: ['us-west1'] },
+    { dimensions: { region: 'us-west1' }, details: {}, applicableLocations: ['us-west1'] },
+    { dimensions: { vm_family: 'C4D' }, details: { value: '24' }, applicableLocations: ['europe-west12'] },
+    { details: {}, applicableLocations: ['europe-west12'] },
+  ] };
+  assert.deepEqual(familyLimits(info, [['us-west4', 'c4d'], ['us-west1', 'c4d'], ['us-west1', 'c3d']]), { 'us-west4|c4d': 50, 'us-west1|c4d': 24 });
+});
+
 test('readLimits reads every placement region and the family quota at once; a family\'s own metric comes first', async () => {
   const calls = [];
   const gce = {

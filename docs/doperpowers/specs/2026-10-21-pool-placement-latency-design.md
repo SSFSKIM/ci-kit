@@ -732,6 +732,18 @@ VM's walk.
   speculation. Very large valid counts are materialized only up to the per-size global-cap bound per tick; physical
   admission remains in the existing launch queue. This is reuse, not the full-standby design excluded above.
 
+- 2026-11-28 (CI-opt): **C4D in us-west1 and us-west3, after the five C4D placements and before C3D.** At the bursts
+  of 2026-11-28 jobs fell to C3D for C4D quota, not capacity: every C4D region was at its `CPUS-PER-VM-FAMILY` grant
+  (24; 50 in us-west4, where its 8 addresses bound first), and C3D runs a lane 1.13-1.37x as long, the CPU and not the
+  disk (ci-kit #237). Google refused raises in four regions the same day (128/64, then 48). Every further region
+  brings its own default grant, and these are the two US regions outside the pool that offer `c4d-highcpu-2/4/8/16` with
+  `hyperdisk-balanced` (us-west1 a/b/c; us-west3 a only): 24 C4D vCPUs each, 8 addresses, 24 instances, 500 GB of
+  Hyperdisk, so six size-4 VMs each, and `max_vcpus` 386 → 434 by the sizing rule (under `CPUS-ALL-REGIONS` 512).
+  Their C4D grant has no entry of its own in Cloud Quotas, only the family's default, which the room now reads.
+  Not taken yet: C4D on other continents (more default grants, at the latency of a transatlantic or transpacific
+  runner and its pulls), and another machine family as a middle tier between C4D and C3D (a family's own default
+  grant per region, worth it only if it measures faster than C3D per vCPU).
+
 ## Surprises & Discoveries
 
 - 2026-10-21 (CI-opt): the first version of this spec and the owner's first standby question assumed a pool hop for

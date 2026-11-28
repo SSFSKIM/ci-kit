@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { GceError } from '../../lib/gce.mjs';
 import { parseGceConfig, placementZones } from '../../gce/launcher/config.mjs';
-import { WEST, CENTRAL, COMMON, NEW_CFG, ONE_REGION_CFG as OLD_CFG, M6_CFG, M6_PLACEMENTS } from './config-fixtures.mjs';
+import { WEST, CENTRAL, COMMON, NEW_CFG, ONE_REGION_CFG as OLD_CFG, M6_CFG, M6_PLACEMENTS, SHIPPED_PLACEMENTS } from './config-fixtures.mjs';
 import { placements, walkPlacements, quotaScope, quotaBlocks, largestMachineCpus, jobInstance, viewInstance, stockoutMemory, STOCKOUT_TTL_MS } from '../../gce/launcher/logic.mjs';
 
 const key = (p) => `${p.machine}/${p.provisioning}@${p.zone}`;
@@ -240,13 +240,13 @@ test('the job VM is on its placement\'s subnetwork and boot disk type, and label
   assert.equal(viewInstance({ ...c, labels: {}, zone: 'x/us-central1-a', creationTimestamp: '2026-10-21T00:00:00Z' }).diskType, null);
 });
 
-test('the shipped gce.json is the spec\'s pool: M6\'s eight placements, C4D before C3D, no E2', () => {
+test('the shipped gce.json is the pool: M6\'s eight placements and C4D us-west1 and us-west3, C4D before C3D, no E2', () => {
   const text = readFileSync(new URL('../../pool/config/gce.json', import.meta.url), 'utf8');
   const shipped = parseGceConfig(text);
   const id = (p) => `${p.machines[8]}@${p.region}`;
   const byId = (list) => Object.fromEntries(list.map((p) => [id(p), p]));
-  assert.deepEqual(byId(shipped.placements), byId(M6_PLACEMENTS), 'the same eight placements (their order is a commit on main)');
-  assert.equal(shipped.placements.length, 8);
+  assert.deepEqual(byId(shipped.placements), byId(SHIPPED_PLACEMENTS), 'the same ten placements (their order is a commit on main)');
+  assert.equal(shipped.placements.length, 10);
   const first = (family) => shipped.placements.findIndex((p) => p.machines[8].startsWith(`${family}-`));
   const last = (family) => shipped.placements.findLastIndex((p) => p.machines[8].startsWith(`${family}-`));
   assert.ok(last('c4d') < first('c3d'), 'speed first: every C4D placement before any C3D one');
