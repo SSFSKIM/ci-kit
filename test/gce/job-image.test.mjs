@@ -6,7 +6,8 @@ import { selectJobImage } from '../../pool/vm/container.mjs';
 function fixture({ repo, present = true, smoke = null, jit = 'secret-jit', label = repo } = {}) {
   const calls = [];
   const values = { name: 'ci-kit-gce-test', 'attributes/ci-kit-jit': jit, 'attributes/ci-kit-smoke': smoke,
-    'attributes/ci-kit-repo': repo ?? null };
+    'attributes/ci-kit-repo': repo ?? null, 'machine-type': 'projects/123/machineTypes/c3d-highcpu-4\n',
+    zone: 'projects/123/zones/us-central1-a', 'attributes/ci-kit-provisioning': 'spot' };
   return { calls, deps: {
     meta: async key => { calls.push(['metadata', key]); return values[key]; },
     report: async (...args) => calls.push(['report', ...args]),
@@ -71,4 +72,25 @@ test('GCE smoke stays on the base and checks every baked repository image separa
   assert.ok(!f.calls.some(c => c[0] === 'docker'));
   assert.deepEqual(f.calls.at(-1), ['report', 'smoke', 'ok']);
   assert.ok(!f.calls.some(c => c[0] === 'watch'));
+});
+
+test('GCE tells the job container its machine type, zone and provisioning from the metadata', async () => {
+  const f = fixture({ repo: 'SSFSKIM/MAWS' });
+  await runGuest(f.deps);
+  const args = f.calls.find(c => c[0] === 'run')[1];
+  for (const e of ['CI_KIT_MACHINE=c3d-highcpu-4', 'CI_KIT_ZONE=us-central1-a', 'CI_KIT_PROVISIONING=spot']) assert.ok(args.includes(e), e);
+});
+
+test('GCE runs the job when the metadata cannot say its placement (a VM from an older launcher)', async () => {
+  const f = fixture({ repo: 'SSFSKIM/MAWS' });
+  const meta = f.deps.meta;
+  f.deps.meta = async key => {
+    if (key === 'machine-type') throw new Error('metadata machine-type: HTTP 503');
+    return key === 'attributes/ci-kit-provisioning' ? null : meta(key);
+  };
+  await runGuest(f.deps);
+  const args = f.calls.find(c => c[0] === 'run')[1];
+  assert.ok(args.includes('CI_KIT_ZONE=us-central1-a'));
+  assert.ok(!args.some(a => /^CI_KIT_(MACHINE|PROVISIONING)=/.test(a)));
+  assert.deepEqual(f.calls.at(-1), ['report', 'job', 'exit:0']);
 });

@@ -55,11 +55,11 @@ export function docker(args, { env = {}, capture = false, spawnProcess = spawn }
 // Detached creation lets the EC2 guest distinguish a real container start from a Docker CLI spawn failure.
 // Attach preserves the job's serial-console output; wait supplies its actual exit status even on attach errors.
 // onGitRecord receives each git watchdog record as it is made (pool/vm/git-watchdog.mjs).
-export async function runContainer({ name, repo, jit, smoke, onStarted, onGitRecord, log = console.log, cpus = availableParallelism() },
+export async function runContainer({ name, repo, jit, smoke, placement, onStarted, onGitRecord, log = console.log, cpus = availableParallelism() },
   { exec = sh, runDocker = docker, watch = watchGitTransfers } = {}) {
   const image = smoke ? IMAGE : await selectJobImage(repo, { exec, log });
   if (smoke) log(`job image ${image}`);
-  const args = jobRunArgs({ name, cpus, smoke, image });
+  const args = jobRunArgs({ name, cpus, smoke, image, placement });
   args.splice(args.indexOf('--rm'), 1, '--detach');
   const started = await exec('docker', args, { env: { ...process.env, CI_KIT_JIT: jit ?? '' }, timeout: 60_000 });
   if (!started.stdout.trim()) throw new Error('container did not start');

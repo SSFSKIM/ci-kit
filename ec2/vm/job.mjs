@@ -128,7 +128,8 @@ export async function runGuest(deps) {
     }
     stopNotice = deps.watchNotice(notice => upload(deps, state, 'notice', { notice }));
     stage = 'container';
-    const result = await deps.runContainer({ name: `ci-kit-ec2-${data.alloc}`, repo: data.repo, jit: data.jit, log: deps.log,
+    const placement = deps.readPlacement ? await deps.readPlacement().catch(() => undefined) : undefined;
+    const result = await deps.runContainer({ name: `ci-kit-ec2-${data.alloc}`, repo: data.repo, jit: data.jit, log: deps.log, placement,
       ...(data.smoke ? { smoke: { expectCpus: data.smoke } } : {}),
       onGitRecord: async record => {
         if (gitRecords.length >= REPORT_RECORDS) return;
@@ -237,6 +238,11 @@ function runtime() {
   return {
     now: () => new Date(), log,
     readUserData: () => md.read('user-data'), putReport, armDeadline, runContainer,
+    // The job's log and summary name the VM's type and zone; the pool's EC2 VMs are spot only.
+    readPlacement: async () => {
+      const [machine, zone, cycle] = await Promise.all(['instance-type', 'placement/availability-zone', 'instance-life-cycle'].map((k) => md.read(`meta-data/${k}`)));
+      return { machine: machine?.trim(), zone: zone?.trim(), provisioning: cycle?.trim() === 'spot' ? 'spot' : cycle ? 'standard' : undefined };
+    },
     checkImage: async () => { await checkImage(); await smokeJobImages(); },
     prepareContainer: name => prepareContainer(name, { blockIpv6: true }),
     watchNotice: callback => watchNotice(md, callback),

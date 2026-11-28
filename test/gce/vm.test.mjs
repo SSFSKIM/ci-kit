@@ -2,7 +2,10 @@
 // keeps DNS, what it does with and without a JIT config, and how it reads the smoke check's verdict.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { jobRunArgs, vmMode, smokeVerdict, METADATA_BLOCK } from '../../gce/vm/run.mjs';
 import { CACHE } from '../../pool/agent/docker.mjs';
 
@@ -116,4 +119,25 @@ test('the smoke script checks infrastructure, Node and isolation, and prints one
     assert.match(script, new RegExp(`^check ${check} `, 'm'), check);
   }
   assert.match(script, /^echo 'ci-kit smoke: ok'$/m);
+});
+
+test('the job container is told the VM it runs on, and only values its metadata can hold', () => {
+  const args = jobRunArgs({ name: 'n', cpus: 4, placement: { machine: 'c3d-highcpu-4', provisioning: 'spot', zone: 'us-central1-a' } });
+  for (const e of ['CI_KIT_MACHINE=c3d-highcpu-4', 'CI_KIT_PROVISIONING=spot', 'CI_KIT_ZONE=us-central1-a']) assert.ok(args.includes(e), e);
+  assert.ok(!jobRunArgs({ name: 'n', cpus: 4 }).some((a) => /^CI_KIT_(MACHINE|PROVISIONING|ZONE)=/.test(a)));
+  const odd = jobRunArgs({ name: 'n', cpus: 4, placement: { machine: 'c4d-highcpu-4', provisioning: 'x y', zone: undefined } });
+  assert.ok(odd.includes('CI_KIT_MACHINE=c4d-highcpu-4'));
+  assert.ok(!odd.some((a) => /^CI_KIT_(PROVISIONING|ZONE)=/.test(a)));
+});
+
+test('the job-started hook names the VM in the job log and its summary, and still runs without either', () => {
+  const hook = new URL('../../pool/image/job-started.sh', import.meta.url).pathname;
+  const summary = join(mkdtempSync(join(tmpdir(), 'ci-kit-hook-')), 'summary.md');
+  const env = { PATH: process.env.PATH, RUNNER_NAME: 'ci-kit-gce-abc', CI_KIT_CORES: '0-3', CI_KIT_MACHINE: 'c3d-highcpu-4',
+    CI_KIT_PROVISIONING: 'spot', CI_KIT_ZONE: 'us-central1-a', GITHUB_STEP_SUMMARY: summary };
+  const line = execFileSync('bash', ['-e', hook], { env, encoding: 'utf8' });
+  assert.match(line, /^ci-kit pool: runner ci-kit-gce-abc on c3d-highcpu-4 \(spot, us-central1-a\), cores 0-3 \(nproc \d+\)\n$/);
+  assert.equal(readFileSync(summary, 'utf8'), line);
+  // An older guest passes no placement, and a runner may give the hook no summary file.
+  assert.match(execFileSync('bash', ['-e', hook], { env: { PATH: process.env.PATH }, encoding: 'utf8' }), /^ci-kit pool: runner \? on \? \(\?, \?\), cores \?/);
 });

@@ -36,6 +36,16 @@ async function report(key, value) {
   }
 }
 
+// The VM's machine type and zone (the last segment of metadata's machine-type and zone paths) and its provisioning
+// (the launcher's ci-kit-provisioning attribute), for the job's log and summary. A read that fails leaves its field out:
+// it never holds up the job.
+export async function placementOf(meta) {
+  const read = (path) => meta(path).catch(() => null);
+  const last = (v) => v?.trim().split('/').at(-1) || undefined;
+  const [machine, zone, provisioning] = await Promise.all([read('machine-type'), read('zone'), read('attributes/ci-kit-provisioning')]);
+  return { machine: last(machine), zone: last(zone), provisioning: provisioning?.trim() || undefined };
+}
+
 export async function runGuest({ meta, log, report, prepareContainer, docker, smokeJobImages, selectJobImage, watchGitTransfers, cpus }) {
   const name = await meta('name');
   const mode = vmMode({ jit: await meta('attributes/ci-kit-jit'), smoke: await meta('attributes/ci-kit-smoke') });
@@ -63,7 +73,7 @@ export async function runGuest({ meta, log, report, prepareContainer, docker, sm
   const jit = await meta('attributes/ci-kit-jit');
   const image = await selectJobImage(await meta('attributes/ci-kit-repo'), { log });
   const stopWatching = watchGitTransfers(name, { log });
-  const { code } = await docker(jobRunArgs({ name, cpus, image }), { env: { CI_KIT_JIT: jit } }).finally(stopWatching);
+  const { code } = await docker(jobRunArgs({ name, cpus, image, placement: await placementOf(meta) }), { env: { CI_KIT_JIT: jit } }).finally(stopWatching);
   log(`job container exited ${code}`);
   await report('job', `exit:${code}`);
 }

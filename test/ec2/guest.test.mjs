@@ -438,3 +438,14 @@ test('the deadline finalizer reports the records the guest saved', async () => {
   assert.equal(reports.at(-1).value, 'failed:deadline');
   assert.deepEqual(reports.at(-1).git_watchdog, [RECORD.join('\n')]);
 });
+
+test('a guest tells its job container the instance type, zone and provisioning, and runs without them when IMDS fails', async () => {
+  const placement = { machine: 'c7a.xlarge', zone: 'us-east-1a', provisioning: 'spot' };
+  const f = fixture({ readPlacement: async () => placement });
+  await runGuest(f.deps);
+  assert.deepEqual(f.calls.find(([op]) => op === 'run')[1].placement, placement);
+  const failing = fixture({ readPlacement: async () => { throw new Error('IMDS HTTP 500'); } });
+  await runGuest(failing.deps);
+  assert.equal(failing.calls.find(([op]) => op === 'run')[1].placement, undefined);
+  assert.ok(failing.calls.some(([op]) => op === 'poweroff'));
+});
