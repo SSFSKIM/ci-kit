@@ -175,7 +175,7 @@ test('today\'s network and the shipped placements: the two subnetworks that exis
   assert.deepEqual(run.state.subnets.slice(0, 2), today);
   const ranges = run.state.subnets.map((s) => s.range);
   assert.equal(new Set(ranges).size, ranges.length, 'no two subnetworks share a range');
-  assert.deepEqual(ranges.slice(2).sort(), ['10.64.32.0/20', '10.64.48.0/20', '10.64.64.0/20']);
+  assert.deepEqual(ranges.slice(2).sort(), ['10.64.32.0/20', '10.64.48.0/20', '10.64.64.0/20', '10.64.80.0/20', '10.64.96.0/20']);
   assert.deepEqual(run.state.nats.sort(), [...REGIONS].sort(), 'a router and NAT in each new region');
 });
 

@@ -145,6 +145,9 @@ const NEW_PAIRS = [
   { machine: 'c4d-highcpu-8', zone: 'us-east5-c', spot: [0.01362, 0.001454], standard: [0.0327035, 0.003495578], diskType: 'hyperdisk-balanced', disk: HDB(0.08, 0.005, 0.04) },
   { machine: 'c3d-highcpu-8', zone: 'us-east1-d', spot: [0.00679, 0.000912], standard: [0.029563, 0.003959], diskType: 'pd-balanced', disk: PD(0.10) },
   { machine: 'c3d-highcpu-8', zone: 'us-east4-b', spot: [0.01331, 0.001779], standard: [0.029563, 0.003959], diskType: 'pd-balanced', disk: PD(0.11) },
+  // C4D us-west1 and us-west3 (2026-11-28): us-west1 on the Americas SKUs above, us-west3 at the catalog of that day.
+  { machine: 'c4d-highcpu-8', zone: 'us-west1-b', spot: [0.01383, 0.00148], standard: [0.0327035, 0.003495578], diskType: 'hyperdisk-balanced', disk: HDB(0.08, 0.005, 0.04) },
+  { machine: 'c4d-highcpu-8', zone: 'us-west3-a', spot: [0.01414, 0.00151], standard: [0.0393129, 0.004202034], diskType: 'hyperdisk-balanced', disk: HDB(0.096, 0.006, 0.048) },
 ];
 
 test('dollars: a VM in each of M6\'s new family and region pairs is priced at that region\'s rates and boot disk', () => {

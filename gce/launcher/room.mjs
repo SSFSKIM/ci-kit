@@ -29,15 +29,19 @@ export function regionLimits(body) {
   return limits;
 }
 
-// Each (region, family)'s vCPUs from Cloud Quotas' CPUS_PER_VM_FAMILY quotaInfo: its own entry, else the quota's
-// default (the entry with no dimensions). A value under 0 is unlimited, so no cap. pairs: [[region, family], …].
+// Each (region, family)'s vCPUs from Cloud Quotas' CPUS_PER_VM_FAMILY quotaInfo: its own entry, else the family's
+// default (an entry naming the family and no region), else the quota's (the entry with no dimensions). A region with
+// no entry of its own carries no value on its region-only entry either (2026-11-28: C4D in us-west1 and us-west3; the
+// family's 24 is Service Usage's effective limit there). A value under 0 is unlimited, so no cap; an entry without a
+// value is none. pairs: [[region, family], …].
 export function familyLimits(info, pairs) {
   const entries = info.dimensionsInfos ?? [];
   const fallback = entries.find((e) => !e.dimensions || Object.keys(e.dimensions).length === 0);
   const out = {};
   for (const [region, family] of pairs) {
     const own = entries.find((e) => e.dimensions?.region === region && e.dimensions?.vm_family?.toLowerCase() === family);
-    const value = Number((own ?? fallback)?.details?.value);
+    const familyDefault = entries.find((e) => !e.dimensions?.region && e.dimensions?.vm_family?.toLowerCase() === family);
+    const value = Number((own ?? familyDefault ?? fallback)?.details?.value);
     if (Number.isFinite(value) && value >= 0) out[`${region}|${family}`] = value;
   }
   return out;

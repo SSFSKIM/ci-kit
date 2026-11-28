@@ -28,6 +28,8 @@ export const moreFinal = (a, b) => rank(a) > rank(b);
 //   c4d us-east5: 0169-7EBF-204A, 3A2D-FAED-C88C; 5177-3764-0DF0, 3FE7-BA20-521F.
 //   c3d us-east1 ("Americas"): DCB1-2557-F8CB, F33C-AA89-DE6D; CEE0-1AE0-3422, 79E9-0431-3CD3.
 //   c3d us-east4: 462F-BF9D-29F2, FEDE-CA21-A2B8; 299E-E8A6-3B63, 4AB8-DEB2-DD17.
+// - c4d us-west1: the same "Americas" SKUs as us-central1 and us-east1, so their rates of 2026-10-21.
+// - c4d us-west3, the catalog on 2026-11-28: A5B9-9FE3-9EB5, A8BA-DAB0-DBF8; D69A-034F-001A, E2B5-D0F0-3847.
 const RATES = {
   'us-central1': {
     c3d: { spot: { vcpu: 0.00715, gib: 0.00096 }, standard: { vcpu: 0.033982, gib: 0.004555 } },
@@ -47,6 +49,12 @@ const RATES = {
   },
   'us-west4': {
     c4d: { spot: { vcpu: 0.0062, gb: 0.000661 }, standard: { vcpu: 0.036834, gb: 0.00393707 } },
+  },
+  'us-west1': {
+    c4d: { spot: { vcpu: 0.01383, gb: 0.00148 }, standard: { vcpu: 0.0327035, gb: 0.003495578 } },
+  },
+  'us-west3': {
+    c4d: { spot: { vcpu: 0.01414, gb: 0.00151 }, standard: { vcpu: 0.0393129, gb: 0.004202034 } },
   },
 };
 const GB_PER_GIB = 2 ** 30 / 1e9;
@@ -69,14 +77,17 @@ const NAT_ADDRESS_HOURLY = 0.005;
 // F704-99E9-0130, D4CA-3484-910A, E96C-BF4C-C467; us-central1 83FF-9C17-D184, 3EEB-E1E6-C521, 9F5F-0236-9C17; us-east1
 // 5607-BF17-C33D, FD24-9FBC-B7F8, 5E1B-7BC4-5753; us-east4 0FB8-4FD9-6BB8, 3D96-85C5-6EB8, B36E-AD65-6DC5; us-east5
 // 87E7-B801-9F9B, 519B-955D-6042, 005C-88B8-438B. pd-balanced ("Balanced PD Capacity"): us-east1 6AE1-525F-8B80, us-east4
-// 7D52-6D58-14FF.
-const HYPERDISK = { gib: 0.08, iops: 0.005, mibps: 0.04 }; // us-central1, us-east4 and us-east5 alike
+// 7D52-6D58-14FF. The catalog on 2026-11-28, hyperdisk-balanced: us-west1 E917-4171-722C, 56CC-5367-43E6,
+// 6E3F-6819-5B7A; us-west3 4E1E-DD11-4C2B, 817E-3186-83E4, 369B-02FD-7516.
+const HYPERDISK = { gib: 0.08, iops: 0.005, mibps: 0.04 }; // us-central1, us-east4, us-east5 and us-west1 alike
 const DISKS = {
   'us-central1': { 'pd-balanced': { gib: 0.10 }, 'hyperdisk-balanced': HYPERDISK },
   'us-east1': { 'pd-balanced': { gib: 0.10 }, 'hyperdisk-balanced': { gib: 0.09, iops: 0.006, mibps: 0.045 } },
   'us-east4': { 'pd-balanced': { gib: 0.11 }, 'hyperdisk-balanced': HYPERDISK },
   'us-east5': { 'hyperdisk-balanced': HYPERDISK },
   'us-west4': { 'hyperdisk-balanced': { gib: 0.09, iops: 0.006, mibps: 0.045 } },
+  'us-west1': { 'hyperdisk-balanced': HYPERDISK },
+  'us-west3': { 'hyperdisk-balanced': { gib: 0.096, iops: 0.006, mibps: 0.048 } },
 };
 const HOURS_PER_MONTH = 730;
 const OLD_DISK_TYPE = 'pd-balanced'; // a row from before placements names no disk type; its VM booted from this

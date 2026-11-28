@@ -29,6 +29,11 @@ export const C4D_EAST5 = { region: 'us-east5', subnetwork: 'ci-kit-us-east5', zo
 export const C3D_EAST1 = { ...C4D_EAST1, machines: C3D_MACHINES, disk_type: 'pd-balanced' };
 export const C3D_EAST4 = { ...C4D_EAST4, machines: C3D_MACHINES, disk_type: 'pd-balanced' };
 export const M6_PLACEMENTS = [WEST, C4D_CENTRAL, C4D_EAST1, C4D_EAST4, C4D_EAST5, CENTRAL, C3D_EAST1, C3D_EAST4];
+// The shipped pool since 2026-11-28: M6's, with C4D in us-west1 and us-west3 after its five C4D placements (each
+// region's own default C4D grant, the raises elsewhere refused; ci-kit #237).
+export const C4D_WEST1 = { region: 'us-west1', subnetwork: 'ci-kit-us-west1', zones: zones('us-west1', ['a', 'b', 'c']), machines: C4D_MACHINES, disk_type: 'hyperdisk-balanced' };
+export const C4D_WEST3 = { region: 'us-west3', subnetwork: 'ci-kit-us-west3', zones: zones('us-west3', ['a']), machines: C4D_MACHINES, disk_type: 'hyperdisk-balanced' };
+export const SHIPPED_PLACEMENTS = [...M6_PLACEMENTS.slice(0, 5), C4D_WEST1, C4D_WEST3, ...M6_PLACEMENTS.slice(5)];
 
 // A placement whose size 2 is E2, which tests use for a machine family that can refuse for quota beside the C3D one in
 // the same region (E2 itself left the shipped pool).
